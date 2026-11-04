@@ -944,13 +944,18 @@ long long fk_metal_pipeline_external(const char *msl, long long msl_len,
         if (fk_pipe_free_top == 0 &&
             !fk_pipe_table_reserve((size_t)[fk_pipe_objs count] + 1)) { return 0; }
         NSError *e = nil;
-        id<MTLLibrary> lib = [fk_dev newLibraryWithSource:src options:nil error:&e];
+        // Form has verified the archive's program identity and byte seal.
+        // Its embedded library supplies the function without compiling MSL.
+        id<MTLLibrary> lib = cache_mode == 2
+            ? [fk_dev newLibraryWithURL:[NSURL fileURLWithPath:cache_path] error:&e]
+            : [fk_dev newLibraryWithSource:src options:nil error:&e];
         if (lib == nil) {
             // The compiler's own words, kept whole. metal_status speaks them.
-            fk_err([NSString stringWithFormat:@"msl compile: %@", [e localizedDescription]]);
+            fk_err([NSString stringWithFormat:@"metal jit library %@: %@",
+                cache_mode == 2 ? @"archive" : @"compile", [e localizedDescription]]);
             return 0;
         }
-        fk_metal_jit_compiles++;
+        if (cache_mode != 2) { fk_metal_jit_compiles++; }
         id<MTLFunction> f = [lib newFunctionWithName:fn];
         if (f == nil) {
             fk_err([NSString stringWithFormat:@"msl has no kernel named %@", fn]);
@@ -983,7 +988,25 @@ long long fk_metal_pipeline_external(const char *msl, long long msl_len,
             return 0;
         }
         if (cache_mode == 1) {
+            // Admit the physical destination before Metal serializes into it.
+            // A filesystem refusal stays a named return at this host boundary.
+            const char *destination = [cache_path fileSystemRepresentation];
+            int created = 0;
+            int fd = open(destination, O_WRONLY | O_CREAT | O_EXCL, 0666);
+            if (fd >= 0) { created = 1; }
+            else if (errno == EEXIST) { fd = open(destination, O_WRONLY); }
+            if (fd < 0) {
+                fk_err([NSString stringWithFormat:@"metal jit archive destination: %s", strerror(errno)]);
+                return 0;
+            }
+            if (close(fd) != 0) {
+                int why = errno;
+                if (created) { unlink(destination); }
+                fk_err([NSString stringWithFormat:@"metal jit archive destination close: %s", strerror(why)]);
+                return 0;
+            }
             if (![archive serializeToURL:archive_url error:&e]) {
+                if (created) { unlink(destination); }
                 fk_err([NSString stringWithFormat:@"metal jit archive write: %@", e.localizedDescription]);
                 return 0;
             }

@@ -1,9 +1,68 @@
 # Algorithms for Optimization applied to Form
 
-The second-edition preview supplied a useful experimental discipline, and one
-source-derived JIT improvement is implemented: argument emission now assembles
-instruction words in linear time instead of repeatedly copying the prefix.
-Whole-program startup improvement has not been established.
+The second-edition preview supplied an experimental discipline for the kernel,
+JIT and startup work. Argument emission now scales linearly; validated scalar
+and Metal images are reused on demand; failures retain their operation through
+repair. Whole-program storage-only cold/warm behavior is not yet established.
+
+## Current execution round
+
+This round follows the user's instructions to execute, remove fallbacks and handle
+failures in the nervous system. Earlier open findings below describe their original
+observations; this section records their current state.
+
+- Container v8 holds compile errors, refusal and a whole-image checksum. `.sym`
+  is optional. Source, imports and direct execution share admission; selected
+  imports consume one validated snapshot. Empty, truncated and corrupt images
+  emit their cause. Source-owned repair closes the correlated failure only after
+  publication is re-admitted; direct invalid images return no substitute answer.
+- Scalar JIT reads immutable admitted builder/closure identity through `kernel_ast`.
+  Missing mandatory identity retains a fault and no answer. A source pathname is
+  telemetry, no longer another authority or a required file. The v5 artifact seals
+  the completed native/Form point challenge. Disk hits invoke native once with
+  zero Form evaluations. Care retains the original request, completed challenge,
+  completed seal and original answer through recovery. The guard observes failure
+  publication, healing publication, retained answer 7 and a distinct native input
+  returning 8. The admission proves its checked point, not all inputs.
+- Metal archives hold the compiled library, program identity and integrity seal.
+  Generated `f(n)=3n+7` returns 22 for input 5 across processes with source-compile
+  counts 1 then 0. Invalid archives are refused and repaired. Blocked publication
+  remains pending with no answer; a correlated resource response resumes the same
+  operation. Directory creation and atomic publication belong to the existing
+  owner. Blocked destinations no longer crash Metal serialization.
+- The timestamp-based implicit sibling `.dylib` route is removed. Explicit native
+  load failure remains a failure and releases a rejected ABI handle. CLI v3 binds
+  binary, image and source identity without a symbols sidecar. Complete private
+  CLI builds passed.
+- Cell reuse retains dependency diagnostics and refusal through new and resident
+  intermediate roots. Units collected beside malformed source but never parsed
+  remain unadmitted until demand. The existing cell check observes source repair
+  restoring the original operation.
+- The memory failure reproduced on HEAD: GC sized private headroom from roughly
+  9.7 million shared nodes that its loops never scan. Headroom now follows the
+  actually scanned private pool. The unchanged 500-call assertion passes: growth
+  fell from about 12.5 MB to 0.25–0.30 MB; heap capacity fell from 4,194,304 to
+  65,536 pairs.
+
+Native SHA compression and demand-owned image/constants reduce admission parsing
+after resource admission from 430 to 125 microseconds in the isolated probe
+(126,171 to 23,938 dispatches). The complete restarted request remains about
+4.5 ms, including first-use resource emission: this is **not** a restart speedup
+claim. First cell parsing, closure discovery, image decoding, immutable pure
+initialization and transparent native-page persistence still violate the complete
+storage-only target. Their owning boundaries are the program-image loader and
+native compiler; a separate SHA cache would duplicate authority.
+
+Observed existing checks: demand JIT 511; SHA/model seal 2047; cell run 16777215;
+GC cost 15; closure reclamation 1023; import carry 255; CLI build 262143; source
+grammar bridge 32767; runtime image model 16777215; tensor lifecycle 1023; Metal
+door 15; canonical conformance exit 0. Exact commands, original failures, fixtures
+and re-observations remain in the local research directory, especially
+`jit-final-event-result-guard.txt`, `metal-archive-final-generated-restart.txt`,
+`empty-cache-repair.txt`, `admission-*-before.txt`, `admission-*-after.txt`,
+`cell-memory-baseline.txt`, `cell-run-all-admissions-final.txt` and
+`final-cli-build-band-repaired.log`. The remaining seed image transport/relocation
+mechanics shrink toward Form's source compiler and program-image owner.
 
 ## Source and scope
 

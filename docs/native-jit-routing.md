@@ -57,29 +57,67 @@ current execution.
 The seed's `.fkb` identity now binds the ordered resolved paths, sizes and
 content digests, together with the separate builder identity. Timestamps remain
 provenance and no longer force recompilation. The v4 source identity replaces
-v3 once; the binary container remains v7. This removes timestamp authority and
-its temporary allocation from the seed. The native source compiler's retained
+v3 once. Container v8 embeds compile errors, execution refusal and a complete
+image checksum. Source, import and direct execution share that admission;
+`.sym` is an optional inspection lens. Selected imports consume the exact
+validated snapshot once, and covered dependencies need no separate image.
+An invalid image emits its cause, is repaired at its owner and is re-admitted
+before the correlated repair event reports health. The native source compiler's retained
 closure/load plan is the shrink path for the remaining seed-owned admission.
-The separate `.dylib` route still uses timestamp freshness and needs a
-content-bound artifact contract before that check can be removed.
+Source startup uses the content-bound image and RAM JIT; it no longer probes
+or selects a sibling `.dylib` by timestamp. Explicit `.dylib` execution remains
+a direct native operation: failed loading or a missing ABI symbol ends that
+operation with its diagnostic, and does not execute source or an image instead.
 
-Scalar demand JIT also has a self-containment gap: `bdj-source-unit-hash` reads
-the compatibility wrapper's fixed `.fk.sym` path, although importing the owner
-does not guarantee that artifact exists. That source identity also omits the
-builder identity held separately by the program-image loader. Its first request evaluates the graph
-and leaves specialization for the owner's progress step, even when a disk image
-may already exist. The request/progress owner must admit current retained state
-on demand and obtain its identity from the actual admitted program. Reading a
-different guessed sidecar or hashing newly edited disk source would not establish
-the identity of code already loaded. The current `kernel_ast` header exposes a
-folded observation of the last noted image, not that complete execution identity.
+Scalar demand JIT reads its executing definition's immutable admission through
+`kernel_ast(host_pid(), ["identity"])`. Its fingerprint binds the admitted
+builder and source closure with the emitter ABI. It requires no `.sym` sibling
+or fresh disk hash. A new eligible request selects a current disk image
+immediately; ordinary absence or changed identity leaves one owned specialization
+pending. Retained pages, held faults and publication care use their current
+state. Missing admission identity retains the original request as a fault with
+no alternate answer; a correlated identity-available event can resume its
+verification. The source path supplies telemetry, while the offered graph and
+immutable admission supply authority; an absent source file does not block reuse
+or publication. Disk admission compares runtime identity, epoch, exact program wire and
+image integrity; timestamps remain telemetry. The v5 scalar artifact retains a
+SHA-256 sealed admission binding those fields to the completed native/Form
+challenge's argument and equal result. Publication care carries the same sealed
+record through retries.
 
-Within the existing scalar cache owner, runtime identity is now resolved only
-when a pending specialization or healing probe needs it. Idle, held faults and
-publication care use their retained state. Disk admission checks the retained
-runtime identity, epoch, exact program wire and image bytes regardless of
-timestamp ordering; file ages remain telemetry. The native/Form installation
-challenge remains in place.
+A corrupt scalar cache produces an exact failure observation and no alternate
+answer. The owner publishes that failure, repairs and rechecks the cache through
+its cause-bound healing flow, publishes the matching healing event, and resumes
+the retained request. Native challenge disagreement or carrier loss also retains
+attention without interpreting a replacement answer. Publication acknowledgements
+preserve later executable state and ordered observations. The existing
+`bml-demand-jit-guard-band.fk` observes these paths, including actual failure and
+healing publication and the resumed native answer.
+
+Compilation performs the native/Form challenge once. A validated disk admission
+and a resident request each invoke the native page once, without repeating Form
+evaluation. This retains the evidence of one checked point; it does not prove
+equivalence for every input. Unchecked legacy artifacts, incomplete admissions
+and changed sealed bytes follow the same failure and healing flow. Disk integrity
+verification and decimal image decoding still add computation after a restart.
+SHA compression uses the existing Form-emitted native implementation; its image
+and round constants are emitted on first compression and retained by that owner.
+Their persistence across restarts remains open, alongside integrity verification
+and decoding costs, before the storage-only contract is met.
+
+Metal archive retention belongs to `form/form-stdlib/bml/metal-jit.bml`.
+One `.metalbin` contains the native archive, Form's source/entry/target identity
+and a seal of the archive bytes. Admission verifies both before loading the
+embedded library through the public Metal API. On Apple M4 Max with macOS
+26.3.1, a generated `f(n)=3n+7` compiled once on first demand; a new process
+loaded its archive with zero MSL source compilations and returned `f(5)=22`.
+Missing, corrupt or mismatched archives enter the existing organ-care flow,
+which creates the directory, captures, seals and atomically publishes the
+replacement, then re-observes strict admission. Failed retention remains a
+failure with the original request and findings held. A correlated resource
+response through `mj-cache-hear` resumes that request; unchanged demand does
+not repeat failed care. This owner does not yet enroll a filesystem watcher.
+Explicit archive-hit-only admission remains strict.
 
 For recovery, search local Form cells, RAG, git history and receipts. Make the
 native attempt, retain behavior checks and per-stage streams, exit status and

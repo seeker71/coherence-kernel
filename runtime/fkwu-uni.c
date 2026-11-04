@@ -292,6 +292,7 @@ static long long fk_cell_dep_find(const char *path);
 static long long fk_cell_dep_find_raw(const char *path);
 static void fk_cell_dep_init(long long idx);
 static void fk_cell_dep_union(long long owner, long long child);
+static void fk_cell_note_unrunnable(long long off);
 #else
 #define fk_cell_read_line() 0
 #define fk_cell_read_bytes(m) 0
@@ -300,6 +301,7 @@ static void fk_cell_dep_union(long long owner, long long child);
 #define fk_cell_dep_find_raw(p) (-1)
 #define fk_cell_dep_init(i) do { } while (0)
 #define fk_cell_dep_union(o, c) do { } while (0)
+#define fk_cell_note_unrunnable(o) do { } while (0)
 #define fk_err_put(p, n) do { } while (0)
 /* the cell door is POSIX only for now: the hooks below stand down */
 static const char *fk_cell_root_path;
@@ -9521,7 +9523,7 @@ static void fk_melt(void) {
     while (ncap - nlive < fk_melt_want) {
         ncap = ncap * 2;
     }
-    /* churn amortization (2026-08-30): a melt walks the whole value-node
+    /* churn amortization (2026-08-30): a melt walks the private value-node
      * pool, so its cost is O(fk_np) however little the heap holds. A
      * tiny-live, high-churn program (witnessed: the BML emitter at cap
      * 8192 / live 3.3k triggered 122,158 melts in one triple run, +9s per
@@ -9529,8 +9531,10 @@ static void fk_melt(void) {
      * conses and pays that walk each time. Guarantee headroom that scales
      * with the walk: at least np/4 free pairs after compaction, so each
      * O(np) melt is amortized over >= np/4 allocations. Worst-case extra
-     * memory is fk_np/4 pairs. */
-    while (ncap - nlive < fk_np / 4 + FK_HASHCONS_INIT_CAP) {
+     * memory is the walked pool/4 pairs. The shared field is not scanned
+     * above: its global population must not reserve private heap headroom. */
+    long long node_headroom = fk_field_on ? 0 : fk_np / 4;
+    while (ncap - nlive < node_headroom + FK_HASHCONS_INIT_CAP) {
         ncap = ncap * 2;
     }
     /* a heap that once peaked keeps no more than it uses: while the live heap is under an eighth of the capacity, the
@@ -9538,7 +9542,7 @@ static void fk_melt(void) {
      * marks are sized by the heap it compacts -- follows what is live, not what once was. Witnessed: 2 s a melt with 1.5M
      * live in a sweep's process whose earlier bands had grown the heap (melt-cost-band, 2026-10-11). */
     while (ncap / 2 >= FK_HASHCONS_INIT_CAP && nlive * 8 < ncap && ncap / 2 - nlive >= fk_melt_want &&
-           ncap / 2 - nlive >= fk_np / 4 + FK_HASHCONS_INIT_CAP) {
+           ncap / 2 - nlive >= node_headroom + FK_HASHCONS_INIT_CAP) {
         ncap = ncap / 2;
     }
     if (fk_store_shared && ncap > FK_STORE_HEAP_PAIRS) { fk_store_go_private(); }
@@ -19118,6 +19122,48 @@ static void *fk_prog_map(char letter, long long pid, long long *size) {
     return 0;
 #endif
 }
+/* Immutable admission provenance, retained with the function indices it admitted.
+ * The Form cache owner reads this snapshot; it never infers running code from a
+ * mutable file or a sibling symbol lens. New admissions mask reused indices. */
+static char fk_fkb_builder_id[64];
+typedef struct fk_admission {
+    long long first, end;
+    char *hash;
+    struct fk_admission *previous;
+} fk_admission;
+static fk_admission *fk_admissions;
+static const char *fk_cell_identity;
+static void fk_admission_clear(void) {
+    while (fk_admissions) {
+        fk_admission *old = fk_admissions;
+        fk_admissions = old->previous;
+        free(old->hash); free(old);
+    }
+}
+static const char *fk_admission_bind(long long first, long long end, const char *hash) {
+    fk_admission *a = malloc(sizeof(*a));
+    long long n = hash ? fk_cstrlen(hash) : 0;
+    if (!a) fk_die("admission identity: out of memory");
+    a->hash = malloc((unsigned long)n + 1);
+    if (!a->hash) fk_die("admission identity: out of memory");
+    if (n) memcpy(a->hash, hash, (unsigned long)n);
+    a->hash[n] = 0;
+    a->first = first; a->end = end; a->previous = fk_admissions;
+    fk_admissions = a;
+    return a->hash;
+}
+static long long fk_admission_read(long long fn) {
+    const char *hash = fn == 0 ? fk_cell_identity : 0;
+    if (fn < 0 || fn >= fk_fn_count) return fk_nothing;
+    if (!hash) {
+        fk_admission *a = fk_admissions;
+        while (a && !(a->first <= fn && fn < a->end)) a = a->previous;
+        hash = a ? a->hash : 0;
+    }
+    if (!hash || !hash[0] || !fk_fkb_builder_id[0]) return fk_nothing;
+    return fk_cons_val(fk_sbuf(fk_fkb_builder_id, fk_cstrlen(fk_fkb_builder_id)),
+                       fk_cons_val(fk_sbuf(hash, fk_cstrlen(hash)), 1));
+}
 static long long fk_prog_read(long long pid, long long spec) {
     long long dsz = 0, out = fk_nothing;
     /* this process's own surface is read where it lives: the published A, S and the defn rows ARE these tables, so a node's
@@ -19134,6 +19180,10 @@ static long long fk_prog_read(long long pid, long long spec) {
         mode[0] = 0;
         fk_cstr(FK_HH(p), mode, 16);
         long long q = FK_HNEXT(p);
+        if (fk_cstr_eq(mode, "identity")) {
+            if (!q) return fk_admission_read(fk_cur_fn);
+            return FK_POK(q) && (FK_HH(q) & 1) == 0 ? fk_admission_read(FK_HH(q) >> 1) : fk_nothing;
+        }
         /* ("fn" c): defn c's body (the one it wears under its page) and its arity, or nothing for a capturing function, whose
          * prologue reads the call's capture channel -- what the Form JIT reads of a callee it writes in place of its call */
         if (fk_cstr_eq(mode, "fn") && q >= 1 && FK_POK(q) && (FK_HH(q) & 1) == 0) {
@@ -21945,7 +21995,7 @@ static void fk_sig_head(long long at, long long seq, const char *image, const ch
     fk_sig_lit(observed);
     fk_sig_lit("\",\"health\":");
     fk_sig_lit(health);
-    fk_sig_lit(",\"surprise\":1,\"needs\":[");
+    fk_sig_lit(health[0] == '1' ? ",\"surprise\":0,\"needs\":[" : ",\"surprise\":1,\"needs\":[");
     if (fk_cell_diag_on) {
         char aspect_row[FK_PATH_CAP + 16];
         if (image != 0) {
@@ -22266,7 +22316,9 @@ static void fk_diag_signal(int sev, long long off, const char *where, long long 
  * An image set aside for a rebuild offers `rebuild` and is held until a rebuilt
  * image is written (fk_sig_heal_settle). */
 static void fk_diag_path_signal(const char *level, const char *path, const char *msg) {
-    int err = level[0] == 'e';
+    int native_failed = fk_cstr_eq(level, "native-failure");
+    int err = level[0] == 'e' || native_failed;
+    int admission_failed = native_failed || fk_cstr_eq(level, "cache-failure");
     long long pn = path != 0 ? fk_cstrlen(path) : 0;
     int image = pn > 0 && (fk_sig_ends_at(path, pn, ".fkb") || fk_sig_ends_at(path, pn, ".sym") ||
                            fk_sig_ends_at(path, pn, ".dylib"));
@@ -22275,14 +22327,14 @@ static void fk_diag_path_signal(const char *level, const char *path, const char 
                 fk_sig_has(msg, "stale .fkb ignored"));
     long long at = fk_now_ms();
     fk_sig_seq = fk_sig_seq + 1;
-    fk_sig_head(at, fk_sig_seq, heal ? path : 0, "observe", err ? "compile-error" : "compile-warning",
-                err ? "0" : "null");
+    fk_sig_head(at, fk_sig_seq, image ? path : 0, "observe", admission_failed ? "image-admission-failed" : err ? "compile-error" : "compile-warning",
+                err || admission_failed ? "0" : "null");
     if (fk_cell_diag_on) {
         fk_dg_detail(msg);
         fk_dg_where(path, -1, 0, 0);
     }
     if (err) {
-        fk_sig_lit("{\"resource\":\"source-diagnostics\",\"detail\":");
+        fk_sig_lit(native_failed ? "{\"resource\":\"native-artifact\",\"detail\":" : "{\"resource\":\"source-diagnostics\",\"detail\":");
         fk_sig_cstr(msg);
         fk_sig_lit("}");
     }
@@ -22294,6 +22346,8 @@ static void fk_diag_path_signal(const char *level, const char *path, const char 
     }
     fk_sig_lit("],\"selected\":\"\",\"evidence\":{\"path\":");
     fk_sig_cstr(path);
+    fk_sig_lit(",\"reason\":");
+    fk_sig_cstr(msg);
     fk_sig_lit(image ? ",\"form\":\"image\"}" : ",\"form\":\"unit\"}");
     fk_sig_send(at, at);
     if (heal) {
@@ -22321,9 +22375,7 @@ static long long fk_sig_stem_n(const char *p) {
     }
     return n;
 }
-/* A rebuilt image was written, and the heal of that image (the image or its lens,
- * one stem) gets its applied row, naming this path at this time. An image set
- * aside and never rewritten keeps its observation alone. */
+/* Only a published image re-admitted by its reader completes the repair event. */
 static void fk_sig_heal_settle(const char *fkb_path) {
     long long i = 0;
     long long kept = 0;
@@ -22339,14 +22391,14 @@ static void fk_sig_heal_settle(const char *fkb_path) {
             k = k + 1;
         }
         if (same) {
-            fk_sig_head(fk_sig_heal_at[i], fk_sig_heal_seq[i], p, "applied", "compile-warning", "null");
+            fk_sig_head(fk_sig_heal_at[i], fk_sig_heal_seq[i], p, "applied", "image-admitted", "1");
             if (fk_cell_diag_on) {
-                fk_dg_detail("image rebuilt");
+                fk_dg_detail("rebuilt image re-admitted");
                 fk_dg_where(fkb_path, -1, 0, 0);
             }
             fk_sig_lit("],\"offers\":[\"rebuild\"],\"selected\":\"rebuild\",\"evidence\":{\"path\":");
             fk_sig_cstr(p);
-            fk_sig_lit(",\"form\":\"image\"},\"result\":{\"image\":\"rebuilt\",\"path\":");
+            fk_sig_lit(",\"form\":\"image\"},\"result\":{\"image\":\"re-admitted\",\"path\":");
             fk_sig_cstr(fkb_path);
             fk_sig_lit("}");
             fk_sig_send(fk_sig_heal_at[i], now);
@@ -23392,6 +23444,7 @@ static void fk_const_forward_finalize(void) {
                     "Read recovered to 0",
                     (int)fk_const_n[i], fk_srctext + fk_const_s[i]);
             fk_src_unrunnable = 1;
+            fk_cell_note_unrunnable(at);
             long long zero = fk_smklit(0);
             fk_const_node[i] = zero;
             if (fk_const_wrapp1[i] != 0) {
@@ -24157,6 +24210,7 @@ static long long fk_sparse(void) {
             "Read recovered to 0; parse continues",
             (int)(fk_spos - s), fk_srctext + s);
     fk_src_unrunnable = 1;
+    fk_cell_note_unrunnable(s);
     return fk_smklit(0);
 }
 /* (do f1 f2 .. fn): sequence forms (tag 69 = eval-first/return-rest). A do-let `(let name val)`
@@ -25384,7 +25438,7 @@ static long long fk_src_unit_mtime_range(long long start, long long end) {
 static long long fk_src_unit_mtime(void) {
     return fk_src_unit_mtime_range(0, fk_src_dep_count);
 }
-static int fk_src_unit_hash_range(long long start, long long end, char *out, long long cap) {
+static int fk_src_unit_hash_members(long long start, long long end, const long long *members, char *out, long long cap) {
     long long pos = 0;
     long long i = start;
     char canon[FK_PATH_CAP];
@@ -25395,13 +25449,15 @@ static int fk_src_unit_hash_range(long long start, long long end, char *out, lon
      * paths, sizes and content digests still bind the resolved closure; the
      * separate builder identity binds its interpretation. The version names
      * this contract and invalidates the timestamp-bearing v3 identity once. */
-    while (i < end && i < fk_src_dep_count) {
-        const char *cid = fk_path_canon_id(fk_src_dep_path[i], canon);
+    while (i < end) {
+        long long d = members ? members[i] : i;
+        if (d < 0 || d >= fk_src_dep_count) return 0;
+        const char *cid = fk_path_canon_id(fk_src_dep_path[d], canon);
         fold = fold ^ fk_bytes_fnv1a(cid, fk_path_len(cid));
         fold = fold * 1099511628211ULL;
-        fold = fold ^ (unsigned long long)fk_src_dep_size[i];
+        fold = fold ^ (unsigned long long)fk_src_dep_size[d];
         fold = fold * 1099511628211ULL;
-        fold = fold ^ fk_src_dep_digest[i];
+        fold = fold ^ fk_src_dep_digest[d];
         fold = fold * 1099511628211ULL;
         count = count + 1;
         i = i + 1;
@@ -25415,7 +25471,7 @@ static int fk_src_unit_hash_range(long long start, long long end, char *out, lon
     return 1;
 }
 static int fk_src_unit_hash(char *out, long long cap) {
-    return fk_src_unit_hash_range(0, fk_src_dep_count, out, cap);
+    return fk_src_unit_hash_members(0, fk_src_dep_count, 0, out, cap);
 }
 static int fk_src_line_is_bare_import(const char *text, long long line_start, long long line_end);
 /* Shared by dependency admission and import-line removal. A string keeps
@@ -26142,8 +26198,11 @@ static int fk_src_load_unit_buffer(const char *root_path, char *owned, long long
  * The buffer flushes when full and once before close; ordering is preserved
  * because EVERY writer below goes through it, header included. */
 #define FK_FKB_OUT_CAP (1 << 20)
+#define FK_FKB_VERSION 8
 static unsigned char fk_fkb_out_buf[FK_FKB_OUT_CAP];
 static long long fk_fkb_out_n;
+static unsigned long long fk_fkb_out_hash;
+static int fk_fkb_sealing;
 static int fk_fkb_flush(int fd) {
     if (fk_fkb_out_n <= 0) {
         return 1;
@@ -26155,6 +26214,11 @@ static int fk_fkb_flush(int fd) {
 static int fk_fkb_out(int fd, const char *p, long long n) {
     if (n < 0) {
         return 0;
+    }
+    if (fk_fkb_sealing) {
+        long long j; for (j = 0; j < n; j++) {
+            fk_fkb_out_hash = (fk_fkb_out_hash ^ (unsigned char)p[j]) * 1099511628211ULL;
+        }
     }
     if (n >= FK_FKB_OUT_CAP) {
         return fk_fkb_flush(fd) && fk_write_all_raw(fd, p, (unsigned long)n);
@@ -26492,7 +26556,6 @@ static void fk_src_sweep_dead_temps(const char *fkb_path) {
  * admits a unit or changes directory. Identical rebuilds reuse images; another
  * executable cannot lend them its meaning. The native artifact layer takes this
  * carrier home when it replaces the seed's image reader and writer. */
-static char fk_fkb_builder_id[64];
 #define FK_FKB_BUILDER_ID fk_fkb_builder_id
 static void fk_fkb_builder_admit(void) {
     const char *path = fk_self_path;
@@ -26548,11 +26611,8 @@ static void fk_fkb_builder_admit(void) {
 
 static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const char *sym_path,
                             long long source_mtime, const char *source_hash) {
-    /* both artifacts go to pid-suffixed temp names and rename() into place:
-     * a reader under a concurrent runner must only ever see a whole image or
-     * the previous one, never a TRUNC-in-progress partial (the "truncated
-     * artifact" die class). The sym lens lands before the image so a fresh
-     * .fkb is never visible without its compile-error record. */
+    /* The image carries its diagnostics and checksum and publishes by one
+     * rename. The independently written .sym is an optional inspection lens. */
     char fkb_tmp[FK_PATH_CAP + 64];
     char sym_tmp[FK_PATH_CAP + 64];
     if (fk_path_len(fkb_path) > FK_PATH_CAP || fk_path_len(sym_path) > FK_PATH_CAP) {
@@ -26576,15 +26636,19 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
     int ok = 1;
     char canon[FK_PATH_CAP];
     fk_fkb_out_n = 0;
+    fk_fkb_out_hash = 14695981039346656037ULL;
+    fk_fkb_sealing = 1;
     ok = ok && fk_fkb_out(fd, "FKPIFB1", 7);
     ok = ok && fk_fkb_write_u8(fd, 0);
-    ok = ok && fk_fkb_write_u32(fd, 7);
+    ok = ok && fk_fkb_write_u32(fd, FK_FKB_VERSION);
     ok = ok && fk_fkb_write_cstr(fd, FK_FKB_BUILDER_ID);
     ok = ok && fk_fkb_write_cstr(fd, fk_path_canon_id(src_path, canon));
     ok = ok && fk_fkb_write_cstr(fd, source_hash);
     ok = ok && fk_fkb_write_signed(fd, source_mtime > 0 ? source_mtime : 1);
     ok = ok && fk_fkb_write_cstr(fd, fkb_path);
     ok = ok && fk_fkb_write_signed(fd, 1);
+    ok = ok && fk_fkb_write_signed(fd, fk_nerr);
+    ok = ok && fk_fkb_write_signed(fd, fk_src_unrunnable ? 1 : 0);
     ok = ok && fk_fkb_write_signed(fd, fk_fn_count);
     long long i = 0;
     while (ok && i < fk_fn_count) {
@@ -26654,7 +26718,10 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
         ok = fk_fkb_write_signed(fd, (long long)fk_const_unit[i]);
         i = i + 1;
     }
-    ok = ok && fk_fkb_flush(fd);
+    unsigned long long checksum = fk_fkb_out_hash;
+    fk_fkb_sealing = 0;
+    ok = ok && fk_fkb_write_u32(fd, (long long)(checksum >> 32)) &&
+         fk_fkb_write_u32(fd, (long long)(checksum & 4294967295ULL)) && fk_fkb_flush(fd);
     /* a close that fails may not have written the image whole: it is not renamed into place */
     if (close(fd) != 0) ok = 0;
     if (!ok) {
@@ -26662,17 +26729,10 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
         unlink(fkb_tmp);
         return 0;
     }
-    if (!fk_src_write_sym_text(sym_tmp, src_path, fkb_path, source_hash)) {
-        fk_src_sym_index_free();
-        unlink(fkb_tmp);
+    if (!fk_src_write_sym_text(sym_tmp, src_path, fkb_path, source_hash) ||
+        rename(sym_tmp, sym_path) != 0) {
         unlink(sym_tmp);
-        return 0;
-    }
-    if (rename(sym_tmp, sym_path) != 0) {
-        fk_src_sym_index_free();
-        unlink(fkb_tmp);
-        unlink(sym_tmp);
-        return 0;
+        fk_diag_path("warning", sym_path, "optional symbol lens could not be published; image retains its diagnostics");
     }
     fk_src_sym_index_free();
     if (rename(fkb_tmp, fkb_path) != 0) {
@@ -26761,6 +26821,91 @@ static int fk_fkb_read_string_matches_cstr(const char *s) {
     }
     fk_fkb_pos = fk_fkb_pos + n;
     return ok;
+}
+static long long fk_fkb_errors, fk_fkb_unrunnable;
+static char fk_fkb_source_hash[FK_SRC_HASH_CAP];
+/* Validate the complete snapshot before any reader mutates evaluator tables.
+ * One header owns identity and diagnostics for direct, source and import use. */
+static int fk_fkb_open_checked(const char *path, const char *source, const char *hash) {
+    fk_fkb_begin(0);
+    fk_fkb_errors = fk_fkb_unrunnable = -1;
+    fk_fkb_source_hash[0] = 0;
+    int fd = open(path, O_RDONLY
+#if defined(_WIN32)
+        | 0x8000
+#endif
+    );
+    if (fd < 0) {
+        if (errno != ENOENT) fk_fkb_mark_bad("image open failed");
+        return 0;
+    }
+    long long got = fk_read_all_dynamic(fd, fk_path_size_raw(path));
+    int closed = close(fd);
+    if (got < 20 || closed != 0) { fk_fkb_mark_bad("incomplete image read"); return 0; }
+    fk_fkb_begin(got);
+    const char magic[8] = {'F','K','P','I','F','B','1',0};
+    long long k;
+    for (k = 0; k < 8; k++) {
+        if (fk_fkb_read_u8() != (unsigned char)magic[k]) { fk_fkb_mark_bad("bad magic"); return 0; }
+    }
+    long long version = fk_fkb_read_u32();
+    if (version != FK_FKB_VERSION) {
+        fk_fkb_mark_bad(version < FK_FKB_VERSION ? "superseded image without embedded diagnostics and checksum" : "unsupported version");
+        return 0;
+    }
+    unsigned long long expected = 0;
+    for (k = got - 8; k < got; k++) expected = (expected << 8) | (unsigned char)fk_buf[k];
+    if (fk_bytes_fnv1a(fk_buf, got - 8) != expected) { fk_fkb_mark_bad("image checksum mismatch"); return 0; }
+    fk_fkb_len = got - 8;
+    if (!fk_fkb_read_string_matches_cstr(FK_FKB_BUILDER_ID)) {
+        fk_fkb_mark_bad("written by a different fkwu build"); return 0;
+    }
+    int source_ok = 1;
+    char canon[FK_PATH_CAP];
+    if (source) source_ok = fk_fkb_read_string_matches_cstr(fk_path_canon_id(source, canon));
+    else fk_fkb_skip_string();
+    long long n = fk_fkb_read_u32();
+    if (n <= 0 || n >= FK_SRC_HASH_CAP || n > fk_fkb_len - fk_fkb_pos) {
+        fk_fkb_mark_bad("invalid source identity"); return 0;
+    }
+    memcpy(fk_fkb_source_hash, fk_buf + fk_fkb_pos, (unsigned long)n);
+    fk_fkb_source_hash[n] = 0; fk_fkb_pos += n;
+    if (fk_cstrlen(fk_fkb_source_hash) != n) { fk_fkb_mark_bad("invalid source identity bytes"); return 0; }
+    if (hash && !fk_cstr_eq(hash, fk_fkb_source_hash)) source_ok = 0;
+    (void)fk_fkb_read_signed(); /* timestamp provenance */
+    fk_fkb_skip_string();      /* artifact's original location */
+    long long sealed = fk_fkb_read_signed();
+    fk_fkb_errors = fk_fkb_read_signed();
+    fk_fkb_unrunnable = fk_fkb_read_signed();
+    if (sealed != 1 || fk_fkb_errors < 0 || fk_fkb_unrunnable < 0 || fk_fkb_unrunnable > 1) {
+        fk_fkb_mark_bad("invalid embedded compile diagnostics");
+    }
+    return !fk_fkb_bad && source_ok;
+}
+static void fk_fkb_repair_signal(const char *path) {
+    char reason[256];
+    sprintf(reason, "image admission failed (%s); rebuilding", fk_fkb_bad ? fk_fkb_bad_why : "source identity changed");
+    fk_diag_path(fk_fkb_bad ? "cache-failure" : "warning", path, reason);
+}
+typedef struct {
+    char *bytes;
+    long long capacity, length, position, errors, unrunnable;
+    char hash[FK_SRC_HASH_CAP];
+} fk_fkb_snapshot;
+/* Planning transfers the validated snapshot, without copying or rereading it.
+ * Imports consume exactly those bytes even if another writer publishes later. */
+static void fk_fkb_snapshot_take(fk_fkb_snapshot *s) {
+    s->bytes = fk_buf; s->capacity = fk_buf_capacity;
+    s->length = fk_fkb_len; s->position = fk_fkb_pos;
+    s->errors = fk_fkb_errors; s->unrunnable = fk_fkb_unrunnable;
+    fk_cstr_copy(s->hash, fk_fkb_source_hash, FK_SRC_HASH_CAP);
+    fk_buf = 0; fk_buf_capacity = 0;
+}
+static void fk_fkb_snapshot_use(fk_fkb_snapshot *s) {
+    free(fk_buf); fk_buf = s->bytes; fk_buf_capacity = s->capacity; s->bytes = 0;
+    fk_fkb_begin(s->length); fk_fkb_pos = s->position;
+    fk_fkb_errors = s->errors; fk_fkb_unrunnable = s->unrunnable;
+    fk_cstr_copy(fk_fkb_source_hash, s->hash, FK_SRC_HASH_CAP);
 }
 static void fk_string_table_reset(void) {
     fk_sinit();
@@ -26940,69 +27085,16 @@ static int fk_fkb_read_symbol_to_srctext(long long *start, long long *len) {
     fk_srctext[fk_slen] = 0;
     return 1;
 }
-static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_src_path,
-                                   const char *expected_source_hash) {
-#if defined(_WIN32)
-    int fd = open(fkb_path, 0x8000);
-#else
-    int fd = open(fkb_path, 0);
-#endif
-    if (fd < 0) {
-        return 0;
-    }
-    long long got = fk_read_all_dynamic(fd, fk_path_size_raw(fkb_path));
-    close(fd);
-    if (got < 0) {
-        return 0;
-    }
-    fk_fkb_begin(got);
-    const char magic[8] = {'F', 'K', 'P', 'I', 'F', 'B', '1', 0};
-    long long mi = 0;
-    while (mi < 8) {
-        if (fk_fkb_read_u8() != (long long)(unsigned char)magic[mi]) {
-            return 0;
-        }
-        mi = mi + 1;
-    }
-    long long version = fk_fkb_read_u32();
-    if (version < 7) {
-        /* pre-v7 artifacts carry no unit sequences (pre-v6 no constant table,
-         * pre-v5 no builder identity), so the lane cannot run their units once --
-         * superseded, not corrupt. */
-        return 0;
-    }
-    /* Every identity read must execute unconditionally: these advance the
-     * decode stream. A short-circuit here (the old `ok && read(...)` shape)
-     * skipped the hash read after a src-path mismatch and desynced every
-     * later read into "truncated string" -- the wrong-CWD reproduction. */
-    int builder_matches = fk_fkb_read_string_matches_cstr(FK_FKB_BUILDER_ID);
-    char canon[FK_PATH_CAP];
-    int src_path_matches =
-        fk_fkb_read_string_matches_cstr(fk_path_canon_id(expected_src_path, canon));
-    int source_hash_matches = fk_fkb_read_string_matches_cstr(expected_source_hash);
-    int source_identity_ok = src_path_matches && source_hash_matches;
-    (void)fk_fkb_read_signed(); /* source mtime is provenance, not identity */
-    fk_fkb_skip_string();
-    long long sealed = fk_fkb_read_signed();
-    if (fk_fkb_bad) {
-        fk_diag_path("warning", fkb_path, "corrupt .fkb artifact; rebuilding from source");
-        return 0;
-    }
-    if (!builder_matches) {
-        fk_diag_path("warning", fkb_path,
-                     "foreign .fkb (written by a different fkwu build); rebuilding from source. "
-                     "The bytes of a source do not fix its meaning -- the binary that compiled "
-                     "them does");
-        return 0;
-    }
-    if (sealed != 1 || !source_identity_ok) {
-        fk_diag_path("warning", fkb_path,
-                     "stale .fkb (stored source identity does not match, e.g. written from a "
-                     "different working directory); rebuilding from source");
+static int fk_src_import_fkb_image(const char *fkb_path, fk_fkb_snapshot *snapshot) {
+    fk_fkb_snapshot_use(snapshot);
+    long long version = FK_FKB_VERSION;
+    if (fk_fkb_errors || fk_fkb_unrunnable) {
+        fk_diag_path("warning", fkb_path, "unit image carries compile errors or refusal; compiling the complete caller closure");
         return 0;
     }
     long long nf = fk_fkb_read_signed();
     if (nf < 1 || nf > fk_fkb_len) {
+        fk_fkb_mark_bad("import function count exceeds artifact bounds");
         return 0;
     }
     fk_fn_reserve(fk_defn_next + nf - 1);
@@ -27020,6 +27112,7 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
     }
     long long nr = fk_fkb_read_signed();
     if (nr < 0 || nr > fk_fkb_len) {
+        fk_fkb_mark_bad("import node count exceeds artifact bounds");
         free(fn_roots);
         return 0;
     }
@@ -27039,6 +27132,7 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
     fk_node_count = fk_node_count + nr;
     long long ns = fk_fkb_read_signed();
     if (ns < 0) {
+        fk_fkb_mark_bad("negative import string count");
         free(fn_roots);
         return 0;
     }
@@ -27060,6 +27154,7 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
     free(fn_roots);
     long long symbol_count = fk_fkb_read_signed();
     if (symbol_count < 0 || symbol_count > fk_fkb_len) {
+        fk_fkb_mark_bad("import symbol count exceeds artifact bounds");
         return 0;
     }
     fk_fn_reserve(fk_fntop + symbol_count + 1);
@@ -27071,9 +27166,6 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
         long long name_s = 0;
         long long name_n = 0;
         if (!fk_fkb_read_symbol_to_srctext(&name_s, &name_n)) {
-            if (fk_fkb_bad) {
-                fk_diag_path("warning", fkb_path, "corrupt .fkb artifact; rebuilding from source");
-            }
             return 0;
         }
         if (old_fnidx > 0) {
@@ -27231,10 +27323,11 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
     free(ccs); free(ccn); free(ccnode); free(chold); free(cown);
     free(uid); free(uchain); free(udup);
     if (fk_fkb_bad || fk_fkb_pos != fk_fkb_len) {
-        fk_diag_path("warning", fkb_path, "corrupt .fkb artifact; rebuilding from source");
+        fk_fkb_mark_bad("trailing import bytes");
         return 0;
     }
-    fk_prog_note_ice(fkb_path, fk_fkb_len, expected_source_hash);
+    fk_admission_bind(fn_base, fn_base + nf - 1, fk_fkb_source_hash);
+    fk_prog_note_ice(fkb_path, fk_fkb_len, fk_fkb_source_hash);
     return 1;
 }
 /* the whole-image loader restores fn symbols instead of skipping them:
@@ -27343,87 +27436,8 @@ static int fk_fkb_restore_symbol_image(long long version) {
 }
 static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_src_path,
                                    const char *expected_source_hash) {
-#if defined(_WIN32)
-    int fd = open(fkb_path, 0x8000);
-#else
-    int fd = open(fkb_path, 0);
-#endif
-    if (fd < 0) {
-        return 0;
-    }
-    long long got = fk_read_all_dynamic(fd, fk_path_size_raw(fkb_path));
-    close(fd);
-    if (got < 0) {
-        fk_fkb_begin(0);
-        fk_fkb_mark_bad(got == -3 ? "artifact dynamic read allocation failed"
-                                  : "artifact is unreadable");
-        return 0;
-    }
-    fk_fkb_begin(got);
-    const char magic[8] = {'F', 'K', 'P', 'I', 'F', 'B', '1', 0};
-    long long mi = 0;
-    while (mi < 8) {
-        if (fk_fkb_read_u8() != (long long)(unsigned char)magic[mi]) {
-            fk_fkb_mark_bad("bad magic");
-            return 0;
-        }
-        mi = mi + 1;
-    }
-    long long version = fk_fkb_read_u32();
-    if (version >= 2 && version <= 6) {
-        /* pre-v7 lanes: v2/v3 are the old lane width, v4 carries no builder
-         * identity, v5 no constant table, v6 no unit sequences -- superseded, not
-         * corrupt. Invalidate so the caller recompiles from source and overwrites
-         * with a v7 artifact. */
-        fk_fkb_mark_bad("pre-v7 artifact lane; superseded");
-        return 0;
-    }
-    if (version != 7) {
-        fk_fkb_mark_bad("unsupported version");
-        return 0;
-    }
-    /* Identity reads execute unconditionally -- they advance the decode
-     * stream; short-circuiting them desyncs every later read (see
-     * fk_src_import_fkb_image). Mismatch stays a soft "rebuild" verdict. */
-    int source_identity_ok = 1;
-    if (!fk_fkb_read_string_matches_cstr(FK_FKB_BUILDER_ID)) {
-        /* Named through mark_bad, not folded into source_identity_ok: the
-         * source is exactly what it claims to be here, and reporting "source
-         * path or content changed" would send the reader hunting a
-         * directory that is not the cause. A diagnostic that misnames its own
-         * cause is the defect it is reporting on, one level up. */
-        fk_fkb_mark_bad("written by a different fkwu build; the bytes of a source do not fix its "
-                        "meaning -- the binary that compiled them does");
-        return 0;
-    }
-    char canon[FK_PATH_CAP];
-    if (expected_src_path != 0) {
-        if (!fk_fkb_read_string_matches_cstr(fk_path_canon_id(expected_src_path, canon))) {
-            source_identity_ok = 0;
-        }
-    } else {
-        fk_fkb_skip_string();
-    }
-    if (expected_source_hash != 0) {
-        if (!fk_fkb_read_string_matches_cstr(expected_source_hash)) {
-            source_identity_ok = 0;
-        }
-    } else {
-        fk_fkb_skip_string();
-    }
-    (void)fk_fkb_read_signed(); /* source mtime is provenance, not identity */
-    fk_fkb_skip_string();
-    long long sealed = fk_fkb_read_signed();
-    if (fk_fkb_bad) {
-        return 0;
-    }
-    if (sealed != 1) {
-        fk_fkb_mark_bad("unsealed artifact");
-        return 0;
-    }
-    if (!source_identity_ok) {
-        return 0;
-    }
+    if (!fk_fkb_open_checked(fkb_path, expected_src_path, expected_source_hash)) return 0;
+    long long version = FK_FKB_VERSION;
     long long nf = fk_fkb_read_signed();
     if (nf < 0 || nf > fk_fkb_len) {
         fk_fkb_mark_bad("function count exceeds artifact bounds");
@@ -27483,6 +27497,8 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
     fk_defn_next = fk_fn_count;
     fk_const_top = 0;
     fk_root = fk_fn_count > 0 ? fk_fn[0] : -1;
+    fk_admission_clear();
+    fk_admission_bind(0, fk_fn_count, fk_fkb_errors || fk_fkb_unrunnable ? 0 : fk_fkb_source_hash);
     fk_prog_note_ice(fkb_path, fk_fkb_len, expected_source_hash);
     fk_prog_note_counts();
     return 1;
@@ -27490,7 +27506,14 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
 static int fk_src_load_fkb(const char *fkb_path) {
     return fk_src_load_fkb_checked(fkb_path, 0, 0);
 }
-static int fk_run_loaded_program_image(long long arg) {
+static int fk_run_loaded_program_image(const char *path, long long arg) {
+    /* Capture before walking: a nested cell may admit another image. */
+    long long errors = fk_fkb_errors;
+    if (fk_fkb_unrunnable) {
+        fk_diag_path("error", path, "cached image was refused at compile; fix source and rerun");
+        return 1;
+    }
+    if (errors) fk_diag_path("warning", path, "cached image was compiled with errors; fix source and rerun");
     if (fk_fn_count <= 0 || fk_fn[0] < 0) {
         fk_die("fk_fkb: no executable root");
     }
@@ -27498,57 +27521,24 @@ static int fk_run_loaded_program_image(long long arg) {
     fk_vsp = 1;
     fk_walk_begins();
     fk_pv_root(fk_walk(fk_fn[0], 0));
-    return 0;
+    return errors ? 1 : 0;
 }
 typedef long long (*fk_dylib_main_v1_fn)(long long);
-static int fk_run_dylib_artifact(const char *dylib_path, long long arg, int hard_error) {
-    fk_walk_begins();
+static int fk_run_dylib_artifact(const char *dylib_path, long long arg) {
     void *h = dlopen(dylib_path, 2);
     if (h == 0) {
-        if (hard_error) {
-            fk_diag_path("error", dylib_path, "could not open .dylib artifact");
-        } else {
-            fk_diag_path("warning", dylib_path, "fresh .dylib could not be opened; falling back");
-        }
+        fk_diag_path("native-failure", dylib_path, "could not open .dylib artifact");
         return 0;
     }
     fk_dylib_main_v1_fn fn = (fk_dylib_main_v1_fn)dlsym(h, "fkwu_main_v1");
     if (fn == 0) {
-        if (hard_error) {
-            fk_diag_path("error", dylib_path, "missing required fkwu_main_v1 ABI symbol");
-        } else {
-            fk_diag_path("warning", dylib_path, "missing fkwu_main_v1 ABI symbol; falling back");
-        }
+        fk_diag_path("native-failure", dylib_path, "missing required fkwu_main_v1 ABI symbol");
+        dlclose(h);
         return 0;
     }
+    fk_walk_begins();
     fk_pv(fn(arg << 1));
     return 1;
-}
-static long long fk_src_fkb_version_raw(const char *fkb_path) {
-#if defined(_WIN32)
-    int fd = open(fkb_path, 0x8000);
-#else
-    int fd = open(fkb_path, 0);
-#endif
-    if (fd < 0) {
-        return -1;
-    }
-    unsigned char b[12];
-    long long got = read(fd, b, 12);
-    close(fd);
-    if (got != 12) {
-        return -1;
-    }
-    const unsigned char magic[8] = {'F', 'K', 'P', 'I', 'F', 'B', '1', 0};
-    long long i = 0;
-    while (i < 8) {
-        if (b[i] != magic[i]) {
-            return -1;
-        }
-        i = i + 1;
-    }
-    return ((long long)b[8] << 24) | ((long long)b[9] << 16) | ((long long)b[10] << 8) |
-           (long long)b[11];
 }
 /* where a lens field's value begins in the lens's first `got` bytes (just past `needle`), or -1 when it is absent */
 static long long fk_src_sym_at(const char *buf, long long got, const char *needle) {
@@ -27565,90 +27555,8 @@ static long long fk_src_sym_at(const char *buf, long long got, const char *needl
     }
     return -1;
 }
-/* the number a lens field carries, or -1 when the field is absent */
-static long long fk_src_sym_number(const char *buf, long long got, const char *needle) {
-    long long p = fk_src_sym_at(buf, got, needle), v = 0;
-    if (p < 0) {
-        return -1;
-    }
-    while (p < got && buf[p] >= '0' && buf[p] <= '9') {
-        v = v * 10 + (buf[p] - '0');
-        p = p + 1;
-    }
-    return v;
-}
-static long long fk_src_sym_recorded_errors(const char *sym_path) {
-    /* the .sym lens records fk_nerr at image-write time (second header line).
-     * Returns -1 when the file or the line is absent: an image without its
-     * error record is an incomplete cache, not a clean one -- otherwise
-     * deleting the lens would launder a degraded image back to exit 0 */
-#if defined(_WIN32)
-    int fd = open(sym_path, 0x8000);
-#else
-    int fd = open(sym_path, 0);
-#endif
-    if (fd < 0) {
-        return -1;
-    }
-    char buf[256];
-    long long got = read(fd, buf, 255);
-    close(fd);
-    if (got <= 0) {
-        return -1;
-    }
-    buf[got] = 0;
-    return fk_src_sym_number(buf, got, "\ncompile-errors ");
-}
-/* The lens read once, for the image it stands beside: the compile-error count and the unrunnable latch as the image
- * recorded them (the latch 1 refused, 0 runnable), each -1 when absent -- an older lens that predates the field, which
- * the caller treats as it treats a missing error record: an incomplete cache to rebuild, never a clean one (guessing
- * "probably runnable" would restore the laundering the latch exists to stop) -- and whether the lens names
- * `source_hash`, the identity the image is checked against: 1 it names it, 0 it names another, -1 it names none. An
- * image and its lens land by two renames (fk_src_write_fkb), so two writers of one unit from two states of its closure
- * can leave the second's lens beside the first's image (A's lens, B's lens, B's image, A's image) -- and two reads of
- * the lens can meet two lenses. A lens that does not name the image's identity belongs to another image, and its
- * counts are not this image's truth. */
-static int fk_src_sym_lens(const char *sym_path, const char *source_hash, long long *errors, long long *unrunnable) {
-    static char buf[2 * FK_PATH_CAP + FK_SRC_HASH_CAP + 256];
-    long long got = 0, cap = (long long)sizeof(buf) - 1, at, end, hn = fk_cstrlen(source_hash);
-    *errors = -1;
-    *unrunnable = -1;
-#if defined(_WIN32)
-    int fd = open(sym_path, 0x8000);
-#else
-    int fd = open(sym_path, 0);
-#endif
-    if (fd < 0) {
-        return -1;
-    }
-    while (got < cap) {
-        long long r = (long long)read(fd, buf + got, (unsigned long)(cap - got));
-        if (r < 0 && errno == EINTR) {
-            continue;
-        }
-        if (r <= 0) {
-            break;
-        }
-        got = got + r;
-    }
-    close(fd);
-    buf[got] = 0;
-    *errors = fk_src_sym_number(buf, got, "\ncompile-errors ");
-    *unrunnable = fk_src_sym_number(buf, got, "\nunrunnable ");
-    at = fk_src_sym_at(buf, got, "\nsource-hash ");
-    if (at < 0) {
-        return -1;
-    }
-    end = at;
-    while (end < got && buf[end] != FK_CH_LF) {
-        end = end + 1;
-    }
-    if (end >= got) {
-        return -1;   /* the line did not end inside what was read: not a whole field */
-    }
-    return end - at == hn && memcmp(buf + at, source_hash, (unsigned long)hn) == 0 ? 1 : 0;
-}
 static void fk_src_reset_compile_state(void) {
+    fk_admission_clear();
     fk_fn_reserve(1);
     fk_fname_n = 0;
     fk_fn_count = 1;
@@ -27749,6 +27657,7 @@ static void fk_src_check_balance(void) {
                         "the text cannot be read as the program it claims to be, so there is "
                         "nothing for a verdict to be of. Refusing to run");
                 fk_src_unrunnable = 1;
+                fk_cell_note_unrunnable(p);
                 return;
             }
         }
@@ -27777,6 +27686,7 @@ static void fk_src_check_balance(void) {
                 depth);
         fk_src_truncated = 1;
         fk_src_unrunnable = 1;
+        fk_cell_note_unrunnable(outermost_open >= 0 ? outermost_open : 0);
     }
 }
 /* a unit's canonical-path id, 63 bits so it rides the image's signed lane */
@@ -27889,6 +27799,7 @@ static void fk_src_compile_current_unit(const char *path, const char *fkb_path,
     if (fk_maxslot > 0) {
         fk_fn[0] = fk_smknode(111, fk_smklit(fk_maxslot), fk_fn[0], 0);
     }
+    fk_admission_bind(0, fk_fn_count, fk_nerr || fk_src_unrunnable || fk_src_truncated ? 0 : source_hash);
     if (!fk_src_write_fkb(path, fkb_path, sym_path, unit_mtime, source_hash)) {
         if (fk_fkb_write_overflow) {
             fk_die("fk_run_src: failed to write .fkb/.sym artifacts -- a value in the "
@@ -27897,7 +27808,11 @@ static void fk_src_compile_current_unit(const char *path, const char *fkb_path,
         }
         fk_die("fk_run_src: failed to write .fkb/.sym artifacts");
     }
-    fk_sig_heal_settle(fkb_path);
+    if (!fk_fkb_open_checked(fkb_path, path, source_hash)) {
+        fk_diag_path("error", fkb_path, fk_fkb_bad ? fk_fkb_bad_why : "published image failed identity admission");
+        fk_die("image publication failed its admission check");
+    }
+    if (!fk_fkb_errors && !fk_fkb_unrunnable) fk_sig_heal_settle(fkb_path);
 }
 /* A unit standing alone: its closure collected as its own image's compile collects it. With
  * `compile` it compiles and writes that image (the import lane's artifact door); with the out
@@ -28167,6 +28082,7 @@ FK_PHASED(FK_PHASE_IMAGE, int, fk_src_try_import_fkb_images, (const char *root_p
     char (*dhash)[FK_SRC_HASH_CAP] = malloc(sizeof(*dhash) * (unsigned long)nd);
     unsigned long long **dids = calloc((unsigned long)nd, sizeof(unsigned long long *));
     long long *dn = calloc((unsigned long)nd, 8);
+    fk_fkb_snapshot *snapshots = calloc((unsigned long)nd, sizeof(*snapshots));
     char *keep = calloc((unsigned long)nd, 1);
     long long *flat = malloc((unsigned long)n_all * 8);
     unsigned long long *flat_id = malloc((unsigned long)n_all * 8);
@@ -28174,7 +28090,7 @@ FK_PHASED(FK_PHASE_IMAGE, int, fk_src_try_import_fkb_images, (const char *root_p
     long long *carry_idx = malloc((unsigned long)n_all * 8);
     long long *carry_lo = malloc((unsigned long)n_all * 8);
     long long *carry_hi = malloc((unsigned long)n_all * 8);
-    if (dix == 0 || dhash == 0 || dids == 0 || dn == 0 || keep == 0 ||
+    if (dix == 0 || dhash == 0 || dids == 0 || dn == 0 || snapshots == 0 || keep == 0 ||
         flat == 0 || flat_id == 0 || carried_at == 0 || carry_idx == 0 || carry_lo == 0 ||
         carry_hi == 0) {
         fk_die("fk_src_try_import_fkb_images: out of memory planning the imports");
@@ -28191,35 +28107,17 @@ FK_PHASED(FK_PHASE_IMAGE, int, fk_src_try_import_fkb_images, (const char *root_p
             i = i + 1;
         }
     }
-    /* Each direct dep's own identity and closure; compile a missing or changed
-     * image standing alone. Timestamp differences alone do not cause work. */
+    /* Establish closure coverage first. Only selected images are demanded. */
     long long ids_total = 0;
     d = 0;
     while (ok && d < nd) {
         char dpath[FK_PATH_CAP];
-        char dep_fkb_path[FK_PATH_CAP];
-        char dep_sym_path[FK_PATH_CAP];
         fk_cstr_copy(dpath, fk_src_dep_path[dix[d]], FK_PATH_CAP);
-        if (!fk_path_replace_ext(dpath, ".fkb", dep_fkb_path, FK_PATH_CAP) ||
-            !fk_path_replace_ext(dpath, ".sym", dep_sym_path, FK_PATH_CAP)) {
-            fk_import_refusal = 4;
-            ok = 0;
-            break;
-        }
         if (!fk_src_standalone_unit(dpath, 0, dhash[d], FK_SRC_HASH_CAP, 0, &dids[d],
                                     &dn[d])) {
             fk_import_refusal = 3;
             ok = 0;
             break;
-        }
-        long long recorded, unrunnable;
-        if (fk_src_fkb_version_raw(dep_fkb_path) < 7 ||
-            fk_src_sym_lens(dep_sym_path, dhash[d], &recorded, &unrunnable) != 1) {
-            if (!fk_src_compile_artifact_only(dpath)) {
-                fk_import_refusal = 3;
-                ok = 0;
-                break;
-            }
         }
         ids_total = ids_total + dn[d];
         keep[d] = 1;
@@ -28268,6 +28166,24 @@ FK_PHASED(FK_PHASE_IMAGE, int, fk_src_try_import_fkb_images, (const char *root_p
             }
         }
         d = d + 1;
+    }
+    d = 0;
+    while (ok && d < nd) {
+        if (keep[d]) {
+            char dpath[FK_PATH_CAP], image[FK_PATH_CAP];
+            fk_cstr_copy(dpath, fk_src_dep_path[dix[d]], FK_PATH_CAP);
+            if (!fk_path_replace_ext(dpath, ".fkb", image, FK_PATH_CAP)) { ok = 0; fk_import_refusal = 4; break; }
+            if (!fk_fkb_open_checked(image, dpath, dhash[d])) {
+                if (fk_fkb_bad || fk_path_size_raw(image) >= 0) {
+                    fk_fkb_repair_signal(image);
+                }
+                if (!fk_src_compile_artifact_only(dpath) || !fk_fkb_open_checked(image, dpath, dhash[d])) {
+                    ok = 0; fk_import_refusal = 3; break;
+                }
+            }
+            fk_fkb_snapshot_take(&snapshots[d]);
+        }
+        d++;
     }
     /* the program's units in the flat compile's order (text order); a unit no imported image
      * carries is carried as text */
@@ -28342,33 +28258,15 @@ FK_PHASED(FK_PHASE_IMAGE, int, fk_src_try_import_fkb_images, (const char *root_p
         if (keep[d]) {
             char dpath[FK_PATH_CAP];
             char dep_fkb_path[FK_PATH_CAP];
-            char dep_sym_path[FK_PATH_CAP];
             fk_cstr_copy(dpath, fk_src_dep_path[dix[d]], FK_PATH_CAP);
-            if (!fk_path_replace_ext(dpath, ".fkb", dep_fkb_path, FK_PATH_CAP) ||
-                !fk_path_replace_ext(dpath, ".sym", dep_sym_path, FK_PATH_CAP)) {
+            if (!fk_path_replace_ext(dpath, ".fkb", dep_fkb_path, FK_PATH_CAP)) {
                 fk_import_refusal = 4;
                 ok = 0;
                 break;
             }
-            /* a dep image compiled with recovered errors is degraded truth; importing it
-             * would bake the degradation invisibly into this run -- refuse (unknown record
-             * counts as degraded), so the caller falls back to the flat compile where the
-             * full chain resolves, and say so, once, counted. */
-            long long dep_recorded = fk_src_sym_recorded_errors(dep_sym_path);
-            if (dep_recorded != 0) {
-                if (dep_recorded > 0) {
-                    fk_diag(FK_DIAG_WARN, -1,
-                            "%s: unit is not importable standalone (%lld unresolved "
-                            "error(s) compiled alone; missing '; preludes:' line?) -- "
-                            "image rejected, falling back to the whole-program compile",
-                            dpath, dep_recorded);
-                }
-                fk_import_refusal = 6;
-                ok = 0;
-                break;
-            }
-            if (!fk_src_import_fkb_image(dep_fkb_path, dpath, dhash[d])) {
-                fk_import_refusal = 7;
+            if (!fk_src_import_fkb_image(dep_fkb_path, &snapshots[d])) {
+                if (fk_fkb_bad) fk_fkb_repair_signal(dep_fkb_path);
+                fk_import_refusal = fk_fkb_errors > 0 || fk_fkb_unrunnable > 0 ? 6 : 7;
                 ok = 0;
                 break;
             }
@@ -28425,12 +28323,14 @@ FK_PHASED(FK_PHASE_IMAGE, int, fk_src_try_import_fkb_images, (const char *root_p
     d = 0;
     while (d < nd) {
         free(dids[d]);
+        free(snapshots[d].bytes);
         d = d + 1;
     }
     free(dix);
     free(dhash);
     free(dids);
     free(dn);
+    free(snapshots);
     free(keep);
     free(have);
     free(flat);
@@ -28537,6 +28437,7 @@ static char *fk_cd_ran;
 static long long *fk_cd_framed;
 static long long *fk_cd_eff;       /* the unit whose sequence is the cell's answer each call: the root, else the last unit with one */
 static char *fk_cd_unrunnable;
+static const char **fk_cd_identity;
 static void *fk_cd_rows_store;     /* per dep: the diagnostic rows its load voiced (fk_dgrow_t array), replayed for a resident call */
 static long long *fk_cd_rows_n;
 static long long fk_cd_cap;
@@ -28561,11 +28462,12 @@ static void fk_cd_reserve(long long need) {
     fk_cd_framed = (long long *)realloc(fk_cd_framed, (unsigned long)nc * 8);
     fk_cd_eff = (long long *)realloc(fk_cd_eff, (unsigned long)nc * 8);
     fk_cd_unrunnable = (char *)realloc(fk_cd_unrunnable, (unsigned long)nc);
+    fk_cd_identity = realloc(fk_cd_identity, (unsigned long)nc * sizeof(*fk_cd_identity));
     fk_cd_rows_store = realloc(fk_cd_rows_store, (unsigned long)nc * sizeof(void *));
     fk_cd_rows_n = (long long *)realloc(fk_cd_rows_n, (unsigned long)nc * 8);
     if (fk_cd_rows_store == 0 || fk_cd_rows_n == 0) { fk_die("fk_cd_reserve: out of memory growing the cell table"); }
     if (fk_cd_win_n == 0 || fk_cd_win == 0 || fk_cd_id == 0 || fk_cd_unit == 0 || fk_cd_epoch == 0 || fk_cd_ok == 0 ||
-        fk_cd_loaded == 0 || fk_cd_ran == 0 || fk_cd_framed == 0 || fk_cd_eff == 0 || fk_cd_unrunnable == 0) {
+        fk_cd_loaded == 0 || fk_cd_ran == 0 || fk_cd_framed == 0 || fk_cd_eff == 0 || fk_cd_unrunnable == 0 || fk_cd_identity == 0) {
         fk_die("fk_cd_reserve: out of memory growing the cell table");
     }
     fk_cd_cap = nc;
@@ -28585,6 +28487,7 @@ static void fk_cell_dep_init(long long idx) {
     fk_cd_framed[idx] = -1;
     fk_cd_eff[idx] = -2;
     fk_cd_unrunnable[idx] = 0;
+    fk_cd_identity[idx] = 0;
     ((void **)fk_cd_rows_store)[idx] = 0;
     fk_cd_rows_n[idx] = 0;
 }
@@ -28593,6 +28496,12 @@ static int fk_cd_has(long long owner, long long m) {
     while (k < fk_cd_win_n[owner]) {
         if (fk_cd_win[owner][k] == m) { return 1; }
         k = k + 1;
+    }
+    return 0;
+}
+static int fk_cell_closure_refused(long long root) {
+    for (long long k = 0; k < fk_cd_win_n[root]; k++) {
+        if (fk_cd_unrunnable[fk_cd_win[root][k]]) return 1;
     }
     return 0;
 }
@@ -28670,6 +28579,9 @@ static long long fk_cell_dep_find(const char *path) {
      * bytes -- is set aside and collected again, and again, until the stack ends: a cycle of two .bml units made a cold load
      * recurse to the guard page (SIGBUS, 2026-10-04). Units from an earlier load keep the check. */
     if (fk_cell_collect && d >= fk_cell_load_base && !(fk_test_flags & FK_TEST_LOAD_BASE_OFF)) { return d; }
+    /* Collection is not admission: a balance refusal may have prevented a
+     * clean sibling from being parsed at all. Its next demand must load it. */
+    if (!fk_cd_loaded[d]) { fk_cell_dep_setaside(d); return -1; }
     while (k < fk_cd_win_n[d]) {
         long long m = fk_cd_win[d][k];
         if (!fk_cell_dep_fresh(m)) { stale = 1; fk_cell_dep_setaside(m); }
@@ -28685,6 +28597,12 @@ static long long fk_cell_dep_of_off(long long off) {
         d = d + 1;
     }
     return -1;
+}
+static void fk_cell_note_unrunnable(long long off) {
+    if (fk_win_on) {
+        long long d = fk_cell_dep_of_off(off);
+        if (d >= fk_cell_load_base) fk_cd_unrunnable[d] = 1;
+    }
 }
 static int fk_win_dep_ok(long long d) {
     return d >= 0 && d < fk_win_cap && fk_win_bits_store[d] != 0;
@@ -29007,6 +28925,7 @@ static long long fk_cell_walk_guarded(long long node, long long fp, int *how) {
 /* ── the load: collect the closure, give every new unit its place, parse what is new against the window ── */
 FK_PHASED(FK_PHASE_LOAD, int, fk_cell_load, (const char *path, long long *root_out), (path, root_out)) {
     long long d0 = fk_src_dep_count, slen0 = fk_slen, fnt0 = fk_fntop;
+    long long fn0 = fk_defn_next;
     long long spos0 = fk_spos, root0 = fk_root, ucur0 = fk_units_cur, cun0 = fk_const_unit_now, maxslot0 = fk_maxslot, bdtop0 = fk_bd_top;
     long long ne0 = fk_nerr, nw0 = fk_nwarn, nes0 = fk_nerr_seen, nws0 = fk_nwarn_seen;
     int trunc0 = fk_src_truncated, unr0 = fk_src_unrunnable;
@@ -29066,7 +28985,8 @@ FK_PHASED(FK_PHASE_LOAD, int, fk_cell_load, (const char *path, long long *root_o
     fk_spos = slen0;
     fk_srctext[fk_slen] = 0;
     fk_src_check_balance();
-    if (!fk_src_unrunnable) {
+    int parsed = !fk_src_unrunnable;
+    if (parsed) {
         fk_prescan_defns();
         fk_spos = slen0;
         while (1) {
@@ -29082,16 +29002,31 @@ FK_PHASED(FK_PHASE_LOAD, int, fk_cell_load, (const char *path, long long *root_o
         fk_fn_count = fk_defn_next;
     }
     fk_win_on = 0;
+    fk_cd_unrunnable[*root_out] = fk_src_unrunnable ? 1 : 0;
     /* a unit's own sequence, framed, is what runs: the libraries once, the cell each call */
     k = d0;
     while (k < fk_src_dep_count) {
         long long u = fk_cd_unit[k];
         if (u >= 0 && fk_unit_chain[u] >= 0) { fk_cd_framed[k] = fk_smknode(111, fk_smklit(16), fk_unit_chain[u], 0); }
-        fk_cd_loaded[k] = 1;
+        fk_cd_unrunnable[k] = fk_cell_closure_refused(k);
+        fk_cd_loaded[k] = parsed || fk_cd_unrunnable[k];
         fk_cd_ran[k] = 0;
         k = k + 1;
     }
-    fk_cd_unrunnable[*root_out] = fk_src_unrunnable ? 1 : 0;
+    int closure_clean = 1;
+    for (k = 0; k < fk_cd_win_n[*root_out]; k++) {
+        long long member = fk_cd_win[*root_out][k];
+        if (member < d0) {
+            if (!fk_cd_identity[member] || !fk_cd_identity[member][0]) closure_clean = 0;
+        }
+    }
+    char identity[FK_SRC_HASH_CAP];
+    int identified = closure_clean && !fk_nerr && !fk_src_unrunnable && !fk_src_truncated &&
+        fk_src_unit_hash_members(0, fk_cd_win_n[*root_out], fk_cd_win[*root_out], identity, FK_SRC_HASH_CAP);
+    const char *admitted = fk_admission_bind(fn0, fk_defn_next, identified ? identity : 0);
+    /* Each new dependency was parsed in this same complete name window. It
+     * may later be called as a resident root without another load. */
+    for (k = d0; k < fk_src_dep_count; k++) fk_cd_identity[k] = admitted;
     fk_root = root0; fk_units_cur = ucur0; fk_const_unit_now = cun0; fk_maxslot = maxslot0; fk_bd_top = bdtop0; fk_spos = spos0;
     fk_nerr = ne0; fk_nwarn = nw0; fk_nerr_seen = nes0; fk_nwarn_seen = nws0;
     fk_src_truncated = trunc0; fk_src_unrunnable = unr0; fk_prescan_from = prescan0;
@@ -29151,12 +29086,12 @@ static void fk_cell_rows_keep(long long root, long long db, long long n0, long l
         g = g + 1;
     }
 }
-static void fk_cell_rows_replay(long long root) {
+static void fk_cell_rows_replay(long long root, long long before) {
     long long k = 0;
     fk_dgrow_t **store = (fk_dgrow_t **)fk_cd_rows_store;
     while (k < fk_cd_win_n[root]) {
         long long m = fk_cd_win[root][k], j = 0;
-        while (j < fk_cd_rows_n[m]) {
+        while (m < before && j < fk_cd_rows_n[m]) {
             fk_dgrow_t c;
             fk_dg_copy(&c, &store[m][j]);
             fk_dg_push(&c);
@@ -29181,6 +29116,7 @@ static long long fk_cell_run_door(long long pathw, long long argw, long long dlw
     long long sv_deadline = fk_cell_deadline_ms;
     long long sv_argument = fk_cell_arg_slot;
     const char *sv_root_path = fk_cell_root_path;
+    const char *sv_identity = fk_cell_identity;
     long long out_w, err_w, diag_w = 1, stopped_w, r;
     if (!fk_is_str(pathw)) { refused = 1; refusal = "cell_run: the unit is a path string"; }
     long long sv_cdepth = fk_collect_depth;
@@ -29272,15 +29208,18 @@ static long long fk_cell_run_door(long long pathw, long long argw, long long dlw
                     root = -1;
                 } else {
                     fk_cell_rows_keep(root, db, dn0, fk_dg_n);
+                    /* Retained dependencies keep their diagnostics on a new
+                     * root too. Replay after keeping only newly voiced rows. */
+                    fk_cell_rows_replay(root, db);
                 }
             } else {
                 fk_bml_defer = sv_defer;
-                fk_cell_rows_replay(root);
+                fk_cell_rows_replay(root, fk_src_dep_count);
             }
             break;
         }
         if (root >= 0) {
-            if (fk_cd_unrunnable[root]) {
+            if (fk_cell_closure_refused(root)) {
                 stopped = fk_stopped_record("unrunnable", "the unit is not a program that reads whole (unbalanced, truncated or an unbound name)");
             } else if (check_only) {
                 value = fk_nothing;   /* loaded and read; nothing runs */
@@ -29300,6 +29239,7 @@ static long long fk_cell_run_door(long long pathw, long long argw, long long dlw
 #endif
                 fk_cell_deadline_ms = one_deadline;
                 fk_cell_root_path = path;
+                fk_cell_identity = fk_cd_identity[root] ? fk_cd_identity[root] : "";
                 /* the libraries this call loaded run once, in the order their text stands */
                 order = (long long *)malloc((unsigned long)(fk_cd_win_n[root] + 1) * 8);
                 if (order == 0) { fk_die("cell_run: out of memory"); }
@@ -29333,6 +29273,7 @@ static long long fk_cell_run_door(long long pathw, long long argw, long long dlw
                 }
                 fk_cell_deadline_ms = sv_deadline;
                 fk_cell_root_path = sv_root_path;
+                fk_cell_identity = sv_identity;
                 if (how != 0) {
                     value = fk_nothing;
                     stopped = fk_stopped_record(how == 2 ? "deadline" : memcmp(fk_stop_said, "stack-depth:", 12) == 0 ? "stack-depth" : "stop", how == 2 ? "deadline: the unit ran past its budget and was ended" : fk_stop_said);
@@ -29543,74 +29484,23 @@ static void fk_jit_pulse(long long c) {
 static int fk_run_src(const char *path, long long arg) {
     char fkb_path[FK_PATH_CAP];
     char sym_path[FK_PATH_CAP];
-    char dylib_path[FK_PATH_CAP];
     char expected_source_hash[FK_SRC_HASH_CAP];
     long long unit_mtime = 0;
     if (!fk_path_replace_ext(path, ".fkb", fkb_path, FK_PATH_CAP) ||
-        !fk_path_replace_ext(path, ".sym", sym_path, FK_PATH_CAP) ||
-        !fk_path_replace_ext(path, ".dylib", dylib_path, FK_PATH_CAP)) {
+        !fk_path_replace_ext(path, ".sym", sym_path, FK_PATH_CAP)) {
         fk_die("fk_run_src: artifact path exceeds buffer");
     }
     if (!fk_src_load_unit(path, expected_source_hash, FK_SRC_HASH_CAP, &unit_mtime)) {
         return 2;
     }
-    int fkb_present = !fk_check_only && fk_path_size_raw(fkb_path) > 0;
-    long long dylib_mtime = fk_check_only ? -1 : fk_path_mtime_raw(dylib_path);
-    if (dylib_mtime >= unit_mtime) {
-        fk_run_door = 3;
-        if (fk_run_dylib_artifact(dylib_path, arg, 0)) {
-            return 0;
-        }
-        fk_run_door = 0;
-    } else if (dylib_mtime > 0) {
-        fk_diag_path("warning", dylib_path, "stale .dylib ignored");
-    }
-    /* the lens read once, and joined to the identity its image must hold (fk_src_sym_lens): a lens another writer
-     * placed beside this image does not lend it its counts */
-    long long recorded = -1, recorded_unrunnable = -1;
-    int lens_joined = fk_src_sym_lens(sym_path, expected_source_hash, &recorded, &recorded_unrunnable);
-    if (fkb_present && (recorded < 0 || recorded_unrunnable < 0)) {
-        /* an image without its error record is an incomplete cache; rebuild
-         * rather than guess (older lenses, or a lens deleted out from under
-         * the image) */
-        fk_diag_path("warning", sym_path, "sym lens lacks a compile-error record; rebuilding");
-    } else if (fkb_present) {
-        if (lens_joined == 1 && fk_src_load_fkb_checked(fkb_path, path, expected_source_hash)) {
-            /* THE REFUSAL TRAVELS WITH THE IMAGE. The fresh-compile door returns
-             * without printing the root value when the unrunnable latch is set,
-             * so a cached run that prints it anyway does not merely replay a
-             * degraded image -- it overturns a decision the kernel already made,
-             * and it does so silently, on the second run of an unchanged file.
-             * Refuse identically here: same door, same answer, whichever side of
-             * the cache the caller happens to be standing on. */
-            if (recorded_unrunnable > 0) {
-                fk_diag_path("error", sym_path,
-                        "cached image was REFUSED at compile (unbound name in value position); "
-                        "refusing to run it from cache -- fix source and rerun");
-                fk_diag_flush();
-                fk_heat_report();
-                return 1;
-            }
-            /* the compile carried errors when this image was written; the
-             * cache must not launder them -- replay the tally as exit truth */
-            if (recorded > 0) {
-                fk_diag_path("warning", sym_path,
-                        "cached image was compiled with errors; fix source and rerun to clear");
-            }
+    if (!fk_check_only) {
+        if (fk_src_load_fkb_checked(fkb_path, path, expected_source_hash)) {
             fk_run_door = 2;
-            int rc = fk_run_loaded_program_image(arg);
+            int rc = fk_run_loaded_program_image(fkb_path, arg);
             fk_heat_report();
-            return recorded > 0 && rc == 0 ? 1 : rc;
+            return rc;
         }
-        if (fk_fkb_bad) {
-            char whybuf[192];
-            sprintf(whybuf, "unusable .fkb artifact (%s); rebuilding", fk_fkb_bad_why);
-            fk_diag_path("warning", fkb_path, whybuf);
-        } else {
-            fk_diag_path("warning", fkb_path,
-                         ".fkb failed source identity check (source path or content changed, "
-                         "e.g. invoked from a different directory); rebuilding");
-        }
+        if (fk_fkb_bad) fk_fkb_repair_signal(fkb_path);
     }
     int import_images_loaded = fk_src_try_import_fkb_images(path);
     fk_run_door = import_images_loaded ? 1 : 0;
@@ -30715,32 +30605,14 @@ static int fk_run_bml(const char *path, long long arg) {
             expected_source_hash, FK_SRC_HASH_CAP, &unit_mtime)) {
         return 2;
     }
-    if (!fk_check_only && fk_path_size_raw(fkb_path) > 0) {
-        /* the lens read once, and joined to the identity its image must hold (fk_src_sym_lens) */
-        long long recorded = -1, unrunnable = -1;
-        int lens_joined = fk_src_sym_lens(sym_path, expected_source_hash, &recorded, &unrunnable);
-        if (unrunnable > 0) {
-            /* an unrunnable mark on the ice may be the floor's own honest
-             * refusal or a foreign writer's (an import probe once compiled
-             * the raw surface alone and poisoned this exact path). Either
-             * way the honest move is the same: re-lower fresh. A .bml that
-             * truly refuses will refuse again, loudly, with today's
-             * diagnostics instead of a cached tombstone. */
-            fk_diag_path("warning", sym_path,
-                    "cached image carries a refusal mark; re-lowering fresh");
-        } else if (recorded >= 0 && lens_joined == 1 &&
-                   fk_src_load_fkb_checked(fkb_path, path, expected_source_hash)) {
-            if (recorded > 0) {
-                fk_diag_path("warning", sym_path,
-                        "cached image was compiled with errors; fix the .bml and rerun to clear");
-            }
+    if (!fk_check_only) {
+        if (fk_src_load_fkb_checked(fkb_path, path, expected_source_hash)) {
             fk_run_door = 2;
-            int rc = fk_run_loaded_program_image(arg);
+            int rc = fk_run_loaded_program_image(fkb_path, arg);
             fk_heat_report();
-            return recorded > 0 && rc == 0 ? 1 : rc;
-        } else {
-            fk_diag_path("warning", fkb_path,
-                    "bml cache does not match today's bytes; re-lowering");
+            return rc;
+        } else if (fk_fkb_bad) {
+            fk_fkb_repair_signal(fkb_path);
         }
     }
     fk_src_reset_compile_state();
@@ -30917,32 +30789,12 @@ static int fk_run(int argc, char **argv) {
             fk_diag_path("error", argv[1], whybuf);
             return 2;
         }
-        long long recorded = 0;
-        char direct_sym_path[FK_PATH_CAP];
-        long long fkb_arg_len = fk_path_len(argv[1]);
-        /* fk_path_replace_ext only strips a trailing ".fk"; this argument ends
-         * in ".fkb" (checked above), so swap the suffix explicitly */
-        if (fkb_arg_len >= 4 && fkb_arg_len < 4090) {
-            sprintf(direct_sym_path, "%.*s.sym", (int)(fkb_arg_len - 4), argv[1]);
-            recorded = fk_src_sym_recorded_errors(direct_sym_path);
-            if (recorded > 0) {
-                fk_diag_path("warning", direct_sym_path,
-                        "image was compiled with errors; fix source and rerun --src to clear");
-            } else if (recorded < 0) {
-                /* direct execution has no source to rebuild from; run, but say
-                 * the record is missing rather than imply a clean compile */
-                fk_diag_path("warning", direct_sym_path,
-                        "image carries no compile-error record");
-                recorded = 0;
-            }
-        }
         fk_run_door = 2;
-        int fkb_rc = fk_run_loaded_program_image(argc > 2 ? atoi(argv[2]) : 0);
-        return recorded > 0 && fkb_rc == 0 ? 1 : fkb_rc;
+        return fk_run_loaded_program_image(argv[1], argc > 2 ? atoi(argv[2]) : 0);
     }
     if (fk_path_has_suffix(argv[1], ".dylib")) {
         fk_run_door = 3;
-        return fk_run_dylib_artifact(argv[1], argc > 2 ? atoi(argv[2]) : 0, 1) ? 0 : 2;
+        return fk_run_dylib_artifact(argv[1], argc > 2 ? atoi(argv[2]) : 0) ? 0 : 2;
     }
     if (fk_path_has_suffix(argv[1], ".tbl")) {
         fk_diag_path("error", argv[1], ".tbl execution has been retired; use .fk, .fkb, or .dylib");

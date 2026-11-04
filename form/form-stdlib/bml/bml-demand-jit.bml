@@ -3,12 +3,12 @@
 // bml-demand-jit.bml -- first-answer-safe, on-demand native pages.
 //
 // A BML caller offers an ordinary lowerable scalar recipe graph.  The
-// first request is answered by the Form evaluator and leaves exactly one
-// specialization pending.  A later bounded step validates a freshness-bound
-// disk image or compiles one, checks it at the pending request argument,
-// publishes it through a short leased rename, and installs it through
-// jit_leaf_inram.  Later calls in the
-// same process reach the retained NodeID page.
+// first request selects a current disk image immediately. A miss is answered
+// by the Form evaluator and leaves exactly one specialization pending. A later
+// bounded step compiles that image, checks it at the request argument, and
+// publishes its sealed admission through a short leased rename. A disk hit
+// verifies that admission and invokes the page once through jit_leaf_inram.
+// Later calls in the same process reach the retained NodeID page.
 //
 // This does not invent a NodeID namespace.  It reuses jonb-identity's exact
 // length-delimited structure. Cache filenames are caller-owned lenses; they
@@ -20,23 +20,21 @@ import form-stdlib/line-grammar.fk;
 import form-stdlib/form-fs.fk;
 import form-stdlib/jit-heat-gate.fk;
 import form-stdlib/form-node-category.bml;
-import form-stdlib/sha256.fk;
+import form/native/metal/sha256-arm64-jit.fk;
 import form-stdlib/organ-health.bml;
 import control/choice-lane-core.fk;
 
 section [form.bml] {
     class BmlDemandJit [public, observable, jit] {
         field BDJSchema = "bml-demand-jit-v3";
-        field BDJCacheSchema = "bml-demand-jit-cache-v4";
+        field BDJCacheSchema = "bml-demand-jit-cache-v5";
+        field BDJAdmissionSchema = "bml-demand-jit-point-admission-v1";
         field BDJAttentionMs = 5000;
         field BDJMaxRows = 256;
         field BDJMaxCacheWireBytes = 1048576;
         field BDJPublishLeaseSeconds = 5;
         field BDJPublishLeaseSchema = "bml-demand-jit-publish-lease-v1";
         field BDJEmitterABI = "form-arm64-leaf-v1";
-        field BDJRuntimePath = "./fkwu";
-        field BDJEmitterPath = "form/form-stdlib/form-lower.fk";
-        field BDJAuthorityPath = "form/form-stdlib/bml/bml-demand-jit.bml";
         field BDJNodeIdPolicy = "native-nodeid-is-one-u64;glass-fault-locator-is-sha256-prefix64-with-full-digest-owner-check";
         field BDJWiderFrontier = "strings-lists-cross-calls-and-whole-program-image-install";
         field BDJStageSchema = "bml-demand-jit-stage-v1";
@@ -49,10 +47,9 @@ section [form.bml] {
         field BDJFaultPriority = 1000;
         field BDJFullProgramCallDoor = "runtime.full-program-image.call";
         field BDJFullProgramCallState = "carrier-door-absent";
-        field BDJRuntimeIdentityKind = "fkwu-content-validated-source-unit-v4";
+        field BDJRuntimeIdentityKind = "fkwu-admitted-program-image-v1";
         field BDJExplicitRuntimeIdentityKind = "sha256-file-content-v1";
-        field BDJRuntimeIdentityDoor = "program-image-sym.source-hash";
-        field BDJSourceUnitSymPath = "form/form-stdlib/bml-demand-jit.fk.sym";
+        field BDJRuntimeIdentityDoor = "kernel_ast.identity";
 
         thought bdj-pattern = ["first-answer", "pending", "inspect", "compile-or-load", "challenge", "atomic-publish", "install", "reuse", "stale"];
 
@@ -95,33 +92,24 @@ section [form.bml] {
         def bdj-image-text(image) = if ((Comparable) len(image) == 0) then "" else if ((Comparable) len(image) == 1) then image[0].str() else (image[0].str() + ("," + bdj-image-text(image[1:])));
         def bdj-cat(parts) = if ((Comparable) len(parts) == 0) then "" else ((String) parts[0] + bdj-cat(parts[1:]));
 
-        // The current `.sym` source-hash is emitted and checked by fkwu's
-        // program-image loader from every dependency's content digest. Reading
-        // its bounded header reuses that already-paid content observation; no
-        // demand hashes the executable or materializes an input-sized byte list.
-        // ABI changes remain explicit in BDJEmitterABI, and every loaded page is
-        // still point-challenged before publication or retained use.
+        // Identity belongs to the code already admitted for this executing
+        // definition. The carrier retains its builder and closure identities;
+        // no demand reads a sibling artifact or hashes current disk contents.
         def bdj-hex-digit?(byte) = if ((byte >= 48) && (byte <= 57)) then 1 else if ((byte >= 97) && (byte <= 102)) then 1 else 0;
         def bdj-hex-tail?(text, i) = if (i >= len(text)) then 1 else if ((Comparable) bdj-hex-digit?(str_byte_at(text, i)) == 1) then bdj-hex-tail?(text, (i + 1)) else 0;
         def bdj-content-identity?(identity) = if (!((Comparable) len(identity) == 71)) then 0 else if (!((String) substring(identity, 0, 7) == "sha256:")) then 0 else bdj-hex-tail?(identity, 7);
-        def bdj-source-unit-hash-lines(lines) = if ((Comparable) len(lines) == 0) then "" else if ((Comparable) str_find(lines[0], "source-hash ", 0) == 0) then substring(lines[0], 12, len(lines[0])) else bdj-source-unit-hash-lines(lines[1:]);
-        // The .sym is written beside the unit when fkwu runs it (bml-demand-jit.fk.sym); the path here read the retired
-        // `bml-demand-jit.sym` and a missing file made split-on stop on a non-string, so the step lane died with a
-        // str_find stop instead of the refusal it owns. A header that was not read answers "" -- runtime identity
-        // unavailable -- and bdj-runtime-identity-ready? says so.
-        def bdj-source-unit-hash() {
-            let symHeader = fs-read-slice(BDJSourceUnitSymPath(), 0, 512);
-            if (nothing?(symHeader) || (!((String) value_kind(symHeader) == "string"))) then "" else bdj-source-unit-hash-of(bdj-source-unit-hash-lines(split-on(symHeader, "\n")));
-        }
-        def bdj-source-unit-hash-of(sourceHash) = if ((Comparable) str_find(sourceHash, "fk-unit-v4|", 0) == 0) then sourceHash else "";
         def bdj-runtime-fingerprint-from-identities(runtimeIdentity, emitterIdentity, authorityIdentity) {
             if ((!((Comparable) bdj-content-identity?(runtimeIdentity) == 1)) || ((!((Comparable) bdj-content-identity?(emitterIdentity) == 1)) || (!((Comparable) bdj-content-identity?(authorityIdentity) == 1)))) then ""
             else bdj-cat([BDJEmitterABI(), "|", BDJExplicitRuntimeIdentityKind(), "|runtime=", runtimeIdentity, "|emitter=", emitterIdentity, "|authority=", authorityIdentity]);
         }
-        def bdj-runtime-fingerprint() {
-            let sourceHash = bdj-source-unit-hash();
-            if ((String) sourceHash == "") then "" else bdj-cat([BDJEmitterABI(), "|", BDJRuntimeIdentityKind(), "|", sourceHash]);
+        def bdj-runtime-fingerprint-from-admission(admission) {
+            if nothing?(admission) || ((String) value_kind(admission) != "list") then ""
+            else if ((Comparable) len(admission) != 2) then ""
+            else if (((String) value_kind(admission[0]) != "string") || ((String) value_kind(admission[1]) != "string")) then ""
+            else if (((Comparable) str_find(admission[0], "fkwu-image-v1 ", 0) != 0) || ((Comparable) str_find(admission[1], "fk-unit-v4|", 0) != 0)) then ""
+            else bdj-cat([BDJEmitterABI(), "|", BDJRuntimeIdentityKind(), "|builder=", len(admission[0]).str(), ":", admission[0], "|closure=", len(admission[1]).str(), ":", admission[1]]);
         }
+        def bdj-runtime-fingerprint() = bdj-runtime-fingerprint-from-admission(kernel_ast(host_pid(), ["identity"]));
         def bdj-runtime-identity-ready?(identity) = if ((String) identity == "") then 0 else if ((Comparable) str_find(identity, bdj-cat([BDJEmitterABI(), "|", BDJRuntimeIdentityKind(), "|"]), 0) == 0) then 1 else if ((Comparable) str_find(identity, bdj-cat([BDJEmitterABI(), "|", BDJExplicitRuntimeIdentityKind(), "|"]), 0) == 0) then 1 else 0;
 
         // Presence travels with each path observation.  A cache that does not
@@ -257,18 +245,28 @@ section [form.bml] {
         }
 
         // parsed = status, runtime fingerprint, epoch, exact-program-wire,
-        // image-id, image. Runtime/emitter/authority changes expire disk ice.
+        // image-id, image, admitted argument/result. Runtime, emitter and
+        // authority changes expire disk ice; the seal binds every field.
         def bdj-cache-refused(reason) = [reason, "", 0, "", 0, []];
         def bdj-cache-parsed(runtime, epoch, programWire, imageId, image) = ["parsed", runtime, epoch, programWire, imageId, image];
         def bdj-cache-parse-with-runtime(text, runtimeIdentity) {
             let lines = split-on(text, "\n");
-            if (!((Comparable) len(lines) == 6)) then bdj-cache-refused("cache-shape")
+            if ((Comparable) len(lines) == 6) then bdj-cache-refused("cache-admission-missing")
+            else if (!((Comparable) len(lines) == 10)) then bdj-cache-refused("cache-shape")
             else if (!((String) lines[0] == BDJCacheSchema())) then bdj-cache-refused("cache-schema")
             else if (!((Comparable) bdj-runtime-identity-ready?(runtimeIdentity) == 1)) then bdj-cache-refused("runtime-identity-unavailable")
             else if (!((String) lines[1] == runtimeIdentity)) then bdj-cache-refused("cache-runtime")
             else if (!((Comparable) bdj-uint?(lines[2]) == 1)) then bdj-cache-refused("cache-epoch")
             else if ((Comparable) len(lines[3]) == 0) then bdj-cache-refused("cache-program-wire")
             else if (!((Comparable) bdj-uint?(lines[4]) == 1)) then bdj-cache-refused("cache-image-id")
+            else if ((String) lines[6] != BDJAdmissionSchema()) then bdj-cache-refused("cache-admission-contract")
+            else if !bdj-signed-int?(lines[7]) || !bdj-signed-int?(lines[8]) then bdj-cache-refused("cache-admission-result")
+            else bdj-cache-verify-admission(lines);
+        }
+        def bdj-cache-verify-admission(lines) {
+            let seal = bdj-admission-seal(bdj-cat([lines[0], "\n", lines[1], "\n", lines[2], "\n", lines[3], "\n", lines[4], "\n", lines[5], "\n", lines[6], "\n", lines[7], "\n", lines[8]]));
+            if nothing?(seal) then bdj-cache-refused("cache-admission-digest-unavailable")
+            else if ((String) seal != lines[9]) then bdj-cache-refused("cache-admission-digest")
             else bdj-cache-parse-image(lines);
         }
         def bdj-cache-parse(text) = bdj-cache-parse-with-runtime(text, bdj-runtime-fingerprint());
@@ -277,11 +275,29 @@ section [form.bml] {
             if (!((Comparable) bdj-byte-parts?(parts) == 1)) then bdj-cache-refused("cache-image-bytes")
             else bdj-cache-verify-image(lines, bdj-parts-ints(parts));
         }
-        def bdj-cache-verify-image(lines, image) = if (!((Comparable) jonb-image-id(image) == str_to_int(lines[4]))) then bdj-cache-refused("cache-image-fold") else bdj-cache-parsed(lines[1], str_to_int(lines[2]), lines[3], str_to_int(lines[4]), image);
+        def bdj-cache-verify-image(lines, image) = if (!((Comparable) jonb-image-id(image) == str_to_int(lines[4]))) then bdj-cache-refused("cache-image-fold") else append(bdj-cache-parsed(lines[1], str_to_int(lines[2]), lines[3], str_to_int(lines[4]), image), [[str_to_int(lines[7]), str_to_int(lines[8])]]);
         def bdj-cache-image(parsed) = parsed[5];
 
         def bdj-cache-wire-with-runtime(runtimeIdentity, epoch, programWire, image) = bdj-cat([BDJCacheSchema(), "\n", runtimeIdentity, "\n", epoch.str(), "\n", programWire, "\n", jonb-image-id(image).str(), "\n", bdj-image-text(image)]);
-        def bdj-cache-wire(epoch, programWire, image) = bdj-cache-wire-with-runtime(bdj-runtime-fingerprint(), epoch, programWire, image);
+        def bdj-signed-int?(text) = bdj-uint?(text) || (((Comparable) str_find(text, "-", 0) == 0) && bdj-uint?(substring(text, 1, len(text))) && ((String) str_to_int(text).str() == text));
+        def bdj-raw-digest-text(raw, offset) = offset >= len(raw) ? "" : str_byte_at(raw, offset).str() + (offset + 1 >= len(raw) ? "" : "," + bdj-raw-digest-text(raw, offset + 1));
+        def bdj-admission-seal(payload) {
+            let digest = saj-string-digest(payload);
+            if nothing?(digest) then nothing() else bdj-raw-digest-text(digest, 0);
+        }
+        // Only the successful challenge calls this constructor. The retained
+        // record carries its sealed bytes through publication and later care.
+        // The checked point is evidence of admission, not a proof for all inputs.
+        def bdj-admission(runtimeIdentity, epoch, programWire, image, argument, answer) {
+            let payload = bdj-cat([bdj-cache-wire-with-runtime(runtimeIdentity, epoch, programWire, image), "\n", BDJAdmissionSchema(), "\n", argument.str(), "\n", answer.str()]);
+            bdj-admission-with-seal([BDJAdmissionSchema(), runtimeIdentity, epoch, programWire, image, argument, answer], payload, bdj-admission-seal(payload));
+        }
+        def bdj-admission-with-seal(fields, payload, seal) = append(fields, [if nothing?(seal) then nothing() else bdj-cat([payload, "\n", seal]), payload]);
+        def bdj-admission-wire(admission) = admission[7];
+        def bdj-admission-payload(admission) = admission[8];
+        // Finishing an absent seal preserves the already completed challenge.
+        // A sealed record returns unchanged, including after publication fails.
+        def bdj-admission-complete(admission) = if !nothing?(bdj-admission-wire(admission)) then admission else bdj-admission-with-seal(admission[0:7], bdj-admission-payload(admission), bdj-admission-seal(bdj-admission-payload(admission)));
         def bdj-publish-lock-path(cache) = (cache + ".publish-lock");
         def bdj-publish-lease-path(cache) = fs-path-join(bdj-publish-lock-path(cache), "lease");
         def bdj-candidate-path(cache) = fs-path-join(bdj-publish-lock-path(cache), "candidate");
@@ -293,38 +309,39 @@ section [form.bml] {
             let lockRemoved = fs-remove-tree(bdj-publish-lock-path(cache));
             if (((Comparable) candidateRemoved == 0) && (((Comparable) leaseRemoved == 0) && ((Comparable) lockRemoved == 0))) then 1 else 0;
         }
-        def bdj-publish-owned-with-runtime(cache, epoch, programWire, image, nowSeconds, runtimeIdentity) {
+        def bdj-publish-owned(cache, admission, nowSeconds) {
             let leaseWrote = fs-write-text(bdj-publish-lease-path(cache), bdj-cat([BDJPublishLeaseSchema(), "\n", nowSeconds.str()]));
-            let wrote = if (leaseWrote >= 0) then fs-write-text(bdj-candidate-path(cache), bdj-cache-wire-with-runtime(runtimeIdentity, epoch, programWire, image)) else -1;
+            let wrote = if (leaseWrote >= 0) then fs-write-text(bdj-candidate-path(cache), bdj-admission-wire(admission)) else -1;
             let moved = if (wrote >= 1) then fs-rename(bdj-candidate-path(cache), cache) else -1;
             let released = bdj-release-publish-lock(cache);
             if (leaseWrote < 0) then "lease-write-failed" else if (wrote < 1) then "write-failed" else if (!((Comparable) moved == 0)) then "rename-failed" else if (!((Comparable) released == 1)) then "published-lock-release-failed" else "published";
         }
-        def bdj-publish-after-heal-with-runtime(cache, epoch, programWire, image, nowSeconds, runtimeIdentity) {
+        def bdj-publish-after-heal(cache, admission, nowSeconds) {
             let released = bdj-release-publish-lock(cache);
             let acquired = if ((Comparable) released == 1) then fs-mkdir(bdj-publish-lock-path(cache)) else -1;
-            if ((Comparable) acquired == 1) then bdj-publish-owned-with-runtime(cache, epoch, programWire, image, nowSeconds, runtimeIdentity) else "lock-heal-failed";
+            if ((Comparable) acquired == 1) then bdj-publish-owned(cache, admission, nowSeconds) else "lock-heal-failed";
         }
-        def bdj-publish-at-with-runtime(cache, epoch, programWire, image, nowSeconds, runtimeIdentity) {
-            if (!((Comparable) bdj-runtime-identity-ready?(runtimeIdentity) == 1)) then "runtime-identity-unavailable"
-            else bdj-publish-at-ready(cache, epoch, programWire, image, nowSeconds, runtimeIdentity);
+        def bdj-publish-at(cache, admission, nowSeconds) {
+            if (!((Comparable) bdj-runtime-identity-ready?(admission[1]) == 1)) then "runtime-identity-unavailable"
+            else if nothing?(bdj-admission-wire(admission)) then "admission-seal-unavailable"
+            else bdj-publish-at-ready(cache, admission, nowSeconds);
         }
-        def bdj-publish-at-ready(cache, epoch, programWire, image, nowSeconds, runtimeIdentity) {
+        def bdj-publish-at-ready(cache, admission, nowSeconds) {
             let acquired = fs-mkdir(bdj-publish-lock-path(cache));
-            if ((Comparable) acquired == 1) then bdj-publish-owned-with-runtime(cache, epoch, programWire, image, nowSeconds, runtimeIdentity) else if ((Comparable) bdj-publish-lock-expired?(cache, nowSeconds) == 1) then bdj-publish-after-heal-with-runtime(cache, epoch, programWire, image, nowSeconds, runtimeIdentity) else if !fs-is-dir?(fs-path-dirname(cache)) then "publish-parent-unavailable" else if !fs-exists?(bdj-publish-lock-path(cache)) then "publish-lock-unavailable" else "publish-busy";
+            if ((Comparable) acquired == 1) then bdj-publish-owned(cache, admission, nowSeconds) else if ((Comparable) bdj-publish-lock-expired?(cache, nowSeconds) == 1) then bdj-publish-after-heal(cache, admission, nowSeconds) else if !fs-is-dir?(fs-path-dirname(cache)) then "publish-parent-unavailable" else if !fs-exists?(bdj-publish-lock-path(cache)) then "publish-lock-unavailable" else "publish-busy";
         }
-        def bdj-publish-at(cache, epoch, programWire, image, nowSeconds) = bdj-publish-at-with-runtime(cache, epoch, programWire, image, nowSeconds, bdj-runtime-fingerprint());
-        def bdj-publish-with-runtime(cache, epoch, programWire, image, runtimeIdentity) = bdj-publish-at-with-runtime(cache, epoch, programWire, image, (now_unix_ms() / 1000), runtimeIdentity);
-        def bdj-publish(cache, epoch, programWire, image) = bdj-publish-with-runtime(cache, epoch, programWire, image, bdj-runtime-fingerprint());
+        def bdj-publish(cache, admission) = bdj-publish-at(cache, admission, (now_unix_ms() / 1000));
 
         // One bounded read returns both classification and parsed bytes. A JIT
         // step installs only that inspected object, never a second path read.
         def bdj-cache-inspection(status, parsed) = [status, parsed];
         def bdj-cache-inspection-status(inspection) = inspection[0];
         def bdj-cache-inspection-parsed(inspection) = inspection[1];
+        def bdj-cache-failure?(status) = ((String) status == "runtime-identity-unavailable") || (((Comparable) str_find(status, "cache-", 0) == 0) && ((String) status != "cache-runtime"));
         def bdj-cache-inspect-content-with-runtime(cache, epoch, programWire, runtimeIdentity) {
             let size = file_size(cache);
-            let parsed = if (size > BDJMaxCacheWireBytes()) then bdj-cache-refused("cache-oversize") else bdj-cache-parse-with-runtime(read_file(cache), runtimeIdentity);
+            let text = if ((size < 0) || (size > BDJMaxCacheWireBytes())) then nothing() else read_file(cache);
+            let parsed = if (size > BDJMaxCacheWireBytes()) then bdj-cache-refused("cache-oversize") else if nothing?(text) || ((String) value_kind(text) != "string") then bdj-cache-refused("cache-unreadable") else bdj-cache-parse-with-runtime(text, runtimeIdentity);
             if (size > BDJMaxCacheWireBytes()) then bdj-cache-inspection("cache-oversize", parsed)
             else if (!((String) parsed[0] == "parsed")) then bdj-cache-inspection(parsed[0], parsed)
             else if (!((Comparable) parsed[2] == epoch)) then bdj-cache-inspection("stale-epoch", parsed)
@@ -335,12 +352,13 @@ section [form.bml] {
         // Missing and stale artifacts select work. The retained runtime,
         // epoch, exact program wire and image validate reuse; timestamps are
         // telemetry and cannot invalidate an unchanged computation.
-        def bdj-cache-inspect-with-runtime(source, cache, epoch, programWire, runtimeIdentity) = if (!((Comparable) bdj-runtime-identity-ready?(runtimeIdentity) == 1)) then bdj-cache-inspection("runtime-identity-unavailable", bdj-cache-refused("runtime-identity-unavailable")) else if !fs-is-file?(source) then bdj-cache-inspection("source-missing", bdj-cache-refused("not-read")) else if !fs-is-file?(cache) then bdj-cache-inspection("missing", bdj-cache-refused("not-read")) else bdj-cache-inspect-content-with-runtime(cache, epoch, programWire, runtimeIdentity);
+        def bdj-cache-inspect-with-runtime(source, cache, epoch, programWire, runtimeIdentity) = if (!((Comparable) bdj-runtime-identity-ready?(runtimeIdentity) == 1)) then bdj-cache-inspection("runtime-identity-unavailable", bdj-cache-refused("runtime-identity-unavailable")) else if !fs-is-file?(cache) then bdj-cache-inspection("missing", bdj-cache-refused("not-read")) else bdj-cache-inspect-content-with-runtime(cache, epoch, programWire, runtimeIdentity);
         def bdj-cache-inspect(source, cache, epoch, programWire) = bdj-cache-inspect-with-runtime(source, cache, epoch, programWire, bdj-runtime-fingerprint());
         def bdj-cache-state(source, cache, epoch, programWire) = bdj-cache-inspection-status(bdj-cache-inspect(source, cache, epoch, programWire));
         def bdj-cache-content-state(cache, epoch, programWire) = bdj-cache-inspection-status(bdj-cache-inspect-content(cache, epoch, programWire));
 
-        // request receipt = status, cache-state, value, route, state, born.
+        // request receipt = status, cache-state, value, route, state, born,
+        // optional demand-time installation observation for the owning queue.
         def bdj-receipt(status, cacheState, value, route, state, born) = [status, cacheState, value, route, state, born];
         def bdj-receipt-status(receipt) = receipt[0];
         def bdj-receipt-cache-state(receipt) = receipt[1];
@@ -348,63 +366,84 @@ section [form.bml] {
         def bdj-receipt-route(receipt) = receipt[3];
         def bdj-receipt-state(receipt) = receipt[4];
         def bdj-receipt-born(receipt) = receipt[5];
+        def bdj-receipt-step(receipt) = if (len(receipt) > 6) then receipt[6] else nothing();
+        def bdj-receipt-with-step(receipt, step) = append(receipt, [step]);
 
-        def bdj-request(state, source, cache, program, root, argument) {
+        def bdj-request(state, source, cache, program, root, argument) = bdj-request-with-runtime-source(state, source, cache, program, root, argument, bdj-runtime-fingerprint);
+        def bdj-request-with-runtime(state, source, cache, program, root, argument, runtimeIdentity) = bdj-request-with-runtime-source(state, source, cache, program, root, argument, () => runtimeIdentity);
+        def bdj-request-with-runtime-source(state, source, cache, program, root, argument, runtimeSource) {
             if ((Comparable) bdj-state-faulted?(state) == 1) then bdj-request-during-healing(state, source, cache, program, root, argument)
             else if (((Comparable) len(program) == 0) || ((root < 0) || (root >= len(program)))) then bdj-request-refused-program(state)
             else if ((Comparable) lo-effects-bound?(program, root) == 0) then bdj-request-refused-effect(state)
             else if ((Comparable) jonb-evaluable?(program, root) == 0) then bdj-request-refused-vocabulary(state)
             else if ((len(program) > BDJMaxRows()) || (!((Comparable) hg-lowerable?(program) == 1))) then bdj-receipt("wider-frontier", "not-inspected", jonb-eval(program, root, argument), "form", state, 0)
-            else bdj-request-lowerable(state, source, cache, program, root, argument);
+            else bdj-request-lowerable(state, source, cache, program, root, argument, runtimeSource);
         }
-        // A failed optimization is never allowed to become an availability
-        // failure. The exact Form graph answers while the original fault stays
-        // latched at priority 1000. Healing keeps the exact specialization that
-        // faulted; a later request can receive an answer but cannot substitute
-        // a different graph under the original fault identity.
-        def bdj-request-during-healing(state, source, cache, program, root, argument) {
-            if (((Comparable) len(program) == 0) || ((root < 0) || (root >= len(program)))) then bdj-receipt("jit-fault-attention", bdj-fault-cause(bdj-state-fault(state)), nothing(), "held-invalid-request", state, 0)
-            else if ((Comparable) lo-effects-bound?(program, root) == 0) then bdj-receipt("jit-fault-attention", bdj-fault-cause(bdj-state-fault(state)), nothing(), "held-unreached-effect-row", state, 0)
-            else if ((Comparable) jonb-evaluable?(program, root) == 0) then bdj-receipt("jit-fault-attention", bdj-fault-cause(bdj-state-fault(state)), nothing(), "held-uncovered-node-tag", state, 0)
-            else if ((len(program) > BDJMaxRows()) || (!((Comparable) hg-lowerable?(program) == 1))) then bdj-receipt("jit-healing-form-answer", bdj-fault-cause(bdj-state-fault(state)), jonb-eval(program, root, argument), "form-attention", state, 0)
-            else bdj-request-during-healing-lowerable(state, source, cache, program, root, argument);
-        }
-        def bdj-request-during-healing-lowerable(state, source, cache, program, root, argument) {
-            let next = bdj-next(state, bdj-state-registry(state), bdj-state-pending(state), "jit-healing-specialization-pending", bdj-state-fault(state), bdj-state-last-control(state));
-            bdj-receipt("jit-healing-form-answer", bdj-fault-cause(bdj-state-fault(state)), jonb-eval(program, root, argument), "form-attention", next, 0);
-        }
+        // The original request stays with its failure until the nervous flow
+        // verifies repair. A later request neither substitutes another graph
+        // nor computes an alternate answer under that fault identity.
+        def bdj-request-during-healing(state, source, cache, program, root, argument) = bdj-receipt("jit-fault-attention", bdj-fault-cause(bdj-state-fault(state)), nothing(), "attention", state, 0);
         def bdj-request-refused-program(state) = bdj-receipt("request-refused-invalid-program-shape", "not-requested", nothing(), "refused", state, 0);
         // a host-effect row the root does not reach is never lowered and never evaluated: its effect would silently not happen
         def bdj-request-refused-vocabulary(state) = bdj-receipt("request-refused-uncovered-node-tag", "not-requested", nothing(), "refused", state, 0);
         def bdj-request-refused-effect(state) =bdj-receipt("request-refused-unreached-effect-row", "not-requested", nothing(), "refused", state, 0);
-        def bdj-request-lowerable(state, source, cache, program, root, argument) {
+        def bdj-request-lowerable(state, source, cache, program, root, argument, runtimeSource) {
             let registry = bdj-state-registry(state);
             let image = jonb-lookup(registry, program, root);
-            if nothing?(image) then bdj-request-first(state, source, cache, program, root, argument, "not-inspected")
-            else bdj-request-retained(state, source, cache, program, root, argument, "not-inspected");
+            if !nothing?(image) then bdj-request-retained(state, source, cache, program, root, argument, "not-inspected")
+            else if !nothing?(bdj-state-pending(state)) then bdj-request-first(state, source, cache, program, root, argument, "specialization-pending")
+            else bdj-request-inspect(state, bdj-pending(source, cache, program, root, argument, bdj-state-epoch(state)), runtimeSource());
+        }
+        // Only a new eligible demand resolves identity and inspects disk. A
+        // retained page, held fault or earlier pending specialization owns its
+        // existing work; another request cannot replace that continuation.
+        def bdj-request-inspect(state, pending, runtimeIdentity) {
+            let started = now_unix_ms();
+            let source = bdj-pending-source(pending);
+            let cache = bdj-pending-cache(pending);
+            let inspection = bdj-cache-inspect-with-runtime(source, cache, bdj-state-epoch(state), bdj-pending-program-wire(pending), runtimeIdentity);
+            let inspected = now_unix_ms();
+            let cacheState = bdj-cache-inspection-status(inspection);
+            if ((String) cacheState == "current") then {
+                let step = bdj-step-at-cache(bdj-step-current(state, pending, started, cacheState, bdj-cache-inspection-parsed(inspection),
+                    bdj-path-age-ms(cache, started), bdj-path-age-ms(source, started), bdj-path-mtime(cache), bdj-path-mtime(source), inspected - started), cache);
+                let next = bdj-step-state(step);
+                let receipt = if bdj-state-faulted?(next) then bdj-receipt("jit-fault-attention", cacheState, nothing(), "attention", next, 0)
+                    else bdj-receipt("resident-native", cacheState, bdj-step-answer(step), "native", next, 0);
+                bdj-receipt-with-step(receipt, step);
+            } else if bdj-cache-failure?(cacheState) then {
+                let step = bdj-step-at-cache(bdj-step-inspect-failure(state, pending, started, cacheState,
+                    bdj-path-age-ms(cache, started), bdj-path-age-ms(source, started), bdj-path-mtime(cache), bdj-path-mtime(source), inspected - started, inspected), cache);
+                bdj-receipt-with-step(bdj-receipt("jit-fault-attention", cacheState, nothing(), "attention", bdj-step-state(step), 0), step);
+            } else bdj-request-pending(state, pending, bdj-pending-program(pending), bdj-pending-root(pending), bdj-pending-argument(pending), cacheState);
         }
         def bdj-request-first(state, source, cache, program, root, argument, cacheState) {
             let pending = if nothing?(bdj-state-pending(state)) then bdj-pending(source, cache, program, root, argument, bdj-state-epoch(state)) else bdj-state-pending(state);
+            bdj-request-pending(state, pending, program, root, argument, cacheState);
+        }
+        def bdj-request-pending(state, pending, program, root, argument, cacheState) {
             let next = bdj-next(state, bdj-state-registry(state), pending, "specialization-pending", nothing(), nothing());
             bdj-receipt("form-ready-specialization-pending", cacheState, jonb-eval(program, root, argument), "form", next, 0);
         }
         def bdj-request-retained(state, source, cache, program, root, argument, cacheState) {
-            let response = jonb-request(bdj-state-registry(state), program, root, argument);
-            let next = bdj-next(state, response[2], bdj-state-pending(state), "resident-native", nothing(), nothing());
-            if ((String) response[1] == "native") then bdj-receipt("resident-native", cacheState, response[0], "native", next, response[3])
-            else bdj-request-retained-fault(state, source, cache, program, root, argument, cacheState, response);
+            let registry = bdj-state-registry(state);
+            let entry = jonb-find(jonb-entries(registry), jonb-identity(program, root, bdj-state-epoch(state)));
+            let native = if nothing?(entry) then nothing() else jit_leaf_inram(entry[3], argument);
+            let next = bdj-next(state, registry, bdj-state-pending(state), "resident-native", nothing(), nothing());
+            if !nothing?(native) then bdj-receipt("resident-native", cacheState, native, "native", next, 0)
+            else bdj-request-retained-fault(state, source, cache, program, root, argument, cacheState);
         }
         // A registry entry is a promise of a callable native page. If that
-        // invocation disappears, the correct Form value remains available but
-        // the missing carrier is a JIT fault—not a silent route downgrade.
-        def bdj-request-retained-fault(state, source, cache, program, root, argument, cacheState, response) {
+        // invocation disappears, retain the failed request for repair without
+        // invoking a second evaluator.
+        def bdj-request-retained-fault(state, source, cache, program, root, argument, cacheState) {
             let observed = now_unix_ms();
             let pending = bdj-pending(source, cache, program, root, argument, bdj-state-epoch(state));
             let stage = bdj-stage-empty(observed, now_unix_ms(), cacheState);
             let identity = jonb-identity(program, root, bdj-state-epoch(state));
-            let registry = bdj-registry-without-identity(response[2], identity);
+            let registry = bdj-registry-without-identity(bdj-state-registry(state), identity);
             let faulted = bdj-fault-state(bdj-next(state, registry, pending, "retained-native-carrier-lost", nothing(), nothing()), pending, "retained-native-carrier-unavailable", stage);
-            bdj-receipt("jit-fault-attention", cacheState, response[0], "form-attention", faulted, response[3]);
+            bdj-receipt("jit-fault-attention", cacheState, nothing(), "attention", faulted, 0);
         }
         def bdj-entries-without-identity(entries, identity) = if ((Comparable) len(entries) == 0) then [] else if ((Comparable) ((Value) entries[0][0] == identity) == 1) then bdj-entries-without-identity(entries[1:], identity) else cons(entries[0], bdj-entries-without-identity(entries[1:], identity));
         def bdj-registry-without-identity(registry, identity) = [jonb-epoch(registry), bdj-entries-without-identity(jonb-entries(registry), identity)];
@@ -425,7 +464,8 @@ section [form.bml] {
         def bdj-step-agreement(receipt) = receipt[7];
         def bdj-step-stage(receipt) = receipt[8];
         def bdj-step-cache-path(receipt) = receipt[9];
-        def bdj-step-at-cache(step, cache) = [bdj-step-status(step), bdj-step-cache-state(step), bdj-step-ms(step), bdj-step-attention(step), bdj-step-state(step), bdj-step-disk-action(step), bdj-step-installed(step), bdj-step-agreement(step), bdj-step-stage(step), cache];
+        def bdj-step-answer(receipt) = if (len(receipt) > 10) then receipt[10] else nothing();
+        def bdj-step-at-cache(step, cache) = append([bdj-step-status(step), bdj-step-cache-state(step), bdj-step-ms(step), bdj-step-attention(step), bdj-step-state(step), bdj-step-disk-action(step), bdj-step-installed(step), bdj-step-agreement(step), bdj-step-stage(step), cache], step[10:]);
 
         def bdj-step(state) = bdj-step-with-runtime-source(state, bdj-runtime-fingerprint);
         def bdj-step-with-runtime(state, runtimeIdentity) = bdj-step-with-runtime-source(state, () => runtimeIdentity);
@@ -455,7 +495,7 @@ section [form.bml] {
             else bdj-step-heal-probe-bound(state, fault, control, probeState, pending, started, runtimeIdentity);
         }
         def bdj-step-heal-probe-bound(state, fault, control, probeState, pending, started, runtimeIdentity) {
-            let probe = bdj-step-pending-with-runtime(probeState, pending, started, runtimeIdentity);
+            let probe = bdj-step-pending-observed(probeState, pending, started, runtimeIdentity, 1);
             if ((((Comparable) bdj-step-installed(probe) == 1) && ((Comparable) bdj-step-agreement(probe) == 1)) && (!((Comparable) bdj-state-faulted?(bdj-step-state(probe)) == 1))) then bdj-step-healed(probe, fault, control)
             else bdj-step-heal-probe-failed(state, probe);
         }
@@ -468,7 +508,7 @@ section [form.bml] {
             let probeState = bdj-step-state(probe);
             let healed = bdj-healed(fault, bdj-fault-control-evidence(control), now_unix_ms());
             let next = bdj-next(probeState, bdj-state-registry(probeState), bdj-state-pending(probeState), "resident-native", nothing(), healed);
-            bdj-step-receipt("jit-healed", bdj-step-cache-state(probe), bdj-step-ms(probe), next, bdj-step-disk-action(probe), 1, 1, bdj-step-stage(probe));
+            append(bdj-step-receipt("jit-healed", bdj-step-cache-state(probe), bdj-step-ms(probe), next, bdj-step-disk-action(probe), 1, 1, bdj-step-stage(probe)), probe[10:]);
         }
         def bdj-step-heal-probe-failed(state, probe) {
             let fault = bdj-state-fault(state);
@@ -481,7 +521,8 @@ section [form.bml] {
             bdj-step-receipt-with-attention("jit-fault-attention", bdj-fault-cause(fault), bdj-stage-total-ms(bdj-fault-stage(fault)), "immediate", state, "fault-held", 0, 0, bdj-fault-stage(fault));
         }
         def bdj-step-pending(state, pending, started) = bdj-step-pending-with-runtime(state, pending, started, bdj-runtime-fingerprint());
-        def bdj-step-pending-with-runtime(state, pending, started, runtimeIdentity) {
+        def bdj-step-pending-with-runtime(state, pending, started, runtimeIdentity) = bdj-step-pending-observed(state, pending, started, runtimeIdentity, 0);
+        def bdj-step-pending-observed(state, pending, started, runtimeIdentity, repairing) {
             let source = bdj-pending-source(pending);
             let cache = bdj-pending-cache(pending);
             let epoch = bdj-state-epoch(state);
@@ -496,6 +537,7 @@ section [form.bml] {
             let inspectMs = (inspected - inspectStarted);
             let cacheState = bdj-cache-inspection-status(inspection);
             if (!((Comparable) bdj-runtime-identity-ready?(runtimeIdentity) == 1)) then bdj-step-inspect-refused(state, pending, started, cacheState, cacheAge, sourceAge, cacheMtime, sourceMtime, inspectMs, inspected)
+            else if bdj-cache-failure?(cacheState) && !repairing then bdj-step-inspect-failure(state, pending, started, cacheState, cacheAge, sourceAge, cacheMtime, sourceMtime, inspectMs, inspected)
             else if ((String) cacheState == "current") then bdj-step-current(state, pending, started, cacheState, bdj-cache-inspection-parsed(inspection), cacheAge, sourceAge, cacheMtime, sourceMtime, inspectMs)
             else bdj-step-compile(state, pending, started, cacheState, cacheAge, sourceAge, cacheMtime, sourceMtime, inspectMs, runtimeIdentity);
         }
@@ -504,8 +546,20 @@ section [form.bml] {
             let faulted = bdj-fault-state(state, pending, "runtime-identity-unavailable", stage);
             bdj-step-fault-finish(cacheState, faulted, "fault-held", stage);
         }
+        def bdj-step-inspect-failure(state, pending, started, cacheState, cacheAge, sourceAge, cacheMtime, sourceMtime, inspectMs, finished) {
+            let stage = bdj-stage(started, finished, cacheState, cacheAge, sourceAge, cacheMtime, sourceMtime, inspectMs, 0, 0, 0, "none");
+            bdj-step-fault-finish(cacheState, bdj-fault-state(state, pending, cacheState, stage), "fault-held", stage);
+        }
         def bdj-step-current(state, pending, started, cacheState, parsed, cacheAge, sourceAge, cacheMtime, sourceMtime, inspectMs) {
-            bdj-step-install(state, pending, bdj-cache-image(parsed), started, cacheState, "loaded-current", cacheAge, sourceAge, cacheMtime, sourceMtime, inspectMs, 0, "disk-image", parsed[1]);
+            let installStarted = now_unix_ms();
+            let identity = jonb-identity(bdj-pending-program(pending), bdj-pending-root(pending), bdj-state-epoch(state));
+            let image = bdj-cache-image(parsed);
+            let retained = jonb-retain(bdj-state-registry(state), identity, image);
+            let answer = if nothing?(retained) then nothing() else jit_leaf_inram([0, identity, image], bdj-pending-argument(pending));
+            let finished = now_unix_ms();
+            let stage = bdj-stage(started, finished, cacheState, cacheAge, sourceAge, cacheMtime, sourceMtime, inspectMs, 0, finished - installStarted, 0, "admitted-disk-image");
+            if nothing?(answer) then bdj-step-fault-finish(cacheState, bdj-fault-state(state, pending, "admitted-native-carrier-unavailable", stage), "loaded-current", stage)
+            else append(bdj-step-finish("disk-installed", cacheState, started, bdj-next(state, retained, nothing(), "resident-native", nothing(), nothing()), "reused-disk", 1, 1, stage), [answer]);
         }
         def bdj-step-compile(state, pending, started, cacheState, cacheAge, sourceAge, cacheMtime, sourceMtime, inspectMs, runtimeIdentity) {
             let materializeStarted = now_unix_ms();
@@ -545,8 +599,12 @@ section [form.bml] {
             let expected = jonb-eval(program, root, argument);
             let challenged = now_unix_ms();
             let installMs = (challenged - installStarted);
-            if (nothing?(native) || (!((Value) native == expected))) then bdj-step-disagree(state, pending, identity, started, cacheState, diskAction, cacheAge, sourceAge, cacheMtime, sourceMtime, inspectMs, materializeMs, materializeAction, installMs)
-            else bdj-step-agree(state, pending, image, retained, started, cacheState, diskAction, cacheAge, sourceAge, cacheMtime, sourceMtime, inspectMs, materializeMs, materializeAction, installMs, runtimeIdentity);
+            let step = if (nothing?(native) || (!((Value) native == expected))) then bdj-step-disagree(state, pending, identity, started, cacheState, diskAction, cacheAge, sourceAge, cacheMtime, sourceMtime, inspectMs, materializeMs, materializeAction, installMs)
+                else bdj-step-agree(state, pending, image, retained, started, cacheState, diskAction, cacheAge, sourceAge, cacheMtime, sourceMtime, inspectMs, materializeMs, materializeAction, installMs, runtimeIdentity,
+                    bdj-admission(runtimeIdentity, bdj-state-epoch(state), bdj-pending-program-wire(pending), image, argument, expected));
+            // The demand consumes the answer already established here. It does
+            // not invoke the page or Form evaluator again after the challenge.
+            append(step, [if bdj-step-installed(step) then native else nothing()]);
         }
         def bdj-step-disagree(state, pending, identity, started, cacheState, diskAction, cacheAge, sourceAge, cacheMtime, sourceMtime, inspectMs, materializeMs, materializeAction, installMs) {
             let releaseStarted = now_unix_ms();
@@ -557,40 +615,40 @@ section [form.bml] {
             let faulted = bdj-fault-state(state, pending, cause, stage);
             bdj-step-fault-finish(cacheState, faulted, diskAction, stage);
         }
-        def bdj-step-agree(state, pending, image, retained, started, cacheState, diskAction, cacheAge, sourceAge, cacheMtime, sourceMtime, inspectMs, materializeMs, materializeAction, installMs, runtimeIdentity) {
+        def bdj-step-agree(state, pending, image, retained, started, cacheState, diskAction, cacheAge, sourceAge, cacheMtime, sourceMtime, inspectMs, materializeMs, materializeAction, installMs, runtimeIdentity, admission) {
             let publishStarted = now_unix_ms();
-            let publishAttempt = if ((String) diskAction == "loaded-current") then "reused-disk" else if ((String) cacheState == "source-missing") then "withheld-source-missing" else bdj-publish-with-runtime(bdj-pending-cache(pending), bdj-state-epoch(state), bdj-pending-program-wire(pending), image, runtimeIdentity);
+            let publishAttempt = bdj-publish(bdj-pending-cache(pending), admission);
             let readback = if ((String) publishAttempt == "published") then bdj-cache-inspection-status(bdj-cache-inspect-content-with-runtime(bdj-pending-cache(pending), bdj-state-epoch(state), bdj-pending-program-wire(pending), runtimeIdentity)) else "not-requested";
             let publish = if (((String) publishAttempt == "published") && (!((String) readback == "current"))) then bdj-cat(["publish-readback-", readback]) else publishAttempt;
             let published = now_unix_ms();
             let publishMs = (published - publishStarted);
             let stage = bdj-stage(started, published, cacheState, cacheAge, sourceAge, cacheMtime, sourceMtime, inspectMs, materializeMs, installMs, publishMs, materializeAction);
             let next = bdj-next(state, retained, nothing(), "resident-native", nothing(), nothing());
-            let status = if ((String) publish == "published") then "compiled-published-installed" else if ((String) publish == "reused-disk") then "disk-installed" else if ((String) publish == "withheld-source-missing") then "ram-installed-source-missing" else "ram-installed-disk-publish-failed";
-            if (((String) status == "ram-installed-disk-publish-failed") || ((String) status == "ram-installed-source-missing")) then bdj-step-publish-care(next, pending, image, runtimeIdentity, cacheState, publish, stage)
+            let status = if ((String) publish == "published") then "compiled-published-installed" else "ram-installed-disk-publish-failed";
+            if ((String) status == "ram-installed-disk-publish-failed") then bdj-step-publish-care(next, pending, image, runtimeIdentity, cacheState, publish, stage, admission)
             else bdj-step-finish(status, cacheState, started, next, publish, 1, 1, stage);
         }
         // Cache care owns the exact bytes and their compilation identity. Its
         // retry crosses only the disk membrane; it neither emits nor installs
         // native code and cannot certify recovery of an execution fault.
-        def bdj-care(fault, pending, image, runtimeIdentity) = [fault, pending, image, runtimeIdentity, bdj-care-reading(fault, pending, bdj-fault-evidence(fault))];
+        def bdj-care(fault, pending, image, runtimeIdentity, admission) = [fault, pending, image, runtimeIdentity, bdj-care-reading(fault, pending, bdj-fault-evidence(fault)), admission];
         def bdj-care-fault(care) = care[0];
         def bdj-care-pending(care) = care[1];
         def bdj-care-image(care) = care[2];
         def bdj-care-runtime(care) = care[3];
         def bdj-care-observation(care) = care[4];
-        def bdj-care-with-disposition(care, disposition, evidence) = [bdj-fault-with-disposition(bdj-care-fault(care), disposition, evidence), bdj-care-pending(care), bdj-care-image(care), bdj-care-runtime(care), bdj-care-observation(care)];
+        def bdj-care-admission(care) = care[5];
+        def bdj-care-with-disposition(care, disposition, evidence) = [bdj-fault-with-disposition(bdj-care-fault(care), disposition, evidence), bdj-care-pending(care), bdj-care-image(care), bdj-care-runtime(care), bdj-care-observation(care), bdj-care-admission(care)];
         // Read only resources implicated in the retained operation. Wall time
         // becomes a change only at lease expiry. A parent's unrelated writes
         // cannot wake care; its availability can. Host metadata does not expose
         // permission/capacity changes: a correlated organ response can offer those.
         def bdj-care-resources(pending, result) {
-            let source = bdj-pending-source(pending);
             let cache = bdj-pending-cache(pending);
-            if ((String) result == "withheld-source-missing") then json-node-object([oh-n("source_file", fs-is-file?(source))])
+            if ((String) result == "admission-seal-unavailable") then json-node-object([oh-s("operation", "native-sha256-admission")])
             else if ((String) result == "publish-parent-unavailable") then json-node-object([oh-n("parent_directory", fs-is-dir?(fs-path-dirname(cache)))])
             else if ((String) result == "publish-busy") then bdj-care-lease-resources(cache)
-            else json-node-object([oh-n("source_file", fs-is-file?(source)), oh-n("parent_directory", fs-is-dir?(fs-path-dirname(cache))),
+            else json-node-object([oh-n("parent_directory", fs-is-dir?(fs-path-dirname(cache))),
                 json-node-pair("cache", json-node-array(oh-ints(fs-stat(cache)))),
                 json-node-pair("lease_directory", json-node-array(oh-ints(fs-stat(bdj-publish-lock-path(cache))))),
                 oh-n("lease_expired", bdj-publish-lock-expired?(cache, (now_unix_ms() / 1000))),
@@ -607,7 +665,7 @@ section [form.bml] {
             let repaired = ((String) result == "published");
             let reading = oh-reading("bml-demand-jit", bdj-image-text(bdj-fault-digest(fault)), "optional-cache-publication",
                 json-node-string("published"), json-node-string(result), json-node-int(repaired),
-                if repaired then [] else [oh-need("cache-publication-resource", json-node-object([oh-s("source", bdj-pending-source(pending)), oh-s("cache", bdj-pending-cache(pending))]))],
+                if repaired then [] else [oh-need(if ((String) result == "admission-seal-unavailable") then "native-sha256-carrier" else "cache-publication-resource", json-node-object([oh-s("source", bdj-pending-source(pending)), oh-s("cache", bdj-pending-cache(pending))]))],
                 ["publish-retained-image", "await-resource"], bdj-care-resources(pending, result));
             reading;
         }
@@ -623,8 +681,7 @@ section [form.bml] {
             // Availability may return between the failed operation and its
             // retained reading. Recognize that evidence without requiring a
             // second transition that might never arrive.
-            if ((String) result == "withheld-source-missing") then json-int-value(oh-get(current, "source_file"))
-            else if ((String) result == "publish-parent-unavailable") then json-int-value(oh-get(current, "parent_directory"))
+            if ((String) result == "publish-parent-unavailable") then json-int-value(oh-get(current, "parent_directory"))
             else if ((String) result == "publish-busy") then (!json-int-value(oh-get(current, "lease_present"))) || json-int-value(oh-get(current, "lease_expired"))
             else !node_eq(current, oh-get(bdj-care-observation(care), "evidence"));
         }
@@ -632,8 +689,8 @@ section [form.bml] {
             let fault = bdj-fault(pending, epoch, bdj-cat(["disk-publish-", publish]), stage, "attention", publish, bdj-stage-finished(stage));
             [BDJFaultSchema(), bdj-fault-cause(fault), stage, "waiting", publish, bdj-fault-observed(fault), nothing(), bdj-fault-publisher(fault), bdj-fault-key(fault), bdj-fault-digest(fault)];
         }
-        def bdj-step-publish-care(state, pending, image, runtimeIdentity, cacheState, publish, stage) {
-            let care = bdj-care(bdj-care-fault-record(pending, bdj-state-epoch(state), publish, stage), pending, image, runtimeIdentity);
+        def bdj-step-publish-care(state, pending, image, runtimeIdentity, cacheState, publish, stage, admission) {
+            let care = bdj-care(bdj-care-fault-record(pending, bdj-state-epoch(state), publish, stage), pending, image, runtimeIdentity, admission);
             oh-frame(bdj-care-observation(care));
             oh-frame(oh-response(bdj-care-observation(care), "await-resource"));
             let next = bdj-state-with-care(state, append(bdj-state-care(state), [care]), nothing());
@@ -703,7 +760,8 @@ section [form.bml] {
             let sourceAge = bdj-path-age-ms(source, started);
             let bound = bdj-fault-bound-to-pending?(bdj-care-fault(care), pending, bdj-state-epoch(state));
             oh-frame(oh-response(bdj-care-observation(care), "publish-retained-image"));
-            let attempt = if (!bound) then "care-identity-mismatch" else if !fs-is-file?(source) then "withheld-source-missing" else bdj-publish-with-runtime(cache, bdj-state-epoch(state), bdj-pending-program-wire(pending), bdj-care-image(care), bdj-care-runtime(care));
+            let admission = if !bound then bdj-care-admission(care) else bdj-admission-complete(bdj-care-admission(care));
+            let attempt = if (!bound) then "care-identity-mismatch" else bdj-publish(cache, admission);
             let readback = if ((String) attempt == "published") then bdj-cache-inspection-status(bdj-cache-inspect-content-with-runtime(cache, bdj-state-epoch(state), bdj-pending-program-wire(pending), bdj-care-runtime(care))) else "not-requested";
             let result = if (((String) attempt == "published") && (!((String) readback == "current"))) then bdj-cat(["publish-readback-", readback]) else attempt;
             let finished = now_unix_ms();
@@ -711,7 +769,7 @@ section [form.bml] {
             oh-frame(oh-applied(bdj-care-observation(care), "publish-retained-image", json-node-string(result)));
             let reading = oh-set(bdj-care-reading(bdj-care-fault(care), pending, result), "care_of", oh-get(bdj-care-observation(care), "id"));
             oh-frame(reading);
-            let finding = [result, stage, reading];
+            let finding = [result, stage, reading, admission];
             if ((String) result == "published") then oac-one(bdj-care-result-step(args, finding)) else oac-node(finding);
         }
         def bdj-care-await-option(offered) {
@@ -725,7 +783,7 @@ section [form.bml] {
             let result = finding[0];
             let stage = finding[1];
             let repaired = ((String) result == "published");
-            let replacement = if repaired then nothing() else [bdj-fault-with-disposition(bdj-care-fault(care), if ((String) result == "care-identity-mismatch") then "held" else "waiting", result), bdj-care-pending(care), bdj-care-image(care), bdj-care-runtime(care), finding[2]];
+            let replacement = if repaired then nothing() else [bdj-fault-with-disposition(bdj-care-fault(care), if ((String) result == "care-identity-mismatch") then "held" else "waiting", result), bdj-care-pending(care), bdj-care-image(care), bdj-care-runtime(care), finding[2], finding[3]];
             let next = bdj-state-with-care(state, bdj-care-replace(bdj-state-care(state), care, replacement), if repaired then bdj-healed(bdj-care-fault(care), "cache-readback-current", bdj-stage-finished(stage)) else nothing());
             bdj-step-at-cache(bdj-step-receipt(if repaired then "cache-repaired" else "cache-care-observed", "not-inspected", bdj-stage-total-ms(stage), next, result, 0, 0, stage), bdj-pending-cache(bdj-care-pending(care)));
         }

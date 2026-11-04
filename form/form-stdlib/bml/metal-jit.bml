@@ -3,12 +3,20 @@
 // FMJ1 | u32 mode | u32 entry bytes | u32 path bytes | entry | path | source.
 // Modes: 0 RAM, 1 capture compiled archive, 2 require compiled archive hit,
 // 3 retire the generation-qualified pipeline handle carried as a u64 payload.
-// Disk is optional. A requested archive that fails is reported, never replaced.
+// Explicit archive modes remain strict. mj-cached owns archive retention:
+// a missing or refused archive is rebuilt on demand and published atomically.
+// Each archive ends in FMJS, its program identity and its archive-byte seal.
+// Mode 2 loads the retained library; it never recompiles the supplied source.
 import form-stdlib/metal-door.fk;
 import form-stdlib/sha256.fk;
 import form-stdlib/str-byte-at.fk;
 import form-stdlib/hex.fk;
+import form-stdlib/organ-care.bml;
+import form-stdlib/form-fs.fk;
+import form-stdlib/bml/host-child.bml;
 section [form.bml] {
+ let MJ-CACHE-STATE = record_new(0, "writes", 0, "reading", nothing(), "pending", [], "failure", "", "unreleased", []);
+ let MJ-ARCHIVE-FOOTER-BYTES = 132;
  class MetalJit {
   def mj-source(body) = ("#include <metal_stdlib>" + (byte_to_str(10) + ("using namespace metal; " + body)));
   def mj-descriptor(source, entry, mode, path) = ("FMJ1" + (md-le32(mode) + (md-le32(len(entry)) + (md-le32(len(path)) + (entry + ((String) path + source))))));
@@ -25,14 +33,117 @@ section [form.bml] {
   }
   // A version holds its live pipeline and the exact program identity.
   def mj-admit(source, entry, mode, path) {
+   record_set(MJ-CACHE-STATE, "failure", "");
    let target = mj-target();
-   let handle = if nothing?(target) then 0 else metal_pipeline(mj-descriptor(source, entry, mode, path), "form_metal_jit_v1");
-   if (handle <= 0) then nothing() else [handle, mj-identity(source, entry, target), source, entry, mode, path];
+   let identity = nothing?(target) ? nothing() : mj-identity(source, entry, target);
+   let valid = mode != 2 || mj-archive-held?(path, identity);
+   !valid ? record_set(MJ-CACHE-STATE, "failure", "metal jit archive program identity or byte seal refused: " ++ path) : 0;
+   let handle = nothing?(identity) || !valid ? 0 : metal_pipeline(mj-descriptor(source, entry, mode, path), "form_metal_jit_v1");
+   handle <= 0 ? nothing() : mj-admit-held([handle, identity, source, entry, mode, path]);
   }
+  // One self-contained Metal archive also carries Form's program identity and
+  // a seal of the actual archive bytes. Loading its library must never replace
+  // the caller's requested program with another program kept at the same path.
+  def mj-archive-footer(bytes, identity) = "FMJS" ++ identity ++ hex-encode(sha256-stream-string(bytes ++ identity));
+  def mj-archive-held?(path, identity) {
+   let bytes = read_file(path);
+   nothing?(bytes) || nothing?(identity) || len(bytes) <= MJ-ARCHIVE-FOOTER-BYTES ? 0 :
+    (String) substring(bytes, len(bytes) - MJ-ARCHIVE-FOOTER-BYTES, len(bytes)) == mj-archive-footer(substring(bytes, 0, len(bytes) - MJ-ARCHIVE-FOOTER-BYTES), identity);
+  }
+  def mj-archive-seal(path, identity) {
+   let bytes = read_file(path);
+   nothing?(bytes) ? 0 : {
+    let sealed = bytes ++ mj-archive-footer(bytes, identity);
+    write_file_text(path, sealed) == len(sealed) && mj-archive-held?(path, identity);
+   };
+  }
+  def mj-admit-held(version) {
+   version[4] != 1 || mj-archive-seal(version[5], version[1]) ? version : {
+    let released = mj-release(version);
+    record_set(MJ-CACHE-STATE, "failure", "metal jit archive seal publication refused: " ++ version[5]);
+    released == 1 ? 0 : {
+     record_set(MJ-CACHE-STATE, "unreleased", cons(version, record_get(MJ-CACHE-STATE, "unreleased")));
+     let reading = mj-cache-reading(version[5], "release-incomplete", 0, mj-cache-diagnostic(), [oh-need("released-pipeline", json-node-int(version[0]))], []);
+     record_set(MJ-CACHE-STATE, "reading", reading); oh-frame(reading);
+    };
+    nothing();
+   };
+  }
+  def mj-cache-diagnostic() = record_get(MJ-CACHE-STATE, "failure") ++ "\n" ++ metal_status();
   def mj-memory(source, entry) = mj-admit(source, entry, 0, "");
   def mj-cached(source, entry, directory) {
    let path = mj-cache-path(directory, source, entry);
-   if nothing?(path) then nothing() else mj-admit(source, entry, if (file_size(path) < 0) then 1 else 2, path);
+   nothing?(path) ? nothing() : mj-cache-demand(source, entry, path);
+  }
+  def mj-cache-reading(path, observed, health, cause, needs, offers) = oh-reading("metal-jit", path, "archive-retention", json-node-string("retained"), json-node-string(observed), json-node-int(health), needs, offers, json-node-string(cause));
+  def mj-cache-emit(context, stage, row) {
+   record_set(MJ-CACHE-STATE, "reading", row);
+   (String) oh-str(row, "stage") == "observe" ? record_set(context, "reading", row) : 0;
+   oh-frame(row);
+  }
+  def mj-cache-pending(path) = head(filter(context => (String) record_get(context, "path") == path, record_get(MJ-CACHE-STATE, "pending")));
+  def mj-cache-forget(context) = record_set(MJ-CACHE-STATE, "pending", filter(item => (Comparable) item != context, record_get(MJ-CACHE-STATE, "pending")));
+  def mj-cache-take(context) {
+   let version = record_get(context, "version");
+   !nothing?(version) ? { mj-cache-forget(context); record_set(context, "version", nothing()); } : 0;
+   version;
+  }
+  def mj-cache-demand(source, entry, path) {
+   let pending = mj-cache-pending(path);
+   nothing?(pending) ? mj-cache-first(source, entry, path) : mj-cache-take(pending);
+  }
+  def mj-cache-first(source, entry, path) {
+   let present = file_size(path) >= 0;
+   let found = present ? mj-admit(source, entry, 2, path) : nothing();
+   nothing?(found) ? mj-cache-rebuild(source, entry, path, present ? mj-cache-diagnostic() : "archive absent") : found;
+  }
+  def mj-cache-rebuild(source, entry, path, cause) {
+   let context = record_new(0, "source", source, "entry", entry, "path", path, "version", nothing(), "reading", nothing(), "cause", cause, "candidate", nothing());
+   record_set(MJ-CACHE-STATE, "pending", cons(context, record_get(MJ-CACHE-STATE, "pending")));
+   let reading = mj-cache-reading(path, "missing-or-refused", 0, cause, [oh-need("compiled-archive", json-node-string(path))], ["rebuild-archive"]);
+   mj-cache-emit(context, "organ-health", reading);
+   mj-cache-care(context, reading, "compiled-archive", "rebuild-archive");
+   mj-cache-take(context);
+  }
+  def mj-cache-care(context, reading, resource, action) = oc-hear(context, reading, [oc-provider("metal-jit-archive", [resource], action, mj-cache-supply)], mj-cache-emit, mj-cache-observe);
+  def mj-cache-supply(context, reading, need) {
+   let source = record_get(context, "source"); let entry = record_get(context, "entry"); let path = record_get(context, "path");
+   let sequence = record_get(MJ-CACHE-STATE, "writes") + 1;
+   record_set(MJ-CACHE-STATE, "writes", sequence);
+   let temporary = path ++ ".writing-" ++ host_pid().str() ++ "-" ++ sequence.str();
+   let made = hch-mkdirs(fs-path-dirname(path));
+   let candidate = mj-admit(source, entry, 1, temporary);
+   let published = !nothing?(candidate) && host_path_rename(temporary, path) >= 0;
+   let detail = published ? "archive published" : nothing?(candidate) ? mj-cache-diagnostic() : "archive publication refused: " ++ path;
+   let removed = published ? 0 : host_path_remove(temporary);
+   let released = nothing?(candidate) ? 1 : mj-release(candidate);
+   record_set(context, "candidate", released == 1 ? nothing() : candidate);
+   record_set(context, "cause", record_get(context, "cause") ++ "\n" ++ detail);
+   json-node-object([oh-n("published", published), oh-n("released", released), oh-n("temporary_removed", file_size(temporary) < 0), oh-s("detail", detail)]);
+  }
+  def mj-cache-observe(context, reading, delivery) {
+   let path = record_get(context, "path");
+   let settled = json-int-value(oh-get(delivery, "published")) == 1 && json-int-value(oh-get(delivery, "released")) == 1;
+   let version = settled ? mj-admit(record_get(context, "source"), record_get(context, "entry"), 2, path) : nothing();
+   record_set(context, "version", version);
+   let held = !nothing?(record_get(context, "candidate"));
+   let observed = !nothing?(version) ? "retained" : held ? "release-incomplete" : "archive-unavailable";
+   let cause = record_get(context, "cause") ++ (settled && nothing?(version) ? "\n" ++ mj-cache-diagnostic() : "");
+   let fresh = mj-cache-reading(path, observed, !nothing?(version), cause, !nothing?(version) ? [] : [oh-need(held ? "released-pipeline" : "writable-archive", json-node-string(path))], !nothing?(version) || held ? [] : ["retry-archive"]);
+   oh-set(fresh, "care_of", oh-get(reading, "id"));
+  }
+  // A resource event resumes the original source, entry, path and findings.
+  // Ordinary demand keeps an unchanged failure held; only a correlated offered
+  // response enters care again. Retained candidates never become RAM success.
+  def mj-cache-hear(path, response) {
+   let context = mj-cache-pending(path);
+   nothing?(context) ? nothing() : {
+    let reading = record_get(context, "reading");
+    (String) oh-select(reading, response, "") != "retry-archive" ? nothing() : {
+     mj-cache-care(context, reading, "writable-archive", "retry-archive");
+     mj-cache-take(context);
+    };
+   };
   }
   def mj-handle(version) = if nothing?(version) then 0 else version[0];
   def mj-u64(value) = ((String) md-le32((value % 4294967296)) + md-le32((value / 4294967296)));

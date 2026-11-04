@@ -63,7 +63,22 @@ fa-str-q(0, 4, 0), fa-str-q(1, 4, 1), fa-ret()]));
     // it lies, or a file span mapped for the run), the 32 state bytes written back, the round constants] and the block
     // count; the 32 bytes answered are the eight hardware-updated state words, so a state continues across runs (the
     // resumable downloader seam). No buffer is allocated or released per run, and no carrier is asked.
-    def saj-compress(message, state-raw, block-count) = !((Comparable) len(state-raw) == 32) ? "" : (Comparable) block-count == 0 ? state-raw : saj-written(jit_cpu_run([saj-image-bytes, [message, [state-raw], saj-round-bytes], [block-count]]));
+    def saj-compress(message, state-raw, block-count) = !((Comparable) len(state-raw) == 32) ? "" : (Comparable) block-count == 0 ? state-raw : saj-compress-owned(message, state-raw, block-count, saj-resources());
+    def saj-compress-owned(message, state-raw, block-count, resources) = nothing?(resources) ? "" : saj-written(jit_cpu_run([resources[0], [message, [state-raw], resources[1]], [block-count]]));
+    // Emission belongs to the first actual compression. One retained bundle
+    // owns the complete image and constants; later demands read that bundle.
+    def saj-resources() = {
+        let held = record_get(SAJ-RESOURCES, "admitted");
+        !nothing?(held) ? held : {
+            let image = saj-code();
+            let rounds = saj-round-constant-bytes();
+            len(image) == 0 || len(image) % 4 != 0 || len(rounds) != 256 ? nothing() : {
+                let admitted = [image, rounds];
+                let retained = record_set(SAJ-RESOURCES, "admitted", admitted);
+                admitted;
+            };
+        };
+    };
     def saj-written(answer) = nothing?(answer) ? "" : answer[0];
     // THE FILE IS HASHED IN CHUNKS. SHA-256 is sequential, so the file is walked in order: each chunk is a span mapped for its run and released after, compressed from the 32-byte state the chunk before
     // left (saj-compress carries it); the state after the last chunk is the state one span over the whole file would have left, bit for bit. A chunk is a multiple of 64 (a block) and of the 16 KiB page, and
@@ -85,6 +100,16 @@ fa-str-q(0, 4, 0), fa-str-q(1, 4, 1), fa-ret()]));
     };
     def saj-final-tail-digest(state-raw, tail-bytes, total-bytes) = !((Comparable) len(tail-bytes) == total-bytes % 64) ? "" : saj-final-padded(state-raw, saj-padding-string(tail-bytes, total-bytes));
     def saj-final-padded(state-raw, padding) = saj-digest-of(saj-compress(padding, state-raw, len(padding) / 64));
+    // Strings use the same compression and padding owner as file spans. The
+    // carrier reads complete blocks where they lie; only the tail is copied.
+    // An unavailable native compression remains absent, never another hasher.
+    def saj-string-digest(message) = (String) value_kind(message) != "string" ? nothing() : {
+        let total = len(message);
+        let prefix = total - total % 64;
+        let state = saj-compress(message, saj-initial-state-bytes(), prefix / 64);
+        let digest = saj-final-tail-digest(state, substring(message, prefix, total), total);
+        (Comparable) len(digest) == 32 ? digest : nothing();
+    };
     def saj-file-digest-any-tail(path, total-bytes) = saj-file-digest-any-tail-chunked(path, total-bytes, saj-chunk-bytes());
     def saj-file-digest-any-tail-chunked(path, total-bytes, chunk) = total-bytes < 0 ? "" : {
         let tail-size = total-bytes % 64;
@@ -103,8 +128,6 @@ fa-str-q(0, 4, 0), fa-str-q(1, 4, 1), fa-ret()]));
         let tail = read_file_slice(path, prefix-size, tail-size);
         saj-final-digest-from-state(state-raw, tail, total-bytes);
     };
-    // made once when the unit loads: the image and the constants are built byte by byte, and every run would build them
-    let saj-image-bytes = saj-code();
-    let saj-round-bytes = saj-round-constant-bytes();
+    let SAJ-RESOURCES = record_new(0, "admitted", nothing());
     0;
 }
