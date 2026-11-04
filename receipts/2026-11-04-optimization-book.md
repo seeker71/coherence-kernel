@@ -713,3 +713,13 @@ correctly; hash CPU is 103 then 47 microseconds. Storage-only parity remains ope
 
 A private prefix filter over the existing home names gave no reliable timing
 gain and was not adopted. Further work follows the remaining measured stages.
+
+A node of that image stays in the sealed bytes until the unit sequence, a
+constant initializer, a call, or a later read names it. The row is written at
+the index the image already gave it, so the tables stay the ones already
+published. Two fresh processes reloading the 2,048-function image returned 42
+with zero source compilation, in 1433 and 1382 microseconds; the resident
+calls were 79 and 83. Unreached function bodies stay bytes. A sibling that
+only reads a shared function wakes that body. These readings sit with the
+compact-image readings above and do not establish a further speedup.
+Storage-only parity remains open.

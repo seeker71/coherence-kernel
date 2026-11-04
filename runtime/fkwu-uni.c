@@ -10223,6 +10223,11 @@ static void fk_call_caps(long long clo) {
     fk_call_cap_reserve(cn);
     while (ci < cn) { fk_call_cap_vals[ci] = fk_clo_capvals[cb + ci]; ci = ci + 1; }
 }
+/* A cell image keeps its node bytes. fk_fn[c] stays asleep until a call reaches it. */
+static unsigned char *fk_fn_asleep;
+static long long fk_fn_asleep_cap;
+static void fk_demand_ensure(long long fn);
+static void fk_demand_wake(long long fn);
 static long long fk_call_value(long long c, long long base, long long n, long long clo) {
     char fk_sp_probe;
     if (fk_stack_base != 0 && (long long)(fk_stack_base - &fk_sp_probe) > fk_stack_wall) {
@@ -10236,6 +10241,14 @@ static long long fk_call_value(long long c, long long base, long long n, long lo
     fk_heat_pulse();
     if (lane && (fk_fn_heat[c] & (FK_F64_HEAT - 1)) == 0) { fk_f64_loop_pulse(c, base, n); }
     fk_call_caps(clo);
+    int demand_body = fk_fn_asleep && c >= 0 && c < fk_fn_asleep_cap && fk_fn_asleep[c];
+    fk_demand_wake(c);
+    if (demand_body && fk_fn[c] < 0) {
+        FK_FR_POP();
+        fk_cur_fn = caller;
+        fk_vsp = base;
+        return fk_nothing;
+    }
     long long r = fk_walk_body(fk_fn[c], base);
     FK_FR_POP();
     fk_cur_fn = caller;
@@ -10260,6 +10273,7 @@ static long long fk_call_tail(long long c, long long fp, long long from, long lo
     if (lane && (h & (FK_F64_HEAT - 1)) == 0) { fk_f64_loop_pulse(c, fp, n); }
     if (!lane) { clo = fk_vs[fk_vsp - 1]; fk_vsp = fk_vsp - 1; }
     fk_call_caps(clo);
+    fk_demand_wake(c);
     return fk_fn[c];
 }
 /* the page's calls: its arguments sit in its own temporaries, fk_vs[fp + t ..] */
@@ -10368,6 +10382,7 @@ static long long fk_jit_bind(long long x) {
         fk_jit_cx.fr_fn = fk_fr_fn;
         fk_jit_cx.fr_cap = FK_FR_CAP;
     }
+    fk_demand_wake(c);
     long long body = fk_fn[c];
     if (body < 0 || fk_node[body][0] != 194) { fk_fn[c] = fk_smknode(194, c, body, 0); fk_prog_note_body(c); }
     fk_jit_bound = fk_jit_bound + 1;
@@ -19426,6 +19441,7 @@ static long long fk_admission_image_read(long long fn) {
     fk_admission *a = fk_admissions;
     while (a && !(a->first <= fn && fn < a->end)) a = a->previous;
     if (!a || !a->image_path || !a->hash[0]) return fk_nothing;
+    fk_demand_wake(fn);
     long long body = fk_fn[fn];
     if (body >= 0 && body < fk_node_count && fk_node[body][0] == 194) body = fk_node[body][2];
     long long local_fn = a->relocation == 1 ? (fn - (a->fn_base ? a->fn_base - 1 : 0)) << 1 : fk_admission_relocated(a, 1, fn);
@@ -19482,6 +19498,7 @@ static long long fk_prog_read(long long pid, long long spec) {
         if (fk_cstr_eq(mode, "fnmeta") && q && FK_POK(q)) {
             long long fn = fk_ast_function_arg(FK_HH(q));
             if (fn <= 0 || fn >= fk_fn_count || fn >= fk_fn_cap_capacity || !fk_fn_meta_known[fn]) return fk_nothing;
+            fk_demand_wake(fn);
             long long body = fk_fn[fn], identity = fk_admission_read(fn);
             if (body >= 0 && body < fk_node_count && fk_node[body][0] == 194) body = fk_node[body][2];
             if (body < 0 || body >= fk_node_count || identity == fk_nothing) return fk_nothing;
@@ -19503,6 +19520,7 @@ static long long fk_prog_read(long long pid, long long spec) {
         if (fk_cstr_eq(mode, "fn") && q >= 1 && FK_POK(q)) {
             long long c = fk_ast_function_arg(FK_HH(q));
             if (c <= 0 || c >= fk_fn_count || (c < fk_fn_cap_capacity && fk_fn_cap_count[c] > 0)) { return fk_nothing; }
+            fk_demand_wake(c);
             long long b = fk_fn[c];
             if (b >= 0 && b < fk_node_count && fk_node[b][0] == 194) { b = fk_node[b][2]; }
             return b >= 0 && b < fk_node_count ? fk_cons_val(b << 1, fk_cons_val(fk_fnar[c] << 1, 1)) : fk_nothing;
@@ -19511,6 +19529,7 @@ static long long fk_prog_read(long long pid, long long spec) {
             long long j = FK_HH(q) >> 1;
             if (j < 0 || j >= fk_fntop) { return fk_nothing; }
             long long idx = fk_fnidx[j];
+            if (idx >= 0 && idx < fk_fn_count) fk_demand_wake(idx);
             long long body = idx >= 0 && idx < fk_fn_count ? fk_fn[idx] : -1;
             return fk_cons_val(fk_fnsym_s[j] << 1, fk_cons_val(fk_fnsym_n[j] << 1, fk_cons_val(idx << 1, fk_cons_val(body << 1, 1))));
         }
@@ -19563,7 +19582,7 @@ static long long fk_prog_read(long long pid, long long spec) {
                 /* the process's own program answers its live body: an image-loaded defn's published
                  * copy can read 0 when the note came before the load's assignment, and a crystallized
                  * defn's body is the tag-194 node it wears now */
-                if (pid == (long long)getpid() && idx >= 0 && idx < fk_fn_count) { body = fk_fn[idx]; }
+                if (pid == (long long)getpid() && idx >= 0 && idx < fk_fn_count) { fk_demand_wake(idx); body = fk_fn[idx]; }
                 out = fk_cons_val(row[0] << 1, fk_cons_val(row[1] << 1, fk_cons_val(idx << 1, fk_cons_val(body << 1, 1))));
             }
         }
@@ -27571,6 +27590,124 @@ static void fk_cell_import_sequence(unsigned long long unit, long long sequence)
 #define fk_cell_import_name(off, unit) ((void)0)
 #define fk_cell_import_sequence(unit, sequence) ((void)0)
 #endif
+/* One admitted image, still in its sealed bytes. A node or function body is
+ * written into the live tables when a reached row names it. */
+typedef struct fk_demand {
+    struct fk_demand *next;
+    char *bytes;
+    long long *image_root;
+    long long *fn_map;
+    unsigned char *live;
+    unsigned char *ready;
+    long long nr, nf, node_base, fn_base, str_base;
+} fk_demand;
+static fk_demand *fk_demands, *fk_demand_building;
+static void fk_demand_free(fk_demand *d) {
+    if (!d) return;
+    free(d->bytes); free(d->image_root); free(d->fn_map); free(d->live); free(d->ready);
+    free(d);
+}
+static void fk_demand_abort(void) {
+    fk_demand *d = fk_demand_building;
+    fk_demand_building = 0;
+    if (!d || !fk_fn_asleep) { fk_demand_free(d); return; }
+    for (long long i = 1; i < d->nf; i++) {
+        long long fn = d->fn_base + i - 1;
+        if (fn >= 0 && fn < fk_fn_asleep_cap) fk_fn_asleep[fn] = 0;
+    }
+    fk_demand_free(d);
+}
+static void fk_demand_commit(void) {
+    if (!fk_demand_building) return;
+    fk_demand_building->next = fk_demands;
+    fk_demands = fk_demand_building;
+    fk_demand_building = 0;
+}
+static void fk_fn_asleep_set(long long fn) {
+    if (fn < 0) return;
+    if (fn >= fk_fn_asleep_cap) {
+        long long nc = fk_fn_asleep_cap > 0 ? fk_fn_asleep_cap : 64;
+        while (nc <= fn) nc = nc * 2;
+        unsigned char *grown = realloc(fk_fn_asleep, (unsigned long)nc);
+        if (!grown) fk_die("image demand: out of memory");
+        memset(grown + fk_fn_asleep_cap, 0, (unsigned long)(nc - fk_fn_asleep_cap));
+        fk_fn_asleep = grown;
+        fk_fn_asleep_cap = nc;
+    }
+    fk_fn_asleep[fn] = 1;
+}
+static long long fk_demand_signed(const char *p) {
+    long long sign = (unsigned char)p[0];
+    long long hi = ((long long)(unsigned char)p[1] << 24) | ((long long)(unsigned char)p[2] << 16) |
+                   ((long long)(unsigned char)p[3] << 8) | (unsigned char)p[4];
+    long long lo = ((long long)(unsigned char)p[5] << 24) | ((long long)(unsigned char)p[6] << 16) |
+                   ((long long)(unsigned char)p[7] << 8) | (unsigned char)p[8];
+    if (hi > 2147483647LL) { fk_fkb_mark_bad("signed magnitude exceeds 63 bits"); return 0; }
+    long long mag = (hi << 32) | lo;
+    if (sign == 0) return mag;
+    if (sign == 1) return -mag;
+    fk_fkb_mark_bad("malformed signed integer");
+    return 0;
+}
+static void fk_demand_node(fk_demand *d, long long image);
+static int fk_demand_ensure_one(fk_demand *d, long long fn) {
+    if (!d || !d->fn_map || fn < d->fn_base || fn >= d->fn_base + d->nf - 1) return 0;
+    long long image = fn - d->fn_base + 1;
+    if (image <= 0 || image >= d->nf || d->fn_map[image] != fn) return 0;
+    if (d->ready[image]) return 1;
+    d->ready[image] = 1;
+    long long body = d->image_root[image];
+    /* The slot names its node before the body is walked, so a read that
+     * reaches this function while its callees are still waking sees a row. */
+    if (body >= 0) fk_fn[fn] = d->node_base + body;
+    if (body >= 0) fk_demand_node(d, body);
+    if (body >= 0 && !fk_fkb_bad) fk_prog_note_body(fn);
+    else if (body >= 0) fk_fn[fn] = -1;
+    if (fk_fn_asleep && fn < fk_fn_asleep_cap) fk_fn_asleep[fn] = 0;
+    return 1;
+}
+static void fk_demand_wake(long long fn) {
+    if (fk_fn_asleep && fn >= 0 && fn < fk_fn_asleep_cap && fk_fn_asleep[fn]) fk_demand_ensure(fn);
+}
+static void fk_demand_ensure(long long fn) {
+    if (fn < 0) return;
+    if (fk_demand_ensure_one(fk_demand_building, fn)) return;
+    for (fk_demand *d = fk_demands; d; d = d->next) if (fk_demand_ensure_one(d, fn)) return;
+}
+static void fk_demand_node(fk_demand *d, long long image) {
+    if (!d || fk_fkb_bad) return;
+    if (image < 0 || image >= d->nr) { fk_fkb_mark_bad("import node child is outside the image"); return; }
+    if (d->live[image]) return;
+    d->live[image] = 1;
+    const char *p = d->bytes + image * 36;
+    long long tag = fk_demand_signed(p);
+    long long c1 = fk_demand_signed(p + 9);
+    long long c2 = fk_demand_signed(p + 18);
+    long long c3 = fk_demand_signed(p + 27);
+    if (fk_fkb_bad) return;
+    int n1 = 0, n2 = 0, n3 = 0;
+    long long ar = fk_fkb_node_arity_for_tag(tag);
+    long long f1 = fk_fkb_remap_field(tag, 1, c1, ar, d->node_base, d->fn_base, d->str_base, &n1);
+    long long f2 = fk_fkb_remap_field(tag, 2, c2, ar, d->node_base, d->fn_base, d->str_base, &n2);
+    long long f3 = fk_fkb_remap_field(tag, 3, c3, ar, d->node_base, d->fn_base, d->str_base, &n3);
+    if ((n1 && c1 >= d->nr) || (n2 && c2 >= d->nr) || (n3 && c3 >= d->nr)) {
+        fk_fkb_mark_bad("import node child is outside the image");
+        return;
+    }
+    if ((tag == 12 || tag == 240 || tag == 241 || tag == 243) && d->fn_map &&
+        f1 >= d->fn_base && f1 < d->fn_base + d->nf - 1) {
+        f1 = d->fn_map[f1 - d->fn_base + 1];
+    }
+    long long slot = d->node_base + image;
+    fk_node[slot][0] = tag;
+    fk_node[slot][1] = f1;
+    fk_node[slot][2] = f2;
+    fk_node[slot][3] = f3;
+    if (n1 && c1 >= 0) fk_demand_node(d, c1);
+    if (n2 && c2 >= 0) fk_demand_node(d, c2);
+    if (n3 && c3 >= 0) fk_demand_node(d, c3);
+    if ((tag == 12 || tag == 240 || tag == 241 || tag == 243) && f1 >= 0) fk_demand_ensure(f1);
+}
 static int fk_src_import_fkb_read(const char *fkb_path, fk_fkb_snapshot *snapshot) {
     fk_fkb_snapshot_use(snapshot);
     int image_graph_retained = 1;
@@ -27606,27 +27743,52 @@ static int fk_src_import_fkb_read(const char *fkb_path, fk_fkb_snapshot *snapsho
         return 0;
     }
     fk_ast_reserve(fk_node_count + nr);
-    i = 0;
-    while (!fk_fkb_bad && i < nr) {
-        long long tag = fk_fkb_read_signed();
-        long long c1 = fk_fkb_read_signed();
-        long long c2 = fk_fkb_read_signed();
-        long long c3 = fk_fkb_read_signed();
-        int n1 = 0, n2 = 0, n3 = 0;
-        long long ar = fk_fkb_node_arity_for_tag(tag);
-        long long f1 = fk_fkb_remap_field(tag, 1, c1, ar, node_base, fn_base, str_base, &n1);
-        long long f2 = fk_fkb_remap_field(tag, 2, c2, ar, node_base, fn_base, str_base, &n2);
-        long long f3 = fk_fkb_remap_field(tag, 3, c3, ar, node_base, fn_base, str_base, &n3);
-        if ((n1 && c1 >= nr) || (n2 && c2 >= nr) || (n3 && c3 >= nr)) {
-            fk_fkb_mark_bad("import node child is outside the image");
+    /* A raw cell keeps the node section as bytes. Each node is four fixed-width
+     * signed fields, so its offset is arithmetic. Rows are filled when reached. */
+    if (fk_cell_import_root >= 0) {
+        if (nr > 0 && (fk_fkb_pos > fk_fkb_len || (fk_fkb_len - fk_fkb_pos) / 36 < nr)) {
+            fk_fkb_mark_bad("import node count exceeds artifact bounds");
             free(fn_roots);
             return 0;
         }
-        fk_node[node_base + i][0] = tag;
-        fk_node[node_base + i][1] = f1;
-        fk_node[node_base + i][2] = f2;
-        fk_node[node_base + i][3] = f3;
-        i = i + 1;
+        fk_demand *d = calloc(1, sizeof(*d));
+        if (!d) fk_die("image demand: out of memory");
+        d->nr = nr; d->nf = nf; d->node_base = node_base; d->fn_base = fn_base; d->str_base = str_base;
+        d->bytes = nr > 0 ? malloc((unsigned long)nr * 36) : 0;
+        d->image_root = malloc((unsigned long)nf * 8);
+        d->live = nr > 0 ? calloc((unsigned long)nr, 1) : 0;
+        if ((nr > 0 && (!d->bytes || !d->live)) || !d->image_root) fk_die("image demand: out of memory");
+        if (nr > 0) memcpy(d->bytes, fk_buf + fk_fkb_pos, (unsigned long)nr * 36);
+        memcpy(d->image_root, fn_roots, (unsigned long)nf * 8);
+        fk_fkb_pos += nr * 36;
+        for (long long z = 0; z < nr; z++) {
+            fk_node[node_base + z][0] = fk_node[node_base + z][1] = 0;
+            fk_node[node_base + z][2] = fk_node[node_base + z][3] = 0;
+        }
+        fk_demand_building = d;
+    } else {
+        i = 0;
+        while (!fk_fkb_bad && i < nr) {
+            long long tag = fk_fkb_read_signed();
+            long long c1 = fk_fkb_read_signed();
+            long long c2 = fk_fkb_read_signed();
+            long long c3 = fk_fkb_read_signed();
+            int n1 = 0, n2 = 0, n3 = 0;
+            long long ar = fk_fkb_node_arity_for_tag(tag);
+            long long f1 = fk_fkb_remap_field(tag, 1, c1, ar, node_base, fn_base, str_base, &n1);
+            long long f2 = fk_fkb_remap_field(tag, 2, c2, ar, node_base, fn_base, str_base, &n2);
+            long long f3 = fk_fkb_remap_field(tag, 3, c3, ar, node_base, fn_base, str_base, &n3);
+            if ((n1 && c1 >= nr) || (n2 && c2 >= nr) || (n3 && c3 >= nr)) {
+                fk_fkb_mark_bad("import node child is outside the image");
+                free(fn_roots);
+                return 0;
+            }
+            fk_node[node_base + i][0] = tag;
+            fk_node[node_base + i][1] = f1;
+            fk_node[node_base + i][2] = f2;
+            fk_node[node_base + i][3] = f3;
+            i = i + 1;
+        }
     }
     fk_node_count = fk_node_count + nr;
     long long ns = fk_fkb_read_signed();
@@ -27642,7 +27804,14 @@ static int fk_src_import_fkb_read(const char *fkb_path, fk_fkb_snapshot *snapsho
     }
     i = 1;
     while (i < nf) {
-        fk_fn[fn_base + i - 1] = fn_roots[i] < 0 ? fn_roots[i] : fn_roots[i] + node_base;
+        if (fk_demand_building) {
+            long long body = fk_demand_building->image_root[i];
+            long long slot = fn_base + i - 1;
+            if (body < 0) fk_fn[slot] = body;
+            else { fk_fn[slot] = -1; fk_fn_asleep_set(slot); }
+        } else {
+            fk_fn[fn_base + i - 1] = fn_roots[i] < 0 ? fn_roots[i] : fn_roots[i] + node_base;
+        }
         fn_roots[i] = fn_base + i - 1; /* reused below as the import's function map */
         i = i + 1;
     }
@@ -27713,15 +27882,23 @@ static int fk_src_import_fkb_read(const char *fkb_path, fk_fkb_snapshot *snapsho
      * Rewrite direct function references through the selected export table,
      * before any imported code or initializer can run. */
     if (!image_graph_retained) {
-        for (long long k = node_base; k < node_base + nr; k++) {
-            long long tag = fk_node[k][0], fn = fk_node[k][1];
-            if ((tag == 12 || tag == 240 || tag == 241 || tag == 243) && fn >= fn_base && fn < fn_base + nf - 1)
-                fk_node[k][1] = fn_roots[fn - fn_base + 1];
+        if (!fk_demand_building) {
+            for (long long k = node_base; k < node_base + nr; k++) {
+                long long tag = fk_node[k][0], fn = fk_node[k][1];
+                if ((tag == 12 || tag == 240 || tag == 241 || tag == 243) && fn >= fn_base && fn < fn_base + nf - 1)
+                    fk_node[k][1] = fn_roots[fn - fn_base + 1];
+            }
         }
         for (long long fn = fn_base; fn < fn_base + nf - 1; fn++) {
             long long parent = fk_fn_parent_idx[fn];
             if (parent >= fn_base && parent < fn_base + nf - 1) fk_fn_parent_idx[fn] = fn_roots[parent - fn_base + 1];
         }
+    }
+    if (fk_demand_building) {
+        fk_demand_building->fn_map = malloc((unsigned long)nf * 8);
+        fk_demand_building->ready = calloc((unsigned long)nf, 1);
+        if (!fk_demand_building->fn_map || !fk_demand_building->ready) fk_die("image demand: out of memory");
+        memcpy(fk_demand_building->fn_map, fn_roots, (unsigned long)nf * 8);
     }
     free(fn_roots);
     long long node_symbol_count = fk_fkb_read_signed();
@@ -27802,6 +27979,12 @@ static int fk_src_import_fkb_read(const char *fkb_path, fk_fkb_snapshot *snapsho
         i = i + 1;
     }
     if (!fk_fkb_bad && fk_fkb_pos != fk_fkb_len) fk_fkb_mark_bad("trailing import bytes");
+    if (!fk_fkb_bad && fk_demand_building) {
+        for (long long s = 0; s < unit_count; s++)
+            if (uchain[s] >= 0) fk_demand_node(fk_demand_building, uchain[s] - node_base);
+        for (long long s = 0; s < const_count; s++)
+            if (ccnode[s] >= 0) fk_demand_node(fk_demand_building, ccnode[s] - node_base);
+    }
     if (!fk_fkb_bad) {
         fk_lit_pin_rows(node_base, node_base + nr);
         /* the hold this image built over each row's initializer */
@@ -27892,7 +28075,8 @@ static int fk_src_import_fkb_read(const char *fkb_path, fk_fkb_snapshot *snapsho
 static int fk_src_import_fkb_image(const char *path, fk_fkb_snapshot *snapshot) {
     long long nodes = fk_node_count, functions = fk_fn_count, next = fk_defn_next;
     long long symbols = fk_fntop, text = fk_slen;
-    if (fk_src_import_fkb_read(path, snapshot)) return 1;
+    if (fk_src_import_fkb_read(path, snapshot)) { fk_demand_commit(); return 1; }
+    fk_demand_abort();
     fk_node_count = nodes; fk_fn_count = functions; fk_defn_next = next; fk_fntop = symbols;
     fk_srcseg_drop_from(text); fk_slen = text; fk_srctext[text] = 0;
     fk_prog_note_counts();
