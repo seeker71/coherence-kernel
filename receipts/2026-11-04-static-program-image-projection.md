@@ -6,6 +6,6 @@ Observed on this tree, after `cc -O2 -o fkwu runtime/fkwu-uni.c`:
 
 - `form/form-stdlib/tests/cell-run-band.fk` → 16777215. A library change moves the admission identity. A fresh load counts 2 source units and 3 source functions. The resident call parses nothing.
 - `form/form-stdlib/tests/program-image-static-projection-band.bml` → 7. An admitted `(defn pisp-answer () 7)` projects (5 nodes, 1 symbol). A second projection is the same graph. `nothing()` refuses.
-- `form/form-stdlib/tests/runtime-program-image-fkb-current-answer-capability-band.fk` → 16777215, including the synthetic projection cases (changed observation, unknown tag, unowned root, wrapper cycle, optional child).
+- `form/form-stdlib/tests/runtime-program-image-fkb-current-answer-capability-band.fk` → 16777215, including the synthetic projection cases (changed observation, unknown tag, unowned root, wrapper cycle, optional child) and a live admission: a retained closure still answers 445 and 446, the rewritten library answers 336, the resident call parses nothing, and the projection writes no effect.
 
 The catalog reader stays a temporary seed carrier. Form owns the projection.
