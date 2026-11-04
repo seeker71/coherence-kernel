@@ -866,3 +866,17 @@ Reached SHA remains correct at 2,962 microseconds disk and 1,477 resident. This
 single copy removal carries no separate elapsed-time gain claim. A checksum
 half-word candidate matched the independent native fingerprint on all 49 cases,
 but its whole-call timings overlapped the control and it remains private.
+
+An accepted image's numeric AST-read instruction still indexed a dormant row
+directly. Before repair, it returned zero for the literal's tag; a subsequent
+public AST read reconstructed [1,99,0,0] and the same instruction then returned
+one. The instruction now checks its node and field bounds and enters the
+existing demand boundary before reading the row. The first read returns one,
+all three invalid-coordinate checks return nothing, and source compilation
+remains zero. A sealed image with a malformed dormant literal emits its owned
+image-admission-failed event and stops in the reading function with
+`malformed signed integer`. This is an accepted-image execution repair; the
+ordinary source compiler does not currently emit that instruction. It leaves
+with the native walker/image-read carrier. Cell and image checks return
+16777215, and the native authoring guide completes. Private raw-ast-peek*
+records retain the before, repaired, bounds and failure observations.

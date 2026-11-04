@@ -14927,7 +14927,11 @@ static long long fk_walk(long long i, long long fp) {
         return r7;
     }
     if (t == 8) {
-        return fk_node[fk_walk(fk_node[i][1], fp) >> 1][fk_walk(fk_node[i][2], fp) >> 1] << 1;
+        long long node = fk_walk(fk_node[i][1], fp) >> 1;
+        long long field = fk_walk(fk_node[i][2], fp) >> 1;
+        if (node < 0 || node >= fk_node_count || field < 0 || field >= 4) return fk_nothing;
+        fk_demand_access(node, 1);
+        return fk_node[node][field] << 1;
     }
     if (t == 12) {
         long long c12 = fk_node[i][1];
