@@ -51,7 +51,9 @@ int dlclose(void *h) {
 typedef unsigned long long size_t;
 extern int *_errno(void);
 #define errno (*_errno())
+#define ENOENT 2
 #define ESRCH 3
+#define ENOTDIR 20
 #define ESPIPE 29
 #define O_RDONLY 0
 #define F_SETFD 2
@@ -6087,7 +6089,10 @@ static void fk_rappend(long long r, long long key, long long val) {
  * .fk) moves the count a refusal of the floor compiler stands on (fk_bml_bad_has), so a unit refused for a source it
  * imports is asked again once this process rewrites that source. Lowering memos and images never pass a door. */
 static long long fk_src_writes;
+static long long fk_file_writes;
+static long long fk_cell_epoch;
 static void fk_src_wrote(const char *p) {
+    fk_file_writes++;
     long long n = fk_cstrlen(p);
     if ((n >= 3 && memcmp(p + n - 3, ".fk", 3) == 0) || (n >= 4 && memcmp(p + n - 4, ".bml", 4) == 0)) {
         fk_src_writes = fk_src_writes + 1;
@@ -11552,6 +11557,7 @@ FK_PHASED(FK_PHASE_FILE, long long, fk_host_door_fs, (long long mode, long long 
         if (!fk_door_pair(x, &a, &b) || !fk_door_path(a, pa)) { return (0 - 2) * 2; }
         long long m = fk_door_mode(b);
         if (m < 0) { return (0 - 2) * 2; }
+        fk_file_writes++;
         if (mode == 35) { return chmod(pa, (unsigned int)m) == 0 ? 0 : (0 - 1) * 2; }
         if (mkdir(pa, (unsigned int)m) != 0) { return 0; }
         chmod(pa, (unsigned int)m); /* mkdir(2) narrows the mode by the umask; -m means exactly this */
@@ -19837,11 +19843,13 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 55) {
         static char p[FK_PATH_CAP];
         fk_cstr(fk_walk(fk_node[i][1], fp), p, FK_PATH_CAP);
+        fk_file_writes++;
         return fk_rmdir_tree(p) << 1;
     }
     if (t == 56) {
         static char p[FK_PATH_CAP];
         fk_cstr(fk_walk(fk_node[i][1], fp), p, FK_PATH_CAP);
+        fk_file_writes++;
         int rc = mkdir(p, 0777);
         return (rc < 0 ? 0 : 1) << 1;
     }
@@ -25154,7 +25162,19 @@ static int fk_src_dep_reserve(long long want) {
     return 1;
 }
 
+typedef struct {
+    char *path;
+    unsigned long long key, digest;
+    long long bytes, epoch, writes;
+} fk_source_observation;
+static fk_source_observation *fk_source_observations;
+static long long fk_source_observations_n, fk_source_observations_cap;
+static int fk_source_digest(const char *path, long long *bytes, unsigned long long *digest);
 static void fk_src_dep_release(void) {
+    for (long long i = 0; i < fk_source_observations_n; i++) free(fk_source_observations[i].path);
+    free(fk_source_observations);
+    fk_source_observations = 0;
+    fk_source_observations_n = fk_source_observations_cap = 0;
     free(fk_src_dep_path); free(fk_src_dep_mtime); free(fk_src_dep_size);
     free(fk_src_dep_digest); free(fk_src_dep_parent); free(fk_src_dep_end);
     free(fk_src_dep_text_off); free(fk_src_dep_text_len); free(fk_src_dep_lowered);
@@ -28441,7 +28461,6 @@ static const char **fk_cd_identity;
 static void *fk_cd_rows_store;     /* per dep: the diagnostic rows its load voiced (fk_dgrow_t array), replayed for a resident call */
 static long long *fk_cd_rows_n;
 static long long fk_cd_cap;
-static long long fk_cell_epoch;
 static long long fk_cell_load_base;   /* the first dependency index the collection now in progress registers (see fk_cell_dep_find) */
 static int fk_cell_base_set;
 static long long *fk_fsym_dep;
@@ -28528,17 +28547,15 @@ static long long fk_cell_dep_find_raw(const char *path) {
     }
     return -1;
 }
-/* is the dependency's file what was parsed? mtime and size (and a clock old enough to trust them) say yes; any
- * doubt reads the bytes and compares the digest the collector took -- the .fkb image's own freshness question */
+/* Each demand observes source content. A timestamp, even an old one, cannot
+ * certify bytes: editors and archive tools may preserve it across a change. */
 static int fk_cell_dep_fresh(long long d) {
     if (fk_cd_epoch[d] == fk_cell_epoch) { return fk_cd_ok[d]; }
     fk_cd_epoch[d] = fk_cell_epoch;
     fk_cd_ok[d] = 0;
     long long m = fk_path_mtime_raw(fk_src_dep_path[d]);
     if (m <= 0) { return 0; }
-    long long age = fk_now_ms() / 1000 - m;
     if (fk_src_dep_lowered[d]) {
-        if (m == fk_src_dep_mtime[d] && age > 2) { fk_cd_ok[d] = 1; return 1; }
         long long ln = 0;
         char *low = fk_bml_lower_to_mem(fk_src_dep_path[d], &ln);
         if (low == 0) { return 0; }
@@ -28547,14 +28564,11 @@ static int fk_cell_dep_fresh(long long d) {
         if (same) { fk_src_dep_mtime[d] = m; fk_cd_ok[d] = 1; }
         return same;
     }
-    long long sz = fk_path_size_raw(fk_src_dep_path[d]);
-    if (m == fk_src_dep_mtime[d] && sz == fk_src_dep_size[d] && age > 2) { fk_cd_ok[d] = 1; return 1; }
     long long n = 0;
-    char *text = fk_read_whole_file(fk_src_dep_path[d], &n);
-    if (text == 0) { return 0; }
-    int same = fk_bytes_fnv1a(text, n) == fk_src_dep_digest[d];
-    free(text);
-    if (same) { fk_src_dep_mtime[d] = m; fk_src_dep_size[d] = sz; fk_cd_ok[d] = 1; }
+    unsigned long long digest;
+    if (!fk_source_digest(fk_src_dep_path[d], &n, &digest)) return 0;
+    int same = digest == fk_src_dep_digest[d];
+    if (same) { fk_src_dep_mtime[d] = m; fk_src_dep_size[d] = n; fk_cd_ok[d] = 1; }
     return same;
 }
 static void fk_cell_dep_setaside(long long d) {
@@ -29790,22 +29804,59 @@ static char *fk_read_whole_file(const char *path, long long *out_len) {
     }
     for (;;) {
         long long got = (long long)read(fd, buf + n, (unsigned long)(cap - n));
-        if (got <= 0) {
-            break;
-        }
+        if (got < 0 && errno == EINTR) continue;
+        if (got < 0) { free(buf); close(fd); return 0; }
+        if (got == 0) break;
         n = n + got;
         if (n == cap) {
             cap = cap * 2;
-            buf = realloc(buf, (unsigned long)cap);
-            if (buf == 0) {
+            char *grown = realloc(buf, (unsigned long)cap);
+            if (grown == 0) {
+                free(buf);
                 close(fd);
                 return 0;
             }
+            buf = grown;
         }
     }
-    close(fd);
+    if (close(fd) != 0) { free(buf); return 0; }
     *out_len = n;
     return buf;
+}
+
+/* The current demand owns one observation per source path, shared by its BML
+ * memo checks and raw dependencies. Nothing is inferred across demands or
+ * writes. This transport shrinks into the native compiler's observation map. */
+static int fk_source_digest(const char *path, long long *bytes, unsigned long long *digest) {
+    long long pn = fk_cstrlen(path), i = 0;
+    unsigned long long key = fk_bytes_fnv1a(path, pn);
+    while (i < fk_source_observations_n &&
+           (fk_source_observations[i].key != key || !fk_cstr_eq(fk_source_observations[i].path, path))) i++;
+    if (i < fk_source_observations_n && fk_source_observations[i].epoch == fk_cell_epoch &&
+        fk_source_observations[i].writes == fk_file_writes) {
+        *bytes = fk_source_observations[i].bytes; *digest = fk_source_observations[i].digest;
+        return 1;
+    }
+    char *source = fk_read_whole_file(path, bytes);
+    if (!source) return 0;
+    *digest = fk_bytes_fnv1a(source, *bytes);
+    free(source);
+    if (i == fk_source_observations_n) {
+        if (i == fk_source_observations_cap) {
+            long long cap = fk_source_observations_cap ? fk_source_observations_cap * 2 : 64;
+            void *rows = realloc(fk_source_observations, (unsigned long)cap * sizeof(*fk_source_observations));
+            if (!rows) fk_die("source observation allocation failed");
+            fk_source_observations = rows; fk_source_observations_cap = cap;
+        }
+        fk_source_observations[i].path = malloc((unsigned long)pn + 1);
+        if (!fk_source_observations[i].path) fk_die("source observation path allocation failed");
+        memcpy(fk_source_observations[i].path, path, (unsigned long)pn + 1);
+        fk_source_observations[i].key = key;
+        fk_source_observations_n++;
+    }
+    fk_source_observations[i].bytes = *bytes; fk_source_observations[i].digest = *digest;
+    fk_source_observations[i].epoch = fk_cell_epoch; fk_source_observations[i].writes = fk_file_writes;
+    return 1;
 }
 
 /* A unit travels through the lowering lane when its file wears .bml or when
@@ -29938,21 +29989,22 @@ static char *fk_bml_packet_body(const char *owner, const char *packet, long long
         else if (kind == 'C' && context == 1 && fk_cstr_eq(path, cwd)) context = 2;
         else if (kind == 'H' && context == 2 && fk_cstr_eq(path, fk_home_path)) context = 3;
         else if (context == 3 && kind == 'N') {
-            if (observe && fk_path_size_raw(path) >= 0) {
-                if (moved) sprintf(moved, "%.4000s appeared", path);
-                return 0;
+            if (observe) {
+                long long size = fk_path_size_raw(path);
+                if (size >= 0 || (errno != ENOENT && errno != ENOTDIR)) {
+                    if (moved) sprintf(moved, size >= 0 ? "%.4000s appeared" : "%.4000s cannot be observed", path);
+                    return 0;
+                }
             }
         } else if (context == 3 && kind == 'F' && !observe) {
             files++;
         } else if (context == 3 && kind == 'F') {
             long long bytes = 0;
-            char *source = fk_read_whole_file(path, &bytes);
-            if (!source) {
-                if (moved) sprintf(moved, "%.4000s is gone", path);
+            unsigned long long actual;
+            if (!fk_source_digest(path, &bytes, &actual)) {
+                if (moved) sprintf(moved, "%.4000s cannot be read completely", path);
                 return 0;
             }
-            unsigned long long actual = fk_bytes_fnv1a(source, bytes);
-            free(source);
             if (actual != expected) {
                 if (moved) sprintf(moved, "%.4000s changed", path);
                 return 0;

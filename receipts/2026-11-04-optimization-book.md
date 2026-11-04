@@ -64,6 +64,43 @@ and re-observations remain in the local research directory, especially
 `final-cli-build-band-repaired.log`. The remaining seed image transport/relocation
 mechanics shrink toward Form's source compiler and program-image owner.
 
+## Resident source-content repair
+
+The next actual failure was resident reuse after a same-size source edit whose
+old timestamp was restored. A binary built from published commit `e850e18b4`
+returned 111 after both Form and BML source changed to 222. The strengthened
+existing cell check returned 16769023, missing its source-freshness bit. The
+repaired runtime returns 222 with residency 0, then 222 with residency 1 on the
+unchanged next call; the complete check returns 16777215.
+
+Each demand now reads source content. One demand shares successful complete
+readings by exact path across its raw dependencies and BML observation packets.
+A later demand or filesystem mutation invalidates that reuse. BML still checks
+its owner, working directory, home, every source and every recorded absence;
+read failures and absence are not memoized. A failed read or close cannot become
+a partial successful reading, and an inaccessible path cannot certify absence.
+The small seed transport shrinks toward the native compiler's observation map.
+
+This repairs correctness; it is not a speedup against the invalid shortcut.
+An uncontended sequential pair used 8.40 CPU seconds for the published binary
+and 11.46 for the repaired runtime, including the additional source repair that
+the old runtime wrongly skipped. Earlier comparisons through the mutable
+`./fkwu` path are not a reliable before/after baseline: it had been renewed.
+Sharing readings within a demand avoids the naive repeated-read implementation,
+which had used 30.59 CPU seconds in its earlier cell-check run. These are single
+runs, not a statistical performance claim. Exact source, commands and output
+remain in `resident-content.fk`, `resident-observation-e850-band.txt`,
+`resident-observation-fixed-timed.txt` and `resident-content-cell-band.txt` in
+the local research directory.
+
+Private immutable-result experiments also establish that binary string bytes
+`[65,0,255]` survive ordinary program-image serialization and separate-process
+reuse without re-running their producers. Effectful operations are refused by
+the existing restricted program-image walker, including when an effect branch
+is selected. An unselected effect branch does not run. This is evidence for the
+next Form-owned implementation, not a persistent SHA initialization cache or a
+whole-program cold/warm result.
+
 ## Source and scope
 
 Mykel J. Kochenderfer and Tim A. Wheeler, *Algorithms for Optimization*, second
