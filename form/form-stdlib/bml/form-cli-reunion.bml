@@ -30,6 +30,7 @@
 // unmerged (a dirty tree) has no banks to keep: it says what git said.
 import form-stdlib/bml/form-cli-heal-native-report.bml;
 import form-stdlib/bml/host-child.bml;
+import form-stdlib/host-filesystem.bml;
 import form-stdlib/meaning-codes.bml;
 section [form.bml] {
  class FormCliReunion {
@@ -135,18 +136,59 @@ section [form.bml] {
   // "[ok] exit=<exit> <the push's last line>"], ["unlearned", what was seen, ""], or ["refused", what git said, ""] for
   // a rebase it would not begin (nothing unmerged, so nothing kept).
   def fcr-reunion() = fcr-reunion-in(hch-dir(), ".", fcr-redraw-cell());
+  def fcr-redraw-pending(dir) = fcr-at(fcr-abs(dir),".form-heal/reunion-drawn.fkb");
+  def fcr-redraw-read(dir) {
+   let path=fcr-redraw-pending(dir);
+   host_path_exists(path) == 0 ? nothing() : {
+    let pending=read_form_binary(path);
+    !nothing?(pending) && node_eq(node_category(pending),JSON-OBJECT()) && fhn-text(pending,"branch") != "" && node_eq(node_category(json-object-get(pending,"paths")),JSON-ARRAY()) && any?(phase => phase == fhn-text(pending,"phase"),["redraw","amend","release"]) ? pending : form_error("reunion pending redraw is unreadable: " + path);
+   };
+  }
+  def fcr-branch(io,dir) {
+   let branch=hch-git-in(io,dir,"reunion-branch",["symbolic-ref","--quiet","HEAD"]);
+   hch-ok?(branch) ? trim(branch[1]) : form_error("reunion could not observe its owning branch");
+  }
   def fcr-reunion-in(io, dir, redraw) {
+   let pending=fcr-redraw-read(dir);
+   !nothing?(pending) && fhn-text(pending,"branch") != fcr-branch(io,dir) ? ["refused","the pending redraw belongs to " + fhn-text(pending,"branch"),""] : {
+   let resumed=nothing?(pending) ? "" : fcr-redraw-resume(io,dir,redraw,pending);
+   resumed != "" ? ["refused","redraw refused: " + resumed,""] : {
    let fetched = hch-git-in(io, dir, "reunion-fetch", ["fetch", "origin", "main"]);
    let rebased = hch-git-in(io, dir, "reunion-rebase", ["rebase", "origin/main"]);
    let joined = hch-ok?(rebased) ? ["joined", []] : fcr-met(io, dir, rebased);
    (String) joined[0] == "joined" ? fcr-reunion-drawn(io, dir, redraw, joined[1]) : (String) joined[0] == "refused" ? ["refused", "the rebase was refused: " ++ joined[1], ""] : fcr-unlearned-kind(io, dir, joined);
+   };
+   };
   }
   def fcr-met(io, dir, rebased) = nil?(fcr-conflicts-in(io, dir)) ? ["refused", fcr-said-line(hch-said(rebased))] : fcr-rounds-in(io, dir, []);
   def fcr-reunion-drawn(io, dir, redraw, done) {
-   let drew = fcr-touches?(done) ? fcr-redraw-amended(io, dir, fcr-redraw-in(io, dir, redraw)) : "";
-   ["joined", "", fcr-pushed(hch-git-in(io, dir, "reunion-push", ["push", "-u", "origin", "HEAD"]))];
+   let needed=fcr-touches?(done); let path=fcr-redraw-pending(dir);
+   let pending=json-node-object([fhn-s("branch",needed ? fcr-branch(io,dir) : ""),fhn-s("phase","redraw"),json-node-pair("paths",json-node-array(done |> map(json-node-string)))]);
+   needed ? {
+    hch-mkdirs(fcr-at(fcr-abs(dir),".form-heal"));
+    host_path_exists(path) != 0 ? form_error("reunion already owns a pending redraw; resume its entry") : fcr-redraw-save(dir,pending);
+   } : nothing();
+   let drew = needed ? fcr-redraw-resume(io,dir,redraw,pending) : "";
+   (String) drew != "" ? ["refused", "redraw refused: " + drew, ""] : ["joined", "", fcr-pushed(hch-git-in(io, dir, "reunion-push", ["push", "-u", "origin", "HEAD"]))];
   }
-  def fcr-redraw-amended(io, dir, said) = (String) said != "" ? said : hch-said(hch-git-in(io, dir, "reunion-amend", ["-c", "user.name=Claude", "-c", "user.email=noreply@anthropic.com", "commit", "-q", "--amend", "--no-edit"]));
+  def fcr-redraw-save(dir,pending) = fcam-write(fcr-redraw-pending(dir),pending) ? pending : form_error("reunion could not retain its pending redraw");
+  def fcr-redraw-resume(io,dir,redraw,pending) {
+   let said=fcr-redraw-step(io,dir,redraw,pending); let path=fcr-redraw-pending(dir);
+   oh-voice(oh-reading("reunion",fcr-abs(dir),"redraw",json-node-string("complete"),json-node-string(said == "" ? "complete" : said),json-node-int(said == ""),
+    said == "" ? [] : [oh-need("redraw",json-node-string(path))],said == "" ? [] : ["resume-redraw"],oh-reference(path)));
+   said;
+  }
+  def fcr-redraw-step(io,dir,redraw,pending) {
+   let phase=fhn-text(pending,"phase");
+   phase == "release" ? (host_path_remove(fcr-redraw-pending(dir)) == 0 ? "" : "completed redraw checkpoint could not be released") : {
+    let said=phase == "redraw" ? fcr-redraw-in(io,dir,redraw) : fcr-redraw-amended(io,dir,"");
+    said != "" ? said : fcr-redraw-step(io,dir,redraw,fcr-redraw-save(dir,oh-set(pending,"phase",json-node-string(phase == "redraw" ? "amend" : "release"))));
+   };
+  }
+  def fcr-redraw-amended(io, dir, said) = (String) said != "" ? said : {
+   let amended=hch-git-in(io, dir, "reunion-amend", ["-c", "user.name=Claude", "-c", "user.email=noreply@anthropic.com", "commit", "-q", "--amend", "--no-edit"]);
+   hch-ok?(amended) ? "" : "amend exit=" + hch-status-text(amended) + ": " + hch-said(amended);
+  };
   def fcr-pushed(run) = "[ok] exit=" ++ hch-status-text(run) ++ " " ++ hch-tail-line(hch-said(run));
  }
 }

@@ -589,3 +589,89 @@ stderr to `/dev/null`. Removing that redirection preserves the channel. A comman
 writing `failure-event` to stderr and exiting 7 previously displayed zero stderr
 bytes while claiming 13 shown; afterward its stderr is exactly those 13 bytes and
 its exit remains 7. Both the source carrier and installed local copy are repaired.
+
+The next reconstruction pass reuses the admitted collection lane for source-map
+labels, checks the existing dependency table before classifying an already held
+unit, and lets the existing prelude scan identify whether import-line removal is
+needed. Text without those lines copies once; carried text is already filtered.
+The existing home registry supplies a local name-length range. Import restores
+node arity once per node rather than once per field, reads the last source-map
+entry directly when it owns the offset, and skips hold discovery when there are
+no constants. No table, cache, image format or alternate loader was added.
+
+The intermediate collection-only measurement did not establish a gain. Adding
+the home filter and shared node-arity lookup produced fresh-process CPU readings
+1699/1751/1909 microseconds on the same 2,048-function image, against the previous
+1982/2015/2025. Resident calls took 85–97 microseconds. This combined improvement
+is about 13% at the median; it does not establish storage-only parity. A reader
+rewrite with fewer byte-bound checks showed no reliable gain and was discarded.
+
+Cell and image capability witnesses returned 16777215, import-carry 255, and all
+12 ownership/invalidation checks passed across separate processes. Actual CRLF
+imports and directive-shaped multiline string contents preserved exact bytes;
+the diagnostic after them remained on line 7. Corrupt checksum and valid-seal
+trailing bytes both voiced image-admission-failed followed by image-admitted;
+the repaired result and retained result were both 42.
+
+The landing witness exposed a cold bootstrap defect: JIT warm-up occurred before
+the floor compiler's existing ownership guard. It attempted image publication
+through another compiler before the first floor call owned that work. A retained
+scratch-checkout trace showed the nested publisher stop and a silent outer exit
+2. Warm-up now occurs inside the same guard; a new, uncached scratch BML unit
+checks successfully. This is an ordering repair at the existing owner, with no
+new recovery path. The native publication task witness also retains its actual
+value, status, errors, stop reason and individual source-check results in its
+checkpoint and emits them through organ health. An intentionally wrong pin
+reported 42 against 41; the corrected pin reported healthy with surprise 0.
+
+The remaining source-discovery work cannot be dropped on the strength of old
+member hashes: new home mappings and newly preferred import paths can change
+the selected closure. Current v9 unit rows hold IDs and sequences, while exact
+source observations and selected windows live in the existing RAM catalog.
+Validation and reconstruction still consume CPU; that gap remains measured and
+open. The byte-copy, row lookup and ordering changes remain seed transport that
+leaves with native Form collection and image admission.
+
+The final ordering candidate measured 1762/1739/1729 microseconds from disk and
+85/85/87 resident, with zero source work. The cold scratch observation also
+exposed publisher ownership: resolving its imports through a logical symlink in
+the caller's scratch checkout could miss the publisher body's own compiler
+sources. Admission now resolves only that selected internal publisher to its
+own source location, refusing if it cannot be resolved. User source and image
+paths retain their existing meaning. Cell and image capability witnesses again
+returned 16777215; the complete landing observer returned 524287.
+
+Reunion had ignored redraw failure and could push unfinished work. It now
+retains the affected paths and owning branch with the existing native checkpoint
+writer before drawing, returns the failure through its result and organ health,
+and resumes that obligation at the public entry even after the rebase is already
+complete. A different branch cannot consume it. In two separate processes a
+deliberate redraw exit 1 left the commit unpublished and the checkpoint present;
+the next public reunion completed the redraw, published and released the
+checkpoint. Healthy observation has surprise 0. No fallback replaced the failed
+operation.
+
+Fresh working directories exposed two more ownership seams. Lowering memo slots
+now include the exact source spelling, working directory and home registry that
+the existing packet already validates. Primary-slot ownership uses that same
+packet reader without redoing source observations. The selected floor compiler,
+like the image publisher, now resolves its physical owning source before entry;
+its dependencies no longer inherit a scratch checkout's logical symlink root.
+No user source identity or packet format changed.
+
+The existing atomic checkpoint writer moved from coding memory to the existing
+host-filesystem module, shared by coding and reunion. Reunion retains redraw,
+amend and release phases and resumes before another rebase. An actual rejecting
+commit hook left phase amend and the remote unchanged; resumption drew exactly
+once. An empty checkpoint was refused. A directory permission failure retained
+phase release and resumed without repeating drawing or amendment. Failure and
+completion were both observed through organ health. These private observations
+retain the exact commands and output under raw-redraw-phases in the research
+directory. The complete landing witness now returns 524287; current cell and
+image capability return 16777215, import-carry 255 and freshness 31.
+
+After these ownership repairs, fresh-process disk CPU measured 2013/1942/1825
+microseconds, with resident 95/100/92 and zero source compilation. This noisier
+round does not establish another speedup or storage-only parity. The remaining
+raw-source classification read and collection read are separate work; the next
+observation targets that duplicate while preserving read and ownership checks.
