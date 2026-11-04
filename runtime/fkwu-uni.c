@@ -2087,7 +2087,13 @@ extern int symlink(const char *, const char *);
 extern int link(const char *, const char *);
 extern void sync(void);
 extern int uname(void *);
+#if defined(__APPLE__)
+/* Use the SDK's default ABI, including its native current-directory lookup.
+ * This declaration leaves with the native host-path carrier. */
+extern char *realpath(const char *, char *) __DARWIN_EXTSN(realpath);
+#else
 extern char *realpath(const char *, char *);
+#endif
 #if defined(__APPLE__)
 #define FK_AT_FDCWD (-2)
 #else
@@ -25646,8 +25652,6 @@ static long long fk_path_repo_prefix_len(const char *path) {
 }
 #if defined(_WIN32)
 extern char *_fullpath(char *, const char *, unsigned long long);
-#else
-extern char *realpath(const char *, char *);
 #endif
 /* the .fkb identity spelling of a path: one absolute spelling regardless of
  * invocation CWD, then anchored at the lexical repo root so the same file
@@ -26506,10 +26510,7 @@ FK_PHASED(FK_PHASE_LOAD, int, fk_src_collect_file, (const char *path, long long 
 /* the after-read half of collection, shared by the file lane and the BML
  * floor's in-memory lane: the bytes arrive owned (freed here), registered
  * under the given path identity — for a lowered .bml that is the .bml
- * itself; the validated lowering memo remains a disposable local cache.
- * The root's absolute path stays here. Its image is that path plus the
- * cell suffix, so admission can keep the location it already resolved. */
-static char fk_cell_abs_source[FK_PATH_CAP];
+ * itself; the validated lowering memo remains a disposable local cache. */
 static int fk_src_collect_bytes(const char *path, char *owned, long long got,
                                 long long mtime, long long size, long long parent_idx, int lowered) {
     if (!fk_src_dep_reserve(fk_src_dep_count + 1)) {
@@ -26522,8 +26523,6 @@ static int fk_src_collect_bytes(const char *path, char *owned, long long got,
     char canonical[FK_PATH_CAP];
     const char *canon_id = fk_path_canon_id(path, canonical);
     fk_cstr_copy(fk_src_dep_canon[fk_src_dep_count], canon_id, FK_PATH_CAP);
-    if (parent_idx < 0 && canon_id >= canonical && canon_id < canonical + FK_PATH_CAP)
-        fk_cstr_copy(fk_cell_abs_source, canonical, FK_PATH_CAP);
     fk_src_dep_mtime[fk_src_dep_count] = mtime;
     fk_src_dep_size[fk_src_dep_count] = size;
     fk_src_dep_digest[fk_src_dep_count] = fk_bytes_fnv1a(owned, got);
@@ -27335,28 +27334,20 @@ static int fk_fkb_open_checked(const char *path, const char *source, const char 
  * values or unrelated cells are serialized; Form owns result persistence. */
 static void fk_admission_image_note(fk_admission *a, const char *path, long long node_base,
                                     long long node_count, long long fn_base) {
-    char absolute[FK_PATH_CAP], beside[FK_PATH_CAP];
-    const char *kept = 0;
+    char absolute[FK_PATH_CAP];
     if (!a || !a->hash[0] || fk_fkb_bad || fk_fkb_errors || fk_fkb_unrunnable ||
         !fk_cstr_eq(a->hash, fk_fkb_source_hash)) return;
-    long long an = fk_cstrlen(fk_cell_abs_source);
-    if (an > 0 && an + 10 < FK_PATH_CAP) {
-        memcpy(beside, fk_cell_abs_source, (unsigned long)an);
-        memcpy(beside + an, ".cell.fkb", 10);
-        if (fk_cstr_eq(path, beside)) kept = beside;
-    }
-    if (!kept) {
+    /* The image leaf has its own owner: a source path plus a suffix does
+     * not resolve a symlink at the artifact itself. */
 #if defined(_WIN32)
-        if (!_fullpath(absolute, path, FK_PATH_CAP)) return;
+    if (!_fullpath(absolute, path, FK_PATH_CAP)) return;
 #else
-        if (!realpath(path, absolute)) return;
+    if (!realpath(path, absolute)) return;
 #endif
-        kept = absolute;
-    }
-    long long n = fk_cstrlen(kept);
+    long long n = fk_cstrlen(absolute);
     a->image_path = malloc((unsigned long)n + 1);
     if (!a->image_path) fk_die("image admission location: out of memory");
-    memcpy(a->image_path, kept, (unsigned long)n + 1);
+    memcpy(a->image_path, absolute, (unsigned long)n + 1);
     a->image_bytes = fk_fkb_len + 8;
     a->node_base = node_base; a->node_end = node_base + node_count; a->fn_base = fn_base;
     static const char hex[] = "0123456789abcdef";

@@ -815,3 +815,34 @@ modest reduction with overlapping readings, not storage-only parity. The image
 was 466,582 bytes and source compilation was zero. Cell and image witnesses
 return 16777215, import-carry 255 and JIT-page 63. Private raw-demand-* and
 raw-catalog-* observations retain the failures, ownership checks and timings.
+
+The reached SHA-256 call identifies the remaining costs without the retired
+crowd fixture. A private profile measured 3,230 microseconds collecting its
+closure: 902 resolving seven source paths, 1,678 reading and validating lowering
+memos, 85 hashing admitted text. The seed's manual `realpath` declaration bound
+Darwin's compatibility entry instead of the SDK's default `__DARWIN_EXTSN`
+entry. Matching the SDK declaration reduced the measured path work to 119
+microseconds. No new cache or path-resolution implementation was added; this
+declaration leaves with the native host-path carrier. The shared line-scan
+candidate preserved source bytes and diagnostic line 7, but its timing overlapped
+the control, so it was not adopted.
+
+The preceding source-plus-suffix shortcut also misidentified a symlinked image
+leaf. A disk-only call reported the link name while `host_realpath` reported its
+backing artifact. Removing that shortcut and its retained source-path buffer
+restored the actual artifact owner: the same observation now returns equal
+paths, zero source compilation, no errors and no stop. The loader retains the
+resolved image in its existing admission record.
+
+SHA's digest remains the known `abc` result. Uninstrumented ABI candidate calls
+measured 3,319/3,682 microseconds from disk and 1,747/1,928 resident, against
+3,944/4,633 and 1,582/1,878 before the change. The fine profile read 2,757 from
+disk, 1,511 resident, with collection 2,223, image validation 285 and import 155.
+These observations establish a reduction in path work, not storage-only parity.
+The remaining dominant collection cost is lowering validation. Host filesystem
+checks return 32767; after installing the same binary for the cell band's child
+oracle, cell and image checks return 16777215 and import-carry 255. Its initial
+private-binary run retained a builder-identity mismatch in bit 1024; no runtime
+behavior was changed to satisfy that mismatch. Private raw-native-realpath*,
+raw-native-path-owner*, raw-collection-profile* and raw-image-path* records retain
+the commands and observations.
