@@ -971,3 +971,49 @@ still stop; no alternate execution path or new queue was added. Private
 raw-reconstruction-build-retained* and raw-jit-floor-* retain the exact failure
 and successful source build. Latest isolated SHA remains correct at 3,116
 microseconds disk and 1,586 resident, both compiling zero source units.
+
+The resumed native landing published through 041465b7d after every drift check
+passed (524287), including the fresh private CLI build. It restored the retained
+observation-ledger additions afterward.
+
+The collector now returns the dependency row it already selected. Its prelude
+caller unions that row directly, and the cell loader retains the root row
+directly; neither repeats a raw path scan. Recursive collection returns the
+captured owner row, not the last row appended by its children. Freshness, cycles,
+refusals and rollback retain their existing decisions and tables. This transport
+leaves with the native source collector. Cell checks return 16777215, including
+constant incarnation and same-timestamp source movement; import resolution
+returns 2111. SHA remains correct with zero source compilation at 3,116
+microseconds disk and 1,536 resident. These readings do not establish a separate
+timing gain or storage-only parity. Private raw-selected-dependency* records
+retain the candidate and observations.
+
+The next cost profile measured 2,627 microseconds in cold collection, 358 in
+image validation and 110 in reconstruction. Resident validation took 1,624.
+The cold lowering checks asked for 155 source digests and reused 125 of those
+observations; resident checks asked for 157 and reused 125. Source hashing cost
+847/898 microseconds, and reads 596/349. These are instrumented CPU readings;
+they do not establish storage bandwidth or parity. The v9 disk unit rows retain
+path hashes and sequences, but omit the catalog's paths, observations and member
+windows. Skipping discovery from those rows would discard needed evidence.
+
+A concrete raw-import shadow observation then returned the wrong answer:
+after an owner-relative dependency appeared, both resident calls still returned
+41 instead of 42, with no error or stop. Raw freshness now hashes and scans the
+same owned source bytes. The existing resolver checks each selected path against
+that owner's existing dependency window without collecting or changing rows;
+the existing stale handling then owns any rebuild. Cycles remain nonrecursive
+during this check. The observation changes to 42 and then reuses 42 with zero
+source compilation. No dependency-provenance table or cache was added.
+
+Source-identity mismatch also rejected an image silently. It now enters the
+existing image-admission-failed and rebuilt-image admission flow. The existing
+cell content check covers adding and removing a preferred dependency in raw and
+lowered cells: values 41/41/42/42/41/41, residency 0/1/0/1/0/1, and the owned
+failure/applied event pair on both changes. Before the repair the expanded band
+returned 16769023; after it returns 16777215. Import resolution returns 2111 and
+the native authoring guide completes. The first repaired SHA reading is correct
+at 3,131 microseconds disk and 1,699 resident, compiling zero source units. This
+fix establishes import-selection correctness, not a speed improvement or
+storage-only parity. Private raw-shadow*, raw-validation* and the expanded
+existing cell fixture retain the failure, repair, events and re-observation.

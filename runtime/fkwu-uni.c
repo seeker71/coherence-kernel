@@ -292,6 +292,7 @@ static long long fk_cell_read_bytes(long long max);
 static long long fk_cell_run_door(long long pathw, long long argw, long long dlw, long long inw, int native_only);
 static long long fk_cell_dep_find(const char *path);
 static long long fk_cell_dep_find_raw(const char *path);
+static long long fk_cell_member_index(long long root, long long dep);
 static void fk_cell_dep_init(long long idx);
 static void fk_cell_dep_union(long long owner, long long child);
 static void fk_cell_note_unrunnable(long long off);
@@ -301,6 +302,7 @@ static void fk_cell_note_unrunnable(long long off);
 #define fk_cell_run_door(a, b, c, d, e) fk_nothing
 #define fk_cell_dep_find(p) (-1)
 #define fk_cell_dep_find_raw(p) (-1)
+#define fk_cell_member_index(r, d) (-1)
 #define fk_cell_dep_init(i) do { } while (0)
 #define fk_cell_dep_union(o, c) do { } while (0)
 #define fk_cell_note_unrunnable(o) do { } while (0)
@@ -25570,7 +25572,7 @@ typedef struct {
 } fk_source_observation;
 static fk_source_observation *fk_source_observations;
 static long long fk_source_observations_n, fk_source_observations_cap;
-static int fk_source_digest(const char *path, long long *bytes, unsigned long long *digest);
+static int fk_source_digest(const char *path, long long *bytes, unsigned long long *digest, char **observed);
 static void fk_src_dep_release(void) {
     for (long long i = 0; i < fk_source_observations_n; i++) free(fk_source_observations[i].path);
     free(fk_source_observations);
@@ -25944,10 +25946,11 @@ static int fk_src_append_text(const char *path, const char *text, long long n, i
     fk_srctext[fk_slen] = 0;
     return 1;
 }
-static int fk_src_collect_file(const char *path, long long parent_idx);
+static int fk_src_collect_file(const char *path, long long parent_idx, long long *selected);
+static int fk_src_validate; /* discovery checks its admitted window without collecting */
 static int fk_unit_text_lowers(const char *text, long long n);
 static int fk_src_collect_bytes(const char *path, char *owned, long long got,
-                                long long mtime, long long size, long long parent_idx, int lowered);
+                                long long mtime, long long size, long long parent_idx, int lowered, long long *selected);
 static char fk_ascii_lower_char(char c) {
     if (c >= FK_CH_UPPER_A && c <= FK_CH_UPPER_Z) {
         return (char)(c + (FK_CH_LOWER_A - FK_CH_UPPER_A));
@@ -26145,9 +26148,12 @@ static int fk_src_collect_dep_inner(const char *owner_path, long long owner_idx,
         fk_diag_path("error", owner_path, "prelude path exceeds buffer");
         return 0;
     }
-    if (!fk_src_collect_file(dep_path, owner_idx)) return 0;
+    if (fk_src_validate)
+        return fk_cell_member_index(owner_idx, fk_cell_dep_find_raw(dep_path)) >= 0;
+    long long child;
+    if (!fk_src_collect_file(dep_path, owner_idx, &child)) return 0;
     if (fk_cell_collect) {
-        fk_cell_dep_union(owner_idx, fk_cell_dep_find_raw(dep_path));
+        fk_cell_dep_union(owner_idx, child);
     }
     return 1;
 }
@@ -26452,22 +26458,25 @@ static int fk_src_collect_preludes(const char *owner_path, const char *text, lon
     return fk_src_link_homes(owner_path, text, n, owner_idx);
 }
 static int fk_src_collect_bytes(const char *path, char *owned, long long got,
-                                long long mtime, long long size, long long parent_idx, int lowered);
-static int fk_src_collect_lowered(const char *path, long long parent_idx, long long mtime) {
+                                long long mtime, long long size, long long parent_idx, int lowered, long long *selected);
+static int fk_src_collect_lowered(const char *path, long long parent_idx, long long mtime, long long *selected) {
     if (mtime <= 0) {
         fk_diag_path("error", path, "source is missing or not stat-readable");
         return 0;
     }
     long long n = 0;
     char *low = fk_bml_lower_to_mem(path, &n);
-    return low ? fk_src_collect_bytes(path, low, n, mtime, n, parent_idx, 1) : 0;
+    return low ? fk_src_collect_bytes(path, low, n, mtime, n, parent_idx, 1, selected) : 0;
 }
-FK_PHASED(FK_PHASE_LOAD, int, fk_src_collect_file, (const char *path, long long parent_idx), (path, parent_idx)) {
-    if (fk_src_dep_lookup(path) >= 0) {
+FK_PHASED(FK_PHASE_LOAD, int, fk_src_collect_file, (const char *path, long long parent_idx, long long *selected), (path, parent_idx, selected)) {
+    if (selected) *selected = -1;
+    long long known = fk_src_dep_lookup(path);
+    if (known >= 0) {
+        if (selected) *selected = known;
         return 1;
     }
     if (fk_path_has_suffix(path, ".bml"))
-        return fk_src_collect_lowered(path, parent_idx, fk_path_mtime_raw(path));
+        return fk_src_collect_lowered(path, parent_idx, fk_path_mtime_raw(path), selected);
 #if defined(_WIN32)
     int fd = open(path, 0x8000);
 #else
@@ -26505,21 +26514,22 @@ FK_PHASED(FK_PHASE_LOAD, int, fk_src_collect_file, (const char *path, long long 
     /* Classify the bytes already read for collection. A raw unit's identity
      * and imports now use this same observation, not a second file read. */
     if (fk_unit_text_lowers(fk_buf, got))
-        return fk_src_collect_lowered(path, parent_idx, mtime);
+        return fk_src_collect_lowered(path, parent_idx, mtime, selected);
     char *owned = malloc((unsigned long)got + 1);
     if (owned == 0) {
         fk_die("fk_run_src: out of memory reading dependency source");
     }
     memcpy(owned, fk_buf, (unsigned long)got);
     owned[got] = 0;
-    return fk_src_collect_bytes(path, owned, got, mtime, size, parent_idx, 0);
+    return fk_src_collect_bytes(path, owned, got, mtime, size, parent_idx, 0, selected);
 }
 /* the after-read half of collection, shared by the file lane and the BML
  * floor's in-memory lane: the bytes arrive owned (freed here), registered
  * under the given path identity — for a lowered .bml that is the .bml
  * itself; the validated lowering memo remains a disposable local cache. */
 static int fk_src_collect_bytes(const char *path, char *owned, long long got,
-                                long long mtime, long long size, long long parent_idx, int lowered) {
+                                long long mtime, long long size, long long parent_idx, int lowered, long long *selected) {
+    if (selected) *selected = -1;
     if (!fk_src_dep_reserve(fk_src_dep_count + 1)) {
         free(owned);
         fk_diag_path("error", path, "could not grow .fk dependency metadata");
@@ -26561,6 +26571,7 @@ static int fk_src_collect_bytes(const char *path, char *owned, long long got,
     }
     fk_src_dep_text_len[idx] = fk_slen - fk_src_dep_text_off[idx];
     free(owned);
+    if (selected) *selected = idx;
     return 1;
 }
 static int fk_src_load_unit(const char *root_path, char *source_hash, long long hash_cap,
@@ -26573,7 +26584,7 @@ static int fk_src_load_unit(const char *root_path, char *source_hash, long long 
     fk_src_root_len = 0;
     fk_src_root_text[0] = 0;
     fk_cstr_copy(fk_src_root_path, root_path, FK_PATH_CAP);
-    if (!fk_src_collect_file(root_path, -1)) {
+    if (!fk_src_collect_file(root_path, -1, 0)) {
         return 0;
     }
     if (!fk_src_unit_hash(source_hash, hash_cap)) {
@@ -26599,7 +26610,7 @@ static int fk_src_load_unit_buffer(const char *root_path, char *owned, long long
     fk_src_root_len = 0;
     fk_src_root_text[0] = 0;
     fk_cstr_copy(fk_src_root_path, root_path, FK_PATH_CAP);
-    if (!fk_src_collect_bytes(root_path, owned, got, mtime, got, -1, 1)) {
+    if (!fk_src_collect_bytes(root_path, owned, got, mtime, got, -1, 1, 0)) {
         return 0;
     }
     if (!fk_src_unit_hash(source_hash, hash_cap)) {
@@ -27327,6 +27338,7 @@ static int fk_fkb_open_checked(const char *path, const char *source, const char 
     fk_fkb_source_hash[n] = 0; fk_fkb_pos += n;
     if (fk_cstrlen(fk_fkb_source_hash) != n) { fk_fkb_mark_bad("invalid source identity bytes"); return 0; }
     if (hash && !fk_cstr_eq(hash, fk_fkb_source_hash)) source_ok = 0;
+    if (!source_ok) { fk_fkb_mark_bad("source identity changed"); return 0; }
     (void)fk_fkb_read_signed(); /* timestamp provenance */
     fk_fkb_skip_string();      /* artifact's original location */
     long long sealed = fk_fkb_read_signed();
@@ -29399,8 +29411,19 @@ static int fk_cell_dep_fresh(long long d) {
     }
     long long n = 0;
     unsigned long long digest;
-    if (!fk_source_digest(fk_src_dep_path[d], &n, &digest)) return 0;
+    char *source = 0;
+    if (!fk_source_digest(fk_src_dep_path[d], &n, &digest, &source)) return 0;
     int same = digest == fk_src_dep_digest[d];
+    /* Unchanged bytes can select a newly present, higher-priority import.
+     * Reuse discovery against this owner's existing window; the caller owns
+     * any invalidation. This check leaves with native source admission. */
+    if (same) {
+        int validating = fk_src_validate, bare = 0;
+        fk_src_validate = 1;
+        same = fk_src_collect_preludes(fk_src_dep_path[d], source, n, d, &bare);
+        fk_src_validate = validating;
+    }
+    free(source);
     if (same) { fk_src_dep_mtime[d] = m; fk_src_dep_size[d] = n; fk_cd_ok[d] = 1; }
     return same;
 }
@@ -29901,10 +29924,10 @@ FK_PHASED(FK_PHASE_LOAD, int, fk_cell_load, (const char *path, long long *root_o
     fk_bml_bad_hit = 0;
     fk_collect_hit = 0;
     fk_cell_collect = 1;
-    ok = fk_src_collect_file(path, -1);
+    ok = fk_src_collect_file(path, -1, root_out);
     fk_cell_collect = 0;
     if (ok && (fk_bml_need_n > 0 || fk_bml_bad_hit)) { ok = 0; }   /* a lowering memo was missing (the door lowers the frontier and loads again), or the floor refused a unit of the closure */
-    *root_out = ok ? fk_cell_dep_find_raw(path) : -1;
+    if (!ok) *root_out = -1;
     if (!ok || *root_out < 0) {
         k = d0;
         while (k < fk_src_dep_count) { free(fk_cd_win[k]); fk_cd_win[k] = 0; k = k + 1; }
@@ -30856,12 +30879,14 @@ static char *fk_read_whole_file(const char *path, long long *out_len) {
 /* The current demand owns one observation per source path, shared by its BML
  * memo checks and raw dependencies. Nothing is inferred across demands or
  * writes. This transport shrinks into the native compiler's observation map. */
-static int fk_source_digest(const char *path, long long *bytes, unsigned long long *digest) {
+/* When requested, the caller owns the exact bytes whose digest was observed. */
+static int fk_source_digest(const char *path, long long *bytes, unsigned long long *digest, char **observed) {
+    if (observed) *observed = 0;
     long long pn = fk_cstrlen(path), i = 0;
     unsigned long long key = fk_bytes_fnv1a(path, pn);
     while (i < fk_source_observations_n &&
            (fk_source_observations[i].key != key || !fk_cstr_eq(fk_source_observations[i].path, path))) i++;
-    if (i < fk_source_observations_n && fk_source_observations[i].epoch == fk_cell_epoch &&
+    if (!observed && i < fk_source_observations_n && fk_source_observations[i].epoch == fk_cell_epoch &&
         fk_source_observations[i].writes == fk_file_writes) {
         *bytes = fk_source_observations[i].bytes; *digest = fk_source_observations[i].digest;
         return 1;
@@ -30869,7 +30894,7 @@ static int fk_source_digest(const char *path, long long *bytes, unsigned long lo
     char *source = fk_read_whole_file(path, bytes);
     if (!source) return 0;
     *digest = fk_bytes_fnv1a(source, *bytes);
-    free(source);
+    if (observed) *observed = source; else free(source);
     if (i == fk_source_observations_n) {
         if (i == fk_source_observations_cap) {
             long long cap = fk_source_observations_cap ? fk_source_observations_cap * 2 : 64;
@@ -31027,7 +31052,7 @@ static char *fk_bml_packet_body(const char *owner, const char *packet, long long
         } else if (context == 3 && kind == 'F') {
             long long bytes = 0;
             unsigned long long actual;
-            if (!fk_source_digest(path, &bytes, &actual)) {
+            if (!fk_source_digest(path, &bytes, &actual, 0)) {
                 if (moved) sprintf(moved, "%.4000s cannot be read completely", path);
                 return 0;
             }
@@ -31528,7 +31553,7 @@ static void fk_bml_scan(const char *root_path) {
     fk_cell_collect = 1;
     fk_bml_seen_n = 0;     /* the memos this scan finds holding, and only those, are what a begin-again would carry */
     fk_bml_scanning = 1;
-    ok = fk_src_collect_file(root_path, -1);
+    ok = fk_src_collect_file(root_path, -1, 0);
     (void)ok;
     fk_bml_scanning = 0;
     fk_cell_collect = 0;
