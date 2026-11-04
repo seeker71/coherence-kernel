@@ -27917,10 +27917,10 @@ static int fk_src_import_fkb_read(const char *fkb_path, fk_fkb_snapshot *snapsho
         }
     }
     if (fk_demand_building) {
-        fk_demand_building->fn_map = malloc((unsigned long)nf * 8);
+        fk_demand_building->fn_map = fn_roots;
+        fn_roots = 0;
         fk_demand_building->ready = calloc((unsigned long)nf, 1);
-        if (!fk_demand_building->fn_map || !fk_demand_building->ready) fk_die("image demand: out of memory");
-        memcpy(fk_demand_building->fn_map, fn_roots, (unsigned long)nf * 8);
+        if (!fk_demand_building->ready) fk_die("image demand: out of memory");
     }
     free(fn_roots);
     if (!fk_fkb_read_node_symbols(nr)) return 0;
@@ -27995,7 +27995,11 @@ static int fk_src_import_fkb_read(const char *fkb_path, fk_fkb_snapshot *snapsho
             if (ccnode[s] >= 0) fk_demand_node(fk_demand_building, ccnode[s] - node_base);
     }
     if (!fk_fkb_bad) {
-        fk_lit_pin_rows(node_base, node_base + nr);
+        /* The admitted image owns its strings even while their nodes sleep.
+         * The existing pin table retains them without reconstructing nodes. */
+        if (fk_demand_building) {
+            for (long long s = str_base; s < str_base + ns; s++) fk_lit_pin(s);
+        } else if (ns > 0) fk_lit_pin_rows(node_base, node_base + nr);
         /* the hold this image built over each row's initializer */
         long long k = node_base;
         while (const_count > 0 && k < node_base + nr) {

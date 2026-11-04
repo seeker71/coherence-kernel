@@ -746,3 +746,21 @@ and 100/108/86 resident, with zero source compilation. The validation repair
 establishes correct refusal, not another timing gain. A private stage profile
 measured collection 537, image opening 363, import 467 and catalog capture 131
 microseconds; storage-only parity remains open.
+
+After the on-demand node decoder arrived, a fresh-process observation exposed
+literal ownership: an untouched function's string was reclaimed after two
+melts. Its later call returned GO-BNF-SHORT-VAR instead of its original literal,
+with no compile error. Successful raw admission now pins its existing string
+table range, including strings whose nodes still sleep. It no longer scans
+every node to find those strings. This uses the existing pin table and leaves
+with native image admission. The demand owner also takes the already prepared
+function map directly instead of allocating, copying and freeing another one.
+
+The same observation now survives two melts and returns the exact original
+literal from disk with zero source compilation in both admissions. A malformed
+section after the map transfer still reports image-admission-failed and repairs
+successfully. Cell and image witnesses return 16777215, import-carry 255; native
+authoring guidance completed. The private raw-demand-string observations retain
+the failing and repaired outputs. Latest 2,048-function disk samples are
+1784/1696/1516 microseconds versus resident 98/96/90. These noisy readings establish
+no additional speedup, and storage-only parity remains open.
