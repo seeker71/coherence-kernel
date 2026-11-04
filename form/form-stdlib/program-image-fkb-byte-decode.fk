@@ -5,8 +5,11 @@
 // admits an 8h5 readback witness only when the readback bytes decode
 // canonically and match the external witness/container metadata.
 //
-// It is not a runtime loader. It does not execute, produce attempts or
-// observations, emit table text, install selectors, or grow the C seed.
+// The v5 witness decoder remains pure. The v8 path below patches one admitted
+// image from a restricted evaluator's captured proof, then conditionally
+// publishes it through the existing guarded rename door. It preserves the
+// owning image's metadata and reports publication care through organ-health.
+// Neither path executes the image or snapshots unrelated process state.
 //
 import form-stdlib/core.fk;
 import form-stdlib/str-byte-at.fk;
@@ -22,6 +25,7 @@ import form-stdlib/source-artifact-identity.fk;
 import form-stdlib/program-image-fkb.fk;
 import form-stdlib/program-image-fkb-byte-container.fk;
 import form-stdlib/program-image-fkb-byte-file-witness.fk;
+import form-stdlib/organ-health.bml;
 section [form.bml] {
     def pifbd-version() = "program-image-fkb-byte-decode-v5";
     def pifbd-feature(name, status) = ["program-image-fkb-byte-decode-feature", name, status];
@@ -345,4 +349,371 @@ section [form.bml] {
             };
         };
     };
+    // A cursor over an ordinary admitted v8 image. Unchanged spans remain raw
+    // strings, including 63-bit unit IDs which need not fit a tagged Form int.
+    def pifbd-v8-reader(bytes) = record_new(0,"raw",bytes,"pos",0,"end",len(bytes) - 8,"reason","");
+    def pifbd-v8-good(r) = record_get(r,"reason") == "";
+    def pifbd-v8-require(r,condition,reason) {
+        !condition && pifbd-v8-good(r) ? record_set(r,"reason",reason) : r;
+        condition;
+    }
+    def pifbd-v8-take(r,count) {
+        let at = record_get(r,"pos");
+        !pifbd-v8-good(r) ? nothing()
+        : !pifbd-v8-require(r,count >= 0 && at <= record_get(r,"end") && count <= record_get(r,"end") - at,"truncated-image-span") ? nothing()
+        : { record_set(r,"pos",at + count); substring(record_get(r,"raw"),at,at + count); };
+    }
+    def pifbd-v8-skip(r,count) {
+        let at = record_get(r,"pos");
+        pifbd-v8-good(r) && pifbd-v8-require(r,count >= 0 && at <= record_get(r,"end") && count <= record_get(r,"end") - at,"truncated-image-span")
+            ? record_set(r,"pos",at + count) : r;
+        r;
+    }
+    def pifbd-v8-u32(r) {
+        let s = pifbd-v8-take(r,4);
+        nothing?(s) ? 0 : str_byte_at(s,0) * 16777216 + str_byte_at(s,1) * 65536 + str_byte_at(s,2) * 256 + str_byte_at(s,3);
+    }
+    def pifbd-v8-int(r) {
+        let sign = pifbd-v8-take(r,1);
+        let hi = pifbd-v8-u32(r); let lo = pifbd-v8-u32(r);
+        nothing?(sign) ? 0 : !pifbd-v8-require(r,(str_byte_at(sign,0) == 0 || str_byte_at(sign,0) == 1) && hi < 1073741824,"nonrepresentable-image-integer") ? 0 : {
+            let mag = hi * 4294967296 + lo;
+            pifbd-v8-require(r,mag != 0 || str_byte_at(sign,0) == 0,"noncanonical-image-integer");
+            str_byte_at(sign,0) == 1 ? 0 - mag : mag;
+        };
+    }
+    def pifbd-v8-string(r) {
+        let n = pifbd-v8-u32(r);
+        pifbd-v8-take(r,n);
+    }
+    def pifbd-v8-skip-string(r) { let n = pifbd-v8-u32(r); pifbd-v8-skip(r,n); }
+    def pifbd-v8-count(r,width) {
+        let n = pifbd-v8-int(r);
+        pifbd-v8-require(r,n >= 0 && n <= (record_get(r,"end") - record_get(r,"pos")) / width,"impossible-image-count") ? n : 0;
+    }
+    def pifbd-v8-skip-strings(r,n) = n <= 0 || !pifbd-v8-good(r) ? r : {
+        pifbd-v8-skip-string(r); pifbd-v8-skip-strings(r,n - 1);
+    };
+    def pifbd-v8-skip-symbols(r,n,selected) = n <= 0 || !pifbd-v8-good(r) ? r : {
+        pifbd-v8-int(r); let fn = pifbd-v8-int(r); let arity = pifbd-v8-int(r);
+        pifbd-v8-skip-string(r);
+        fn == selected ? record_set(r,"arity",arity) : r;
+        record_has(record_get(r,"wanted"),fn.str()) ? record_set(record_get(r,"arities"),fn.str(),arity) : r;
+        pifbd-v8-skip-symbols(r,n - 1,selected);
+    };
+    def pifbd-v8-node-symbols(r,n,i,selected) = n <= 0 || !pifbd-v8-good(r) ? r : {
+        let start = record_get(r,"pos");
+        let node = pifbd-v8-int(r); pifbd-v8-int(r);
+        let deps = pifbd-v8-count(r,18);
+        pifbd-v8-skip(r,deps * 18);
+        pifbd-v8-require(r,node == i,"unordered-node-symbols");
+        node == selected ? {
+            record_set(r,"symbol_start",start);
+            record_set(r,"symbol_end",record_get(r,"pos"));
+        } : r;
+        pifbd-v8-node-symbols(r,n - 1,i + 1,selected);
+    };
+    def pifbd-v8-constants(r,n) = n <= 0 || !pifbd-v8-good(r) ? r : {
+        pifbd-v8-skip-string(r); pifbd-v8-skip(r,9); pifbd-v8-constants(r,n - 1);
+    };
+    def pifbd-v8-local-fn(owner,fn) = record_get(owner,"fn_base") == 0 ? fn : fn - record_get(owner,"fn_base") + 1;
+    def pifbd-v8-wanted(owner,ledger,held) = nil?(ledger) ? held : {
+        record_set(held,pifbd-v8-local-fn(owner,ledger[0][0]).str(),1);
+        pifbd-v8-wanted(owner,tail(ledger),held);
+    };
+    def pifbd-v8-index(bytes,owner,ledger) {
+        let fn = record_get(owner,"local_fn"); let body = record_get(owner,"local_body");
+        let r = pifbd-v8-reader(bytes);
+        record_set(r,"wanted",pifbd-v8-wanted(owner,ledger,record_new(0)));
+        record_set(r,"arities",record_new(0));
+        let magic = pifbd-v8-take(r,8); let version = pifbd-v8-u32(r);
+        pifbd-v8-require(r,magic == "FKPIFB1" + byte_to_str(0) && version == 8,"unsupported-program-image");
+        record_set(r,"builder",pifbd-v8-string(r));
+        record_set(r,"source",pifbd-v8-string(r));
+        record_set(r,"closure",pifbd-v8-string(r));
+        pifbd-v8-skip(r,9); pifbd-v8-skip-string(r);
+        let sealed = pifbd-v8-int(r); let errors = pifbd-v8-int(r); let refused = pifbd-v8-int(r);
+        pifbd-v8-require(r,sealed == 1 && errors == 0 && refused == 0,"image-carries-refusal");
+        let nf = pifbd-v8-count(r,9); let roots = record_get(r,"pos");
+        record_set(r,"roots",roots); record_set(r,"function_count",nf); pifbd-v8-skip(r,nf * 9);
+        record_set(r,"node_count_pos",record_get(r,"pos"));
+        let nr = pifbd-v8-count(r,36);
+        record_set(r,"nodes",record_get(r,"pos")); record_set(r,"node_count",nr);
+        pifbd-v8-skip(r,nr * 36);
+        record_set(r,"string_count_pos",record_get(r,"pos"));
+        let ns = pifbd-v8-count(r,4); record_set(r,"string_count",ns); record_set(r,"strings",record_get(r,"pos"));
+        pifbd-v8-skip-strings(r,ns); record_set(r,"strings_end",record_get(r,"pos"));
+        record_set(r,"arity",nothing());
+        pifbd-v8-skip-symbols(r,pifbd-v8-count(r,31),fn);
+        record_set(r,"node_symbols_pos",record_get(r,"pos"));
+        let nsy = pifbd-v8-count(r,27);
+        pifbd-v8-require(r,nsy == nr,"node-symbol-count-mismatch");
+        pifbd-v8-node-symbols(r,nsy,0,body);
+        record_set(r,"node_symbols_end",record_get(r,"pos"));
+        let nc = pifbd-v8-count(r,13); pifbd-v8-constants(r,nc);
+        let nu = pifbd-v8-count(r,18); pifbd-v8-skip(r,nu * 18);
+        let no = pifbd-v8-count(r,9);
+        pifbd-v8-require(r,no == nc,"constant-owner-count-mismatch");
+        pifbd-v8-skip(r,no * 9);
+        pifbd-v8-require(r,record_get(r,"pos") == record_get(r,"end"),"trailing-image-bytes");
+        pifbd-v8-require(r,fn > 0 && fn < nf && body >= 0 && body < nr,"image-entry-out-of-range");
+        pifbd-v8-good(r) ? {
+            record_set(r,"pos",roots + fn * 9);
+            pifbd-v8-require(r,pifbd-v8-int(r) == body,"image-entry-body-mismatch");
+        } : r;
+        r;
+    }
+    def pifbd-v8-ledger?(r,owner,ledger) = nil?(ledger) ? 1 : {
+        let definition = head(ledger); let fn = pifbd-v8-local-fn(owner,definition[0]);
+        let body = definition[1] - record_get(owner,"node_base");
+        definition[3][0] != record_get(owner,"builder") || definition[3][1] != record_get(owner,"closure")
+            || fn <= 0 || fn >= record_get(r,"function_count") || body < 0 || body >= record_get(r,"node_count") ? 0 : {
+            record_set(r,"pos",record_get(r,"roots") + fn * 9);
+            pifbd-v8-int(r) == body && record_has(record_get(r,"arities"),fn.str()) && record_get(record_get(r,"arities"),fn.str()) == definition[2]
+                && pifbd-v8-good(r) && pifbd-v8-ledger?(r,owner,tail(ledger));
+        };
+    };
+    def pifbd-v8-outcome(status,reason,owner,proof,bytes) = record_new(0,"kind","program-image-initializer","status",status,"reason",reason,"owner",owner,"proof",proof,"bytes",bytes);
+    def pifbd-v8-optional(row,key) = record_has(row,key) ? record_get(row,key) : nothing();
+    def pifbd-v8-event(result,fresh) {
+        let previous = pifbd-v8-optional(result,"event");
+        let reading = nothing?(previous) ? fresh : {
+            record_set(result,"previous_event",previous);
+            oh-set(fresh,"care_of",oh-get(previous,"id"));
+        };
+        record_set(result,"event",reading); oh-frame(reading); result;
+    }
+    def pifbd-v8-signal(result) {
+        let owner = record_get(result,"owner");
+        let offeredPath = record?(owner) ? pifbd-v8-optional(owner,"path") : nothing();
+        let path = value_kind(offeredPath) == "string" ? offeredPath : nothing();
+        let flow = nothing?(path) || len(path) == 0 ? "unmapped-image" : path;
+        let phase = pifbd-v8-optional(result,"phase") ?? "admission";
+        let guard = pifbd-v8-optional(result,"guard");
+        let releaseHeld = record?(guard) && (!record_has(guard,"released") || record_get(guard,"released") != 1);
+        let reason = record_get(result,"reason");
+        let reading = oh-reading("program-image",flow,"immutable-initializer",json-node-string("verified-owning-image"),json-node-string(reason),json-node-int(0),
+            [oh-need("program-image-publication",json-node-string(reason))],record_has(result,"temporary") && !releaseHeld ? ["retry-publication","await-resource"] : ["await-resource"],
+            json-node-object([oh-s("path",path),oh-s("reason",reason),oh-s("phase",phase)]));
+        pifbd-v8-event(result,reading);
+    }
+    def pifbd-v8-refused(reason,owner,proof) = pifbd-v8-signal(pifbd-v8-outcome("repair-required",reason,owner,proof,nothing()));
+    def pifbd-v8-fields?(owner,keys,kind) = nil?(keys) ? 1 : !record_has(owner,head(keys)) ? 0
+        : value_kind(record_get(owner,head(keys))) != kind ? 0 : pifbd-v8-fields?(owner,tail(keys),kind);
+    def pifbd-v8-owner?(owner) = !record?(owner) ? 0 : record_get(owner,"kind") != "program-image-owner" ? 0
+        : !pifbd-v8-fields?(owner,["fn","body","arity","local_fn","local_body","node_base","fn_base","bytes"],"int") ? 0
+        : !pifbd-v8-fields?(owner,["path","checksum","builder","closure"],"string") ? 0
+        : record_get(owner,"fn") > 0 && record_get(owner,"node_base") >= 0 && record_get(owner,"fn_base") >= 0
+        && record_get(owner,"local_fn") == pifbd-v8-local-fn(owner,record_get(owner,"fn"))
+        && record_get(owner,"local_body") == record_get(owner,"body") - record_get(owner,"node_base")
+        && record_get(owner,"local_body") >= 0 && record_get(owner,"bytes") >= 20 && len(record_get(owner,"path")) > 0;
+    def pifbd-v8-definition?(entry) = value_kind(entry) != "list" ? 0 : len(entry) != 4 ? 0
+        : value_kind(entry[0]) != "int" || value_kind(entry[1]) != "int" || value_kind(entry[2]) != "int" ? 0
+        : value_kind(entry[3]) != "list" ? 0 : len(entry[3]) != 2 ? 0 : value_kind(entry[3][0]) == "string" && value_kind(entry[3][1]) == "string";
+    def pifbd-v8-owner-fields-equal?(a,b,keys) = nil?(keys) ? 1
+        : value_eq(record_get(a,head(keys)),record_get(b,head(keys))) && pifbd-v8-owner-fields-equal?(a,b,tail(keys));
+    def pifbd-v8-owner-bound?(owner,actual) = pifbd-v8-owner?(actual) && pifbd-v8-owner-fields-equal?(owner,actual,
+        ["kind","fn","body","arity","local_fn","local_body","node_base","fn_base","path","bytes","checksum","builder","closure"]);
+    def pifbd-v8-definitions?(ledger) = nil?(ledger) ? 1 : pifbd-v8-definition?(head(ledger)) ? pifbd-v8-definitions?(tail(ledger)) : 0;
+    def pifbd-v8-in-ledger?(entry,ledger) = nil?(ledger) ? 0 : value_eq(entry,head(ledger)) || pifbd-v8-in-ledger?(entry,tail(ledger));
+    def pifbd-v8-granted?(granted) = value_kind(granted) != "list" ? 0 : len(granted) != 4 ? 0
+        : !pifbd-v8-definition?(granted[0]) ? 0 : value_kind(granted[2]) != "list" ? 0
+        : pifbd-v8-definitions?(granted[2]) && pifbd-v8-in-ledger?(granted[0],granted[2]);
+    def pifbd-v8-entry?(entry,owner) = !pifbd-v8-definition?(entry) ? 0
+        : entry[0] == record_get(owner,"fn") && entry[1] == record_get(owner,"body") && entry[2] == 0 && record_get(owner,"arity") == 0
+        && entry[3][0] == record_get(owner,"builder") && entry[3][1] == record_get(owner,"closure");
+    def pifbd-v8-checksum(bytes) = len(bytes) < 8 ? nothing() : hex-encode(sai-string-bytes(substring(bytes,len(bytes) - 8,len(bytes))));
+    def pifbd-v8-owned?(bytes,owner) = value_kind(bytes) != "string" ? 0 : len(bytes) < 20 ? 0
+        : len(bytes) == record_get(owner,"bytes") && pifbd-v8-checksum(bytes) == record_get(owner,"checksum") && pifbc-v8-fold(substring(bytes,0,len(bytes) - 8)) == record_get(owner,"checksum");
+    // `admit` is supplied by the restricted evaluator, which already owns the
+    // proof semantics. It yields [definition, value, ledger, actual-image-owner]
+    // for its completed proof; this codec never fabricates a success proof.
+    def pifbd-v8-patch(bytes,owner,proof,admit) = !pifbd-v8-owner?(owner) ? pifbd-v8-refused("image-owner-unavailable",owner,proof) : {
+        let granted = admit(proof);
+        !pifbd-v8-granted?(granted) ? pifbd-v8-refused("initializer-proof-refused",owner,proof)
+        : !pifbd-v8-owner?(granted[3]) ? pifbd-v8-refused("image-owner-unavailable",owner,proof)
+        : !pifbd-v8-owner-bound?(owner,granted[3]) ? pifbd-v8-refused("image-owner-changed",owner,proof)
+        : !pifbd-v8-entry?(granted[0],owner) ? pifbd-v8-refused("initializer-owner-mismatch",owner,proof)
+        : !pifbd-v8-owned?(bytes,owner) ? pifbd-v8-refused("admitted-image-bytes-mismatch",owner,proof)
+        : pifbd-v8-transform(bytes,owner,proof,granted);
+    };
+    def pifbd-v8-transform(bytes,owner,proof,granted) {
+            let r = pifbd-v8-index(bytes,owner,granted[2]);
+            !pifbd-v8-good(r) ? pifbd-v8-refused(record_get(r,"reason"),owner,proof)
+            : record_get(r,"builder") != record_get(owner,"builder") || record_get(r,"closure") != record_get(owner,"closure") || record_get(r,"arity") != 0
+                ? pifbd-v8-refused("image-admission-metadata-mismatch",owner,proof)
+            : !pifbd-v8-ledger?(r,owner,granted[2]) ? pifbd-v8-refused("reached-definition-image-mismatch",owner,proof)
+            : pifbd-v8-current?(bytes,r,owner,granted[1]) ? pifbd-v8-outcome("image-current","",owner,proof,bytes)
+            : pifbd-v8-replace(bytes,r,owner,proof,granted[1]);
+    }
+    def pifbd-v8-current?(bytes,r,owner,value) {
+        let at = record_get(r,"nodes") + record_get(owner,"local_body") * 36;
+        let row = substring(bytes,at,at + 36); let kind = value_kind(value);
+        kind == "int" ? row == pifbc-v8-row(1,value,0,0)
+        : kind == "null" ? row == pifbc-v8-row(137,0,0,0)
+        : kind == "list" ? nil?(value) && row == pifbc-v8-row(18,0,0,0)
+        : kind != "string" ? 0 : {
+            let cursor = pifbd-v8-reader(bytes); record_set(cursor,"pos",at);
+            let tag = pifbd-v8-int(cursor); let slot = pifbd-v8-int(cursor);
+            tag != 24 || slot < 0 || slot >= record_get(r,"string_count") ? 0 : {
+                record_set(cursor,"pos",record_get(r,"strings"));
+                pifbd-v8-skip-strings(cursor,slot);
+                pifbd-v8-string(cursor) == value && pifbd-v8-good(cursor);
+            };
+        };
+    }
+    def pifbd-v8-anonymous(from,count) = count <= 0 ? "" : pifbc-v8-int(from) + pifbc-v8-int(0 - 1) + pifbc-v8-int(0) + pifbd-v8-anonymous(from + 1,count - 1);
+    def pifbd-v8-replace(bytes,r,owner,proof,value) {
+        let nr = record_get(r,"node_count"); let ns = record_get(r,"string_count");
+        let literals = pifbc-v8-literals(nr,ns);
+        pifbc-v8-literal(literals,value);
+        record_get(literals,"reason") != "" ? pifbd-v8-refused(record_get(literals,"reason"),owner,proof) : {
+            let rows = record_get(literals,"rows");
+            let extra = record_get(literals,"next") - nr - 1;
+            let at = record_get(r,"nodes") + record_get(owner,"local_body") * 36;
+            let sp = record_get(r,"string_count_pos"); let se = record_get(r,"strings_end");
+            let yp = record_get(r,"node_symbols_pos"); let ye = record_get(r,"node_symbols_end");
+            let ys = record_get(r,"symbol_start"); let yt = record_get(r,"symbol_end");
+            let payload = substring(bytes,0,record_get(r,"node_count_pos")) + pifbc-v8-int(nr + extra)
+                + substring(bytes,record_get(r,"nodes"),at) + head(rows) + substring(bytes,at + 36,sp)
+                + pifbc-v8-join(reverse(tail(rows))) + pifbc-v8-int(record_get(literals,"strings"))
+                + substring(bytes,sp + 9,se) + pifbc-v8-join(reverse(record_get(literals,"text")))
+                + substring(bytes,se,yp) + pifbc-v8-int(nr + extra) + substring(bytes,yp + 9,ys)
+                + substring(bytes,ys,ys + 18) + pifbc-v8-int(0) + substring(bytes,yt,ye)
+                + pifbd-v8-anonymous(nr,extra) + substring(bytes,ye,len(bytes) - 8);
+            pifbd-v8-outcome("image-patched","",owner,proof,pifbc-v8-seal(payload));
+        };
+    }
+    // Every demand in a batch stands on the same immutable admitted image.
+    // Later literal patches compose in RAM; one guarded publication carries
+    // all of them, without rewriting the running admission's provenance.
+    def pifbd-v8-same-image?(a,b) = pifbd-v8-owner?(a) && pifbd-v8-owner?(b)
+        && record_get(a,"path") == record_get(b,"path") && record_get(a,"bytes") == record_get(b,"bytes")
+        && record_get(a,"checksum") == record_get(b,"checksum") && record_get(a,"builder") == record_get(b,"builder")
+        && record_get(a,"closure") == record_get(b,"closure");
+    def pifbd-v8-requests?(requests) = value_kind(requests) != "list" ? 0 : nil?(requests) ? 1
+        : value_kind(head(requests)) != "list" ? 0 : len(head(requests)) != 2 ? 0 : pifbd-v8-requests?(tail(requests));
+    def pifbd-v8-patch-many(bytes,requests,admit) = !pifbd-v8-requests?(requests) ? pifbd-v8-refused("initializer-demand-malformed",nothing(),requests)
+        : nil?(requests) ? pifbd-v8-refused("initializer-demand-missing",nothing(),requests) : {
+        let owner = requests[0][0];
+        !pifbd-v8-owner?(owner) ? pifbd-v8-refused("image-owner-unavailable",owner,requests)
+        : !pifbd-v8-owned?(bytes,owner) ? pifbd-v8-refused("admitted-image-bytes-mismatch",owner,requests)
+        : pifbd-v8-patch-next(bytes,owner,requests,requests,admit,0);
+    };
+    def pifbd-v8-patch-next(bytes,first,remaining,requests,admit,changed) = nil?(remaining)
+        ? pifbd-v8-outcome(changed ? "image-patched" : "image-current","",first,requests,bytes) : {
+        let owner = remaining[0][0]; let proof = remaining[0][1]; let granted = admit(proof);
+        let step = !pifbd-v8-same-image?(first,owner) ? pifbd-v8-refused("batch-image-owner-mismatch",owner,proof)
+            : !pifbd-v8-granted?(granted) ? pifbd-v8-refused("initializer-proof-refused",owner,proof)
+            : !pifbd-v8-owner?(granted[3]) ? pifbd-v8-refused("image-owner-unavailable",owner,proof)
+            : !pifbd-v8-owner-bound?(owner,granted[3]) ? pifbd-v8-refused("image-owner-changed",owner,proof)
+            : !pifbd-v8-entry?(granted[0],owner) ? pifbd-v8-refused("initializer-owner-mismatch",owner,proof)
+            : pifbd-v8-transform(bytes,owner,proof,granted);
+        record_get(step,"status") == "repair-required" ? {
+            record_set(step,"requests",requests); record_set(step,"candidate",bytes); step;
+        } : pifbd-v8-patch-next(record_get(step,"bytes"),first,tail(remaining),requests,admit,changed || record_get(step,"status") == "image-patched");
+    };
+    def pifbd-v8-publish(owner,proof,admit) = pifbd-v8-publish-many([[owner,proof]],admit);
+    def pifbd-v8-publish-many(requests,admit) = !pifbd-v8-requests?(requests) ? pifbd-v8-refused("initializer-demand-malformed",nothing(),requests)
+        : nil?(requests) ? pifbd-v8-refused("initializer-demand-missing",nothing(),requests) : {
+        let owner = requests[0][0];
+        !pifbd-v8-owner?(owner) ? pifbd-v8-refused("image-owner-unavailable",owner,requests) : {
+            let path = record_get(owner,"path"); let original = read_file(path);
+            let patch = pifbd-v8-patch-many(original,requests,admit);
+            record_get(patch,"status") != "image-patched" ? patch : pifbd-v8-publish-patch(path,original,patch);
+        };
+    };
+    def pifbd-v8-publish-patch(path,original,patch) {
+        // Public observations never alias the operation's publication state.
+        // The retained callable owns the original bytes and completed effects.
+        let private = pifbd-v8-copy(patch);
+        let state = record_new(0,"path",path,"expected",original,"candidate",record_get(private,"bytes"),"result",private);
+        record_set(state,"result",pifbd-v8-stage(path,original,private));
+        pifbd-v8-publication-view(state);
+    }
+    def pifbd-v8-copy-list(values) = nil?(values) ? [] : cons(pifbd-v8-copy(head(values)),pifbd-v8-copy-list(tail(values)));
+    def pifbd-v8-copy(value) = record?(value) ? {
+        let copy = record_new(0);
+        record_keys(value) |> map(key => record_set(copy,key,pifbd-v8-copy(record_get(value,key))));
+        copy;
+    } : value_kind(value) == "list" ? pifbd-v8-copy-list(value) : value;
+    def pifbd-v8-equal-list?(a,b) = nil?(a) ? nil?(b) : nil?(b) ? 0
+        : pifbd-v8-equal?(head(a),head(b)) && pifbd-v8-equal-list?(tail(a),tail(b));
+    def pifbd-v8-equal-fields?(a,b,keys) = nil?(keys) ? 1
+        : record_has(a,head(keys)) == record_has(b,head(keys))
+        && pifbd-v8-equal?(pifbd-v8-optional(a,head(keys)),pifbd-v8-optional(b,head(keys)))
+        && pifbd-v8-equal-fields?(a,b,tail(keys));
+    def pifbd-v8-equal?(a,b) = record?(a) ? record?(b) && len(record_keys(a)) == len(record_keys(b)) && pifbd-v8-equal-fields?(a,b,record_keys(a))
+        : value_kind(a) == "list" ? value_kind(b) == "list" && pifbd-v8-equal-list?(a,b) : value_eq(a,b);
+    def pifbd-v8-publication-view(state) {
+        let view = pifbd-v8-copy(record_get(state,"result"));
+        record_set(view,"resume",(offered,response) => pifbd-v8-resume-owned(state,offered,response));
+        view;
+    }
+    def pifbd-v8-stage(path,original,patch) {
+        let temporary = path + ".initializer." + host_pid().str();
+        let bytes = record_get(patch,"bytes");
+        let wrote = write_file(temporary,bytes);
+        record_set(patch,"expected",original); record_set(patch,"temporary",temporary);
+        record_set(patch,"wrote",wrote);
+        wrote != len(bytes) ? pifbd-v8-publication-failed("image-publication-write-incomplete",patch,"write",[])
+        : {
+            let readback = read_file(temporary); record_set(patch,"readback",readback);
+            readback != bytes ? pifbd-v8-publication-failed("image-publication-readback-mismatch",patch,"readback",["candidate-written"])
+                : pifbd-v8-commit(patch);
+        };
+    }
+    def pifbd-v8-publication-failed(reason,patch,phase,completed) {
+        let result = pifbd-v8-outcome("repair-required",reason,record_get(patch,"owner"),record_get(patch,"proof"),record_get(patch,"bytes"));
+        record_set(result,"expected",record_get(patch,"expected")); record_set(result,"temporary",record_get(patch,"temporary"));
+        record_set(result,"wrote",pifbd-v8-optional(patch,"wrote")); record_set(result,"readback",pifbd-v8-optional(patch,"readback"));
+        record_set(result,"guard",pifbd-v8-optional(patch,"guard"));
+        record_set(result,"event",pifbd-v8-optional(patch,"event"));
+        record_set(result,"phase",phase); record_set(result,"completed",completed); pifbd-v8-signal(result);
+    }
+    def pifbd-v8-commit(patch) {
+        let owner = record_get(patch,"owner"); let path = record_get(owner,"path");
+        let guard = host_path_rename(record_get(patch,"temporary"),record_new(0,"path",path,"expected",record_get(patch,"expected")));
+        record_set(patch,"guard",guard);
+        !record?(guard) ? pifbd-v8-publication-failed("image-publication-guard-unavailable",patch,"commit",["candidate-written","candidate-verified"])
+        : record_get(guard,"released") != 1 ? pifbd-v8-publication-failed("image-publication-release-failed",patch,"release",record_get(guard,"published") == 1 ? ["candidate-written","candidate-verified","image-published"] : ["candidate-written","candidate-verified"])
+        : record_get(guard,"published") != 1 ? pifbd-v8-publication-failed(record_get(guard,"reason"),patch,"commit",["candidate-written","candidate-verified"])
+        : pifbd-v8-verify-published(patch);
+    }
+    def pifbd-v8-verify-published(patch) {
+        let owner = record_get(patch,"owner"); let path = record_get(owner,"path");
+        let readback = read_file(path); record_set(patch,"readback",readback);
+        readback != record_get(patch,"bytes") ? pifbd-v8-publication-failed("image-publication-final-readback-mismatch",patch,"verify",["candidate-written","candidate-verified","image-published","publication-released"])
+        : {
+            record_set(patch,"status","image-published"); record_set(patch,"reason",""); record_set(patch,"phase","complete");
+            record_set(patch,"completed",["candidate-written","candidate-verified","image-published","publication-released","image-readback-verified"]);
+            let reading = oh-reading("program-image",path,"immutable-initializer",json-node-string("image-published"),json-node-string("image-published"),json-node-int(1),[],[],json-node-object([oh-s("path",path),oh-s("checksum",pifbd-v8-checksum(record_get(patch,"bytes")))]));
+            pifbd-v8-event(patch,reading);
+        };
+    }
+    // A relevant resource event resumes the private operation, never authority
+    // reconstructed from its mutable public observation. A completed rename is
+    // only observed again, including when a caller changes its displayed flags.
+    def pifbd-v8-resume(held,response) = !record?(held) ? held
+        : value_kind(pifbd-v8-optional(held,"resume")) != "closure"
+            ? pifbd-v8-refused("image-publication-permission-unavailable",pifbd-v8-optional(held,"owner"),pifbd-v8-optional(held,"proof"))
+        : record_get(held,"resume")(held,response);
+    def pifbd-v8-resume-owned(state,offered,response) {
+        let held = record_get(state,"result");
+        let same = pifbd-v8-equal-fields?(offered,held,["kind","status","reason","owner","proof","bytes","expected","temporary","wrote","readback","guard","phase","completed","event","previous_event"]);
+        !same ? {
+            record_set(state,"result",pifbd-v8-publication-failed("image-publication-permission-mismatch",held,"permission",record_get(held,"completed")));
+            pifbd-v8-publication-view(state);
+        } : record_get(held,"status") != "repair-required" ? pifbd-v8-publication-view(state)
+        : oh-select(record_get(held,"event"),response,"") != "retry-publication" ? pifbd-v8-publication-view(state) : {
+            oh-frame(oh-applied(record_get(held,"event"),"retry-publication",json-node-string("retained-candidate")));
+            let guard = record_get(held,"guard");
+            let result = record?(guard) && record_get(guard,"released") != 1
+                ? pifbd-v8-publication-failed("image-publication-release-unverified",held,"release",record_get(held,"completed"))
+            : record?(guard) && record_get(guard,"published") == 1 ? pifbd-v8-verify-published(held)
+            : pifbd-v8-stage(record_get(state,"path"),record_get(state,"expected"),held);
+            record_set(state,"result",result);
+            pifbd-v8-publication-view(state);
+        };
+    }
 }

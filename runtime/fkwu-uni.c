@@ -2062,6 +2062,9 @@ extern int ftruncate(int, long long);
 extern int rmdir(const char *);
 extern int unlink(const char *);
 extern int rename(const char *, const char *);
+#if !defined(_WIN32)
+extern int renameat(int, const char *, int, const char *);
+#endif
 extern int getpid(void);
 #if defined(__APPLE__)
 /* Form's native POSIX lane can fork directly from its CPU image. Darwin's
@@ -19132,9 +19135,135 @@ static void *fk_prog_map(char letter, long long pid, long long *size) {
  * The Form cache owner reads this snapshot; it never infers running code from a
  * mutable file or a sibling symbol lens. New admissions mask reused indices. */
 static char fk_fkb_builder_id[64];
+/* Records carried across host doors. Their meanings stay with Form callers. */
+static long long fk_cr_new(void) {
+    fk_rp = fk_rp + 1;
+    fk_record_reserve(fk_rp + 1);
+    fk_rcnt[fk_rp] = 0;
+    fk_rbp[fk_rp] = 0;
+    return fk_rp;
+}
+static void fk_cr_put(long long r, const char *key, long long v) {
+    long long k = fk_stri(fk_sbuf(key, fk_cstrlen(key)));
+    fk_rappend(r, k, v);
+}
+static long long fk_cr_str(const char *s) {
+    return fk_sbuf(s != 0 ? s : "", s != 0 ? fk_cstrlen(s) : 0);
+}
+static long long fk_cr_key_find(long long recw, const char *key) {
+    long long r = fk_ridx(recw), k = 0, kn = fk_cstrlen(key);
+    if (r < 1 || r > fk_rp) return fk_nothing;
+    while (k < fk_rcnt[r]) {
+        long long si = fk_rkey[r][k];
+        if (si >= 0 && FK_SOK(si) && FK_SLEN(si) == kn && memcmp(FK_SBYTES(si), key, (unsigned long)kn) == 0) return fk_rval[r][k];
+        k = k + 1;
+    }
+    return fk_nothing;
+}
+typedef struct {
+    int published, matched, released, error;
+    const char *reason;
+} fk_publication;
+/* The filesystem carrier supplies one compare/rename critical section. The
+ * destination directory inode is the lock, so there is no lock sidecar or
+ * age-based ownership stealing. Both the seed writer and Form use this seam;
+ * proof, retry and retention policy stay in the Form program-image owner. */
+#if !defined(_WIN32)
+static int fk_publication_parent(const char *path, const char **name) {
+    char parent[FK_PATH_CAP];
+    long long end = fk_cstrlen(path);
+    while (end > 1 && path[end - 1] == '/') end--;
+    long long cut = end;
+    while (cut > 0 && path[cut - 1] != '/') cut--;
+    if (!cut) { parent[0] = '.'; parent[1] = 0; }
+    else { long long n = cut == 1 ? 1 : cut - 1; memcpy(parent, path, (unsigned long)n); parent[n] = 0; }
+    *name = path + cut;
+#if defined(O_SEARCH)
+    return open(parent, O_SEARCH | O_NONBLOCK);
+#else
+    return open(parent, O_RDONLY | O_DIRECTORY | O_NONBLOCK);
+#endif
+}
+static int fk_path_matches(int parent, const char *name, const char *expected, long long len,
+                           int *released) {
+    int fd = openat(parent, name, O_RDONLY | O_NONBLOCK);
+    if (fd < 0) return -1;
+    struct stat state;
+    int stated = fstat(fd, &state), saved_stat_error = errno;
+    if (stated || !S_ISREG(state.st_mode)) {
+        int closed = close(fd);
+        if (closed) *released = 0;
+        if (stated && !closed) errno = saved_stat_error;
+        return stated || closed ? -1 : -2;
+    }
+    char bytes[16384];
+    long long at = 0;
+    int match = 1;
+    for (;;) {
+        long long got = read(fd, bytes, sizeof(bytes));
+        if (got < 0 && errno == EINTR) continue;
+        if (got < 0) { match = -1; break; }
+        if (!got) { match = at == len; break; }
+        if (got > len - at || memcmp(bytes, expected + at, (unsigned long)got)) { match = 0; break; }
+        at += got;
+    }
+    int saved = errno;
+    if (close(fd) != 0) { *released = 0; return -1; }
+    errno = saved;
+    return match;
+}
+#endif
+static fk_publication fk_path_publish(const char *from, const char *to,
+                                       const char *expected, long long len) {
+    fk_publication r = {0, 0, 1, 0, "publication-unavailable"};
+#if defined(_WIN32)
+    if (expected) return r;
+    r.matched = 1;
+    r.published = rename(from, to) == 0;
+    r.error = r.published ? 0 : errno;
+    r.reason = r.published ? "published" : "rename-failed";
+#else
+    const char *from_name, *to_name;
+    int lock = fk_publication_parent(to, &to_name);
+    if (lock < 0) { r.reason = "publication-directory-unavailable"; r.error = errno; return r; }
+    int source = fk_publication_parent(from, &from_name);
+    if (source < 0) {
+        r.reason = "publication-stage-directory-unavailable"; r.error = errno;
+        r.released = close(lock) == 0; return r;
+    }
+    int locked;
+    do { locked = flock(lock, LOCK_EX); } while (locked && errno == EINTR);
+    if (locked) {
+        r.reason = "publication-lock-unavailable"; r.error = errno;
+        int source_closed = close(source), target_closed = close(lock);
+        r.released = !source_closed && !target_closed; return r;
+    }
+    int comparison_released = 1;
+    int match = expected ? fk_path_matches(lock, to_name, expected, len, &comparison_released) : 1;
+    r.matched = match == 1;
+    if (match == -2) r.reason = "destination-not-regular";
+    else if (match < 0) { r.reason = "destination-read-failed"; r.error = errno; }
+    else if (!match) r.reason = "destination-changed";
+    else {
+        r.published = renameat(source, from_name, lock, to_name) == 0;
+        r.error = r.published ? 0 : errno;
+        r.reason = r.published ? "published" : "rename-failed";
+    }
+    int comparison_error = r.error;
+    int unlocked = flock(lock, LOCK_UN), unlock_error = errno;
+    int source_closed = close(source), source_error = errno;
+    int closed = close(lock);
+    r.released = comparison_released && !source_closed && !closed; /* closing the sole locked descriptor releases flock too */
+    if (!r.released) { r.error = closed ? errno : source_closed ? source_error : comparison_error; r.reason = "publication-release-unconfirmed"; }
+    (void)unlocked; (void)unlock_error;
+#endif
+    return r;
+}
 typedef struct fk_admission {
     long long first, end;
-    char *hash;
+    char *hash, *image_path;
+    long long image_bytes, node_base, node_end, fn_base;
+    char image_checksum[17];
     struct fk_admission *previous;
 } fk_admission;
 static fk_admission *fk_admissions;
@@ -19143,11 +19272,11 @@ static void fk_admission_clear(void) {
     while (fk_admissions) {
         fk_admission *old = fk_admissions;
         fk_admissions = old->previous;
-        free(old->hash); free(old);
+        free(old->image_path); free(old->hash); free(old);
     }
 }
 static const char *fk_admission_bind(long long first, long long end, const char *hash) {
-    fk_admission *a = malloc(sizeof(*a));
+    fk_admission *a = calloc(1, sizeof(*a));
     long long n = hash ? fk_cstrlen(hash) : 0;
     if (!a) fk_die("admission identity: out of memory");
     a->hash = malloc((unsigned long)n + 1);
@@ -19170,6 +19299,38 @@ static long long fk_admission_read(long long fn) {
     return fk_cons_val(fk_sbuf(fk_fkb_builder_id, fk_cstrlen(fk_fkb_builder_id)),
                        fk_cons_val(fk_sbuf(hash, fk_cstrlen(hash)), 1));
 }
+/* This is an immutable image-location observation, not a write door. Form's
+ * program-image owner proves pure results and owns any publication. A cell
+ * without an admitted image has no image descriptor; no sibling is guessed. */
+static long long fk_admission_image_read(long long fn) {
+    if (fn < 0 || fn >= fk_fn_count || (fn == 0 && fk_cell_identity) ||
+        (fn < fk_fn_cap_capacity && fk_fn_cap_count[fn] > 0)) return fk_nothing;
+    fk_admission *a = fk_admissions;
+    while (a && !(a->first <= fn && fn < a->end)) a = a->previous;
+    if (!a || !a->image_path || !a->hash[0]) return fk_nothing;
+    long long body = fk_fn[fn];
+    if (body >= 0 && body < fk_node_count && fk_node[body][0] == 194) body = fk_node[body][2];
+    if (body < a->node_base || body >= a->node_end) return fk_nothing;
+    long long r = fk_cr_new();
+    fk_cr_put(r, "kind", fk_cr_str("program-image-owner"));
+    fk_cr_put(r, "builder", fk_cr_str(fk_fkb_builder_id));
+    fk_cr_put(r, "closure", fk_cr_str(a->hash));
+    fk_cr_put(r, "path", fk_cr_str(a->image_path));
+    fk_cr_put(r, "checksum", fk_cr_str(a->image_checksum));
+    fk_cr_put(r, "bytes", a->image_bytes << 1);
+    fk_cr_put(r, "fn", fn << 1);
+    fk_cr_put(r, "body", body << 1);
+    fk_cr_put(r, "arity", fk_fnar[fn] << 1);
+    fk_cr_put(r, "local_fn", (fn - (a->fn_base ? a->fn_base - 1 : 0)) << 1);
+    fk_cr_put(r, "local_body", (body - a->node_base) << 1);
+    fk_cr_put(r, "node_base", a->node_base << 1);
+    fk_cr_put(r, "fn_base", a->fn_base << 1);
+    return fk_rbox(r);
+}
+static long long fk_ast_function_arg(long long value) {
+    if ((value & 1) == 0) return value >> 1;
+    return fk_is_fnval(value) && !fk_fnval_is_closure(value) ? fk_fnval_idx(value) : -1;
+}
 static long long fk_prog_read(long long pid, long long spec) {
     long long dsz = 0, out = fk_nothing;
     /* this process's own surface is read where it lives: the published A, S and the defn rows ARE these tables, so a node's
@@ -19188,16 +19349,29 @@ static long long fk_prog_read(long long pid, long long spec) {
         long long q = FK_HNEXT(p);
         if (fk_cstr_eq(mode, "identity")) {
             if (!q) return fk_admission_read(fk_cur_fn);
-            return FK_POK(q) && (FK_HH(q) & 1) == 0 ? fk_admission_read(FK_HH(q) >> 1) : fk_nothing;
+            return FK_POK(q) ? fk_admission_read(fk_ast_function_arg(FK_HH(q))) : fk_nothing;
+        }
+        if (fk_cstr_eq(mode, "image")) {
+            return q && FK_POK(q) ? fk_admission_image_read(fk_ast_function_arg(FK_HH(q))) : fk_nothing;
+        }
+        if (fk_cstr_eq(mode, "index") && q && FK_POK(q)) {
+            long long fn = fk_ast_function_arg(FK_HH(q));
+            return fn > 0 && fn < fk_fn_count &&
+                !(fn < fk_fn_cap_capacity && fk_fn_cap_count[fn] > 0) ? fn << 1 : fk_nothing;
+        }
+        if (fk_cstr_eq(mode, "str") && q && FK_POK(q) && (FK_HH(q) & 1) == 0) {
+            long long k = FK_HH(q) >> 1;
+            return k >= 0 && k < fk_node_count && fk_node[k][0] == 24
+                ? fk_strv(fk_node[k][1]) : fk_nothing;
         }
         /* ("fn" c): defn c's body (the one it wears under its page) and its arity, or nothing for a capturing function, whose
          * prologue reads the call's capture channel -- what the Form JIT reads of a callee it writes in place of its call */
-        if (fk_cstr_eq(mode, "fn") && q >= 1 && FK_POK(q) && (FK_HH(q) & 1) == 0) {
-            long long c = FK_HH(q) >> 1;
+        if (fk_cstr_eq(mode, "fn") && q >= 1 && FK_POK(q)) {
+            long long c = fk_ast_function_arg(FK_HH(q));
             if (c <= 0 || c >= fk_fn_count || (c < fk_fn_cap_capacity && fk_fn_cap_count[c] > 0)) { return fk_nothing; }
             long long b = fk_fn[c];
-            if (b > 0 && b < fk_node_count && fk_node[b][0] == 194) { b = fk_node[b][2]; }
-            return b > 0 && b < fk_node_count ? fk_cons_val(b << 1, fk_cons_val(fk_fnar[c] << 1, 1)) : fk_nothing;
+            if (b >= 0 && b < fk_node_count && fk_node[b][0] == 194) { b = fk_node[b][2]; }
+            return b >= 0 && b < fk_node_count ? fk_cons_val(b << 1, fk_cons_val(fk_fnar[c] << 1, 1)) : fk_nothing;
         }
         if (fk_cstr_eq(mode, "defn") && q >= 1 && FK_POK(q) && (FK_HH(q) & 1) == 0) {
             long long j = FK_HH(q) >> 1;
@@ -19245,14 +19419,6 @@ static long long fk_prog_read(long long pid, long long spec) {
                     if (off + len <= ssz) { out = fk_sbuf(S + off, len); }
                     munmap(S, (size_t)ssz);
                 }
-            }
-        } else if (fk_cstr_eq(mode, "str") && p >= 1 && FK_POK(p)) {
-            /* (list "str" k): the text of string-literal node k, for this process's own nodes. A tag-24 node
-             * carries only its pool index, which means nothing outside the process that minted it; a JIT
-             * written in Form reads its own program's literals here (a float literal is a 53 over a 24). */
-            long long k = FK_HH(p) >> 1;
-            if (pid == (long long)getpid() && k >= 0 && k < fk_node_count && fk_node[k][0] == 24) {
-                out = fk_strv(fk_node[k][1]);
             }
         } else if (fk_cstr_eq(mode, "defn") && p >= 1 && FK_POK(p)) {
             long long j = FK_HH(p) >> 1;
@@ -19895,11 +20061,30 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 59) {
         static char a[FK_PATH_CAP];
         static char b[FK_PATH_CAP];
-        fk_cstr(fk_walk(fk_node[i][1], fp), a, FK_PATH_CAP);
-        fk_cstr(fk_walk(fk_node[i][2], fp), b, FK_PATH_CAP);
+        long long saved = fk_vsp;
+        fk_vp(fk_walk(fk_node[i][1], fp));
+        long long target = fk_walk(fk_node[i][2], fp);
+        long long expected = fk_isrec(target) ? fk_cr_key_find(target, "expected") : fk_nothing;
+        long long path = fk_isrec(target) ? fk_cr_key_find(target, "path") : target;
+        int guarded = fk_isrec(target);
+        if (!fk_door_path(fk_vs[saved], a) || !fk_door_path(path, b) || (guarded && !fk_is_str(expected))) {
+            fk_vsp = saved; return fk_nothing;
+        }
+        fk_vsp = saved;
         fk_src_wrote(a);
         fk_src_wrote(b);
-        return rename(a, b) << 1;
+        /* Plain rename retains the host operation's permission contract.
+         * The conditional image publisher and C image writer share the lock. */
+        if (!guarded) return rename(a, b) == 0 ? 0 : -2;
+        long long si = guarded ? fk_stri(expected) : -1;
+        fk_publication published = fk_path_publish(a, b, guarded ? FK_SBYTES(si) : 0, guarded ? FK_SLEN(si) : 0);
+        long long r = fk_cr_new();
+        fk_cr_put(r, "published", published.published << 1);
+        fk_cr_put(r, "matched", published.matched << 1);
+        fk_cr_put(r, "released", published.released << 1);
+        fk_cr_put(r, "os_error", published.error << 1);
+        fk_cr_put(r, "reason", fk_cr_str(published.reason));
+        return fk_rbox(r);
     }
     if (t == 60) {
         static char p[FK_PATH_CAP];
@@ -26221,6 +26406,7 @@ static int fk_src_load_unit_buffer(const char *root_path, char *owned, long long
 #define FK_FKB_VERSION 8
 static unsigned char fk_fkb_out_buf[FK_FKB_OUT_CAP];
 static long long fk_fkb_out_n;
+static long long fk_fkb_out_total;
 static unsigned long long fk_fkb_out_hash;
 static int fk_fkb_sealing;
 static int fk_fkb_flush(int fd) {
@@ -26235,6 +26421,7 @@ static int fk_fkb_out(int fd, const char *p, long long n) {
     if (n < 0) {
         return 0;
     }
+    fk_fkb_out_total += n;
     if (fk_fkb_sealing) {
         long long j; for (j = 0; j < n; j++) {
             fk_fkb_out_hash = (fk_fkb_out_hash ^ (unsigned char)p[j]) * 1099511628211ULL;
@@ -26630,7 +26817,8 @@ static void fk_fkb_builder_admit(void) {
 }
 
 static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const char *sym_path,
-                            long long source_mtime, const char *source_hash) {
+                            long long source_mtime, const char *source_hash,
+                            long long *written_bytes, unsigned long long *written_checksum) {
     /* The image carries its diagnostics and checksum and publishes by one
      * rename. The independently written .sym is an optional inspection lens. */
     char fkb_tmp[FK_PATH_CAP + 64];
@@ -26656,6 +26844,7 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
     int ok = 1;
     char canon[FK_PATH_CAP];
     fk_fkb_out_n = 0;
+    fk_fkb_out_total = 0;
     fk_fkb_out_hash = 14695981039346656037ULL;
     fk_fkb_sealing = 1;
     ok = ok && fk_fkb_out(fd, "FKPIFB1", 7);
@@ -26742,6 +26931,7 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
     fk_fkb_sealing = 0;
     ok = ok && fk_fkb_write_u32(fd, (long long)(checksum >> 32)) &&
          fk_fkb_write_u32(fd, (long long)(checksum & 4294967295ULL)) && fk_fkb_flush(fd);
+    long long image_bytes = fk_fkb_out_total;
     /* a close that fails may not have written the image whole: it is not renamed into place */
     if (close(fd) != 0) ok = 0;
     if (!ok) {
@@ -26755,10 +26945,15 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
         fk_diag_path("warning", sym_path, "optional symbol lens could not be published; image retains its diagnostics");
     }
     fk_src_sym_index_free();
-    if (rename(fkb_tmp, fkb_path) != 0) {
+    fk_publication publication = fk_path_publish(fkb_tmp, fkb_path, 0, 0);
+    if (!publication.published) {
+        fk_diag_path("cache-failure", fkb_path, publication.reason);
         unlink(fkb_tmp);
         return 0;
     }
+    if (!publication.released) fk_diag_path("cache-failure", fkb_path, publication.reason);
+    *written_bytes = image_bytes;
+    *written_checksum = checksum;
     return 1;
 }
 static long long fk_fkb_pos;
@@ -26901,6 +27096,33 @@ static int fk_fkb_open_checked(const char *path, const char *source, const char 
         fk_fkb_mark_bad("invalid embedded compile diagnostics");
     }
     return !fk_fkb_bad && source_ok;
+}
+/* Retain only the admitted artifact's location and relocation. No runtime
+ * values or unrelated cells are serialized; Form owns result persistence. */
+static void fk_admission_image_note(const char *path, long long node_base,
+                                    long long node_count, long long fn_base) {
+    fk_admission *a = fk_admissions;
+    char absolute[FK_PATH_CAP];
+    if (!a || !a->hash[0] || fk_fkb_bad || fk_fkb_errors || fk_fkb_unrunnable ||
+        !fk_cstr_eq(a->hash, fk_fkb_source_hash)) return;
+#if defined(_WIN32)
+    if (!_fullpath(absolute, path, FK_PATH_CAP)) return;
+#else
+    if (!realpath(path, absolute)) return;
+#endif
+    long long n = fk_cstrlen(absolute);
+    a->image_path = malloc((unsigned long)n + 1);
+    if (!a->image_path) fk_die("image admission location: out of memory");
+    memcpy(a->image_path, absolute, (unsigned long)n + 1);
+    a->image_bytes = fk_fkb_len + 8;
+    a->node_base = node_base; a->node_end = node_base + node_count; a->fn_base = fn_base;
+    static const char hex[] = "0123456789abcdef";
+    for (long long i = 0; i < 8; i++) {
+        unsigned char byte = (unsigned char)fk_buf[fk_fkb_len + i];
+        a->image_checksum[i * 2] = hex[byte >> 4];
+        a->image_checksum[i * 2 + 1] = hex[byte & 15];
+    }
+    a->image_checksum[16] = 0;
 }
 static void fk_fkb_repair_signal(const char *path) {
     char reason[256];
@@ -27107,6 +27329,7 @@ static int fk_fkb_read_symbol_to_srctext(long long *start, long long *len) {
 }
 static int fk_src_import_fkb_image(const char *fkb_path, fk_fkb_snapshot *snapshot) {
     fk_fkb_snapshot_use(snapshot);
+    int image_graph_retained = 1;
     long long version = FK_FKB_VERSION;
     if (fk_fkb_errors || fk_fkb_unrunnable) {
         fk_diag_path("warning", fkb_path, "unit image carries compile errors or refusal; compiling the complete caller closure");
@@ -27328,6 +27551,7 @@ static int fk_src_import_fkb_image(const char *fkb_path, fk_fkb_snapshot *snapsh
                 }
                 if (chold[i] >= 0) {
                     fk_node[chold[i]][1] = fk_const_wrapp1[prior] - 1;
+                    image_graph_retained = 0;
                 }
             } else {
                 fk_const_unit_now = cown[i];
@@ -27347,6 +27571,9 @@ static int fk_src_import_fkb_image(const char *fkb_path, fk_fkb_snapshot *snapsh
         return 0;
     }
     fk_admission_bind(fn_base, fn_base + nf - 1, fk_fkb_source_hash);
+    /* Cross-image holds change the admitted graph. The original image is no
+     * longer a complete publication target for that graph's pure results. */
+    if (image_graph_retained) fk_admission_image_note(fkb_path, node_base, nr, fn_base);
     fk_prog_note_ice(fkb_path, fk_fkb_len, fk_fkb_source_hash);
     return 1;
 }
@@ -27519,6 +27746,7 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
     fk_root = fk_fn_count > 0 ? fk_fn[0] : -1;
     fk_admission_clear();
     fk_admission_bind(0, fk_fn_count, fk_fkb_errors || fk_fkb_unrunnable ? 0 : fk_fkb_source_hash);
+    fk_admission_image_note(fkb_path, 0, nr, 0);
     fk_prog_note_ice(fkb_path, fk_fkb_len, expected_source_hash);
     fk_prog_note_counts();
     return 1;
@@ -27820,7 +28048,9 @@ static void fk_src_compile_current_unit(const char *path, const char *fkb_path,
         fk_fn[0] = fk_smknode(111, fk_smklit(fk_maxslot), fk_fn[0], 0);
     }
     fk_admission_bind(0, fk_fn_count, fk_nerr || fk_src_unrunnable || fk_src_truncated ? 0 : source_hash);
-    if (!fk_src_write_fkb(path, fkb_path, sym_path, unit_mtime, source_hash)) {
+    long long written_bytes = 0;
+    unsigned long long written_checksum = 0;
+    if (!fk_src_write_fkb(path, fkb_path, sym_path, unit_mtime, source_hash, &written_bytes, &written_checksum)) {
         if (fk_fkb_write_overflow) {
             fk_die("fk_run_src: failed to write .fkb/.sym artifacts -- a value in the "
                    "program image is outside the .fkb v4 signed lane (magnitude 2^63, "
@@ -27832,6 +28062,13 @@ static void fk_src_compile_current_unit(const char *path, const char *fkb_path,
         fk_diag_path("error", fkb_path, fk_fkb_bad ? fk_fkb_bad_why : "published image failed identity admission");
         fk_die("image publication failed its admission check");
     }
+    unsigned long long admitted_checksum = 0;
+    for (long long k = fk_fkb_len; k < fk_fkb_len + 8; k++) admitted_checksum = (admitted_checksum << 8) | (unsigned char)fk_buf[k];
+    /* A competing writer may have replaced the path after our rename. Its
+     * valid image is not the relocation map of the graph already in RAM. */
+    if (written_bytes == fk_fkb_len + 8 && written_checksum == admitted_checksum)
+        fk_admission_image_note(fkb_path, 0, fk_node_count, 0);
+    else fk_diag_path("cache-failure", fkb_path, "published image changed before descriptor capture; running graph has no image mapping");
     if (!fk_fkb_errors && !fk_fkb_unrunnable) fk_sig_heal_settle(fkb_path);
 }
 /* A unit standing alone: its closure collected as its own image's compile collects it. With
@@ -28828,21 +29065,6 @@ static void fk_cell_tick_run(void) {
     if (fk_cell_deadline_ms == 0) { return; }
     fk_cell_tick = fk_cell_tick + 16384ULL;
     fk_cell_deadline_hit();
-}
-/* ── records built from C ── */
-static long long fk_cr_new(void) {
-    fk_rp = fk_rp + 1;
-    fk_record_reserve(fk_rp + 1);
-    fk_rcnt[fk_rp] = 0;
-    fk_rbp[fk_rp] = 0;
-    return fk_rp;
-}
-static void fk_cr_put(long long r, const char *key, long long v) {
-    long long k = fk_stri(fk_sbuf(key, fk_cstrlen(key)));
-    fk_rappend(r, k, v);
-}
-static long long fk_cr_str(const char *s) {
-    return fk_sbuf(s != 0 ? s : "", s != 0 ? fk_cstrlen(s) : 0);
 }
 static long long fk_dg_record(const fk_dgrow_t *g) {
     long long r = fk_cr_new();
@@ -30270,16 +30492,6 @@ static char *fk_bml_lower_to_mem(const char *bml_path, long long *out_len) {
  * things it cannot yet leave to Form -- find the memo, call the floor cell for the misses, write the memo. When the
  * collector (fk_src_collect_*) is Form's, the miss list and the begin-again below are the loader's own recursion and this
  * block, the defer flag and the re-entry leave with it. */
-static long long fk_cr_key_find(long long recw, const char *key) {
-    long long r = fk_ridx(recw), k = 0, kn = fk_cstrlen(key);
-    if (r < 1 || r > fk_rp) return fk_nothing;
-    while (k < fk_rcnt[r]) {
-        long long si = fk_rkey[r][k];
-        if (si >= 0 && FK_SOK(si) && FK_SLEN(si) == kn && memcmp(FK_SBYTES(si), key, (unsigned long)kn) == 0) return fk_rval[r][k];
-        k = k + 1;
-    }
-    return fk_nothing;
-}
 /* a Form string value's bytes, copied out (owned), with its length; 0 when the word is not a string */
 static char *fk_str_copy_out(long long w, long long *len) {
     long long si = fk_stri(w);

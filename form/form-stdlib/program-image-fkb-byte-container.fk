@@ -26,11 +26,11 @@
 //                 where each node-symbol-row carries dependency target pairs:
 //                 dep-count (dep-symbol-id target-node-id)*
 //
-// The C seed writes version 6, which appends the top-level constant table after
-// the node-symbol rows: const-count, then (name-string initializer-node) per row,
-// so an importer binds a unit's column-0 lets. This cell writes the version 5
-// container without it; the two writers refuse each other's artifacts by builder
-// identity.
+// The envelope API writes version 5. The ordinary seed image is version 8:
+// it also carries refusal state, constant/unit ownership and a trailing FNV
+// checksum. The v8 raw-span helpers below preserve that owning image while
+// encoding only a proven immutable initializer; they do not mint a new builder
+// identity or serialize unrelated runtime state.
 //
 // `content-hash` and `artifact-mtime` are descriptor/probe metadata, not
 // hash-covered payload fields.
@@ -46,6 +46,7 @@ import form-stdlib/runtime-artifact-plan.fk;
 import form-stdlib/source-artifact-probe.fk;
 import form-stdlib/source-artifact-identity.fk;
 import form-stdlib/program-image-fkb.fk;
+import form-stdlib/bml-source.fk;
 section [form.bml] {
     def pifbc-version() = "program-image-fkb-byte-container-v5";
     def pifbc-byte-version() = 5;
@@ -125,4 +126,47 @@ pifbc-abs(n) >= 0 ? pifbc-abs(n) <= pifbc-max-signed() : 0;
         let vouch = pifbc-content-vouch(e, bytes);
         sai-vouch-match?(vouch) ? pifbc-container(e, bytes, vouch, pifbc-status-ready(), pifbc-reason-ready()) : (String) sai-vouch-status(vouch) == sai-status-malformed() ? pifbc-container(e, bytes, vouch, pifbc-status-refused(), pifbc-reason-content-hash-malformed()) : pifbc-container(e, bytes, vouch, pifbc-status-investigate(), pifbc-reason-content-hash-mismatch());
     };
+
+    // The ordinary v8 image keeps its admitted metadata and opaque sections.
+    // Only a restricted evaluator's immutable result becomes literal AST rows;
+    // process heap handles and CONST_HOLD memo fields never enter these bytes.
+    def pifbc-v8-byte-string(xs) = nil?(xs) ? "" : byte_to_str(xs[0]) + pifbc-v8-byte-string(xs[1:]);
+    def pifbc-v8-u32(n) = byte_to_str(n / 16777216 % 256) + byte_to_str(n / 65536 % 256) + byte_to_str(n / 256 % 256) + byte_to_str(n % 256);
+    def pifbc-v8-int(n) {
+        let mag = n < 0 ? 0 - n : n;
+        // The native minimum's positive magnitude cannot be a tagged int.
+        mag < 0 ? byte_to_str(1) + pifbc-v8-u32(1073741824) + pifbc-v8-u32(0)
+        : byte_to_str(n < 0 ? 1 : 0) + pifbc-v8-u32(mag / 4294967296) + pifbc-v8-u32(mag % 4294967296);
+    }
+    def pifbc-v8-row(tag,a,b,c) = pifbc-v8-int(tag) + pifbc-v8-int(a) + pifbc-v8-int(b) + pifbc-v8-int(c);
+    def pifbc-v8-string(s) = pifbc-v8-u32(len(s)) + s;
+    def pifbc-v8-join(parts) = nil?(parts) ? "" : parts[0] + pifbc-v8-join(parts[1:]);
+    def pifbc-v8-fold(bytes) = bml-source-fingerprint(bytes);
+    def pifbc-v8-seal(bytes) = bytes + pifbc-v8-byte-string(hex-decode(pifbc-v8-fold(bytes)));
+    def pifbc-v8-literals(nodes,strings) = record_new(0,"next",nodes,"strings",strings,"rows",[],"text",[],"reason","");
+    def pifbc-v8-add-row(state,tag,a,b,c) {
+        let at = record_get(state,"next");
+        record_set(state,"next",at + 1);
+        record_set(state,"rows",cons(pifbc-v8-row(tag,a,b,c),record_get(state,"rows")));
+        at;
+    }
+    def pifbc-v8-list(state,value) = nil?(value) ? pifbc-v8-add-row(state,18,0,0,0) : {
+        let h = pifbc-v8-literal(state,head(value));
+        let t = pifbc-v8-literal(state,tail(value));
+        pifbc-v8-add-row(state,19,h,t,0);
+    };
+    def pifbc-v8-literal(state,value) {
+        let kind = value_kind(value);
+        kind == "int" ? pifbc-v8-add-row(state,1,value,0,0)
+        : kind == "null" ? pifbc-v8-add-row(state,137,0,0,0)
+        : kind == "list" ? pifbc-v8-list(state,value)
+        : kind == "string" ? len(value) > 4294967295 ? {
+            record_set(state,"reason","literal-string-exceeds-wire-length"); 0;
+        } : {
+            let at = record_get(state,"strings");
+            record_set(state,"strings",at + 1);
+            record_set(state,"text",cons(pifbc-v8-string(value),record_get(state,"text")));
+            pifbc-v8-add-row(state,24,at,0,0);
+        } : { record_set(state,"reason","immutable-literal-required"); 0; };
+    }
 }

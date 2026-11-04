@@ -26,7 +26,8 @@
 ;   128   host_os is "Darwin" here (and "Linux" where /proc/self stands)
 ;   256   copy: a 10 MiB file of varying bytes arrives byte-equal and keeps its mode (493); the raw door onto the same file
 ;         answers -1 (its truncate would empty it) and hfs-copy, which stages and renames, leaves the file whole; a missing source answers -1 and leaves neither the destination nor a stage; a copy over an
-;         existing destination replaces it whole
+;         existing destination replaces it whole; guarded rename compares all bytes under the publication lock,
+;         retains a mismatched stage, and reports publication and release separately
 ;   512   file_holders (Darwin; on a host with no libproc the door answers nothing() and this claim reads that): a fresh
 ;         file has no holder ([]), a Form child holding it open as its stdout is exactly [its pid], once the child is
 ;         reaped it is [] again, a path that is not there is nothing(), and hfs-peers leaves the caller out
@@ -61,6 +62,46 @@ section [form.bml] {
   def hfb-grow(s, n) = (Comparable) len(s) >= n ? s : hfb-grow(str_concat(s, s), n);
   def hfb-all(xs) = nil?(xs) ? true : ((Comparable) xs[0] == (0 - 2)) && hfb-all(xs[1:]);
   def hfb-same?(a, b) = nil?(a) ? nil?(b) : nil?(b) ? false : ((Comparable) a[0] == b[0]) && hfb-same?(a[1:], b[1:]);
+  def hfb-guarded-publish(dir) {
+    let target = dir + "/guarded-target";
+    let stage = dir + "/guarded-stage";
+    let original = "old" + byte_to_str(0) + "tail";
+    write_file(target,original);
+    write_file(stage,"one");
+    let wrong = host_path_rename(stage,record_new(0,"path",target,"expected","old"));
+    let kept = read_file(target) == original && read_file(stage) == "one";
+    let right = host_path_rename(stage,record_new(0,"path",target,"expected",original));
+    let moved = read_file(target) == "one" && host_path_exists(stage) == 0;
+    write_file(stage,"two");
+    let stale = host_path_rename(stage,record_new(0,"path",target,"expected",original));
+    let still = read_file(target) == "one" && read_file(stage) == "two";
+    let resumed = host_path_rename(stage,record_new(0,"path",target,"expected","one"));
+    let missing = host_path_rename(stage,record_new(0,"path",target,"expected","two"));
+    let fifo = dir + "/guarded-fifo";
+    fs_mkfifo(fifo);
+    write_file(stage,"retained");
+    let special = host_path_rename(stage,record_new(0,"path",fifo,"expected","old"));
+    let search = dir + "/publication-search";
+    host_mkdir_mode(search,448);
+    write_file(search + "/stage","search-only");
+    host_chmod(search,192);
+    let plain-search = host_path_rename(search + "/stage",search + "/target");
+    let guarded-search = host_os() == "Darwin" ? {
+      write_file(search + "/stage","guarded-search");
+      host_path_rename(search + "/stage",record_new(0,"path",search + "/target","expected","search-only"));
+    } : nothing();
+    host_chmod(search,448);
+    let search-ok = plain-search == 0 && (host_os() != "Darwin" ? read_file(search + "/target") == "search-only"
+      : record_get(guarded-search,"published") == 1 && record_get(guarded-search,"released") == 1 && read_file(search + "/target") == "guarded-search");
+    print(["guarded-publication",record_get(wrong,"reason"),record_get(right,"reason"),record_get(stale,"reason"),record_get(resumed,"reason"),record_get(missing,"reason")]);
+    kept && moved && still && search-ok && read_file(target) == "two"
+      && record_get(wrong,"published") == 0 && record_get(wrong,"matched") == 0 && record_get(wrong,"released") == 1
+      && record_get(right,"published") == 1 && record_get(right,"matched") == 1 && record_get(right,"released") == 1
+      && record_get(stale,"published") == 0 && record_get(stale,"reason") == "destination-changed"
+      && record_get(resumed,"published") == 1 && record_get(resumed,"released") == 1
+      && record_get(missing,"published") == 0 && record_get(missing,"matched") == 1 && record_get(missing,"released") == 1 && record_get(missing,"reason") == "rename-failed"
+      && record_get(special,"published") == 0 && record_get(special,"reason") == "destination-not-regular" && record_get(special,"released") == 1 && read_file(stage) == "retained" && hfs-fifo?(fifo);
+  }
   def hfb-absent() {
     let shown = print(["host-fs-band", "door absent: this fkwu has no host doors 35-49; rebuild it (cc -O2 -o fkwu.new runtime/fkwu-uni.c)"]);
     let verdict = print(["host-fs-band", "verdict", 0]);
@@ -230,7 +271,7 @@ section [form.bml] {
     let over = hfs-copy(dir ++ "/small", dst);
     let replaced = ((String) read_file(dst) == "short") && ((Comparable) host_file_size(dst) == 5);
     let s256 = hfb-say("copy", [n256, "ms", t1 - t0, same, kept, raw_onto, onto, intact, nosrc, leftovers, over, replaced]);
-    let b256 = hfb-bit(((Comparable) n256 == 10485760) && same && ((Comparable) kept == 493) && ((Comparable) raw_onto == (0 - 1)) && ((Comparable) onto == 10485760) && intact && ((Comparable) nosrc == (0 - 1)) && nil?(leftovers) && ((Comparable) over == 5) && replaced, 256);
+    let b256 = hfb-bit(((Comparable) n256 == 10485760) && same && ((Comparable) kept == 493) && ((Comparable) raw_onto == (0 - 1)) && ((Comparable) onto == 10485760) && intact && ((Comparable) nosrc == (0 - 1)) && nil?(leftovers) && ((Comparable) over == 5) && replaced && hfb-guarded-publish(dir), 256);
 
     // 512 holders
     let hf = dir ++ "/held";

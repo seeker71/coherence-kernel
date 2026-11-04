@@ -8,6 +8,241 @@
 ; preludes: form-stdlib/bmf-core.fk form-stdlib/form-knowledge-query-token.fk form-stdlib/form-knowledge-source-search.fk form-stdlib/form-cli-heed-current-source.fk form-stdlib/public-source-concept-index.fk form-stdlib/public-source-concept-shards.fk form-stdlib/form-nodeid-knowledge-query.fk
 ; preludes: form-stdlib/source-artifact-cache.fk form-stdlib/source-artifact-descriptor.fk form-stdlib/runtime-artifact-plan.fk form-stdlib/source-artifact-probe.fk form-stdlib/source-artifact-identity.fk form-stdlib/runtime-artifact-selector.fk form-stdlib/runtime-artifact-outcome.fk form-stdlib/runtime-artifact-retry.fk form-stdlib/runtime-artifact-load-envelope.fk form-stdlib/runtime-artifact-attempt-receipt.fk
 ; preludes: form-stdlib/program-image-fkb.fk form-stdlib/program-image-fkb-byte-container.fk form-stdlib/program-image-fkb-byte-file-witness.fk form-stdlib/program-image-fkb-byte-decode.fk form-stdlib/runtime-program-image-fkb-attempt.fk form-stdlib/program-image-symbol-entry.fk form-stdlib/runtime-program-image-fkb-walker-trace.fk form-stdlib/reason-coverage.fk form-stdlib/runtime-program-image-fkb-micro-walker.fk form-stdlib/runtime-program-image-fkb-symbol-walk.fk form-stdlib/runtime-program-image-fkb-current-source-capability.fk form-stdlib/runtime-program-image-fkb-current-answer-capability.fk
+; preludes: form/native/metal/sha256-arm64-jit.fk
+
+section [form.bml] {
+    // This is the existing executing walker's source/effect boundary. A held
+    // immutable-looking value is not proof when its initializer reads a record.
+    let rpicab-held-owner = record_new(0, "value", "memoized");
+    let rpicab-held-mutable = record_get(rpicab-held-owner, "value");
+    let rpicab-held-pure = [1, 2, 3];
+    def rpicab-held-mutable-value() = rpicab-held-mutable;
+    def rpicab-held-pure-value() = rpicab-held-pure;
+    def rpicab-selected-effect(flag) = flag ? print_str("UNEXPECTED-PIF-EFFECT") : "safe";
+    def rpicab-source-and() = and(0, print_str("UNEXPECTED-PIF-AND"));
+    def rpicab-source-or() = or(1, print_str("UNEXPECTED-PIF-OR"));
+    def rpicab-argument-first(a, b) = a;
+    def rpicab-argument-effect() = rpicab-argument-first(7, print_str("UNEXPECTED-PIF-ARGUMENT"));
+    def rpicab-order-divide() = rpicab-argument-first(div(1, 0), print_str("UNEXPECTED-PIF-AFTER-DIVIDE"));
+    def rpicab-order-effect() = rpicab-argument-first(print_str("UNEXPECTED-PIF-BEFORE-DIVIDE"), div(1, 0));
+    def rpicab-arguments-three(a, b, c) = [a, b, c];
+    def rpicab-call-three() = rpicab-arguments-three(11, 22, 33);
+    def rpicab-null-kind() = value_kind(nothing());
+    def rpicab-empty-head() = nothing?(head([])) ? "yes" : "no";
+    def rpicab-authorized-string() = "original";
+    let rpicab-publisher-held = str_concat("A", byte_to_str(0));
+    def rpicab-publisher-value() = rpicab-publisher-held;
+    def rpicab-publisher-alias() = rpicab-publisher-held;
+    def rpicab-publisher-other() = "other";
+    def rpicab-publisher-effect() = print_str("UNEXPECTED-PUBLISHER-EFFECT");
+    def rpicab-immutable-equality() = [eq([], []), eq([1, "x"], [1, "x"]), eq(nothing(), nothing()), eq(1, "1")];
+    def rpicab-byte-u32() = str_concat(byte_to_str(band(shr_u32(-1, 24), 255)), byte_to_str(0));
+    def rpicab-ambient-node() = node_value(make_nodeid(1, 1, 1, 1));
+    def rpicab-find-admitted(name, at) {
+        let row = kernel_ast(host_pid(), ["defn", at]);
+        nothing?(row) ? nothing() : (String) kernel_ast(host_pid(), ["src", row[0], row[1]]) == name ? row[2] : rpicab-find-admitted(name, at + 1);
+    }
+    def rpicab-evaluate(name, arguments) = rpmw-eval-admitted(rpicab-find-admitted(name, 0), 1000000, arguments);
+    def rpicab-evaluated-value?(receipt, value) = rpmw-result-ok?(rpmw-admitted-result(receipt)) && value_eq(rpmw-result-value(rpmw-admitted-result(receipt)), value);
+    def rpicab-evaluated-refusal?(receipt, reason) = !rpmw-result-ok?(rpmw-admitted-result(receipt)) && (String) rpmw-result-reason(rpmw-admitted-result(receipt)) == reason && !rpmw-admitted-string-proof?(receipt);
+    def rpicab-proof-owner-check() = rpmw-with-admitted(rpicab-find-admitted("rpicab-authorized-string", 0), 100, [], (proof, admit) => {
+        let forged = [proof[0], proof[1], proof[2], rpmw-result-ok("different", rpmw-kind-string(), 1)];
+        let allowed = admit(proof);
+        !nothing?(allowed) && (String) allowed[1] == "original" && nothing?(admit(forged));
+    });
+    def rpicab-explicit-budget-check() = {
+        let index = rpicab-find-admitted("rpicab-call-three", 0);
+        let finite = rpmw-eval-admitted(index, 100, []);
+        let uncapped = rpmw-eval-admitted(index, nothing(), []);
+        let stopped = rpmw-eval-admitted(index, 1, []);
+        rpicab-evaluated-value?(uncapped, [11, 22, 33])
+            && value_eq(rpmw-admitted-result(finite), rpmw-admitted-result(uncapped))
+            && rpicab-evaluated-refusal?(stopped, rpmw-reason-step-budget-exhausted());
+    };
+    def rpicab-occupied-frame-check() {
+        // Raw LETF can overwrite a parameter. Such an escaping mutation is
+        // outside immutable source admission even though old PIF frames exist.
+        let table = rpmw-admitted-table();
+        let rows = [[1, 0, 0, 0], [1, 2, 0, 0], [110, 0, 0, 0], [109, 0, 1, 2], [69, 3, 2, 0]];
+        let cached = record_get(table[1], "nodes");
+        let indexed = foldl((at, row) => { record_set(cached, at.str(), row); at + 1; }, 0, rows);
+        let result = rpmw-eval-node(table, 4, 20, rpmw-frame-one(1, rpmw-kind-int()), rpmw-kind-absent());
+        !rpmw-result-ok?(result) && (String) rpmw-result-reason(result) == rpmw-reason-occupied-frame-slot();
+    }
+    def rpicab-eager-primitive-refused?(tag, first) {
+        // Source and/or rewrite to IF. The raw70/71 primitive family itself
+        // remains eager: an otherwise decisive left value cannot hide RHS IO.
+        let table = pif-table-image-from-parts([3], [[1, first, 0, 0], [24, 0, 0, 0], [115, 1, 0, 0], [tag, 0, 2, 0]], [[88]]);
+        let result = rpmw-eval-node(table, 3, 16, rpmw-frame-many([], []), rpmw-kind-absent());
+        !rpmw-result-ok?(result) && (String) rpmw-result-reason(result) == rpmw-reason-unsupported-tag();
+    }
+    def rpicab-publisher-refused?(result, reason) = record?(result) && (String) record_get(result, "status") == "repair-required" && (String) record_get(result, "reason") == reason;
+    def rpicab-publisher-resume(result) = pifbd-v8-resume(result, oh-response(record_get(result, "event"), "retry-publication"));
+    def rpicab-initializer-permissions(publication, value) {
+        let held = rpmw-initializer-result(publication, [value], [rpicab-publisher-value], nothing());
+        let wasReady = rpmw-initializer-ready?(publication);
+        record_set(held, "status", "ready"); record_set(held, "values", ["forged-public-value"]);
+        let restored = rpmw-initializers-resume(held, nothing());
+        let valuesOkay = wasReady ? value_eq(record_get(restored, "values"), [value]) : nothing?(record_get(restored, "values"));
+        record_set(restored, "completed-values", ["forged-completed-value"]);
+        let refused = rpmw-initializers-resume(restored, nothing());
+        let missing = rpmw-initializers-resume(record_new(0, "status", "ready", "values", ["forged"]), nothing());
+        let noncallable = rpmw-initializers-resume(record_new(0, "resume", 0), nothing());
+        valuesOkay && nothing?(record_get(refused, "values")) && rpicab-publisher-refused?(record_get(refused, "publication"), "initializer-continuation-changed")
+            && nothing?(record_get(missing, "values")) && rpicab-publisher-refused?(record_get(missing, "publication"), "initializer-continuation-unavailable")
+            && nothing?(record_get(noncallable, "values")) && rpicab-publisher-refused?(record_get(noncallable, "publication"), "initializer-continuation-unavailable");
+    }
+    def rpicab-publisher-restore(path, original, published) {
+        let temporary = path + ".initializer-reset." + host_pid().str();
+        let wrote = write_file(temporary, original);
+        wrote != len(original) || read_file(temporary) != original ? 0 : {
+            let guard = host_path_rename(temporary, record_new(0, "path", path, "expected", published));
+            record?(guard) && record_get(guard, "published") == 1 && record_get(guard, "released") == 1 && read_file(path) == original;
+        };
+    }
+    // A modeled carrier release observation checks Form's refusal boundary;
+    // this does not claim to induce an operating-system close failure.
+    def rpicab-publisher-release-model(base, original, published) {
+        let held = pifbd-v8-copy(base); let owner = record_get(held, "owner");
+        let path = record_get(owner, "path"); let temporary = path + ".release-model." + host_pid().str();
+        let bytes = read_file(path);
+        record_set(held, "expected", original); record_set(held, "temporary", temporary);
+        record_set(held, "guard", record_new(0, "published", published, "released", 0));
+        let failed = pifbd-v8-publication-failed("image-publication-release-failed", held, "release", published ? ["image-published"] : []);
+        let event = record_get(failed, "event");
+        let state = record_new(0, "path", path, "expected", original, "candidate", record_get(held, "bytes"), "result", failed);
+        let view = pifbd-v8-publication-view(state);
+        let retry = oh-response(event, "retry-publication");
+        let observed = pifbd-v8-resume(view, retry);
+        nothing?(oh-select(event, retry, nothing())) && (String) oh-select(event, oh-response(event, "await-resource"), "") == "await-resource"
+            && rpicab-publisher-refused?(observed, "image-publication-release-failed")
+            && oh-str(record_get(observed, "event"), "id") == oh-str(event, "id")
+            && read_file(path) == bytes && !fs-exists?(temporary);
+    }
+    def rpicab-publisher-lifecycle(owner, proof, admit, original, patch) {
+        let path = record_get(owner, "path"); let candidate = record_get(patch, "bytes");
+        let temporary = path + ".initializer." + host_pid().str();
+        host_dir_mkdir(temporary);
+        let failed = pifbd-v8-publish(owner, proof, admit); let failedEvent = record_get(failed, "event");
+        host_dir_rmdir(temporary);
+        let writeFailure = rpicab-publisher-refused?(failed, "image-publication-write-incomplete") && read_file(path) == original;
+        let releaseBefore = rpicab-publisher-release-model(patch, original, 0);
+        record_set(failed, "bytes", "changed");
+        let bytesRefused = rpicab-publisher-resume(failed);
+        record_set(record_get(bytesRefused, "owner"), "path", path + ".redirected");
+        let ownerRefused = rpicab-publisher-resume(bytesRefused);
+        record_set(ownerRefused, "guard", record_new(0, "published", 1, "released", 1));
+        let effectsRefused = rpicab-publisher-resume(ownerRefused);
+        let unchanged = read_file(path) == original;
+        let competitor = original + byte_to_str(1); let replaced = write_file(path, competitor);
+        let casRefused = rpicab-publisher-resume(effectsRefused);
+        let casSafe = replaced == len(competitor) && rpicab-publisher-refused?(casRefused, "destination-changed") && read_file(path) == competitor;
+        let reset = rpicab-publisher-restore(path, original, competitor);
+        let resumed = reset ? rpicab-publisher-resume(casRefused) : casRefused;
+        let repairedEvent = record_get(resumed, "event");
+        let published = record_get(resumed, "status") == "image-published" && read_file(path) == candidate
+            && pifbd-v8-equal?(record_get(resumed, "proof"), record_get(failed, "proof"));
+        let care = json-int-value(oh-get(failedEvent, "health")) == 0 && json-int-value(oh-get(repairedEvent, "health")) == 1
+            && oh-unease(repairedEvent) == 0 && oh-str(repairedEvent, "care_of") == oh-str(record_get(casRefused, "event"), "id");
+        let permissions = published ? rpicab-initializer-permissions(resumed, rpmw-result-value(rpmw-admitted-result(proof))) : 0;
+        let releaseAfter = published ? rpicab-publisher-release-model(resumed, original, 1) : 0;
+        record_set(record_get(resumed, "guard"), "published", 0);
+        let repeated = rpicab-publisher-resume(resumed);
+        host_dir_mkdir(temporary);
+        let verified = rpicab-publisher-resume(repeated);
+        let noSecondRename = rpicab-publisher-refused?(repeated, "image-publication-permission-mismatch") && record_get(verified, "status") == "image-published" && read_file(path) == candidate;
+        host_dir_rmdir(temporary);
+        let restored = rpicab-publisher-restore(path, original, candidate);
+        let checks = [writeFailure, rpicab-publisher-refused?(bytesRefused, "image-publication-permission-mismatch"), rpicab-publisher-refused?(ownerRefused, "image-publication-permission-mismatch"),
+            rpicab-publisher-refused?(effectsRefused, "image-publication-permission-mismatch"), unchanged, casSafe, reset, published, care, permissions, noSecondRename, restored, releaseBefore, releaseAfter];
+        print(["rpicab-publication-care", checks]);
+        foldl((okay, check) => okay && check, 1, checks);
+    }
+    def rpicab-publisher-observe(proof, admit) {
+        let entry = rpmw-admitted-definition(proof); let value = rpmw-result-value(rpmw-admitted-result(proof));
+        let owner = kernel_ast(host_pid(), ["image", entry[0]]);
+        nothing?(owner) ? {
+            let refused = pifbd-v8-publish(owner, proof, admit);
+            let okay = rpmw-admitted-string-proof?(proof) && rpicab-publisher-refused?(refused, "image-owner-unavailable")
+                && pifbd-v8-equal?(record_get(refused, "proof"), [[owner, proof]]) && rpicab-initializer-permissions(refused, value);
+            print(["rpicab-publisher", "raw-admission-owner-unavailable", okay]); okay;
+        } : {
+            let original = read_file(record_get(owner, "path")); let granted = admit(proof);
+            let patch = pifbd-v8-patch(original, owner, proof, admit); let candidate = record_get(patch, "bytes");
+            let before = pifbd-v8-index(original, owner, granted[2]); let after = pifbd-v8-index(candidate, owner, granted[2]);
+            let alias = kernel_ast(host_pid(), ["fn", rpicab-publisher-alias]);
+            let metadata = pifbd-v8-good(before) && pifbd-v8-good(after) && alias[0] == record_get(owner, "body")
+                && substring(original, 0, record_get(before, "node_count_pos")) == substring(candidate, 0, record_get(after, "node_count_pos"))
+                && substring(original, record_get(before, "node_symbols_end"), len(original) - 8) == substring(candidate, record_get(after, "node_symbols_end"), len(candidate) - 8);
+            let wrong = pifbd-v8-copy(owner); record_set(wrong, "fn", 999999); record_set(wrong, "local_fn", 999999);
+            let wrongResult = pifbd-v8-patch(original, wrong, proof, admit);
+            let damaged = substring(original, 0, len(original) - 1) + byte_to_str(bxor(str_byte_at(original, len(original) - 1), 1));
+            let checksumResult = pifbd-v8-patch(damaged, owner, proof, admit);
+            let malformed = pifbd-v8-patch(original, owner, proof, ignored => ["malformed"]);
+            let effectIndex = kernel_ast(host_pid(), ["index", rpicab-publisher-effect]);
+            let effect = rpmw-with-admitted(effectIndex, 100, [], (ep, ea) => pifbd-v8-patch(original, kernel_ast(host_pid(), ["image", effectIndex]), ep, ea));
+            let relocation = rpmw-with-admitted(kernel_ast(host_pid(), ["index", rpicab-publisher-other]), 100, [], (otherProof, otherAdmit) => {
+                let other = kernel_ast(host_pid(), ["image", rpmw-admitted-definition(otherProof)[0]]); let forged = pifbd-v8-copy(other);
+                record_set(forged, "fn_base", record_get(other, "fn") - record_get(owner, "local_fn") + 1);
+                record_set(forged, "node_base", record_get(other, "body") - record_get(owner, "local_body"));
+                record_set(forged, "local_fn", record_get(owner, "local_fn")); record_set(forged, "local_body", record_get(owner, "local_body"));
+                let approval = otherAdmit(otherProof); let mapped = pifbd-v8-index(original, forged, approval[2]);
+                let oldChecks = pifbd-v8-owner?(forged) && pifbd-v8-entry?(approval[0], forged) && pifbd-v8-ledger?(mapped, forged, approval[2]);
+                oldChecks && rpicab-publisher-refused?(pifbd-v8-patch(original, forged, otherProof, otherAdmit), "image-owner-changed");
+            });
+            let unchanged = read_file(record_get(owner, "path")) == original;
+            let lifecycle = record_get(patch, "status") == "image-patched" ? rpicab-publisher-lifecycle(owner, proof, admit, original, patch)
+                : record_get(patch, "status") == "image-current" && rpicab-initializer-permissions(patch, value);
+            let checks = [metadata, rpicab-publisher-refused?(wrongResult, "image-owner-changed"), rpicab-publisher-refused?(checksumResult, "admitted-image-bytes-mismatch"),
+                rpicab-publisher-refused?(malformed, "initializer-proof-refused"), rpicab-publisher-refused?(effect, "initializer-proof-refused"), relocation, unchanged, lifecycle];
+            print(["rpicab-publisher", record_get(patch, "status"), checks]);
+            foldl((okay, check) => okay && check, 1, checks);
+        };
+    }
+    def rpicab-publisher-check() = rpmw-with-admitted(kernel_ast(host_pid(), ["index", rpicab-publisher-value]), 1000, [], rpicab-publisher-observe);
+    def rpicab-restricted-computation-checks() {
+        let changed = record_set(rpicab-held-owner, "value", "changed-after-hold");
+        let held = rpicab-evaluate("rpicab-held-mutable-value", []);
+        let pure = rpicab-evaluate("rpicab-held-pure-value", []);
+        let safe = rpicab-evaluate("rpicab-selected-effect", [0]);
+        let effect = rpicab-evaluate("rpicab-selected-effect", [1]);
+        let eagerAnd = rpicab-evaluate("rpicab-source-and", []);
+        let eagerOr = rpicab-evaluate("rpicab-source-or", []);
+        let argument = rpicab-evaluate("rpicab-argument-effect", []);
+        let divideFirst = rpicab-evaluate("rpicab-order-divide", []);
+        let effectFirst = rpicab-evaluate("rpicab-order-effect", []);
+        let three = rpicab-evaluate("rpicab-call-three", []);
+        let kind = rpicab-evaluate("rpicab-null-kind", []);
+        let emptyHead = rpicab-evaluate("rpicab-empty-head", []);
+        let equal = rpicab-evaluate("rpicab-immutable-equality", []);
+        let bytes = rpicab-evaluate("rpicab-byte-u32", []);
+        let ambient = rpicab-evaluate("rpicab-ambient-node", []);
+        let code = rpicab-evaluate("saj-code", []);
+        let rounds = rpicab-evaluate("saj-round-constant-bytes", []);
+        let expectedBytes = str_concat(byte_to_str(255), byte_to_str(0));
+        let observed = [
+            (String) rpicab-held-mutable-value() == "memoized" && rpicab-evaluated-refusal?(held, rpmw-reason-unsupported-tag()),
+            rpicab-evaluated-value?(pure, [1, 2, 3]),
+            rpicab-evaluated-value?(safe, "safe") && rpicab-evaluated-refusal?(effect, rpmw-reason-unsupported-tag()),
+            rpicab-evaluated-value?(eagerAnd, 0) && rpicab-evaluated-value?(eagerOr, 1) && rpicab-eager-primitive-refused?(70, 0) && rpicab-eager-primitive-refused?(71, 1),
+            rpicab-evaluated-refusal?(argument, rpmw-reason-unsupported-tag()),
+            rpicab-evaluated-refusal?(divideFirst, rpmw-reason-zero-divisor()) && rpicab-evaluated-refusal?(effectFirst, rpmw-reason-unsupported-tag()),
+            rpicab-evaluated-value?(three, [11, 22, 33]),
+            rpicab-evaluated-value?(kind, "null") && rpicab-evaluated-value?(emptyHead, rpicab-empty-head()),
+            rpicab-evaluated-value?(equal, [1, 1, 1, 0]),
+            rpicab-evaluated-value?(bytes, expectedBytes),
+            rpicab-evaluated-refusal?(ambient, rpmw-reason-unsupported-tag()),
+            rpmw-admitted-string-proof?(code) && rpicab-evaluated-value?(code, saj-code()),
+            rpmw-admitted-string-proof?(rounds) && rpicab-evaluated-value?(rounds, saj-round-constant-bytes()),
+            rpicab-proof-owner-check(),
+            rpicab-occupied-frame-check(),
+            rpicab-explicit-budget-check(),
+            rpicab-publisher-check()
+        ];
+        let okay = foldl((held, item) => held && item, 1, observed);
+        okay ? 1 : form_error("[restricted-image-computation] " + [observed, map(receipt => rpmw-admitted-result(receipt), [held, pure, safe, effect, eagerAnd, eagerOr, argument, divideFirst, effectFirst, three, kind, equal, bytes, ambient, code, rounds])].str());
+    }
+}
 
 (do
     (defn rpicab-bit (held weight) (if held weight 0))
@@ -475,6 +710,7 @@
                          (str_eq (rpica-execution-reason timeout-receipt)
                                  (rpmw-reason-step-budget-exhausted)))))))))) 524288)
                 (rpicab-bit
+                    (and (rpicab-restricted-computation-checks)
                     (and (rpica-execution-receipt? fault-receipt)
                     (and (eq (rpica-execution-load fault-receipt) 1)
                     (and (eq (rpica-execution-call fault-receipt) 1)
@@ -484,7 +720,7 @@
                     (and (eq (rpica-execution-release fault-receipt) 1)
                     (and (str_eq (rpica-execution-status fault-receipt) "fault")
                          (str_eq (rpica-execution-reason fault-receipt)
-                                 (rpmw-reason-unsupported-tag)))))))))) 1048576)
+                                 (rpmw-reason-unsupported-tag))))))))))) 1048576)
                 (rpicab-bit
                     (and (not (rpica-execution-receipt?
                                 forged-release-receipt))

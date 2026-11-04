@@ -101,6 +101,79 @@ is selected. An unselected effect branch does not run. This is evidence for the
 next Form-owned implementation, not a persistent SHA initialization cache or a
 whole-program cold/warm result.
 
+## Demand-owned immutable image results
+
+The existing restricted program-image walker now reads the actual admitted
+definitions, evaluates only selected pure operations and retains the definitions
+it reached. It supports ordered multiargument calls and explicit caller fuel;
+`nothing()` selects uncapped work. Effects, ambient reads, unknown operations,
+captures and writes to occupied local slots are refused. This is a selected-path
+evaluation, not a general termination or purity theorem. The first production
+publication policy accepts zero-argument immutable strings.
+
+The existing byte codec writes those results into the owning ordinary v8 image.
+It preserves source identity, diagnostics, function roots, aliases, constant and
+unit ownership, and untouched metadata. A grant binds the completed value and
+reached definitions to the exact native image descriptor; a matching name or
+guessed sibling is insufficient. Multiple requested initializers compose into
+one publication. No process handles or unrelated runtime state are serialized.
+
+The C seed exports immutable admission coordinates and carries the filesystem
+operation. Form owns evaluation, image transformation, events and continuation.
+The source writer binds its descriptor to its own emitted length and checksum,
+so a competing writer cannot attach a different snapshot to the executing graph.
+An imported graph whose constant holds were rewired has no affine image grant.
+These admission mechanics shrink toward the native program loader; the guarded
+rename remains a host leaf, not a second compiler or cache policy.
+
+Conditional publication compares exact destination bytes and renames under an
+anchored directory lock. The C image writer shares that boundary; arbitrary
+direct writes and ordinary renames do not. Competing 16 MiB publications produced
+one success and one `destination-changed`. A FIFO destination originally blocked
+the reader; it now returns `destination-not-regular` without blocking. Known-name
+renames still work in search-only directories. Every descriptor close contributes
+to release status; an unconfirmed release cannot authorize another attempt.
+
+Publication failure retains the completed proof, candidate, original bytes and
+effects in a private closure. Mutable public fields cannot change that authority.
+Correlated care resumes the same operation and never repeats a completed rename.
+Observed tampering of candidate bytes, owner, completed flags or values was
+refused; absent and noncallable continuations were refused too. Successful care
+links the prior event and reports health 1 with surprise 0. Local evidence includes
+`image-patch-resume-v3.txt`, `image-patch-cases-v4.txt`,
+`pure-image-continuation-unrestricted-v3.txt`, `guarded-race-a.txt`,
+`guarded-race-b.txt`, `guarded-fifo-after.txt` and
+`guarded-publication-host-fs-final-v3.txt` under the research directory.
+
+Automatic SHA use remains **unactivated**. The private candidate produced the
+correct SHA-256 result across separate processes: one same-binary isolated pair
+measured 1,444 CPU microseconds for the prior initializer and 83 for the retained
+literal. First restricted evaluation and publication cost about 2.47 seconds.
+These single observations establish neither a statistical speedup nor whole
+startup performance. Its blocked-storage care witness retained both proof and
+scalar challenge, consumed one resource event and resumed native answer 7.
+
+The candidate exposed a real raw-cell gap: no owning disk image exists there,
+and the hash consequently returned `nothing` with `image-owner-unavailable`.
+It is preserved as `sha-initializer-activation.patch`; default SHA remains the
+verified existing implementation, with no alternate branch added. Raw-cell image
+admission still needs exact per-source symbol ownership, per-unit sequences and
+preservation of completed library effects. A standalone compilation or whole
+process snapshot cannot supply those by inference. Later separate publication
+requests against an already changed image also require verified publication
+lineage; the current owner refuses stale descriptors. The full storage-only
+cold/warm objective remains open at these boundaries and at loader reconstruction.
+
+The existing image capability check returned 16777215, including all 14 care
+and 8 publisher assertions; its separate raw-cell call also returned 16777215
+with zero errors and explicit owner-unavailable evidence. Release-failure cases
+model carrier observations; they do not claim an induced OS close failure.
+The final bootstrap/freshness, filesystem, cell, model-seal and demand-JIT checks
+returned 42/31, 32767, 16777215, 2047 and 511. The failed in-place binary install
+was killed at launch while the private candidate ran; atomic replacement restored
+execution. The first model-seal command named the wrong `.fk` extension; its
+retained missing-source event led to the actual `.bml` check above.
+
 ## Source and scope
 
 Mykel J. Kochenderfer and Tim A. Wheeler, *Algorithms for Optimization*, second
