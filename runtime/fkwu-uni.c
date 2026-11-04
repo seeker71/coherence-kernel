@@ -26498,7 +26498,10 @@ FK_PHASED(FK_PHASE_LOAD, int, fk_src_collect_file, (const char *path, long long 
 /* the after-read half of collection, shared by the file lane and the BML
  * floor's in-memory lane: the bytes arrive owned (freed here), registered
  * under the given path identity — for a lowered .bml that is the .bml
- * itself; the validated lowering memo remains a disposable local cache. */
+ * itself; the validated lowering memo remains a disposable local cache.
+ * The root's absolute path stays here. Its image is that path plus the
+ * cell suffix, so admission can keep the location it already resolved. */
+static char fk_cell_abs_source[FK_PATH_CAP];
 static int fk_src_collect_bytes(const char *path, char *owned, long long got,
                                 long long mtime, long long size, long long parent_idx, int lowered) {
     if (!fk_src_dep_reserve(fk_src_dep_count + 1)) {
@@ -26509,7 +26512,10 @@ static int fk_src_collect_bytes(const char *path, char *owned, long long got,
     long long idx = fk_src_dep_count;
     fk_cstr_copy(fk_src_dep_path[fk_src_dep_count], path, FK_PATH_CAP);
     char canonical[FK_PATH_CAP];
-    fk_cstr_copy(fk_src_dep_canon[fk_src_dep_count], fk_path_canon_id(path, canonical), FK_PATH_CAP);
+    const char *canon_id = fk_path_canon_id(path, canonical);
+    fk_cstr_copy(fk_src_dep_canon[fk_src_dep_count], canon_id, FK_PATH_CAP);
+    if (parent_idx < 0 && canon_id >= canonical && canon_id < canonical + FK_PATH_CAP)
+        fk_cstr_copy(fk_cell_abs_source, canonical, FK_PATH_CAP);
     fk_src_dep_mtime[fk_src_dep_count] = mtime;
     fk_src_dep_size[fk_src_dep_count] = size;
     fk_src_dep_digest[fk_src_dep_count] = fk_bytes_fnv1a(owned, got);
@@ -27321,18 +27327,28 @@ static int fk_fkb_open_checked(const char *path, const char *source, const char 
  * values or unrelated cells are serialized; Form owns result persistence. */
 static void fk_admission_image_note(fk_admission *a, const char *path, long long node_base,
                                     long long node_count, long long fn_base) {
-    char absolute[FK_PATH_CAP];
+    char absolute[FK_PATH_CAP], beside[FK_PATH_CAP];
+    const char *kept = 0;
     if (!a || !a->hash[0] || fk_fkb_bad || fk_fkb_errors || fk_fkb_unrunnable ||
         !fk_cstr_eq(a->hash, fk_fkb_source_hash)) return;
+    long long an = fk_cstrlen(fk_cell_abs_source);
+    if (an > 0 && an + 10 < FK_PATH_CAP) {
+        memcpy(beside, fk_cell_abs_source, (unsigned long)an);
+        memcpy(beside + an, ".cell.fkb", 10);
+        if (fk_cstr_eq(path, beside)) kept = beside;
+    }
+    if (!kept) {
 #if defined(_WIN32)
-    if (!_fullpath(absolute, path, FK_PATH_CAP)) return;
+        if (!_fullpath(absolute, path, FK_PATH_CAP)) return;
 #else
-    if (!realpath(path, absolute)) return;
+        if (!realpath(path, absolute)) return;
 #endif
-    long long n = fk_cstrlen(absolute);
+        kept = absolute;
+    }
+    long long n = fk_cstrlen(kept);
     a->image_path = malloc((unsigned long)n + 1);
     if (!a->image_path) fk_die("image admission location: out of memory");
-    memcpy(a->image_path, absolute, (unsigned long)n + 1);
+    memcpy(a->image_path, kept, (unsigned long)n + 1);
     a->image_bytes = fk_fkb_len + 8;
     a->node_base = node_base; a->node_end = node_base + node_count; a->fn_base = fn_base;
     static const char hex[] = "0123456789abcdef";
@@ -27678,7 +27694,12 @@ static int fk_demand_ensure_one(fk_demand *d, long long fn) {
      * reaches this function while its callees are still waking sees a row. */
     if (body >= 0) fk_fn[fn] = d->node_base + body;
     if (body >= 0) fk_demand_node(d, body);
-    if (body >= 0 && !fk_fkb_bad) fk_prog_note_body(fn);
+    if (body >= 0 && !fk_fkb_bad) {
+        fk_prog_note_body(fn);
+        /* The name joins the live roster when the body is reached. */
+        for (long long j = 0; j < fk_fntop; j++)
+            if (fk_fnidx[j] == fn) fk_live_note_defn(j);
+    }
     if (fk_fkb_bad) {
         if (!d->failed) { d->failure = fk_fkb_bad_why; d->failed = d; }
         fk_fn[fn] = -1;
@@ -28094,7 +28115,9 @@ static int fk_src_import_fkb_read(const char *fkb_path, fk_fkb_snapshot *snapsho
         return 0;
     }
     fk_admission_bind(fn_base, fn_base + nf - 1, fk_fkb_source_hash);
-    for (long long j = retained_exports; j < fk_fntop; j++) fk_live_note_defn(j);
+    /* A demand image notes a function when its body is reached. */
+    if (!fk_demand_building)
+        for (long long j = retained_exports; j < fk_fntop; j++) fk_live_note_defn(j);
     fk_admissions->image_bytes = fk_fkb_len + 8;
     /* Cross-image holds change the admitted graph. The original image is no
      * longer a complete publication target for that graph's pure results. */
