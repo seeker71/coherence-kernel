@@ -775,3 +775,8 @@ resident call in that series was 98. These sit with the readings above and
 do not establish a further speedup. Cell and image witnesses return
 16777215, import-carry 255, static projection 127 and the demand guard 511.
 Storage-only parity remains open.
+
+The 2,048-function file wrote a fixed crowd so a reload could be timed.
+The call that ran was one function. An unreached row stays sealed until a
+call or a read names it. That file, its image, and the generator that
+wrote the crowd are retired. A reached call is the witness.
