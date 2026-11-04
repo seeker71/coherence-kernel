@@ -764,3 +764,14 @@ authoring guidance completed. The private raw-demand-string observations retain
 the failing and repaired outputs. Latest 2,048-function disk samples are
 1784/1696/1516 microseconds versus resident 98/96/90. These noisy readings establish
 no additional speedup, and storage-only parity remains open.
+
+Admission was naming every export as the image came in, and resolving the
+image path again. The name joins the live roster when the body is reached.
+The location stays the absolute path collection already resolved, when the
+artifact is that path with the cell suffix. Ten fresh processes reloading
+the 2,048-function image returned 42 with zero source compilation, in 1272,
+1313, 1358, 1392, 1444, 1462, 1514, 1526, 1645 and 1739 microseconds. One
+resident call in that series was 98. These sit with the readings above and
+do not establish a further speedup. Cell and image witnesses return
+16777215, import-carry 255, static projection 127 and the demand guard 511.
+Storage-only parity remains open.
