@@ -5,7 +5,11 @@
 Observed on this tree, after `cc -O2 -o fkwu runtime/fkwu-uni.c`:
 
 - `form/form-stdlib/tests/cell-run-band.fk` → 16777215. A library change moves the admission identity. A fresh load counts 2 source units and 3 source functions. The resident call parses nothing.
-- `form/form-stdlib/tests/program-image-static-projection-band.bml` → 7. An admitted `(defn pisp-answer () 7)` projects (5 nodes, 1 symbol). A second projection is the same graph. `nothing()` refuses.
+- `form/form-stdlib/tests/program-image-static-projection-band.bml` → 63. An admitted `(defn pisp-answer () 7)` projects (5 nodes, 1 symbol). A second projection is the same graph. `nothing()` refuses. The rows are a sealed program image, and the demand wire is their flat.
 - `form/form-stdlib/tests/runtime-program-image-fkb-current-answer-capability-band.fk` → 16777215, including the synthetic projection cases (changed observation, unknown tag, unowned root, wrapper cycle, optional child) and a live admission: a retained closure still answers 445 and 446, the rewritten library answers 336, the resident call parses nothing, and the projection writes no effect.
 
-The catalog reader stays a temporary seed carrier. Form owns the projection.
+The projected rows are the program image. `pifbc-projection-table` fills the table with those rows, the function bodies, and the string bytes. `pifbc-projection-container` seals that table. `bdj-projected-program-wire` is the flat a later demand compares.
+
+Observed on the same cell: the band answers 63. The table is valid. The container is ready. A second projection flats to the same image. A process id was rewritten and is absent from that flat. The demand wire is the flat.
+
+The catalog reader stays a temporary seed carrier. Form owns the projection. A demand request whose program is still a process-local scalar graph is unchanged. Kernel tags in this image are not yet a native page.
