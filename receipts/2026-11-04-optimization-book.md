@@ -201,3 +201,68 @@ This establishes removal of unnecessary recompilation after timestamp-only
 changes. It does not establish the full storage-only cold/warm bound or a new
 wall-time speedup. Dependency discovery, graph reconstruction, restart JIT
 persistence and the separate timestamp-gated `.dylib` route remain open.
+
+## On-demand, adaptive, self-contained caching
+
+Urs then specified: "All catching shall be on demand, smart and fully self
+contained." In this caching discussion, "catching" is read as "caching". The
+compiler contract now applies this to all caches. Actual demand creates only
+missing reachable work. Reuse benefit, transfer cost and resource pressure guide
+retention and specialization. Each owning organ carries its validity evidence
+and payload and handles publication, invalidation, recovery and release. Shared
+unchanged dependencies reuse their retained results. Callers need no separate
+warm-up, metadata preparation or cache maintenance.
+
+This corrects the earlier contract's instruction to create executable state when
+meaning changes: a change invalidates affected results; demand creates their
+replacements. First-ever computation remains necessary when no result exists.
+The storage-only cold/warm requirement applies to reuse of work already done.
+
+Read-only source review identified another concrete open boundary. The scalar
+demand-JIT authority obtains its default identity from the fixed compatibility
+wrapper `.fk.sym`, which ordinary imports do not guarantee. Explicit-identity
+guard tests do not establish this default path's self-containment. Its first
+request also ignores disk images until the owner progresses pending work.
+`kernel_ast` currently exposes only the last noted image's folded observation,
+not a complete admitted-program/compiler/target identity. The default scalar
+fingerprint also omits the builder identity that `.fkb` admission holds separately.
+Replacing the fixed
+path with another sidecar, a process ID or a hash of possibly changed source
+would not repair that ownership contract. This finding stays with the existing
+demand-JIT and program-image owners.
+
+Two smaller violations are repaired in Form. The shared JIT step now asks an
+identity resolver only on specialization/probe branches; idle, held faults and
+publication care retain their owned state. Production owner progress uses that
+same path. The disk-cache inspector no longer rejects an otherwise valid image
+because its source mtime is newer. Its existing runtime identity, epoch, exact
+program wire and image-fold checks decide admission, followed by the existing
+native/Form point challenge. Source presence and publication ownership remain.
+
+The extended existing guard returns 511. Its pending path invokes the resolver;
+idle and publication-care paths use a resolver that raises if called and finish
+without calling it. A separate native experiment,
+`.hearth/research/algorithms-for-optimization/on-demand-cache.bml`, writes a
+400-byte scalar image under explicit fixture identities. After
+`form-run touch -t 202701030101 .hearth/research/algorithms-for-optimization/on-demand-source.txt`,
+a fresh process reports:
+
+```text
+[explicit-fixture-identities, cache-older-than-source, 1,
+ status, disk-installed, materialization, disk-image, answer, 7, route, native,
+ refusals, [stale-epoch, stale-program, cache-runtime, cache-image-fold]]
+1
+```
+
+These observations establish avoided identity lookup and unnecessary scalar
+recompilation, not complete cache self-containment or a whole-startup speedup.
+The default admitted-identity seam, first-demand disk selection and persisted
+native validation evidence remain open. The guard needed approved process-birth
+access; its original refusal and successful output are retained separately as
+`on-demand-guard.txt` and `on-demand-guard-allowed.txt`.
+Independent source review found no blocking issue. Step total/unattributed time
+now includes identity resolution, which previously occurred before its timer;
+compare future timings with that attribution change in view. The synthetic
+`source-artifact-cache.fk` policy model still uses timestamp freshness and is
+another caller contract to migrate alongside its descriptor chain; it does not
+implement actual program-image admission.

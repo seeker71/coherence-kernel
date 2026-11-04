@@ -7,6 +7,14 @@ native images are local cache. The executable route lives in
 
 File presence establishes availability; executable witnesses establish behavior.
 
+The [compiler contract](../grammars/bml-native-north-star.form) applies to every
+cache: materialize on demand, adapt from measured reuse and cost, and keep the
+complete lifecycle inside its owning organ. A source change invalidates affected
+results; their replacements wait for demand. First demand computes genuinely
+missing work. Subsequent cold and warm demands reuse that work, with only
+storage delivery permitted to differ. Callers should not need a warm-up command,
+separately prepared metadata or manual cache maintenance.
+
 `./fkwu observe/native-jit-witness-run.fk` emits an ARM64 image in Form, executes
 two inputs through the physical carrier, and checks malformed-image refusal.
 `form/form-stdlib/tests/jit-heat-gate-band.fk` and
@@ -54,6 +62,24 @@ its temporary allocation from the seed. The native source compiler's retained
 closure/load plan is the shrink path for the remaining seed-owned admission.
 The separate `.dylib` route still uses timestamp freshness and needs a
 content-bound artifact contract before that check can be removed.
+
+Scalar demand JIT also has a self-containment gap: `bdj-source-unit-hash` reads
+the compatibility wrapper's fixed `.fk.sym` path, although importing the owner
+does not guarantee that artifact exists. That source identity also omits the
+builder identity held separately by the program-image loader. Its first request evaluates the graph
+and leaves specialization for the owner's progress step, even when a disk image
+may already exist. The request/progress owner must admit current retained state
+on demand and obtain its identity from the actual admitted program. Reading a
+different guessed sidecar or hashing newly edited disk source would not establish
+the identity of code already loaded. The current `kernel_ast` header exposes a
+folded observation of the last noted image, not that complete execution identity.
+
+Within the existing scalar cache owner, runtime identity is now resolved only
+when a pending specialization or healing probe needs it. Idle, held faults and
+publication care use their retained state. Disk admission checks the retained
+runtime identity, epoch, exact program wire and image bytes regardless of
+timestamp ordering; file ages remain telemetry. The native/Form installation
+challenge remains in place.
 
 For recovery, search local Form cells, RAG, git history and receipts. Make the
 native attempt, retain behavior checks and per-stage streams, exit status and
