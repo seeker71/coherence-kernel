@@ -6,7 +6,7 @@
 ; replaced: each case runs the same unit as a child (this band is the one place that still spawns a cell, on purpose) and the
 ; record is held to it. A unit of the tree and a unit of the fixtures alike:
 ;
-;   1      pure text: voice-chunk-band answers its 4095, prints what it printed, voices nothing, exits 0 spawned and in process
+;   1      pure text: voice-chunk-band answers its 4095, prints what it printed, has no source diagnostic, exits 0 spawned and in process
 ;   2      a band that reads the kernel's own AST (kernel_ast): anf-shadow-band
 ;   4      a band that reads and writes files: file-bytes-band
 ;   8      substring-one-meaning-band        16   str-find-one-meaning-band
@@ -51,7 +51,7 @@
 ; Verdict 16777215
 ; REQUIRES: (cell_run is a seed door, leaf-door mode 35; the sibling kernels carry no host doors)
 ; preflight-exec: forbidden
-; preludes: form/form-stdlib/core.fk form/form-stdlib/line-grammar.fk
+; preludes: form/form-stdlib/core.fk form/form-stdlib/line-grammar.fk form/form-stdlib/organ-health.bml
 section [form.bml] {
   def crb-bit(ok, bit) = ok ? bit : 0;
   def crb-say(label, v) = print([label, v]);
@@ -90,7 +90,7 @@ section [form.bml] {
   // the organ-health rows a spawned run voiced, less the image rebuilds a cold cache adds
   def crb-health(err) = split-on(err, "\n") |> filter(l => crb-starts?(l, "form-organ health {") && !crb-starts?(crb-field(l, "aspect"), "image:"));
   def crb-observed-oracle(err) = crb-join(map(l => crb-field(l, "observed"), crb-health(err)), "|");
-  def crb-observed(r) = crb-join(map(g => (String) record_get(g, "observed"), record_get(r, "diag")), "|");
+  def crb-observed(r) = crb-join(map(g => (String) record_get(g, "observed"), filter(g => !crb-starts?((String) record_get(g,"aspect"),"image:"),record_get(r,"diag"))), "|");
   def crb-last-line(text) {
     let lines = split-on(trim(text), "\n");
     nil?(lines) ? "" : lines[len(lines) - 1];
@@ -116,7 +116,9 @@ section [form.bml] {
     let again = crb-oracle(cell, "/dev/null", n + 1000);
     let r = cell_run(cell, 0, nothing(), nothing());
     let shown = crb-say(cell, [first[0], record_get(r, "errors"), record_get(r, "ms"), crb-render(record_get(r, "value"))]);
-    [crb-same(r, again), (Comparable) first[0] == again[0] && (String) first[1] == (String) again[1], r];
+    let same = crb-same(r, again);
+    same ? 0 : print(["cell-run-oracle-mismatch",cell,"oracle",again,"actual",record_get(r,"value"),record_get(r,"diag"),record_get(r,"out"),record_get(r,"stopped")]);
+    [same, (Comparable) first[0] == again[0] && (String) first[1] == (String) again[1], r];
   }
   def crb-rss() {
     let rows = host_processes("fkwu*");
@@ -132,6 +134,77 @@ section [form.bml] {
   }
   def crb-repeat(n, cell) = n <= 0 ? 0 : crb-repeat-one(n, cell, cell_run(cell, 0, nothing(), nothing()));
   def crb-repeat-one(n, cell, r) = (Comparable) record_get(r, "resident") == 1 ? crb-repeat(n - 1, cell) : 1000000;
+  def crb-image-count(path) = { let bytes = read_file(path); nothing?(bytes) ? 0 : len(bytes); };
+  def crb-image-fixtures(directory) {
+    host_dir_mkdir(directory);
+    let library = directory + "/library.fk"; let a = directory + "/a.fk"; let b = directory + "/b.fk";
+    let libraryEffects = directory + "/library-effects"; let rootEffects = directory + "/root-effects";
+    write_file(library,"(defn crb-img-f () 1)\n(let crb-img-saved crb-img-f)\n(let crb-img-held (record_new 0 \"n\" 7))\n(defn crb-img-owner () crb-img-held)\n"
+      + "(do (let before (read_file \"" + libraryEffects + "\")) (write_file \"" + libraryEffects + "\" (if (nothing? before) \"L\" (str_concat before \"L\"))) 0)\n");
+    let source = "; preludes: " + library + "\n(defn crb-img-answer () (record_new 0 \"n\" (record_get (crb-img-owner) \"n\") \"owner\" (crb-img-owner) \"same\" (eq crb-img-saved crb-img-f) \"fn\" crb-img-f))\n"
+      + "(do (let before (read_file \"" + rootEffects + "\")) (write_file \"" + rootEffects + "\" (if (nothing? before) \"R\" (str_concat before \"R\"))) (crb-img-answer))\n";
+    write_file(a,source); write_file(b,source); [a,b,libraryEffects,rootEffects];
+  }
+  def crb-image-disk-reuse() {
+    let directory = crb-dir() + "/disk-reuse"; let paths = crb-image-fixtures(directory); let driver = directory + "/driver.fk";
+    let builder = kernel_ast(host_pid(),["identity"])[0];
+    let source = "(do\n(defn crb-img-good (r) (and (eq (record_get r \"errors\") 0) (nothing? (record_get r \"stopped\"))))\n"
+      + "(defn crb-img-zero (r) (and (eq (record_get r \"source_units\") 0) (eq (record_get r \"source_functions\") 0)))\n"
+      + "(defn crb-img-count (p) (do (let s (read_file p)) (if (nothing? s) 0 (len s))))\n"
+      + "(defn crb-img-diag (rows path) (if (eq (len rows) 0) (list) (if (str_eq (record_get (head rows) \"aspect\") (str_concat \"image:\" path)) (cons (head rows) (crb-img-diag (tail rows) path)) (crb-img-diag (tail rows) path))))\n"
+      + "(defn crb-img-healed (rows path) (if (eq (len rows) 2) (do (let failed (head rows)) (let applied (head (tail rows))) (and (str_eq (record_get failed \"observed\") \"image-admission-failed\") (and (str_eq (record_get failed \"stage\") \"observe\") (and (eq (record_get failed \"health\") 0) (and (str_eq (record_get failed \"path\") path) (and (str_eq (record_get applied \"observed\") \"image-admitted\") (and (str_eq (record_get applied \"stage\") \"applied\") (and (eq (record_get applied \"health\") 1) (str_eq (record_get applied \"path\") path))))))))) 0))\n"
+      + "(let l0 (crb-img-count \"" + paths[2] + "\")) (let r0 (crb-img-count \"" + paths[3] + "\"))\n"
+      + "(let a (cell_call \"" + paths[0] + "\" (nothing) (nothing))) (let av (record_get a \"value\"))\n"
+      + "(let changed (record_set (record_get av \"owner\") \"n\" 9))\n"
+      + "(let ar (cell_call \"" + paths[0] + "\" (nothing) (nothing))) (let b (cell_call \"" + paths[1] + "\" (nothing) (nothing)))\n"
+      + "(let bv (record_get b \"value\")) (let br (cell_call \"" + paths[1] + "\" (nothing) (nothing)))\n"
+      + "(let good (and (crb-img-good a) (and (crb-img-good ar) (and (crb-img-good b) (crb-img-good br)))))\n"
+      + "(let state (and (eq (record_get av \"n\") 7) (and (eq (record_get (record_get ar \"value\") \"n\") 9) (and (eq (record_get bv \"n\") 9) (eq (record_get (record_get br \"value\") \"n\") 9)))))\n"
+      + "(let identity (and (eq (record_get av \"same\") 1) (and (eq (record_get bv \"same\") 1) (and (eq (record_get av \"fn\") (record_get bv \"fn\")) (eq (record_get av \"owner\") (record_get bv \"owner\"))))))\n"
+      + "(let effects (and (eq (crb-img-count \"" + paths[2] + "\") (add l0 1)) (eq (crb-img-count \"" + paths[3] + "\") (add r0 4))))\n"
+      + "(let resident (and (eq (record_get ar \"resident\") 1) (and (eq (record_get br \"resident\") 1) (and (crb-img-zero ar) (crb-img-zero br)))))\n"
+      + "(let disk (and (crb-img-zero a) (crb-img-zero b))) (let cold (and (gt (record_get a \"source_units\") 0) (gt (record_get b \"source_units\") 0)))\n"
+      + "(let ad (crb-img-diag (record_get a \"diag\") \"" + paths[0] + ".cell.fkb\")) (let bd (crb-img-diag (record_get b \"diag\") \"" + paths[1] + ".cell.fkb\"))\n"
+      + "(let clean (and (eq (len ad) 0) (eq (len bd) 0))) (let repaired (and (gt (record_get a \"source_units\") 0) (and (crb-img-zero b) (and (crb-img-healed ad \"" + paths[0] + ".cell.fkb\") (eq (len bd) 0)))))\n"
+      + "(print (list \"cell-image-source-work\" (record_get a \"source_units\") (record_get a \"source_functions\") (record_get b \"source_units\") (record_get b \"source_functions\") good state identity effects resident ad bd))\n"
+      + "(if (and (str_eq (head (kernel_ast (host_pid) (list \"identity\"))) \"" + builder + "\") (and good (and state (and identity (and effects resident))))) (if repaired 3 (if clean (if disk 2 (if cold 1 0)) 0)) 0))\n";
+    write_file(driver,source);
+    let cold = crb-oracle(driver,"/dev/null",910); let warm = crb-oracle(driver,"/dev/null",911);
+    let artifact = paths[0] + ".cell.fkb"; let bytes = read_file(artifact);
+    let damaged = write_file(artifact,substring(bytes,0,len(bytes) - 8) + "broken!!");
+    let repaired = crb-oracle(driver,"/dev/null",912); let reused = crb-oracle(driver,"/dev/null",913);
+    let okay = cold[0] == 0 && warm[0] == 0 && repaired[0] == 0 && reused[0] == 0 && crb-last-line(cold[1]) == "1" && crb-last-line(warm[1]) == "2"
+      && crb-last-line(repaired[1]) == "3" && crb-last-line(reused[1]) == "2" && damaged == len(bytes);
+    print(["cell-image-disk-reuse",cold,warm,repaired,reused,okay]);
+    host_dir_rmdir(directory); okay && nothing?(fs_list(directory));
+  }
+  def crb-image-publication() {
+    let directory = crb-dir() + "/publication"; let paths = crb-image-fixtures(directory); let target = paths[0];
+    let blocked = host_dir_mkdir(target + ".cell.fkb");
+    let first = cell_call(target,nothing(),nothing()); let firstPublication = record_get(first,"publication");
+    let firstEffects = [crb-image-count(paths[2]),crb-image-count(paths[3])];
+    let repeated = cell_call(target,nothing(),nothing()); let publication = record_get(repeated,"publication");
+    let pendingEffects = [crb-image-count(paths[2]),crb-image-count(paths[3])];
+    let resume = record_get(publication,"resume");
+    value_kind(resume) != "closure" ? form_error("cell publication continuation unavailable: " + [crb-stopped(first),publication].str()) : 0;
+    host_dir_rmdir(target + ".cell.fkb");
+    let healed = resume(publication,oh-response(record_get(publication,"event"),"retry-publication"));
+    let healedEffects = [crb-image-count(paths[2]),crb-image-count(paths[3])];
+    let answer = cell_call(target,nothing(),nothing()); let value = record_get(answer,"value"); let answerEffects = [crb-image-count(paths[2]),crb-image-count(paths[3])];
+    let completedResume = record_get(healed,"resume"); let completed = completedResume(healed,nothing());
+    let completedEffects = [crb-image-count(paths[2]),crb-image-count(paths[3])];
+    record_set(record_get(value,"owner"),"n",9);
+    let resident = cell_call(target,nothing(),nothing());
+    let checks = [record_get(crb-stopped(first),"kind") == "image-publication" && nothing?(record_get(first,"value")) && firstEffects == [0,0],
+      record_get(crb-stopped(repeated),"kind") == "image-publication" && record_get(repeated,"source_units") == 0 && record_get(repeated,"source_functions") == 0 && pendingEffects == [0,0],
+      record_get(firstPublication,"bytes") == record_get(publication,"bytes"),
+      record_get(healed,"status") == "image-published" && healedEffects == [0,0],
+      nothing?(crb-stopped(answer)) && record_get(answer,"errors") == 0 && record_get(value,"n") == 7 && answerEffects == [1,1],
+      record_get(completed,"status") == "image-published" && completedEffects == [1,1],
+      record_get(resident,"resident") == 1 && record_get(record_get(resident,"value"),"n") == 9 && [crb-image-count(paths[2]),crb-image-count(paths[3])] == [1,2]];
+    host_dir_rmdir(directory); let clean = nothing?(fs_list(directory));
+    print(["cell-image-publication-care",checks,clean]); clean && all?(check => check,checks);
+  }
   def crb-native() {
     // the band's own argument: nothing when it runs as a program, the leg's value when a sweep runs it as a cell; the nested
     // calls below must give it back unchanged
@@ -278,7 +351,7 @@ section [form.bml] {
     let c64 = crb-case(crb-fx("stop-cell.fk"), 7);
     let c128 = crb-case(crb-fx("warn-cell.fk"), 8);
     let c512 = crb-case(crb-fx("bml-cell.bml"), 10);
-    let b1 = crb-bit(c1[0] && (Comparable) record_get(c1[2], "value") == 4095 && (Comparable) record_get(c1[2], "errors") == 0 && nil?(record_get(c1[2], "diag")), 1);
+    let b1 = crb-bit(c1[0] && (Comparable) record_get(c1[2], "value") == 4095 && (Comparable) record_get(c1[2], "errors") == 0 && (String) crb-observed(c1[2]) == "", 1);
     let b2 = crb-bit(c2[0], 2);
     let b4 = crb-bit(c4[0], 4);
     let b8 = crb-bit(c8[0], 8);
@@ -298,7 +371,7 @@ section [form.bml] {
     // residency: the same unit again, parsed already
     let a1 = cell_run(bands ++ "voice-chunk-band.fk", 0, nothing(), nothing());
     let w1 = cell_run(crb-fx("warn-cell.fk"), 0, nothing(), nothing());
-    let b1024 = crb-bit((Comparable) record_get(a1, "resident") == 1 && (Comparable) record_get(a1, "value") == 4095 && (String) record_get(a1, "out") == (String) record_get(c1[2], "out") && (Comparable) record_get(w1, "resident") == 1 && (String) crb-observed(w1) == "binding-missing" && (Comparable) record_get(w1, "errors") == 1 && crb-dependency-admission() && crb-unparsed-sibling(), 1024);
+    let b1024 = crb-bit((Comparable) record_get(a1, "resident") == 1 && (Comparable) record_get(a1, "value") == 4095 && (String) record_get(a1, "out") == (String) record_get(c1[2], "out") && (Comparable) record_get(w1, "resident") == 1 && (String) crb-observed(w1) == "binding-missing" && (Comparable) record_get(w1, "errors") == 1 && crb-dependency-admission() && crb-unparsed-sibling() && crb-image-disk-reuse() && crb-image-publication(), 1024);
     let sa = cell_run(crb-fx("scope-a.fk"), 0, nothing(), nothing());
     let sb = cell_run(crb-fx("scope-b.fk"), 0, nothing(), nothing());
     let sa2 = cell_run(crb-fx("scope-a.fk"), 0, nothing(), nothing());

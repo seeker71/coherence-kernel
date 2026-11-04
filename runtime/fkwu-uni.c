@@ -25369,6 +25369,8 @@ static void fk_diag_path(const char *level, const char *path, const char *msg) {
  * temporary seed's source-loader bookkeeping. */
 static char (*fk_src_dep_path)[FK_PATH_CAP];
 static long long *fk_src_dep_mtime;
+/* Canonical spelling is observed once with each dependency's source bytes. */
+static char (*fk_src_dep_canon)[FK_PATH_CAP];
 static long long *fk_src_dep_size;
 /* CONTENT DIGEST per dependency. The artifact identity used to be
  * path@mtime:size and the code that wrote it said "source path, content, or
@@ -25445,6 +25447,7 @@ static int fk_src_dep_reserve(long long want) {
     long long cap = fk_src_dep_cap;
     long long i = 0;
     char (*paths)[FK_PATH_CAP];
+    char (*canons)[FK_PATH_CAP];
     long long *mtimes;
     long long *sizes;
     unsigned long long *digests;
@@ -25472,6 +25475,7 @@ static int fk_src_dep_reserve(long long want) {
         return 0;
     }
     paths = malloc(sizeof(*paths) * (unsigned long)cap);
+    canons = malloc(sizeof(*canons) * (unsigned long)cap);
     mtimes = malloc(sizeof(*mtimes) * (unsigned long)cap);
     sizes = malloc(sizeof(*sizes) * (unsigned long)cap);
     digests = malloc(sizeof(*digests) * (unsigned long)cap);
@@ -25480,14 +25484,15 @@ static int fk_src_dep_reserve(long long want) {
     text_offs = malloc(sizeof(*text_offs) * (unsigned long)cap);
     text_lens = malloc(sizeof(*text_lens) * (unsigned long)cap);
     lowered = malloc(sizeof(*lowered) * (unsigned long)cap);
-    if (paths == 0 || mtimes == 0 || sizes == 0 || digests == 0 ||
+    if (paths == 0 || canons == 0 || mtimes == 0 || sizes == 0 || digests == 0 ||
         parents == 0 || ends == 0 || text_offs == 0 || text_lens == 0 || lowered == 0) {
-        free(paths); free(mtimes); free(sizes); free(digests);
+        free(paths); free(canons); free(mtimes); free(sizes); free(digests);
         free(parents); free(ends); free(text_offs); free(text_lens); free(lowered);
         return 0;
     }
     while (i < fk_src_dep_count) {
         fk_cstr_copy(paths[i], fk_src_dep_path[i], FK_PATH_CAP);
+        fk_cstr_copy(canons[i], fk_src_dep_canon[i], FK_PATH_CAP);
         mtimes[i] = fk_src_dep_mtime[i];
         sizes[i] = fk_src_dep_size[i];
         digests[i] = fk_src_dep_digest[i];
@@ -25502,6 +25507,7 @@ static int fk_src_dep_reserve(long long want) {
     free(fk_src_dep_digest); free(fk_src_dep_parent); free(fk_src_dep_end);
     free(fk_src_dep_text_off); free(fk_src_dep_text_len); free(fk_src_dep_lowered);
     fk_src_dep_path = paths;
+    free(fk_src_dep_canon); fk_src_dep_canon = canons;
     fk_src_dep_mtime = mtimes;
     fk_src_dep_size = sizes;
     fk_src_dep_digest = digests;
@@ -25531,6 +25537,7 @@ static void fk_src_dep_release(void) {
     free(fk_src_dep_digest); free(fk_src_dep_parent); free(fk_src_dep_end);
     free(fk_src_dep_text_off); free(fk_src_dep_text_len); free(fk_src_dep_lowered);
     fk_src_dep_path = 0;
+    free(fk_src_dep_canon); fk_src_dep_canon = 0;
     fk_src_dep_mtime = 0;
     fk_src_dep_size = 0;
     fk_src_dep_digest = 0;
@@ -25565,12 +25572,12 @@ static int fk_cstr_eq(const char *a, const char *b) {
     return a[i] == b[i];
 }
 static int fk_src_dep_index(const char *path) {
-    long long i = 0;
-    while (i < fk_src_dep_count) {
+    long long i = fk_src_dep_count;
+    while (i > 0) {
+        i--;
         if (fk_cstr_eq(fk_src_dep_path[i], path)) {
             return (int)i;
         }
-        i = i + 1;
     }
     return -1;
 }
@@ -25629,6 +25636,10 @@ static const char *fk_path_canon_id(const char *path, char *out) {
 #endif
     long long pre_n = fk_path_repo_prefix_len(out);
     return pre_n > 0 ? out + pre_n : out;
+}
+static const char *fk_src_path_id(const char *path, char *out) {
+    long long dep = fk_src_dep_index(path);
+    return dep >= 0 ? fk_src_dep_canon[dep] : fk_path_canon_id(path, out);
 }
 static int fk_path_resolve_fk_dep(const char *owner_path, const char *token, long long token_n,
                                   char *out, long long cap) {
@@ -25813,7 +25824,6 @@ static long long fk_src_unit_mtime(void) {
 static int fk_src_unit_hash_members(long long start, long long end, const long long *members, char *out, long long cap) {
     long long pos = 0;
     long long i = start;
-    char canon[FK_PATH_CAP];
     unsigned long long fold = 14695981039346656037ULL;
     long long count = 0;
     /* v4 retains v3's bounded identity but removes timestamps: touching an
@@ -25824,7 +25834,7 @@ static int fk_src_unit_hash_members(long long start, long long end, const long l
     while (i < end) {
         long long d = members ? members[i] : i;
         if (d < 0 || d >= fk_src_dep_count) return 0;
-        const char *cid = fk_path_canon_id(fk_src_dep_path[d], canon);
+        const char *cid = fk_src_dep_canon[d];
         fold = fold ^ fk_bytes_fnv1a(cid, fk_path_len(cid));
         fold = fold * 1099511628211ULL;
         fold = fold ^ (unsigned long long)fk_src_dep_size[d];
@@ -26477,6 +26487,8 @@ static int fk_src_collect_bytes(const char *path, char *owned, long long got,
     }
     long long idx = fk_src_dep_count;
     fk_cstr_copy(fk_src_dep_path[fk_src_dep_count], path, FK_PATH_CAP);
+    char canonical[FK_PATH_CAP];
+    fk_cstr_copy(fk_src_dep_canon[fk_src_dep_count], fk_path_canon_id(path, canonical), FK_PATH_CAP);
     fk_src_dep_mtime[fk_src_dep_count] = mtime;
     fk_src_dep_size[fk_src_dep_count] = size;
     fk_src_dep_digest[fk_src_dep_count] = fk_bytes_fnv1a(owned, got);
@@ -27019,7 +27031,7 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
     ok = ok && fk_fkb_write_u8(fd, 0);
     ok = ok && fk_fkb_write_u32(fd, FK_FKB_VERSION);
     ok = ok && fk_fkb_write_cstr(fd, FK_FKB_BUILDER_ID);
-    ok = ok && fk_fkb_write_cstr(fd, fk_path_canon_id(src_path, canon));
+    ok = ok && fk_fkb_write_cstr(fd, fk_src_path_id(src_path, canon));
     ok = ok && fk_fkb_write_cstr(fd, source_hash);
     ok = ok && fk_fkb_write_signed(fd, source_mtime > 0 ? source_mtime : 1);
     ok = ok && fk_fkb_write_cstr(fd, fkb_path);
@@ -27256,7 +27268,7 @@ static int fk_fkb_open_checked(const char *path, const char *source, const char 
     }
     int source_ok = 1;
     char canon[FK_PATH_CAP];
-    if (source) source_ok = fk_fkb_read_string_matches_cstr(fk_path_canon_id(source, canon));
+    if (source) source_ok = fk_fkb_read_string_matches_cstr(fk_src_path_id(source, canon));
     else fk_fkb_skip_string();
     long long n = fk_fkb_read_u32();
     if (n <= 0 || n >= FK_SRC_HASH_CAP || n > fk_fkb_len - fk_fkb_pos) {
@@ -27545,7 +27557,7 @@ static void fk_cell_import_sequence(unsigned long long unit, long long sequence)
 #define fk_cell_import_name(off, unit) ((void)0)
 #define fk_cell_import_sequence(unit, sequence) ((void)0)
 #endif
-static int fk_src_import_fkb_image(const char *fkb_path, fk_fkb_snapshot *snapshot) {
+static int fk_src_import_fkb_read(const char *fkb_path, fk_fkb_snapshot *snapshot) {
     fk_fkb_snapshot_use(snapshot);
     int image_graph_retained = 1;
     long long version = FK_FKB_VERSION;
@@ -27613,7 +27625,6 @@ static int fk_src_import_fkb_image(const char *fkb_path, fk_fkb_snapshot *snapsh
         fk_fkb_read_table_string();
         i = i + 1;
     }
-    fk_lit_pin_rows(node_base, node_base + nr);
     i = 1;
     while (i < nf) {
         fk_fn[fn_base + i - 1] = fn_roots[i] < 0 ? fn_roots[i] : fn_roots[i] + node_base;
@@ -27678,7 +27689,6 @@ static int fk_src_import_fkb_image(const char *fkb_path, fk_fkb_snapshot *snapsh
                 fk_fnar[new_fnidx] = arity;
                 fk_fn_unit[new_fnidx] = (unsigned long long)owner;
             }
-            fk_live_note_defn(fk_fntop);
             fk_fntop = fk_fntop + 1;
         }
         i = i + 1;
@@ -27715,6 +27725,7 @@ static int fk_src_import_fkb_image(const char *fkb_path, fk_fkb_snapshot *snapsh
      * this image's nodes landed, as its fn symbols are above. */
     long long const_count = fk_fkb_read_signed();
     if (const_count < 0 || const_count > fk_fkb_len) {
+        fk_fkb_mark_bad("import constant count exceeds artifact bounds");
         return 0;
     }
     long long cap1 = const_count > 0 ? const_count : 1;
@@ -27758,6 +27769,8 @@ static int fk_src_import_fkb_image(const char *fkb_path, fk_fkb_snapshot *snapsh
     while (!fk_fkb_bad && u < unit_count) {
         uid[u] = (unsigned long long)fk_fkb_read_signed();
         long long c = fk_fkb_read_signed();
+        if (c < -1 || c >= nr) fk_fkb_mark_bad("import unit sequence is outside the image");
+        if (!fk_fkb_bad && fk_cell_import_root >= 0) (void)fk_cell_import_dep(uid[u]);
         uchain[u] = c >= 0 ? c + node_base : -1;
         u = u + 1;
     }
@@ -27773,6 +27786,7 @@ static int fk_src_import_fkb_image(const char *fkb_path, fk_fkb_snapshot *snapsh
     }
     if (!fk_fkb_bad && fk_fkb_pos != fk_fkb_len) fk_fkb_mark_bad("trailing import bytes");
     if (!fk_fkb_bad) {
+        fk_lit_pin_rows(node_base, node_base + nr);
         /* the hold this image built over each row's initializer */
         long long k = node_base;
         while (k < node_base + nr) {
@@ -27847,12 +27861,25 @@ static int fk_src_import_fkb_image(const char *fkb_path, fk_fkb_snapshot *snapsh
         return 0;
     }
     fk_admission_bind(fn_base, fn_base + nf - 1, fk_fkb_source_hash);
+    for (long long j = retained_exports; j < fk_fntop; j++) fk_live_note_defn(j);
     fk_admissions->image_bytes = fk_fkb_len + 8;
     /* Cross-image holds change the admitted graph. The original image is no
      * longer a complete publication target for that graph's pure results. */
     if (image_graph_retained) fk_admission_image_note(fk_admissions, fkb_path, node_base, nr, fn_base);
     fk_prog_note_ice(fkb_path, fk_fkb_len, fk_fkb_source_hash);
     return 1;
+}
+/* Import appends static rows; existing bindings are committed only after the
+ * complete payload reads. A refused image leaves those table boundaries intact.
+ * Unreferenced strings stay in the existing intern pool until its collection. */
+static int fk_src_import_fkb_image(const char *path, fk_fkb_snapshot *snapshot) {
+    long long nodes = fk_node_count, functions = fk_fn_count, next = fk_defn_next;
+    long long symbols = fk_fntop, text = fk_slen;
+    if (fk_src_import_fkb_read(path, snapshot)) return 1;
+    fk_node_count = nodes; fk_fn_count = functions; fk_defn_next = next; fk_fntop = symbols;
+    fk_srcseg_drop_from(text); fk_slen = text; fk_srctext[text] = 0;
+    fk_prog_note_counts();
+    return 0;
 }
 /* the whole-image loader restores fn symbols instead of skipping them:
  * names ride the artifact already (written at image time), and a warm
@@ -28225,9 +28252,7 @@ static void fk_src_check_balance(void) {
     }
 }
 /* a unit's canonical-path id, 63 bits so it rides the image's signed lane */
-static unsigned long long fk_canon_id63(const char *path) {
-    char canon[FK_PATH_CAP];
-    const char *cid = fk_path_canon_id(path, canon);
+static unsigned long long fk_canon_id63(const char *cid) {
     return fk_bytes_fnv1a(cid, fk_path_len(cid)) >> 1;
 }
 /* the flat compile's units: every unit of the table, in text order */
@@ -28251,7 +28276,7 @@ static void fk_units_from_table(void) {
     a = 0;
     while (a < n) {
         long long d = ord[a];
-        fk_units_add(fk_canon_id63(fk_src_dep_path[d]), fk_src_dep_text_off[d],
+        fk_units_add(fk_canon_id63(fk_src_dep_canon[d]), fk_src_dep_text_off[d],
                      fk_src_dep_text_off[d] + fk_src_dep_text_len[d], -1);
         a = a + 1;
     }
@@ -28375,6 +28400,9 @@ static int fk_src_standalone_unit(const char *path, int compile, char *hash_out,
     char *saved_srctext = malloc((unsigned long)(fk_slen + 1));
     char (*saved_dep_path)[FK_PATH_CAP] = saved_dep_count > 0 ?
         malloc(sizeof(*saved_dep_path) * (unsigned long)saved_dep_count) : 0;
+    char (*saved_dep_canon)[FK_PATH_CAP] = saved_dep_count > 0 ?
+        malloc(sizeof(*saved_dep_canon) * (unsigned long)saved_dep_count) : 0;
+    if (saved_dep_count && !saved_dep_canon) fk_die("source observation: out of memory");
     long long *saved_dep_mtime = saved_dep_count > 0 ?
         malloc(sizeof(*saved_dep_mtime) * (unsigned long)saved_dep_count) : 0;
     long long *saved_dep_size = saved_dep_count > 0 ?
@@ -28437,6 +28465,7 @@ static int fk_src_standalone_unit(const char *path, int compile, char *hash_out,
     i = 0;
     while (i < saved_dep_count) {
         fk_cstr_copy(saved_dep_path[i], fk_src_dep_path[i], FK_PATH_CAP);
+        fk_cstr_copy(saved_dep_canon[i], fk_src_dep_canon[i], FK_PATH_CAP);
         saved_dep_mtime[i] = fk_src_dep_mtime[i];
         saved_dep_size[i] = fk_src_dep_size[i];
         saved_dep_digest[i] = fk_src_dep_digest[i];
@@ -28514,7 +28543,7 @@ static int fk_src_standalone_unit(const char *path, int compile, char *hash_out,
             }
             a = 0;
             while (a < n) {
-                ids[a] = fk_canon_id63(fk_src_dep_path[ord[a]]);
+                ids[a] = fk_canon_id63(fk_src_dep_canon[ord[a]]);
                 a = a + 1;
             }
             free(ord);
@@ -28552,6 +28581,7 @@ static int fk_src_standalone_unit(const char *path, int compile, char *hash_out,
     i = 0;
     while (i < saved_dep_count) {
         fk_cstr_copy(fk_src_dep_path[i], saved_dep_path[i], FK_PATH_CAP);
+        fk_cstr_copy(fk_src_dep_canon[i], saved_dep_canon[i], FK_PATH_CAP);
         fk_src_dep_mtime[i] = saved_dep_mtime[i];
         fk_src_dep_size[i] = saved_dep_size[i];
         fk_src_dep_digest[i] = saved_dep_digest[i];
@@ -28565,6 +28595,7 @@ static int fk_src_standalone_unit(const char *path, int compile, char *hash_out,
     free(saved_root_text);
     free(saved_srctext);
     free(saved_dep_path);
+    free(saved_dep_canon);
     free(saved_dep_mtime);
     free(saved_dep_size);
     free(saved_dep_digest);
@@ -28746,7 +28777,7 @@ FK_PHASED(FK_PHASE_IMAGE, int, fk_src_try_import_fkb_images, (const char *root_p
         }
         a = 0;
         while (a < n_all) {
-            flat_id[a] = fk_canon_id63(fk_src_dep_path[flat[a]]);
+            flat_id[a] = fk_canon_id63(fk_src_dep_canon[flat[a]]);
             carried_at[a] = -1;
             if (flat[a] != 0 && !fk_src_ids_has(have, have_n, flat_id[a])) {
                 carried_at[a] = carry_count;
@@ -29022,7 +29053,7 @@ static void fk_cell_dep_init(long long idx) {
     if (fk_cd_win[idx] == 0) { fk_die("fk_cell_dep_init: out of memory"); }
     fk_cd_win[idx][0] = idx;
     fk_cd_win_n[idx] = 1;
-    fk_cd_id[idx] = fk_canon_id63(fk_src_dep_path[idx]);
+    fk_cd_id[idx] = fk_canon_id63(fk_src_dep_canon[idx]);
     fk_cd_unit[idx] = -1;
     fk_cd_epoch[idx] = -1;
     fk_cd_ok[idx] = 0;
@@ -29223,11 +29254,11 @@ static long long fk_cell_catalog_capture(long long root, long long fresh) {
             if (member < 0) return 1; /* an incomplete catalog grants no owner */
             members = fk_cons_val(member << 1, members);
         }
-        char digest[17], canon[FK_PATH_CAP];
+        char digest[17];
         sprintf(digest, "%016llx", fk_src_dep_digest[dep]);
         long long obs[] = {fk_cr_str(fk_src_dep_lowered[dep] ? "lowered" : "raw"),
             fk_src_dep_size[dep] << 1, fk_cr_str(digest)};
-        long long row[] = {i << 1, fk_cr_str(fk_path_canon_id(fk_src_dep_path[dep], canon)),
+        long long row[] = {i << 1, fk_cr_str(fk_src_dep_canon[dep]),
             fk_cd_framed[dep] * 2, order << 1, members, fk_admission_tuple(obs, 3)};
         units = fk_cons_val(fk_admission_tuple(row, 6), units);
         if (dep < fresh) {
@@ -29635,20 +29666,15 @@ FK_PHASED(FK_PHASE_LOAD, int, fk_cell_load, (const char *path, long long *root_o
     int parsed = !fk_src_unrunnable;
     char identity[FK_SRC_HASH_CAP], image_path[FK_PATH_CAP];
     int identified = parsed && fk_cell_closure_identity(*root_out, d0, identity);
-    int image_loaded = 0, image_failed = 0;
+    int image_loaded = 0;
     if (!fk_cell_image_busy && identified && fk_cell_image_path(path, image_path) && fk_path_size_raw(image_path) >= 0) {
         if (fk_fkb_open_checked(image_path, path, identity)) {
             fk_fkb_snapshot snapshot = {0}; fk_fkb_snapshot_take(&snapshot);
-            long long nodes_before = fk_node_count, fn_before = fk_defn_next;
             fk_cell_import_root = *root_out; fk_cell_import_fresh = d0;
             image_loaded = fk_src_import_fkb_image(image_path, &snapshot);
             fk_cell_import_root = -1;
-            if (!image_loaded && (fk_node_count != nodes_before || fk_defn_next != fn_before)) {
-                /* The live tables moved, so the source cannot be parsed in their place. */
-                fk_fkb_repair_signal(image_path);
-                image_failed = 1; parsed = 0; fk_src_unrunnable = 1;
-            }
-        }
+            if (!image_loaded && fk_fkb_bad) fk_fkb_repair_signal(image_path);
+        } else if (fk_fkb_bad) fk_fkb_repair_signal(image_path);
     }
     if (parsed && !image_loaded) {
         for (k = d0; k < fk_src_dep_count; k++)
@@ -29680,7 +29706,7 @@ FK_PHASED(FK_PHASE_LOAD, int, fk_cell_load, (const char *path, long long *root_o
         fk_cd_ran[k] = 0;
         k = k + 1;
     }
-    identified = identified && !fk_nerr && !fk_src_unrunnable && !fk_src_truncated && !image_failed;
+    identified = identified && !fk_nerr && !fk_src_unrunnable && !fk_src_truncated;
     const char *admitted = image_loaded ? fk_admissions->hash : fk_admission_bind(fn0, fk_defn_next, identified ? identity : 0);
     /* Each new dependency was parsed in this same complete name window. It
      * may later be called as a resident root without another load. */
@@ -29711,9 +29737,7 @@ static int fk_cell_image_prepare(const char *path, long long root, long long *pu
     fk_cr_put(request, "mtime", fk_src_dep_mtime[root] << 1);
     if (a->publication != 1) fk_cr_put(request, "pending", fk_admission_at(a->publication, 1));
     fk_cell_image_busy = 1;
-    long long units = fk_cell_source_units, functions = fk_cell_source_functions;
     long long response = fk_cell_run_door(fk_cr_str(fk_native_unit_path(path, "form-stdlib/program-image-fkb-byte-decode.fk")), fk_rbox(request), fk_nothing, fk_nothing, 1);
-    fk_cell_source_units = units; fk_cell_source_functions = functions;
     fk_cell_image_busy = 0;
     long long value = fk_cr_key_find(response, "value");
     long long resume = a->publication == 1 ? fk_cr_key_find(value, "resume") : fk_admission_at(a->publication, 1);

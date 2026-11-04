@@ -484,21 +484,47 @@ does not explain the earlier step. An observer-only probe accounts for its own
 802,816-byte growth by pair-heap capacity plus one page. GC allocation/residency
 is still under observation; the threshold has not changed.
 
-A raw cell whose current `.fkb` matches is admitted through the existing import
-tables and is not parsed again. `cell_run` of that image answers 9 with
-`source_units` 0 and an image owner; the resident call answers 9 again. A let in
-that image prints on the resident call. A named call answers 7. A changed source
-is parsed (`source_units` 1) and the stale image is not the owner. An image that
-carries compile errors is left for the source parse, so the diagnostic is still
-voiced. A prelude still parses. The same cell publishes its admitted catalog beside the
-source, as `path.cell.fkb`, through the existing image owner. The first `cell_run`
-of `(defn pub () 4)` parses (`source_units` 1) and answers 4. The next process
-admits that sidecar (`source_units` 0) and answers 4. The publisher's own parse
-is not counted in the cell's source units. A sidecar whose node child lies
-outside the image is not admitted; the source is parsed, and that rejection is
-not a diagnostic of the cell. The first process still parses when no image is
-present. The cell band returns 16777215, import-carry 255, the projection band
-127, the demand guard 511, and the image capability band 16777215.
+Raw cells publish the admitted closure through Form into `path.cell.fkb`.
+The next process reconstructs the existing unit, function, constant and source
+map tables from that image. The duplicate single-unit loading path is removed.
+Fresh-process and retained-dependency reloads preserve mutable library holds,
+function equality, deleted-constant refusal, and once-only library effects with
+zero source compilation. Source-admitted image owners carry detached relocation
+maps; disk-admitted owners use the existing offsets. A blocked publication keeps
+its exact candidate and continuation, executes no user effects, and resumes
+through the existing care response. All seven failure/resume checks pass.
+
+Corrupt checksums and late malformed payloads emit failure and successful repair
+events. Rejected imports restore the existing table boundaries before source
+repair; they no longer poison subsequent resident calls. Native diagnostics
+remain returned values, including repair events. Compiler-work counters include
+the publisher's work. The existing cell band now observes fresh process reuse,
+corruption and publication care and returns 16777215. Import-carry returns 255,
+the demand guard 511, and image capability 16777215.
+
+The byte encoder now uses the existing balanced string join: the larger cell
+check fell from an interrupted run near 90 GB RSS to a completed run near
+415 MB. Released JIT nodes use their existing slot column as a touched-node
+chain; resident dispatch fell from about 2.5 ms to 32–50 microseconds. A private
+timing candidate attributed about 950 microseconds of a 1.3 ms disk load to
+seven repeated canonical-path resolutions. Capturing that observation in the
+existing dependency table reduced the small cached fresh-process observation
+to 671 microseconds, versus 42 resident; another root retaining its library took
+285 microseconds. These seed fields and append rollback are mechanical loader
+state, to leave with source admission moving into Form. They add no independent
+cache authority. Exact commands and traces remain under the private research
+directory in the `perf/raw-cell-disk-reconstruction` checkout.
+
+On-demand SHA initialization now uses the admitted raw-cell owner. The source
+case proves its two immutable producers and atomically publishes their literal
+bytes; readback and publication release both verify. A later process loads
+literal tags `[24,24]`, performs zero proofs and zero source compilation, and
+does not load the proof helper. Both calls produce the correct SHA-256 of `abc`
+using the native path. The measured hash operation is about 81 microseconds on
+first disk demand and 36 resident; the first uncached proof took about 2.57
+seconds. Observer scans are separate from that operation. Whole-program
+storage-only cold/warm behavior remains unestablished; measured admission and
+first native resource setup still differ.
 
 The subsequent shared-field probe observed all 110 GC generations across three
 500-call windows. Heap capacity and growth count stayed fixed; RSS reads caused
