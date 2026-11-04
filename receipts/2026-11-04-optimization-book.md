@@ -457,3 +457,32 @@ Projection is verified; raw-cell disk reconstruction and the storage-only
 cold/warm target remain open. No provenance tree or additional image format was
 introduced. The next loader change must follow an actual failing reload and
 reuse the existing unit, function and constant tables.
+
+## Native image reconstruction, 2026-11-04
+
+Actual reloads exposed three missing contracts. A hidden function lost its
+arity and capture metadata in the image; a same-named constant in another unit
+replaced the retained unit's binding; and a saved function ceased to equal its
+export after another import created a duplicate function. Native FKB version 9
+carries the existing function metadata and export owner. Import selects existing
+constant and function rows by their unit, and matches repeated export names in
+declaration order. No new provenance or invalidation layer is introduced.
+
+The metadata check also exposed a prescan row for a definition inside a lexical
+`do`. Prescan now follows the parser's distinction between top-level definitions
+and lexical values. The existing image capability band covers this case and
+returns 16777215. The existing import-carry band returns 255, including constants
+`[11,22,11]`, saved-function equality `[1,1]`, and duplicate declarations with
+results 3 and 7 in observed import mode 1 followed by cached mode 2. The full cell
+band returns 16777215. Exact commands and output remain under
+`.hearth/research/algorithms-for-optimization/`.
+
+An earlier cell run returned 16744447 because RSS rose 3.2 MiB in its resident
+window. A later instrumented window showed a 3.5 MiB step despite unchanged
+endpoint table capacities. The final band window grew 311,296 bytes; that pass
+does not explain the earlier step. An observer-only probe accounts for its own
+802,816-byte growth by pair-heap capacity plus one page. GC allocation/residency
+is still under observation; the threshold has not changed.
+
+Raw-cell disk admission and storage-only cold/warm behavior remain open. The
+verified v9 transport is a prerequisite, not evidence that those goals are met.

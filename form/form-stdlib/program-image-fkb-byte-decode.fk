@@ -349,7 +349,7 @@ section [form.bml] {
             };
         };
     };
-    // A cursor over an ordinary admitted v8 image. Unchanged spans remain raw
+    // A cursor over an ordinary admitted v9 image. Unchanged spans remain raw
     // strings, including 63-bit unit IDs which need not fit a tagged Form int.
     def pifbd-v8-reader(bytes) = record_new(0,"raw",bytes,"pos",0,"end",len(bytes) - 8,"reason","");
     def pifbd-v8-good(r) = record_get(r,"reason") == "";
@@ -394,12 +394,38 @@ section [form.bml] {
     def pifbd-v8-skip-strings(r,n) = n <= 0 || !pifbd-v8-good(r) ? r : {
         pifbd-v8-skip-string(r); pifbd-v8-skip-strings(r,n - 1);
     };
-    def pifbd-v8-skip-symbols(r,n,selected) = n <= 0 || !pifbd-v8-good(r) ? r : {
+    def pifbd-v8-function-metadata(r,n,i,selected) = i >= n || !pifbd-v8-good(r) ? r : {
+        let arity = pifbd-v8-int(r); let captures = pifbd-v8-int(r); let parent = pifbd-v8-int(r);
+        pifbd-v8-require(r,arity >= 0 && captures >= 0 && parent >= -1 && parent < n
+            && (i != 0 || (arity == 0 && captures == 0 && parent == -1)),"invalid-function-metadata");
+        i == selected ? { record_set(r,"arity",arity); record_set(r,"captures",captures); } : r;
+        record_has(record_get(r,"wanted"),i.str()) ? {
+            record_set(record_get(r,"arities"),i.str(),arity);
+            record_set(record_get(r,"capture_counts"),i.str(),captures);
+        } : r;
+        pifbd-v8-function-metadata(r,n,i + 1,selected);
+    };
+    def pifbd-v8-function-arity(r,fn) {
+        let at = record_get(r,"pos");
+        record_set(r,"pos",record_get(r,"function_metadata") + fn * 27);
+        let arity = pifbd-v8-int(r); record_set(r,"pos",at); arity;
+    }
+    // Unit IDs are unsigned 63-bit path identities. Validate their wire shape
+    // without narrowing them to Form's tagged integer range.
+    def pifbd-v8-unit-id(r) {
+        let bytes = pifbd-v8-take(r,9);
+        nothing?(bytes) ? nothing() : {
+            pifbd-v8-require(r,str_byte_at(bytes,0) == 0 && str_byte_at(bytes,1) < 128,"invalid-export-unit-id");
+            bytes;
+        };
+    }
+    def pifbd-v8-skip-symbols(r,n) = n <= 0 || !pifbd-v8-good(r) ? r : {
         pifbd-v8-int(r); let fn = pifbd-v8-int(r); let arity = pifbd-v8-int(r);
+        pifbd-v8-unit-id(r);
         pifbd-v8-skip-string(r);
-        fn == selected ? record_set(r,"arity",arity) : r;
-        record_has(record_get(r,"wanted"),fn.str()) ? record_set(record_get(r,"arities"),fn.str(),arity) : r;
-        pifbd-v8-skip-symbols(r,n - 1,selected);
+        pifbd-v8-require(r,fn > 0 && fn < record_get(r,"function_count"),"export-function-out-of-range")
+            ? pifbd-v8-require(r,arity == pifbd-v8-function-arity(r,fn),"export-arity-mismatch") : r;
+        pifbd-v8-skip-symbols(r,n - 1);
     };
     def pifbd-v8-node-symbols(r,n,i,selected) = n <= 0 || !pifbd-v8-good(r) ? r : {
         let start = record_get(r,"pos");
@@ -426,16 +452,19 @@ section [form.bml] {
         let r = pifbd-v8-reader(bytes);
         record_set(r,"wanted",pifbd-v8-wanted(owner,ledger,record_new(0)));
         record_set(r,"arities",record_new(0));
+        record_set(r,"capture_counts",record_new(0));
         let magic = pifbd-v8-take(r,8); let version = pifbd-v8-u32(r);
-        pifbd-v8-require(r,magic == "FKPIFB1" + byte_to_str(0) && version == 8,"unsupported-program-image");
+        pifbd-v8-require(r,magic == "FKPIFB1" + byte_to_str(0) && version == 9,"unsupported-program-image");
         record_set(r,"builder",pifbd-v8-string(r));
         record_set(r,"source",pifbd-v8-string(r));
         record_set(r,"closure",pifbd-v8-string(r));
         pifbd-v8-skip(r,9); pifbd-v8-skip-string(r);
         let sealed = pifbd-v8-int(r); let errors = pifbd-v8-int(r); let refused = pifbd-v8-int(r);
         pifbd-v8-require(r,sealed == 1 && errors == 0 && refused == 0,"image-carries-refusal");
-        let nf = pifbd-v8-count(r,9); let roots = record_get(r,"pos");
+        let nf = pifbd-v8-count(r,36); let roots = record_get(r,"pos");
         record_set(r,"roots",roots); record_set(r,"function_count",nf); pifbd-v8-skip(r,nf * 9);
+        record_set(r,"function_metadata",record_get(r,"pos")); record_set(r,"arity",nothing()); record_set(r,"captures",nothing());
+        pifbd-v8-function-metadata(r,nf,0,fn);
         record_set(r,"node_count_pos",record_get(r,"pos"));
         let nr = pifbd-v8-count(r,36);
         record_set(r,"nodes",record_get(r,"pos")); record_set(r,"node_count",nr);
@@ -443,8 +472,7 @@ section [form.bml] {
         record_set(r,"string_count_pos",record_get(r,"pos"));
         let ns = pifbd-v8-count(r,4); record_set(r,"string_count",ns); record_set(r,"strings",record_get(r,"pos"));
         pifbd-v8-skip-strings(r,ns); record_set(r,"strings_end",record_get(r,"pos"));
-        record_set(r,"arity",nothing());
-        pifbd-v8-skip-symbols(r,pifbd-v8-count(r,31),fn);
+        pifbd-v8-skip-symbols(r,pifbd-v8-count(r,40));
         record_set(r,"node_symbols_pos",record_get(r,"pos"));
         let nsy = pifbd-v8-count(r,27);
         pifbd-v8-require(r,nsy == nr,"node-symbol-count-mismatch");
@@ -470,6 +498,7 @@ section [form.bml] {
             || fn <= 0 || fn >= record_get(r,"function_count") || body < 0 || body >= record_get(r,"node_count") ? 0 : {
             record_set(r,"pos",record_get(r,"roots") + fn * 9);
             pifbd-v8-int(r) == body && record_has(record_get(r,"arities"),fn.str()) && record_get(record_get(r,"arities"),fn.str()) == definition[2]
+                && record_get(record_get(r,"capture_counts"),fn.str()) == 0
                 && pifbd-v8-good(r) && pifbd-v8-ledger?(r,owner,tail(ledger));
         };
     };
@@ -540,7 +569,7 @@ section [form.bml] {
     def pifbd-v8-transform(bytes,owner,proof,granted) {
             let r = pifbd-v8-index(bytes,owner,granted[2]);
             !pifbd-v8-good(r) ? pifbd-v8-refused(record_get(r,"reason"),owner,proof)
-            : record_get(r,"builder") != record_get(owner,"builder") || record_get(r,"closure") != record_get(owner,"closure") || record_get(r,"arity") != 0
+            : record_get(r,"builder") != record_get(owner,"builder") || record_get(r,"closure") != record_get(owner,"closure") || record_get(r,"arity") != 0 || record_get(r,"captures") != 0
                 ? pifbd-v8-refused("image-admission-metadata-mismatch",owner,proof)
             : !pifbd-v8-ledger?(r,owner,granted[2]) ? pifbd-v8-refused("reached-definition-image-mismatch",owner,proof)
             : pifbd-v8-current?(bytes,r,owner,granted[1]) ? pifbd-v8-outcome("image-current","",owner,proof,bytes)

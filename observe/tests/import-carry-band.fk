@@ -23,8 +23,34 @@
 ;            the counters agree with it
 ;     64     the cold walk took the import lane (door 1, one image, one carried unit)
 ;     128    the warm walk answered all six bits through its cached image (door 2)
+; The same two admission bits also require retained imported constant ownership,
+; saved function identity, and declaration order for duplicate exported names.
 ; A child that does not exit 0 answers nothing, and none of its bits hold.
 ; The home is removed afterwards.
+
+section [form.bml] {
+    def icb-unit-list(home,names) = nil?(names) ? "" : icb-at(home,head(names)) + (nil?(tail(names)) ? "" : " " + icb-unit-list(home,tail(names)));
+    def icb-source(home,name,dependencies,body) = write_file(icb-at(home,name),
+        (nil?(dependencies) ? "" : "; preludes: " + icb-unit-list(home,dependencies) + "\n") + body + "\n");
+    def icb-ownership-fixture(home) {
+        icb-source(home,"owner-x.fk",[],"(let icb-owner-state 11) (defn icb-owner-x () icb-owner-state) (do (icb-owner-x))");
+        icb-source(home,"owner-y.fk",[],"(let icb-owner-state 22) (defn icb-owner-y () icb-owner-state) (do (icb-owner-y))");
+        icb-source(home,"owner-a.fk",["owner-x.fk"],"(defn icb-owner-a () (icb-owner-x)) (do (icb-owner-a))");
+        icb-source(home,"owner-b.fk",["owner-x.fk"],"(defn icb-owner-b () (icb-owner-x)) (do (icb-owner-b))");
+        icb-source(home,"fn-x.fk",[],"(defn icb-fn-f () 1) (let icb-fn-saved icb-fn-f) (do (icb-fn-f))");
+        icb-source(home,"fn-a.fk",["fn-x.fk"],"(defn icb-fn-a () (eq icb-fn-saved icb-fn-f)) (do (icb-fn-a))");
+        icb-source(home,"fn-b.fk",["fn-x.fk"],"(defn icb-fn-b () (eq icb-fn-saved icb-fn-f)) (do (icb-fn-b))");
+        icb-source(home,"duplicate.fk",[],"(defn icb-duplicate (x) x) (defn icb-duplicate (x y) (add x y))");
+        icb-source(home,"duplicate-a.fk",["duplicate.fk"],"(defn icb-duplicate-a () (icb-duplicate 1 2))");
+        icb-source(home,"duplicate-b.fk",["duplicate.fk"],"(defn icb-duplicate-b () (icb-duplicate 3 4))");
+        icb-source(home,"ownership.fk",["owner-a.fk","owner-y.fk","owner-b.fk","fn-a.fk","fn-b.fk","duplicate-a.fk","duplicate-b.fk"],
+            "(do (let ownership (and (eq (icb-owner-a) 11) (and (eq (icb-owner-y) 22) (eq (icb-owner-b) 11))))"
+            + " (let identity (and (eq (icb-fn-a) 1) (eq (icb-fn-b) 1)))"
+            + " (let order (and (eq (icb-duplicate-a) 3) (eq (icb-duplicate-b) 7)))"
+            + " (add (add (add (if ownership 1 0) (if identity 2 0)) (if order 4 0))"
+            + " (add (if (eq (kernel_stat 15) 1) 8 0) (if (eq (kernel_stat 15) 2) 16 0))))");
+    }
+}
 
 (do
     (defn icb-k (cond bit) (if cond bit 0))
@@ -38,12 +64,14 @@
                     (str_concat (icb-at home "import-carry-fixture-floor.bml")
                         (str_concat "\n" (read_file (icb-tracked "import-carry-fixture-pair.fk"))))))))
     ; one child kernel walks the pair; its stdout is its answer, nothing when it did not exit 0
-    (defn icb-ask (home tag)
+    (defn icb-ask-file (home file tag)
         (do (let out (icb-at home (str_concat tag ".out")))
             (let err (icb-at home (str_concat tag ".err")))
-            (let pid (host_spawn_at (list (str_concat (host_cwd) "/fkwu") (icb-at home "pair.fk")) (list "/dev/null" out err)))
+            (let pid (host_spawn_at (list (str_concat (host_cwd) "/fkwu") (icb-at home file)) (list "/dev/null" out err)))
             (let code (if (gt pid 0) (host_wait pid) -1))
-            (if (eq code 0) (str_to_int (read_file out)) (nothing))))
+            (if (eq code 0) (str_to_int (read_file out))
+                (do (print (list "import-carry child failed" file code (read_file err) (read_file out))) (nothing)))))
+    (defn icb-ask (home tag) (icb-ask-file home "pair.fk" tag))
     (defn icb-low (n) (if (nothing? n) 0 (band n 63)))
     (defn icb-door (n) (if (nothing? n) 0 (band n 192)))
 
@@ -54,8 +82,14 @@
     (let r (write_file_text (icb-at home "pair.fk") (icb-root-text home)))
     (let cold (icb-ask home "cold"))
     (let warm (icb-ask home "warm"))
+    (let ownership-files (icb-ownership-fixture home))
+    (let ownership-cold (icb-ask-file home "ownership.fk" "ownership-cold"))
+    (let ownership-warm (icb-ask-file home "ownership.fk" "ownership-warm"))
     (let said (print_str (str_concat "import-carry pair: cold=" (str_concat (if (nothing? cold) "nothing" (int_to_str cold)) (str_concat " warm=" (if (nothing? warm) "nothing" (int_to_str warm)))))))
+    (let ownership-said (print (list "import-carry ownership/function/order" ownership-cold ownership-warm)))
     (let gone (fs_rmdir home))
-    (add (add (icb-low cold)
-              (icb-k (eq (icb-door cold) 64) 64))
-         (icb-k (if (nothing? warm) 0 (eq warm 191)) 128)))
+    (if (nothing? (fs_list home))
+        (add (add (icb-low cold)
+                  (icb-k (and (eq (icb-door cold) 64) (eq ownership-cold 15)) 64))
+             (icb-k (if (nothing? warm) 0 (and (eq warm 191) (eq ownership-warm 23))) 128))
+        (form_error (str_concat "import-carry fixture cleanup incomplete: " home))))

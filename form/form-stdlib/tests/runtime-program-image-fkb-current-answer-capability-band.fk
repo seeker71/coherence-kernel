@@ -38,6 +38,28 @@ section [form.bml] {
     def rpicab-immutable-equality() = [eq([], []), eq([1, "x"], [1, "x"]), eq(nothing(), nothing()), eq(1, "1")];
     def rpicab-byte-u32() = str_concat(byte_to_str(band(shr_u32(-1, 24), 255)), byte_to_str(0));
     def rpicab-ambient-node() = node_value(make_nodeid(1, 1, 1, 1));
+    def rpicab-image-hidden-pair(bias) = [x => add(x,1),x => add(x,bias)];
+    def rpicab-image-repeat(f,left,total) = left <= 0 ? total : rpicab-image-repeat(f,left - 1,total + f(left));
+    def rpicab-image-captured-child(parent,at) {
+        let meta = kernel_ast(host_pid(),["fnmeta",at]);
+        nothing?(meta) ? nothing() : meta[3] == parent && meta[2] > 0 ? [at,meta] : rpicab-image-captured-child(parent,at + 1);
+    }
+    // The same ordinary band runs once from source and again from its image.
+    // Hidden callable metadata must preserve both admission and refusal.
+    def rpicab-image-hidden-check() {
+        let pair = rpicab-image-hidden-pair(7); let plain = pair[0]; let captured = pair[1];
+        let parent = kernel_ast(host_pid(),["index",rpicab-image-hidden-pair]);
+        let index = kernel_ast(host_pid(),["index",plain]);
+        let plainFn = kernel_ast(host_pid(),["fn",index]); let plainMeta = kernel_ast(host_pid(),["fnmeta",index]);
+        let child = rpicab-image-captured-child(parent,index);
+        let observations = [!nothing?(plainFn) && plainFn[1] == 1,
+            !nothing?(plainMeta) && plainMeta[1] == 1 && plainMeta[2] == 0 && plainMeta[3] == parent,
+            !nothing?(child) && child[1][1] == 1 && child[1][2] == 1 && child[1][3] == parent,
+            !nothing?(child) && nothing?(kernel_ast(host_pid(),["fn",child[0]])),
+            nothing?(kernel_ast(host_pid(),["index",captured])) && nothing?(kernel_ast(host_pid(),["fn",captured])),
+            rpicab-image-repeat(plain,1000,0) == 501500 && rpicab-image-repeat(captured,1000,0) == 507500];
+        foldl((yes,item) => yes && item,1,observations) ? 1 : form_error("[hidden-image-function-metadata] " + [observations,"mode",kernel_stat(15),"plain",plainFn,plainMeta,"captured",child].str());
+    }
     def rpicab-find-admitted(name, at) {
         let row = kernel_ast(host_pid(), ["defn", at]);
         nothing?(row) ? nothing() : (String) kernel_ast(host_pid(), ["src", row[0], row[1]]) == name ? row[2] : rpicab-find-admitted(name, at + 1);
@@ -158,6 +180,22 @@ section [form.bml] {
         print(["rpicab-publication-care", checks]);
         foldl((okay, check) => okay && check, 1, checks);
     }
+    def rpicab-image-replace-word(bytes,at,word) = substring(bytes,0,at) + word + substring(bytes,at + 9,len(bytes));
+    def rpicab-image-metadata-shapes(bytes,owner,ledger,index) {
+        let metadata = record_get(index,"function_metadata"); let selected = metadata + record_get(owner,"local_fn") * 27;
+        let symbols = record_get(index,"strings_end"); let firstFunction = symbols + 18; let firstArity = symbols + 27; let firstUnit = symbols + 36;
+        // These are decoder observations over private bytes, never candidates
+        // offered to publication. The real image's checksum stays untouched.
+        let cases = [[metadata,1,"invalid-function-metadata"],[selected,-1,"invalid-function-metadata"],
+            [selected + 9,-1,"invalid-function-metadata"],[selected + 18,record_get(index,"function_count"),"invalid-function-metadata"],
+            [firstFunction,0,"export-function-out-of-range"],[firstArity,-1,"export-arity-mismatch"],[firstUnit,-1,"invalid-export-unit-id"]];
+        let refused = cases |> map(test => record_get(pifbd-v8-index(rpicab-image-replace-word(bytes,test[0],pifbc-v8-int(test[1])),owner,ledger),"reason") == test[2]);
+        let captured = pifbd-v8-index(rpicab-image-replace-word(bytes,selected + 9,pifbc-v8-int(1)),owner,ledger);
+        let wide = byte_to_str(0) + pifbc-v8-u32(2147483647) + pifbc-v8-u32(4294967295);
+        let positiveUnit = pifbd-v8-index(rpicab-image-replace-word(bytes,firstUnit,wide),owner,ledger);
+        let okay = foldl((yes,item) => yes && item,1,refused) && pifbd-v8-good(captured) && !pifbd-v8-ledger?(captured,owner,ledger) && pifbd-v8-good(positiveUnit);
+        okay ? 1 : form_error("[image-function-metadata-wire] " + [refused,record_get(captured,"reason"),record_get(positiveUnit,"reason")].str());
+    }
     def rpicab-publisher-observe(proof, admit) {
         let entry = rpmw-admitted-definition(proof); let value = rpmw-result-value(rpmw-admitted-result(proof));
         let owner = kernel_ast(host_pid(), ["image", entry[0]]);
@@ -173,7 +211,9 @@ section [form.bml] {
             let alias = kernel_ast(host_pid(), ["fn", rpicab-publisher-alias]);
             let metadata = pifbd-v8-good(before) && pifbd-v8-good(after) && alias[0] == record_get(owner, "body")
                 && substring(original, 0, record_get(before, "node_count_pos")) == substring(candidate, 0, record_get(after, "node_count_pos"))
+                && substring(original, record_get(before, "strings_end"), record_get(before, "node_symbols_pos")) == substring(candidate, record_get(after, "strings_end"), record_get(after, "node_symbols_pos"))
                 && substring(original, record_get(before, "node_symbols_end"), len(original) - 8) == substring(candidate, record_get(after, "node_symbols_end"), len(candidate) - 8);
+            let metadataShapes = rpicab-image-metadata-shapes(original,owner,granted[2],before);
             let wrong = pifbd-v8-copy(owner); record_set(wrong, "fn", 999999); record_set(wrong, "local_fn", 999999);
             let wrongResult = pifbd-v8-patch(original, wrong, proof, admit);
             let damaged = substring(original, 0, len(original) - 1) + byte_to_str(bxor(str_byte_at(original, len(original) - 1), 1));
@@ -194,7 +234,7 @@ section [form.bml] {
             let lifecycle = record_get(patch, "status") == "image-patched" ? rpicab-publisher-lifecycle(owner, proof, admit, original, patch)
                 : record_get(patch, "status") == "image-current" && rpicab-initializer-permissions(patch, value);
             let checks = [metadata, rpicab-publisher-refused?(wrongResult, "image-owner-changed"), rpicab-publisher-refused?(checksumResult, "admitted-image-bytes-mismatch"),
-                rpicab-publisher-refused?(malformed, "initializer-proof-refused"), rpicab-publisher-refused?(effect, "initializer-proof-refused"), relocation, unchanged, lifecycle];
+                rpicab-publisher-refused?(malformed, "initializer-proof-refused"), rpicab-publisher-refused?(effect, "initializer-proof-refused"), relocation, unchanged, lifecycle, metadataShapes];
             print(["rpicab-publisher", record_get(patch, "status"), checks]);
             foldl((okay, check) => okay && check, 1, checks);
         };
@@ -308,6 +348,10 @@ section [form.bml] {
         let sourceRestore = write_file(library,rpicab-projection-library(effects,111));
         let restoredReading = cell_call(root,nothing(),nothing()); let restoredValue = record_get(restoredReading,"value"); let restoredGetter = record_get(restoredValue,"getter");
         let restoredIdentity = kernel_ast(host_pid(),["identity",record_get(restoredValue,"target")]);
+        let nestedPath = directory + "/nested.fk";
+        let nestedWritten = write_file(nestedPath,"(do 0 (do (defn rpicab-proj-nested (x) x) (list (rpicab-proj-nested 7) rpicab-proj-nested)))\n");
+        let nestedReading = cell_call(nestedPath,nothing(),nothing()); let nestedValue = record_get(nestedReading,"value");
+        let nestedTarget = nestedValue[1]; let nestedProjection = pifbc-project-admitted(nestedTarget);
         let observations = [record_get(projected,"status") == "projected",record_has(relocation[1],entry.str()),
             value_eq(record_get(value,"owner"),held),before == 445 && getter(2) == 446,newGetter(3) == 336,
             record_get(resident,"source_units") == 0 && record_get(resident,"source_functions") == 0,
@@ -315,10 +359,13 @@ section [form.bml] {
             len(record_get(projected,"roots")) == len(record_get(projected,"functions")) + 1,
             !nothing?(firstIdentity) && value_eq(firstIdentity,restoredIdentity),
             firstGetter(4) == 559 && middleGetter(5) == 1004 && restoredGetter(6) == 117,
-            !value_eq(record_get(firstValue,"owner"),record_get(restoredValue,"owner")) && read_file(effects) == "XXXXX"];
+            !value_eq(record_get(firstValue,"owner"),record_get(restoredValue,"owner")) && read_file(effects) == "XXXXX",
+            nestedValue[0] == 7 && nestedTarget(8) == 8 && record_get(nestedProjection,"status") == "projected"
+                && len(record_get(nestedProjection,"functions")) == 1 && len(record_get(nestedProjection,"symbols")) == 0];
         let removed = fs-remove-tree(directory); let clean = nothing?(fs_list(directory));
         let okay = clean && foldl((yes,item) => yes && item,1,observations);
-        okay ? 1 : form_error("[admitted-image-projection] " + [observations,"cleanup",clean,"projection",record_get(projected,"reason"),record_get(projected,"detail")].str());
+        okay ? 1 : form_error("[admitted-image-projection] " + [observations,"cleanup",clean,"projection",record_get(projected,"reason"),record_get(projected,"detail"),
+            "nested",nestedValue[0],nestedTarget(8),record_get(nestedProjection,"status"),record_get(nestedProjection,"reason"),record_get(nestedProjection,"detail"),len(record_get(nestedProjection,"functions")),len(record_get(nestedProjection,"symbols"))].str());
     }
     def rpicab-restricted-computation-checks() {
         let changed = record_set(rpicab-held-owner, "value", "changed-after-hold");
@@ -359,7 +406,8 @@ section [form.bml] {
             rpicab-explicit-budget-check(),
             rpicab-publisher-check(),
             rpicab-projection-check(),
-            rpicab-projection-live-check()
+            rpicab-projection-live-check(),
+            rpicab-image-hidden-check()
         ];
         let okay = foldl((held, item) => held && item, 1, observed);
         okay ? 1 : form_error("[restricted-image-computation] " + [observed, map(receipt => rpmw-admitted-result(receipt), [held, pure, safe, effect, eagerAnd, eagerOr, argument, divideFirst, effectFirst, three, kind, equal, bytes, ambient, code, rounds])].str());

@@ -9780,6 +9780,7 @@ static void fk_fn_reserve(long long needed) {
  *   fk_fn_cap_room[idx]     -- the seats idx's two rows hold; a row doubles when one more name is
  *                              captured than it holds, so a function captures as many as it names. */
 static long long *fk_fn_parent_idx, *fk_fn_cap_count, *fk_fn_cap_room;
+static unsigned long long *fk_fn_unit;
 static char *fk_fn_meta_known;
 static long long **fk_fn_cap_encoff, **fk_fn_cap_slot;
 static long long fk_fn_cap_capacity;
@@ -9795,6 +9796,8 @@ static void fk_fn_cap_reserve(long long needed) {
     unsigned long bytesp = (unsigned long)next * sizeof(long long *);
     char *nm = realloc(fk_fn_meta_known, (unsigned long)next);
     if (nm != 0) fk_fn_meta_known = nm;
+    unsigned long long *nu = realloc(fk_fn_unit, bytes1);
+    if (nu != 0) fk_fn_unit = nu;
     long long *np = realloc(fk_fn_parent_idx, bytes1);
     if (np != 0) {
         fk_fn_parent_idx = np;
@@ -9815,13 +9818,14 @@ static void fk_fn_cap_reserve(long long needed) {
     if (ns != 0) {
         fk_fn_cap_slot = ns;
     }
-    if (nm == 0 || np == 0 || nc == 0 || nr == 0 || ne == 0 || ns == 0) {
+    if (nu == 0 || nm == 0 || np == 0 || nc == 0 || nr == 0 || ne == 0 || ns == 0) {
         fk_die("fk_fn_cap_reserve: out of memory growing closure-capture tables");
     }
     long long i = fk_fn_cap_capacity;
     while (i < next) {
         fk_fn_parent_idx[i] = -1;
         fk_fn_meta_known[i] = 0;
+        fk_fn_unit[i] = 0;
         fk_fn_cap_count[i] = 0;
         fk_fn_cap_room[i] = 0;
         fk_fn_cap_encoff[i] = 0;
@@ -23549,22 +23553,23 @@ static long long fk_fn_lookup(long long s, long long n) {
 }
 /* returns the const ROW (not the node): the reference site builds/reuses
  * the row's shared hold node, so all references share one memo slot. */
-static long long fk_const_lookup(long long s, long long n) {
+static long long fk_const_lookup_unit(long long s, long long n, unsigned long long unit) {
     long long i = fk_const_top;
     while (i > 0) {
         i = i - 1;
-        if (fk_sym_eq2(s, n, fk_const_s[i], fk_const_n[i]) && (!fk_win_on || fk_win_const_ok(i))) {
+        if ((!unit || fk_const_unit[i] == unit) && fk_sym_eq2(s, n, fk_const_s[i], fk_const_n[i]) && (!fk_win_on || fk_win_const_ok(i))) {
             return i;
         }
     }
     return -1;
 }
+static long long fk_const_lookup(long long s, long long n) { return fk_const_lookup_unit(s, n, 0); }
 static long long fk_const_set(long long s, long long n, long long node) {
     long long i = 0;
     while (i < fk_const_top) {
-        /* in a cell load a row is a unit's own: the same name in another unit is another binding */
+        /* A declaration belongs to its unit in both source and image loads. */
         if (fk_sym_eq2(s, n, fk_const_s[i], fk_const_n[i]) &&
-            (!fk_win_on || (fk_const_unit[i] == fk_const_unit_now && fk_win_const_ok(i)))) {
+            fk_const_unit[i] == fk_const_unit_now && (!fk_win_on || fk_win_const_ok(i))) {
             fk_const_s[i] = s; fk_const_n[i] = n;
             if (fk_const_node[i] == FK_CONST_FORWARD && fk_const_wrapp1[i] != 0 && node != FK_CONST_FORWARD) {
                 /* the let a forward read waited for: the hold every earlier read
@@ -23830,7 +23835,8 @@ static long long fk_sparse(void) {
             if (fk_maxslot > 0) {
                 body = fk_smknode(111, fk_smklit(fk_maxslot), body, 0);
             }
-            fk_fn[idx] = body; fk_fn_meta_known[idx] = 1; fk_prog_note_body(idx);
+            fk_fn[idx] = body; fk_fn_meta_known[idx] = 1;
+            fk_fn_unit[idx] = fk_units_cur >= 0 ? fk_unit_id[fk_units_cur] : 0; fk_prog_note_body(idx);
             fk_bd_restore(fk_bd_saved_top);
             fk_maxslot = fk_bd_saved_maxslot;
             fk_fntop = saved_fntop;
@@ -24620,7 +24626,8 @@ static long long fk_parse_do(void) {
             if (fk_maxslot > 0) {
                 dbody = fk_smknode(111, fk_smklit(fk_maxslot), dbody, 0);
             }
-            fk_fn[didx] = dbody; fk_fn_meta_known[didx] = 1; fk_prog_note_body(didx);
+            fk_fn[didx] = dbody; fk_fn_meta_known[didx] = 1;
+            fk_fn_unit[didx] = fk_units_cur >= 0 ? fk_unit_id[fk_units_cur] : 0; fk_prog_note_body(didx);
             fk_bd_restore(fk_bd_saved_top);
             fk_maxslot = fk_bd_saved_maxslot;
             fk_enc_mark = dsaved_enc_mark;
@@ -24951,6 +24958,7 @@ static void fk_prescan_form(long long *pp) {
 }
 static void fk_prescan_seq(long long *pp) {
     long long p = *pp;
+    int values = 0;
     while (1) {
         fk_sskip_at(&p);
         if (p >= fk_slen) {
@@ -24961,7 +24969,20 @@ static void fk_prescan_seq(long long *pp) {
             *pp = p + 1;
             return;
         }
-        fk_prescan_form(&p);
+        long long h = p + 1, he = h;
+        int definition = 0, sequence = 0;
+        if (fk_srctext[p] == FK_CH_LPAREN) {
+            while (h < fk_slen && fk_sws(fk_srctext[h])) h++;
+            he = fk_sym_end(h);
+            definition = fk_sym_eq(h, he - h, "defn");
+            sequence = fk_sym_eq(h, he - h, "do");
+        }
+        /* After the first value, nested do is lexical in the body parser.
+         * Only direct defns still bind top-level rows. Do not invent an
+         * exported row for a function that the body will parse privately. */
+        if (values && !definition) p = fk_skip_balanced(p);
+        else fk_prescan_form(&p);
+        if (!definition && !sequence) values = 1;
     }
 }
 static void fk_prescan_defns(void) {
@@ -25114,7 +25135,8 @@ static void fk_parse_top_in(void) {
             if (fk_maxslot > 0) {
                 body = fk_smknode(111, fk_smklit(fk_maxslot), body, 0);
             }
-            fk_fn[idx] = body; fk_fn_meta_known[idx] = 1; fk_prog_note_body(idx);
+            fk_fn[idx] = body; fk_fn_meta_known[idx] = 1;
+            fk_fn_unit[idx] = fk_units_cur >= 0 ? fk_unit_id[fk_units_cur] : 0; fk_prog_note_body(idx);
             fk_bd_restore(fk_bd_saved_top);
             fk_maxslot = fk_bd_saved_maxslot;
             return;
@@ -26482,7 +26504,7 @@ static int fk_src_load_unit_buffer(const char *root_path, char *owned, long long
  * The buffer flushes when full and once before close; ordering is preserved
  * because EVERY writer below goes through it, header included. */
 #define FK_FKB_OUT_CAP (1 << 20)
-#define FK_FKB_VERSION 8
+#define FK_FKB_VERSION 9
 static unsigned char fk_fkb_out_buf[FK_FKB_OUT_CAP];
 static long long fk_fkb_out_n;
 static long long fk_fkb_out_total;
@@ -26943,6 +26965,16 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
         ok = fk_fkb_write_signed(fd, fk_fn[i]);
         i = i + 1;
     }
+    /* Hidden definitions are absent from the export table. Preserve the
+     * compiler's function rows themselves, not a reconstruction from names.
+     * This physical image transport leaves with the native Form loader. */
+    for (i = 0; ok && i < fk_fn_count; i++) {
+        int known = i == 0 || (i < fk_fn_cap_capacity && fk_fn_meta_known[i]);
+        if (!known && !fk_nerr && !fk_src_unrunnable) { ok = 0; break; }
+        ok = fk_fkb_write_signed(fd, !known ? -1 : i == 0 ? 0 : fk_fnar[i]) &&
+             fk_fkb_write_signed(fd, !known ? -1 : i == 0 ? 0 : fk_fn_cap_count[i]) &&
+             fk_fkb_write_signed(fd, i == 0 || !known ? -1 : fk_fn_parent_idx[i]);
+    }
     ok = ok && fk_fkb_write_signed(fd, fk_node_count);
     i = 0;
     while (ok && i < fk_node_count) {
@@ -26963,6 +26995,7 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
         long long arity = (fnidx >= 0 && fnidx < fk_fn_count) ? fk_fnar[fnidx] : 0;
         ok = fk_fkb_write_signed(fd, i) && fk_fkb_write_signed(fd, fnidx) &&
              fk_fkb_write_signed(fd, arity) &&
+             fk_fkb_write_signed(fd, fnidx >= 0 && fnidx < fk_fn_cap_capacity ? (long long)fk_fn_unit[fnidx] : 0) &&
              fk_fkb_write_srctext_slice(fd, fk_fnsym_s[i], fk_fnsym_n[i]);
         i = i + 1;
     }
@@ -27144,7 +27177,7 @@ static int fk_fkb_open_checked(const char *path, const char *source, const char 
     }
     long long version = fk_fkb_read_u32();
     if (version != FK_FKB_VERSION) {
-        fk_fkb_mark_bad(version < FK_FKB_VERSION ? "superseded image without embedded diagnostics and checksum" : "unsupported version");
+        fk_fkb_mark_bad(version < FK_FKB_VERSION ? "superseded image without complete function metadata" : "unsupported version");
         return 0;
     }
     unsigned long long expected = 0;
@@ -27406,6 +27439,27 @@ static int fk_fkb_read_symbol_to_srctext(long long *start, long long *len) {
     fk_srctext[fk_slen] = 0;
     return 1;
 }
+static int fk_fkb_restore_functions(long long nf, long long fn_base) {
+    fk_fn_cap_reserve(fn_base ? fn_base + nf - 1 : nf);
+    for (long long i = 0; !fk_fkb_bad && i < nf; i++) {
+        long long arity = fk_fkb_read_signed(), captures = fk_fkb_read_signed(), parent = fk_fkb_read_signed();
+        int unknown = arity == -1 && captures == -1 && parent == -1;
+        if ((unknown && !fk_fkb_errors && !fk_fkb_unrunnable) ||
+            (!unknown && (arity < 0 || captures < 0 || parent < -1 || parent >= nf)) ||
+            (i == 0 && (arity != 0 || captures != 0 || parent != -1))) {
+            fk_fkb_mark_bad("invalid function metadata"); break;
+        }
+        if (i || !fn_base) {
+            long long target = fn_base ? fk_fkb_remap_fn(i, fn_base) : i;
+            fk_fnar[target] = unknown ? 0 : arity;
+            fk_fn_cap_count[target] = unknown ? 0 : captures;
+            fk_fn_parent_idx[target] = parent < 0 ? -1 : fn_base ? fk_fkb_remap_fn(parent, fn_base) : parent;
+            fk_fn_meta_known[target] = !unknown;
+            fk_fn_unit[target] = 0;
+        }
+    }
+    return !fk_fkb_bad;
+}
 static int fk_src_import_fkb_image(const char *fkb_path, fk_fkb_snapshot *snapshot) {
     fk_fkb_snapshot_use(snapshot);
     int image_graph_retained = 1;
@@ -27433,6 +27487,7 @@ static int fk_src_import_fkb_image(const char *fkb_path, fk_fkb_snapshot *snapsh
         fn_roots[i] = fk_fkb_read_signed();
         i = i + 1;
     }
+    if (!fk_fkb_restore_functions(nf, fn_base)) { free(fn_roots); return 0; }
     long long nr = fk_fkb_read_signed();
     if (nr < 0 || nr > fk_fkb_len) {
         fk_fkb_mark_bad("import node count exceeds artifact bounds");
@@ -27468,28 +27523,55 @@ static int fk_src_import_fkb_image(const char *fkb_path, fk_fkb_snapshot *snapsh
     i = 1;
     while (i < nf) {
         fk_fn[fn_base + i - 1] = fn_roots[i] < 0 ? fn_roots[i] : fn_roots[i] + node_base;
+        fn_roots[i] = fn_base + i - 1; /* reused below as the import's function map */
         i = i + 1;
     }
     fk_defn_next = fn_base + nf - 1;
     if (fk_fn_count < fk_defn_next) {
         fk_fn_count = fk_defn_next;
     }
-    free(fn_roots);
     long long symbol_count = fk_fkb_read_signed();
     if (symbol_count < 0 || symbol_count > fk_fkb_len) {
         fk_fkb_mark_bad("import symbol count exceeds artifact bounds");
+        free(fn_roots);
         return 0;
     }
+    long long retained_exports = fk_fntop;
+    unsigned char *used_exports = calloc((unsigned long)(retained_exports ? retained_exports : 1), 1);
+    if (!used_exports) fk_die("image export mapping: out of memory");
     fk_fn_reserve(fk_fntop + symbol_count + 1);
     i = 0;
     while (!fk_fkb_bad && i < symbol_count) {
         (void)fk_fkb_read_signed();
         long long old_fnidx = fk_fkb_read_signed();
         long long arity = fk_fkb_read_signed();
+        long long owner = fk_fkb_read_signed();
+        if (owner < 0 || old_fnidx <= 0 || old_fnidx >= nf || arity != fk_fnar[fk_fkb_remap_fn(old_fnidx, fn_base)]) {
+            fk_fkb_mark_bad("invalid exported function metadata"); free(used_exports); free(fn_roots); return 0;
+        }
         long long name_s = 0;
         long long name_n = 0;
         if (!fk_fkb_read_symbol_to_srctext(&name_s, &name_n)) {
+            free(used_exports); free(fn_roots);
             return 0;
+        }
+        if (owner && fk_lane_have_find((unsigned long long)owner) >= 0) {
+            long long previous = -1;
+            for (long long j = 0; j < retained_exports; j++) {
+                long long fn = fk_fnidx[j];
+                if (!used_exports[j] && fn < fk_fn_cap_capacity && fk_fn_unit[fn] == (unsigned long long)owner &&
+                    fk_sym_eq2(name_s, name_n, fk_fnsym_s[j], fk_fnsym_n[j])) {
+                    previous = fn; used_exports[j] = 1; break;
+                }
+            }
+            if (previous < 0 || fk_fnar[previous] != arity ||
+                fk_fn_cap_count[previous] != fk_fn_cap_count[fk_fkb_remap_fn(old_fnidx, fn_base)]) {
+                fk_fkb_mark_bad("retained unit export is unavailable"); free(used_exports); free(fn_roots); return 0;
+            }
+            fn_roots[old_fnidx] = previous;
+            image_graph_retained = 0;
+            i++;
+            continue;
         }
         if (old_fnidx > 0) {
             long long new_fnidx = fk_fkb_remap_fn(old_fnidx, fn_base);
@@ -27498,12 +27580,27 @@ static int fk_src_import_fkb_image(const char *fkb_path, fk_fkb_snapshot *snapsh
             fk_fnidx[fk_fntop] = new_fnidx;
             if (new_fnidx >= 0 && new_fnidx < fk_fn_capacity) {
                 fk_fnar[new_fnidx] = arity;
+                fk_fn_unit[new_fnidx] = (unsigned long long)owner;
             }
             fk_live_note_defn(fk_fntop);
             fk_fntop = fk_fntop + 1;
         }
         i = i + 1;
     }
+    free(used_exports);
+    /* Reusing a unit preserves both its held values and its function values.
+     * Rewrite direct function references through the selected export table,
+     * before any imported code or initializer can run. */
+    for (long long k = node_base; k < node_base + nr; k++) {
+        long long tag = fk_node[k][0], fn = fk_node[k][1];
+        if ((tag == 12 || tag == 240 || tag == 241 || tag == 243) && fn >= fn_base && fn < fn_base + nf - 1)
+            fk_node[k][1] = fn_roots[fn - fn_base + 1];
+    }
+    for (long long fn = fn_base; fn < fn_base + nf - 1; fn++) {
+        long long parent = fk_fn_parent_idx[fn];
+        if (parent >= fn_base && parent < fn_base + nf - 1) fk_fn_parent_idx[fn] = fn_roots[parent - fn_base + 1];
+    }
+    free(fn_roots);
     long long node_symbol_count = fk_fkb_read_signed();
     i = 0;
     while (!fk_fkb_bad && i < node_symbol_count) {
@@ -27623,7 +27720,7 @@ static int fk_src_import_fkb_image(const char *fkb_path, fk_fkb_snapshot *snapsh
                     u = u + 1;
                 }
             }
-            long long prior = dup ? fk_const_lookup(ccs[i], ccn[i]) : -1;
+            long long prior = dup ? fk_const_lookup_unit(ccs[i], ccn[i], cown[i]) : -1;
             if (prior >= 0 && fk_const_node[prior] != FK_CONST_FORWARD) {
                 if (fk_const_wrapp1[prior] == 0) {
                     fk_const_wrapp1[prior] =
@@ -27666,6 +27763,7 @@ static int fk_src_import_fkb_image(const char *fkb_path, fk_fkb_snapshot *snapsh
  * fallback stays honest. */
 static int fk_fkb_restore_symbol_image(long long version) {
     long long symbol_count = fk_fkb_read_signed();
+    if (symbol_count < 0 || symbol_count > fk_fkb_len) { fk_fkb_mark_bad("symbol count exceeds artifact bounds"); return 0; }
     long long i = 0;
     fk_fntop = 0;
     if (fk_live_page != 0) { (fk_live_page + 2)[29] = 0; fk_live_blob_used = 0; } fk_f64_reset();
@@ -27678,6 +27776,10 @@ static int fk_fkb_restore_symbol_image(long long version) {
             fnidx = fk_fkb_read_signed();
             arity = fk_fkb_read_signed();
         }
+        long long owner = fk_fkb_read_signed();
+        if (owner < 0 || fnidx <= 0 || fnidx >= fk_fn_count || arity != fk_fnar[fnidx]) {
+            fk_fkb_mark_bad("invalid exported function metadata"); return 0;
+        }
         long long name_s = 0;
         long long name_n = 0;
         if (!fk_fkb_read_symbol_to_srctext(&name_s, &name_n)) {
@@ -27689,6 +27791,7 @@ static int fk_fkb_restore_symbol_image(long long version) {
             fk_fnidx[fk_fntop] = fnidx;
             if (fnidx < fk_fn_capacity) {
                 fk_fnar[fnidx] = arity;
+                fk_fn_unit[fnidx] = (unsigned long long)owner;
             }
             fk_live_note_defn(fk_fntop);
             fk_fntop = fk_fntop + 1;
@@ -27766,7 +27869,7 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
     if (!fk_fkb_open_checked(fkb_path, expected_src_path, expected_source_hash)) return 0;
     long long version = FK_FKB_VERSION;
     long long nf = fk_fkb_read_signed();
-    if (nf < 0 || nf > fk_fkb_len) {
+    if (nf < 1 || nf > fk_fkb_len) {
         fk_fkb_mark_bad("function count exceeds artifact bounds");
         return 0;
     }
@@ -27778,6 +27881,7 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
         fk_fn[i] = fk_fkb_read_signed(); fk_prog_note_body(i);
         i = i + 1;
     }
+    if (!fk_fkb_restore_functions(nf, 0)) return 0;
     long long nr = fk_fkb_read_signed();
     if (nr < 0 || nr > fk_fkb_len) {
         fk_fkb_mark_bad("node count exceeds image size");
@@ -27922,6 +28026,7 @@ static void fk_src_reset_compile_state(void) {
     while (capreset_i < fk_fn_cap_capacity) {
         fk_fn_cap_count[capreset_i] = 0;
         fk_fn_meta_known[capreset_i] = 0;
+        fk_fn_unit[capreset_i] = 0;
         fk_fn_parent_idx[capreset_i] = -1;
         capreset_i = capreset_i + 1;
     }
