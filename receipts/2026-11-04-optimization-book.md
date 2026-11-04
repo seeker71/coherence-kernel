@@ -675,3 +675,19 @@ microseconds, with resident 95/100/92 and zero source compilation. This noisier
 round does not establish another speedup or storage-only parity. The remaining
 raw-source classification read and collection read are separate work; the next
 observation targets that duplicate while preserving read and ownership checks.
+
+The collector now classifies the bytes from its existing successful read. Raw
+classification, identity and imports therefore describe one observation; the
+same bytes are copied before recursive imports reuse the buffer. The existing
+lowering owner handles `.bml` and embedded-section sources. Cell admission,
+dependency collection and bootstrap share that entry, removing 24 seed lines
+without a new cache or table. Descriptor metadata and release checks remain.
+
+The first single-read samples were 1702/1706/1853 microseconds. A control reversal
+measured 1704/1647/1696 on the previous binary and 1710/1886/1734 on the candidate,
+so this is a correctness simplification, not an established speedup. Cell and
+image capability returned 16777215, import-carry and home linking 255; cyclic
+lowering, retained values, malformed-image repair and exact source-byte/line
+behavior held. The private cell observer initially mixed candidate and installed
+builders; giving both parent and oracle the same candidate restored its complete
+pin. That failed command and output are retained with the corrected observation.

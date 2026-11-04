@@ -25916,6 +25916,7 @@ static int fk_src_append_text(const char *path, const char *text, long long n, i
     return 1;
 }
 static int fk_src_collect_file(const char *path, long long parent_idx);
+static int fk_unit_text_lowers(const char *text, long long n);
 static int fk_src_collect_bytes(const char *path, char *owned, long long got,
                                 long long mtime, long long size, long long parent_idx, int lowered);
 static char fk_ascii_lower_char(char c) {
@@ -26115,27 +26116,7 @@ static int fk_src_collect_dep_inner(const char *owner_path, long long owner_idx,
         fk_diag_path("error", owner_path, "prelude path exceeds buffer");
         return 0;
     }
-    if (fk_src_dep_lookup(dep_path) < 0) {
-        if (fk_unit_lowers(dep_path)) {
-            long long bml_mtime = fk_path_mtime_raw(dep_path);
-            if (bml_mtime <= 0) {
-                fk_diag_path("error", dep_path,
-                        "prelude is missing or not stat-readable");
-                return 0;
-            }
-            long long low_len = 0;
-            char *low = fk_bml_lower_to_mem(dep_path, &low_len);
-            if (low == 0) {
-                return 0;
-            }
-            if (!fk_src_collect_bytes(dep_path, low, low_len,
-                    bml_mtime, low_len, owner_idx, 1)) {
-                return 0;
-            }
-        } else if (!fk_src_collect_file(dep_path, owner_idx)) {
-            return 0;
-        }
-    }
+    if (!fk_src_collect_file(dep_path, owner_idx)) return 0;
     if (fk_cell_collect) {
         fk_cell_dep_union(owner_idx, fk_cell_dep_find_raw(dep_path));
     }
@@ -26443,10 +26424,21 @@ static int fk_src_collect_preludes(const char *owner_path, const char *text, lon
 }
 static int fk_src_collect_bytes(const char *path, char *owned, long long got,
                                 long long mtime, long long size, long long parent_idx, int lowered);
+static int fk_src_collect_lowered(const char *path, long long parent_idx, long long mtime) {
+    if (mtime <= 0) {
+        fk_diag_path("error", path, "source is missing or not stat-readable");
+        return 0;
+    }
+    long long n = 0;
+    char *low = fk_bml_lower_to_mem(path, &n);
+    return low ? fk_src_collect_bytes(path, low, n, mtime, n, parent_idx, 1) : 0;
+}
 FK_PHASED(FK_PHASE_LOAD, int, fk_src_collect_file, (const char *path, long long parent_idx), (path, parent_idx)) {
     if (fk_src_dep_lookup(path) >= 0) {
         return 1;
     }
+    if (fk_path_has_suffix(path, ".bml"))
+        return fk_src_collect_lowered(path, parent_idx, fk_path_mtime_raw(path));
 #if defined(_WIN32)
     int fd = open(path, 0x8000);
 #else
@@ -26481,6 +26473,10 @@ FK_PHASED(FK_PHASE_LOAD, int, fk_src_collect_file, (const char *path, long long 
         }
         return 0;
     }
+    /* Classify the bytes already read for collection. A raw unit's identity
+     * and imports now use this same observation, not a second file read. */
+    if (fk_unit_text_lowers(fk_buf, got))
+        return fk_src_collect_lowered(path, parent_idx, mtime);
     char *owned = malloc((unsigned long)got + 1);
     if (owned == 0) {
         fk_die("fk_run_src: out of memory reading dependency source");
@@ -29638,19 +29634,7 @@ FK_PHASED(FK_PHASE_LOAD, int, fk_cell_load, (const char *path, long long *root_o
     fk_bml_bad_hit = 0;
     fk_collect_hit = 0;
     fk_cell_collect = 1;
-    if (fk_unit_lowers(path)) {
-        long long ln = 0;
-        long long mt = fk_path_mtime_raw(path);
-        char *low = mt > 0 ? fk_bml_lower_to_mem(path, &ln) : 0;
-        if (low == 0) {
-            if (mt <= 0) { fk_diag_path("error", path, "cell source is missing or not stat-readable"); }
-            ok = 0;
-        } else {
-            ok = fk_src_collect_bytes(path, low, ln, mt, ln, -1, 1);
-        }
-    } else {
-        ok = fk_src_collect_file(path, -1);
-    }
+    ok = fk_src_collect_file(path, -1);
     fk_cell_collect = 0;
     if (ok && (fk_bml_need_n > 0 || fk_bml_bad_hit)) { ok = 0; }   /* a lowering memo was missing (the door lowers the frontier and loads again), or the floor refused a unit of the closure */
     *root_out = ok ? fk_cell_dep_find_raw(path) : -1;
@@ -30631,18 +30615,9 @@ static int fk_source_digest(const char *path, long long *bytes, unsigned long lo
  * ten -bmf.fk grammars carry such blocks mid-file, and every chain that
  * preluded them raw died on `::=` as an unbound name (2026-09-04, 131 chains
  * on compiler.fk alone). */
-static int fk_unit_lowers(const char *path) {
-    long long n = 0;
-    char *text;
+static int fk_unit_text_lowers(const char *text, long long n) {
     long long i = 0;
     int found = 0;
-    if (fk_path_has_suffix(path, ".bml")) {
-        return 1;
-    }
-    text = fk_read_whole_file(path, &n);
-    if (text == 0) {
-        return 0;
-    }
     while (i < n && !found) {
         while (i < n && (text[i] == FK_CH_SPACE || text[i] == FK_CH_TAB)) {
             i = i + 1;
@@ -30657,6 +30632,14 @@ static int fk_unit_lowers(const char *path) {
         }
         i = i + 1;
     }
+    return found;
+}
+static int fk_unit_lowers(const char *path) {
+    if (fk_path_has_suffix(path, ".bml")) return 1;
+    long long n = 0;
+    char *text = fk_read_whole_file(path, &n);
+    if (!text) return 0;
+    int found = fk_unit_text_lowers(text, n);
     free(text);
     return found;
 }
@@ -31265,14 +31248,7 @@ static void fk_bml_scan(const char *root_path) {
     fk_cell_collect = 1;
     fk_bml_seen_n = 0;     /* the memos this scan finds holding, and only those, are what a begin-again would carry */
     fk_bml_scanning = 1;
-    if (fk_unit_lowers(root_path)) {
-        long long ln = 0, mt = fk_path_mtime_raw(root_path);
-        char *low = mt > 0 ? fk_bml_lower_to_mem(root_path, &ln) : 0;
-        if (low == 0) { ok = 0; }
-        else { ok = fk_src_collect_bytes(root_path, low, ln, mt, ln, -1, 1); }
-    } else {
-        ok = fk_src_collect_file(root_path, -1);
-    }
+    ok = fk_src_collect_file(root_path, -1);
     (void)ok;
     fk_bml_scanning = 0;
     fk_cell_collect = 0;
