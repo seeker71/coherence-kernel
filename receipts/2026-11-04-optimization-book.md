@@ -691,3 +691,25 @@ lowering, retained values, malformed-image repair and exact source-byte/line
 behavior held. The private cell observer initially mixed candidate and installed
 builders; giving both parent and oracle the same candidate restored its complete
 pin. That failed command and output are retained with the corrected observation.
+
+Raw v9 images no longer serialize the node-symbol inspection rows that both
+native loaders discarded. AST rows, function roots and ordered exports already
+carry those relationships. The existing v9 empty section is used; no image
+version or runtime selector changes. The Form patcher admits either an empty
+section or a complete ordered section and preserves its form during literal
+replacement. Partial counts still fail. The producer's two derivative maps and
+per-node metadata writer were removed.
+
+The same 2,048-function image shrank from 687,946 to 466,582 bytes (32%). The
+adopted Form path measured 1413/1553/1497 microseconds from disk, with resident
+85/85/89 and zero source compilation, against the preceding roughly 1.7 ms
+readings. The existing image witness now also checks partial-count refusal and
+empty-section replacement with nested literals, checksum and ownership-tail
+preservation. Cell and image witnesses return 16777215, import-carry 255 and
+static projection 127. Actual SHA demand publishes its literals into a compact
+image; the next process reads tags 24/24, executes zero proofs and compiles zero
+source units/functions, without admitting the helper. Both calls hash abc
+correctly; hash CPU is 103 then 47 microseconds. Storage-only parity remains open.
+
+A private prefix filter over the existing home names gave no reliable timing
+gain and was not adopted. Further work follows the remaining measured stages.
