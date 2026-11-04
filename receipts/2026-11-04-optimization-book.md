@@ -880,3 +880,23 @@ ordinary source compiler does not currently emit that instruction. It leaves
 with the native walker/image-read carrier. Cell and image checks return
 16777215, and the native authoring guide completes. Private raw-ast-peek*
 records retain the before, repaired, bounds and failure observations.
+
+That AST-read repair landed as 0b21922e4bf3480fd57139ed981ef8840b9e432f.
+The next validation reading found duplicate absence observations in lowering
+memos. The existing Form manifest join now uses a per-emission native record
+to emit each identical N row once. It preserves first occurrence order,
+distinct path spellings, distinct observation bytes and every F row. Dependency
+resolution still observes each candidate; no kernel cache or fallback was added.
+The exact-output probe changes from 283 bytes and verdict 0 to the expected 213
+bytes and verdict 1, including unchanged duplicate and contradictory F rows.
+
+Regenerating the two memos reached by the SHA call reduces N rows from 81/91
+to 32/35, all unique: 105 fewer absence checks on each admission. A preferred
+dependency appearing after resident admission changes the result from 41 to 42;
+the next call reuses 42 with zero source compilation. Cell checks return
+16777215, import-reference resolution 2111. SHA's known digest remains correct:
+before, disk 3443 microseconds and resident 1851; after, disk 3460/3141 and
+resident 1658/1550, all with zero source compilation. These overlapping whole-call
+readings establish no separate timing gain or storage-only parity. Private
+raw-memo-unique*, raw-memo-rows* and raw-memo-resolution* records retain the
+observations. The change lives in the native compiler's existing manifest writer.
