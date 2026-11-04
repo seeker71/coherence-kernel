@@ -486,3 +486,15 @@ is still under observation; the threshold has not changed.
 
 Raw-cell disk admission and storage-only cold/warm behavior remain open. The
 verified v9 transport is a prerequisite, not evidence that those goals are met.
+
+The subsequent shared-field probe observed all 110 GC generations across three
+500-call windows. Heap capacity and growth count stayed fixed; RSS reads caused
+no collection. RSS grew 480 KiB, 240 KiB and 128 KiB. The earlier large step was
+not reproduced, so neither GC nor its threshold was changed.
+
+Failure observation itself had one concrete defect: `form-run` counted stderr
+bytes but hid them because its stdin-preserving `exec` also permanently redirected
+stderr to `/dev/null`. Removing that redirection preserves the channel. A command
+writing `failure-event` to stderr and exiting 7 previously displayed zero stderr
+bytes while claiming 13 shown; afterward its stderr is exactly those 13 bytes and
+its exit remains 7. Both the source carrier and installed local copy are repaired.
