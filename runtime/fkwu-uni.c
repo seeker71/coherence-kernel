@@ -22424,6 +22424,7 @@ static long long fk_srcseg_n;
 static long long fk_srcseg_cap;
 static long long *fk_srcseg_off;
 static char **fk_srcseg_path;
+static long long *fk_srcseg_dep; /* an imported name's selected cell unit; source spans need no override */
 static void fk_srcseg_drop_from(long long off) {
     while (fk_srcseg_n > 0 && fk_srcseg_off[fk_srcseg_n - 1] >= off) {
         fk_srcseg_n = fk_srcseg_n - 1;
@@ -22446,6 +22447,9 @@ static void fk_srcseg_push(long long off, const char *path) {
             fk_die("fk_srcseg_push: out of memory growing the source map");
         }
         fk_srcseg_path = p;
+        long long *d = realloc(fk_srcseg_dep, (unsigned long)nc * sizeof(long long));
+        if (!d) fk_die("fk_srcseg_push: out of memory growing unit ownership");
+        fk_srcseg_dep = d;
         fk_srcseg_cap = nc;
     }
     char *held = 0;
@@ -22463,6 +22467,7 @@ static void fk_srcseg_push(long long off, const char *path) {
     }
     fk_srcseg_off[fk_srcseg_n] = off;
     fk_srcseg_path[fk_srcseg_n] = held;
+    fk_srcseg_dep[fk_srcseg_n] = -1;
     fk_srcseg_n = fk_srcseg_n + 1;
 }
 /* the file and its own line for an offset into the assembled unit: 1 with both set, 0 when the
@@ -23540,12 +23545,14 @@ static long long *fk_const_fwd;
  * in scope -- a forward scan would always find the outer/lower-indexed one first
  * and the inner one could never actually shadow it. */
 static long long fk_units_at(long long pos);
+static unsigned long long *fk_unit_id;
 static long long fk_fn_lookup(long long s, long long n) {
     long long i = fk_fntop, own = fk_units_at(s), imported = -1;
     while (i > 0) {
         i = i - 1;
         if (fk_sym_eq2(s, n, fk_fnsym_s[i], fk_fnsym_n[i]) && (!fk_win_on || fk_win_row_ok(i))) {
-            if (own >= 0 && fk_units_at(fk_fnsym_s[i]) == own) { return fk_fnidx[i]; }
+            if (own >= 0 && (fk_units_at(fk_fnsym_s[i]) == own ||
+                (fk_fnidx[i] < fk_fn_cap_capacity && fk_fn_unit[fk_fnidx[i]] == fk_unit_id[own]))) { return fk_fnidx[i]; }
             if (imported < 0) { imported = fk_fnidx[i]; }
         }
     }
@@ -27559,7 +27566,7 @@ static int fk_src_import_fkb_image(const char *fkb_path, fk_fkb_snapshot *snapsh
             long long previous = -1;
             for (long long j = 0; j < retained_exports; j++) {
                 long long fn = fk_fnidx[j];
-                if (!used_exports[j] && fn < fk_fn_cap_capacity && fk_fn_unit[fn] == (unsigned long long)owner &&
+                if (!used_exports[j] && (!fk_win_on || fk_win_row_ok(j)) && fn < fk_fn_cap_capacity && fk_fn_unit[fn] == (unsigned long long)owner &&
                     fk_sym_eq2(name_s, name_n, fk_fnsym_s[j], fk_fnsym_n[j])) {
                     previous = fn; used_exports[j] = 1; break;
                 }
@@ -27674,6 +27681,7 @@ static int fk_src_import_fkb_image(const char *fkb_path, fk_fkb_snapshot *snapsh
         cown[i] = (unsigned long long)fk_fkb_read_signed();
         i = i + 1;
     }
+    if (!fk_fkb_bad && fk_fkb_pos != fk_fkb_len) fk_fkb_mark_bad("trailing import bytes");
     if (!fk_fkb_bad) {
         /* the hold this image built over each row's initializer */
         long long k = node_base;
@@ -29030,6 +29038,10 @@ static long long fk_cell_dep_find(const char *path) {
     return d;
 }
 static long long fk_cell_dep_of_off(long long off) {
+    long long seg = fk_srcseg_n - 1;
+    while (seg >= 0 && fk_srcseg_off[seg] > off) seg--;
+    if (seg >= 0 && fk_srcseg_dep[seg] >= fk_cell_base_dep && fk_srcseg_dep[seg] < fk_src_dep_count)
+        return fk_srcseg_dep[seg];
     long long d = fk_cell_base_dep;
     while (d < fk_src_dep_count) {
         if (fk_src_dep_text_len[d] > 0 && off >= fk_src_dep_text_off[d] && off < fk_src_dep_text_off[d] + fk_src_dep_text_len[d]) { return d; }
@@ -29143,6 +29155,26 @@ static unsigned long long fk_cell_binding_order(long long root, long long fresh,
         }
     }
     return h;
+}
+static int fk_cell_closure_identity(long long root, long long fresh, char *identity) {
+    long long retained = 0;
+    unsigned long long context = 14695981039346656037ULL;
+    for (long long k = 0; k < fk_cd_win_n[root]; k++) {
+        long long member = fk_cd_win[root][k];
+        if (member < fresh) {
+            if (!fk_cd_identity[member] || !fk_cd_identity[member][0]) return 0;
+            context = (context ^ (unsigned long long)k) * 1099511628211ULL;
+            context = (context ^ fk_bytes_fnv1a(fk_cd_identity[member], fk_cstrlen(fk_cd_identity[member]))) * 1099511628211ULL;
+            retained++;
+        }
+    }
+    context = fk_cell_binding_order(root, fresh, context);
+    if (!fk_src_unit_hash_members(0, fk_cd_win_n[root], fk_cd_win[root], identity, FK_SRC_HASH_CAP)) return 0;
+    long long pos = fk_cstrlen(identity);
+    return fk_source_hash_append(identity, FK_SRC_HASH_CAP, &pos, "|retained-v2|n=") &&
+        fk_source_hash_append_ll(identity, FK_SRC_HASH_CAP, &pos, retained) &&
+        fk_source_hash_append(identity, FK_SRC_HASH_CAP, &pos, "|") &&
+        fk_source_hash_append_ll(identity, FK_SRC_HASH_CAP, &pos, (long long)(context >> 1));
 }
 
 /* ── the stdout sink ── */
@@ -29455,6 +29487,59 @@ FK_PHASED(FK_PHASE_LOAD, int, fk_cell_load, (const char *path, long long *root_o
         fk_spos = spos0; fk_nerr = ne0; fk_nwarn = nw0; fk_src_truncated = trunc0; fk_src_unrunnable = unr0;
         return 0;
     }
+    /* A raw cell whose current image matches is admitted through the unit,
+     * function and constant tables an import already restores. This transport
+     * leaves with the native Form loader. A prelude, a lowered unit, or a
+     * changed source still parses. The cell does not publish an image of its own. */
+    int from_image = 0;
+    if (fk_src_dep_count == d0 + 1 && !fk_src_dep_lowered[*root_out]) {
+        char image_hash[FK_SRC_HASH_CAP];
+        char image_path[FK_PATH_CAP];
+        if (fk_src_unit_hash_members(d0, fk_src_dep_count, 0, image_hash, FK_SRC_HASH_CAP) &&
+            fk_path_replace_ext(path, ".fkb", image_path, FK_PATH_CAP)) {
+            if (fk_fkb_open_checked(image_path, path, image_hash) && !fk_fkb_errors && !fk_fkb_unrunnable) {
+                fk_fkb_snapshot image_snapshot;
+                fk_fkb_snapshot_take(&image_snapshot);
+                long long nodes_before = fk_node_count;
+                long long segs_before = fk_srcseg_n;
+                if (fk_src_import_fkb_image(image_path, &image_snapshot)) {
+                    long long s = segs_before;
+                    while (s < fk_srcseg_n) { fk_srcseg_dep[s] = *root_out; s = s + 1; }
+                    from_image = 1;
+                } else if (fk_node_count != nodes_before) from_image = -1;
+            } else if (fk_fkb_bad) {
+                fk_fkb_repair_signal(image_path);
+            }
+        }
+    }
+    if (from_image < 0) {
+        k = d0;
+        while (k < fk_src_dep_count) { free(fk_cd_win[k]); fk_cd_win[k] = 0; k = k + 1; }
+        fk_srcseg_drop_from(slen0);
+        fk_src_dep_count = d0;
+        fk_slen = slen0;
+        fk_srctext[fk_slen] = 0;
+        fk_spos = spos0; fk_nerr = ne0; fk_nwarn = nw0; fk_src_truncated = trunc0; fk_src_unrunnable = unr0;
+        return 0;
+    }
+    if (from_image) {
+        long long root = *root_out;
+        long long have = fk_lane_have_find(fk_cd_id[root]);
+        long long chain = have >= 0 ? fk_lane_have_chain[have] : -1;
+        if (fk_src_dep_text_len[root] > 0) {
+            fk_units_add(fk_cd_id[root], fk_src_dep_text_off[root], fk_src_dep_text_off[root] + fk_src_dep_text_len[root], chain);
+            fk_cd_unit[root] = fk_units_n - 1;
+        }
+        if (chain >= 0) fk_cd_framed[root] = fk_smknode(111, fk_smklit(16), chain, 0);
+        fk_cd_loaded[root] = 1;
+        fk_cd_ran[root] = 0;
+        fk_cd_unrunnable[root] = 0;
+        if (fk_admissions && fk_admissions->hash[0]) fk_cd_identity[root] = fk_admissions->hash;
+        fk_root = root0; fk_units_cur = ucur0; fk_const_unit_now = cun0; fk_maxslot = maxslot0; fk_bd_top = bdtop0; fk_spos = spos0;
+        fk_nerr = ne0; fk_nwarn = nw0; fk_nerr_seen = nes0; fk_nwarn_seen = nws0;
+        fk_src_truncated = trunc0; fk_src_unrunnable = unr0; fk_prescan_from = prescan0;
+        return 1;
+    }
     /* each new unit gets its place in the unit table, so a form is filed under the unit whose text holds it */
     k = d0;
     while (k < fk_src_dep_count) {
@@ -29508,35 +29593,8 @@ FK_PHASED(FK_PHASE_LOAD, int, fk_cell_load, (const char *path, long long *root_o
         fk_cd_ran[k] = 0;
         k = k + 1;
     }
-    int closure_clean = 1;
-    long long retained = 0;
-    unsigned long long context = 14695981039346656037ULL;
-    for (k = 0; k < fk_cd_win_n[*root_out]; k++) {
-        long long member = fk_cd_win[*root_out][k];
-        if (member < d0) {
-            if (!fk_cd_identity[member] || !fk_cd_identity[member][0]) closure_clean = 0;
-            else {
-                context = (context ^ (unsigned long long)k) * 1099511628211ULL;
-                context = (context ^ fk_bytes_fnv1a(fk_cd_identity[member], fk_cstrlen(fk_cd_identity[member]))) * 1099511628211ULL;
-                retained++;
-            }
-        }
-    }
     char identity[FK_SRC_HASH_CAP];
-    context = fk_cell_binding_order(*root_out, d0, context);
-    int identified = closure_clean && !fk_nerr && !fk_src_unrunnable && !fk_src_truncated &&
-        fk_src_unit_hash_members(0, fk_cd_win_n[*root_out], fk_cd_win[*root_out], identity, FK_SRC_HASH_CAP);
-    /* Reused definitions retain their original bindings, including calls to
-     * an earlier caller's definitions outside this root's source closure.
-     * Their admitted context is part of this cell's meaning. The native
-     * loader takes this composition when these admission rows leave the seed. */
-    if (identified) {
-        long long pos = fk_cstrlen(identity);
-        identified = fk_source_hash_append(identity, FK_SRC_HASH_CAP, &pos, "|retained-v2|n=") &&
-            fk_source_hash_append_ll(identity, FK_SRC_HASH_CAP, &pos, retained) &&
-            fk_source_hash_append(identity, FK_SRC_HASH_CAP, &pos, "|") &&
-            fk_source_hash_append_ll(identity, FK_SRC_HASH_CAP, &pos, (long long)(context >> 1));
-    }
+    int identified = !fk_nerr && !fk_src_unrunnable && !fk_src_truncated && fk_cell_closure_identity(*root_out, d0, identity);
     const char *admitted = fk_admission_bind(fn0, fk_defn_next, identified ? identity : 0);
     /* Each new dependency was parsed in this same complete name window. It
      * may later be called as a resident root without another load. */
@@ -29563,7 +29621,8 @@ static long long fk_cell_eff_of(long long root) {
     }
     return fk_cd_eff[root];
 }
-/* the cell's own top-level lets are built again for each call; a library's are built once */
+/* the cell's own top-level lets are built again for each call; a library's are built once.
+ * An earlier incarnation of the same path keeps its hold: only names filed under this dep reset. */
 static void fk_cell_reset_lets(long long dep) {
     long long i = 0;
     while (i < fk_const_top) {

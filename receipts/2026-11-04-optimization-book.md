@@ -484,8 +484,15 @@ does not explain the earlier step. An observer-only probe accounts for its own
 802,816-byte growth by pair-heap capacity plus one page. GC allocation/residency
 is still under observation; the threshold has not changed.
 
-Raw-cell disk admission and storage-only cold/warm behavior remain open. The
-verified v9 transport is a prerequisite, not evidence that those goals are met.
+A raw cell whose current `.fkb` matches is admitted through the existing import
+tables and is not parsed again. `cell_run` of that image answers 9 with
+`source_units` 0 and an image owner; the resident call answers 9 again. A let in
+that image prints on the resident call. A named call answers 7. A changed source
+is parsed (`source_units` 1) and the stale image is not the owner. An image that
+carries compile errors is left for the source parse, so the diagnostic is still
+voiced. A prelude still parses. The cell does not publish an image of its own.
+Storage-only cold start remains open. The cell band returns 16777215, import-carry
+255, the projection band 127, and the demand guard 511.
 
 The subsequent shared-field probe observed all 110 GC generations across three
 500-call windows. Heap capacity and growth count stayed fixed; RSS reads caused
