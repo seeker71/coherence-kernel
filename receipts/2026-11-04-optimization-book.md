@@ -490,9 +490,15 @@ tables and is not parsed again. `cell_run` of that image answers 9 with
 that image prints on the resident call. A named call answers 7. A changed source
 is parsed (`source_units` 1) and the stale image is not the owner. An image that
 carries compile errors is left for the source parse, so the diagnostic is still
-voiced. A prelude still parses. The cell does not publish an image of its own.
-Storage-only cold start remains open. The cell band returns 16777215, import-carry
-255, the projection band 127, and the demand guard 511.
+voiced. A prelude still parses. The same cell publishes its admitted catalog beside the
+source, as `path.cell.fkb`, through the existing image owner. The first `cell_run`
+of `(defn pub () 4)` parses (`source_units` 1) and answers 4. The next process
+admits that sidecar (`source_units` 0) and answers 4. The publisher's own parse
+is not counted in the cell's source units. A sidecar whose node child lies
+outside the image is not admitted; the source is parsed, and that rejection is
+not a diagnostic of the cell. The first process still parses when no image is
+present. The cell band returns 16777215, import-carry 255, the projection band
+127, the demand guard 511, and the image capability band 16777215.
 
 The subsequent shared-field probe observed all 110 GC generations across three
 500-call windows. Heap capacity and growth count stayed fixed; RSS reads caused

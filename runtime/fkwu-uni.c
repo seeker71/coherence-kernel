@@ -5162,6 +5162,12 @@ static size_t fk_inram_capacity;
 static unsigned long long *fk_inram_node_slot;
 static unsigned int *fk_inram_node_generation;
 static unsigned char *fk_inram_node_released;
+static unsigned long long fk_inram_released_head;
+static void fk_inram_mark_released(long long ix) {
+    fk_inram_node_slot[ix] = fk_inram_released_head;
+    fk_inram_node_released[ix] = 1;
+    fk_inram_released_head = (unsigned long long)ix;
+}
 static long long fk_inram_last_slot = -1;
 
 static long long fk_inram_bytes(long long image, unsigned char *out, long long cap) {
@@ -5394,25 +5400,24 @@ static long long fk_jit_leaf_inram_resident(long long action, long long identity
     if (!fk_inram_node_index(identity, &ix)) {
         return fk_nothing;
     }
+    if (fk_inram_node_released[ix]) return action == 1 ? 0 : fk_nothing;
     encoded_slot = fk_inram_node_slot[ix];
     if (encoded_slot > fk_inram_capacity) { return fk_nothing; }
     if (action == 1) {
         if (encoded_slot == 0) {
-            fk_inram_node_released[ix] = 1;
+            fk_inram_mark_released(ix);
             return 0;
         }
         e = &fk_inram_cache[encoded_slot - 1];
         if (!e->live || fk_inram_node_generation[ix] != e->generation) {
-            fk_inram_node_slot[ix] = 0;
-            fk_inram_node_released[ix] = 1;
+            fk_inram_mark_released(ix);
             return 0;
         }
         if (e->residents == 0) { return fk_nothing; }
         if (e->residents == 1 && e->mem != 0 && munmap(e->mem, e->span) != 0) {
             return fk_nothing;
         }
-        fk_inram_node_slot[ix] = 0;
-        fk_inram_node_released[ix] = 1;
+        fk_inram_mark_released(ix);
         e->residents = e->residents - 1;
         if (e->residents == 0) {
             free(e->code);
@@ -5428,9 +5433,6 @@ static long long fk_jit_leaf_inram_resident(long long action, long long identity
     {
         long long ra[8];
         if (fk_inram_args(arg_value, ra) == 0) {
-            return fk_nothing;
-        }
-        if (fk_inram_node_released[ix]) {
             return fk_nothing;
         }
         if (encoded_slot != 0) {
@@ -19229,7 +19231,7 @@ static fk_publication fk_path_publish(const char *from, const char *to,
                                        const char *expected, long long len) {
     fk_publication r = {0, 0, 1, 0, "publication-unavailable"};
 #if defined(_WIN32)
-    if (expected) return r;
+    if (expected || len < 0) return r;
     r.matched = 1;
     r.published = rename(from, to) == 0;
     r.error = r.published ? 0 : errno;
@@ -19251,7 +19253,12 @@ static fk_publication fk_path_publish(const char *from, const char *to,
         r.released = !source_closed && !target_closed; return r;
     }
     int comparison_released = 1;
-    int match = expected ? fk_path_matches(lock, to_name, expected, len, &comparison_released) : 1;
+    int match;
+    if (len < 0) {
+        struct stat state;
+        int present = fstatat(lock, to_name, &state, AT_SYMLINK_NOFOLLOW);
+        match = present == 0 ? 0 : errno == ENOENT ? 1 : -1;
+    } else match = expected ? fk_path_matches(lock, to_name, expected, len, &comparison_released) : 1;
     r.matched = match == 1;
     if (match == -2) r.reason = "destination-not-regular";
     else if (match < 0) { r.reason = "destination-read-failed"; r.error = errno; }
@@ -19276,18 +19283,22 @@ typedef struct fk_admission {
     char *hash, *image_path;
     long long image_bytes, node_base, node_end, fn_base;
     char image_checksum[17];
-    long long catalog; /* immutable tuples only; copied through the value melt */
+    long long catalog, relocation, publication; /* private tuples copied through the value melt */
     struct fk_admission *previous;
 } fk_admission;
 static fk_admission *fk_admissions;
 static const char *fk_cell_identity;
 static long long fk_admission_live_roots(void) {
     long long n = 0;
-    for (fk_admission *a = fk_admissions; a; a = a->previous) n += fk_mlive(a->catalog);
+    for (fk_admission *a = fk_admissions; a; a = a->previous)
+        n += fk_mlive(a->catalog) + fk_mlive(a->relocation) + fk_mlive(a->publication);
     return n;
 }
 static void fk_admission_copy_roots(void) {
-    for (fk_admission *a = fk_admissions; a; a = a->previous) a->catalog = fk_mcopy(a->catalog);
+    for (fk_admission *a = fk_admissions; a; a = a->previous) {
+        a->catalog = fk_mcopy(a->catalog); a->relocation = fk_mcopy(a->relocation);
+        a->publication = fk_mcopy(a->publication);
+    }
 }
 static fk_admission *fk_admission_owner(long long fn) {
     if (fn < 0 || fn >= fk_fn_count) return 0;
@@ -19313,7 +19324,7 @@ static const char *fk_admission_bind(long long first, long long end, const char 
     if (n) memcpy(a->hash, hash, (unsigned long)n);
     a->hash[n] = 0;
     a->first = first; a->end = end; a->previous = fk_admissions;
-    a->catalog = 1;
+    a->catalog = 1; a->relocation = 1; a->publication = 1;
     fk_admissions = a;
     return a->hash;
 }
@@ -19336,6 +19347,44 @@ static long long fk_admission_at(long long tuple, long long i) {
     long long p = tuple >> 1;
     while (i-- > 0) p = FK_HNEXT(p);
     return FK_HH(p);
+}
+static long long fk_admission_maps_capture(long long maps) {
+    long long held[3], p = (maps & 1) ? maps >> 1 : -1;
+    for (long long slot = 0; slot < 3; slot++) {
+        if (p < 1 || !FK_POK(p)) return 1;
+        long long r = fk_ridx(FK_HH(p)), rows = 1;
+        p = FK_HNEXT(p);
+        if (r < 1 || r > fk_rp) return 1;
+        for (long long i = fk_rcnt[r]; i-- > 0;) {
+            long long pair[] = {fk_strv(fk_rkey[r][i]), fk_rval[r][i]};
+            rows = fk_cons_val(fk_admission_tuple(pair, 2), rows);
+        }
+        held[slot] = rows;
+    }
+    return p == 0 ? fk_admission_tuple(held, 3) : 1;
+}
+static long long fk_admission_relocated(fk_admission *a, long long slot, long long index) {
+    char key[32]; sprintf(key, "%lld", index);
+    long long len = fk_cstrlen(key), rows = fk_admission_at(a->relocation, slot);
+    for (long long p = rows >> 1; p; p = FK_HNEXT(p)) {
+        long long pair = FK_HH(p), si = fk_stri(fk_admission_at(pair, 0));
+        if (si >= 0 && FK_SLEN(si) == len && !memcmp(FK_SBYTES(si), key, (unsigned long)len))
+            return fk_admission_at(pair, 1);
+    }
+    return fk_nothing;
+}
+static long long fk_admission_maps_read(fk_admission *a) {
+    long long maps[3];
+    for (long long slot = 0; slot < 3; slot++) {
+        long long r = fk_cr_new(), rows = fk_admission_at(a->relocation, slot);
+        for (long long p = rows >> 1; p; p = FK_HNEXT(p)) {
+            long long pair = FK_HH(p); char key[32];
+            fk_cstr(fk_admission_at(pair, 0), key, sizeof(key));
+            fk_cr_put(r, key, fk_admission_at(pair, 1));
+        }
+        maps[slot] = fk_rbox(r);
+    }
+    return fk_admission_tuple(maps, 3);
 }
 static long long fk_admission_catalog_read(long long fn) {
     fk_admission *a = fk_admission_owner(fn);
@@ -19379,7 +19428,10 @@ static long long fk_admission_image_read(long long fn) {
     if (!a || !a->image_path || !a->hash[0]) return fk_nothing;
     long long body = fk_fn[fn];
     if (body >= 0 && body < fk_node_count && fk_node[body][0] == 194) body = fk_node[body][2];
-    if (body < a->node_base || body >= a->node_end) return fk_nothing;
+    long long local_fn = a->relocation == 1 ? (fn - (a->fn_base ? a->fn_base - 1 : 0)) << 1 : fk_admission_relocated(a, 1, fn);
+    long long local_body = a->relocation == 1 ? (body - a->node_base) << 1 : fk_admission_relocated(a, 0, body);
+    if (local_fn == fk_nothing || local_body == fk_nothing ||
+        (a->relocation == 1 && (body < a->node_base || body >= a->node_end))) return fk_nothing;
     long long r = fk_cr_new();
     fk_cr_put(r, "kind", fk_cr_str("program-image-owner"));
     fk_cr_put(r, "builder", fk_cr_str(fk_fkb_builder_id));
@@ -19390,10 +19442,11 @@ static long long fk_admission_image_read(long long fn) {
     fk_cr_put(r, "fn", fn << 1);
     fk_cr_put(r, "body", body << 1);
     fk_cr_put(r, "arity", fk_fnar[fn] << 1);
-    fk_cr_put(r, "local_fn", (fn - (a->fn_base ? a->fn_base - 1 : 0)) << 1);
-    fk_cr_put(r, "local_body", (body - a->node_base) << 1);
+    fk_cr_put(r, "local_fn", local_fn);
+    fk_cr_put(r, "local_body", local_body);
     fk_cr_put(r, "node_base", a->node_base << 1);
     fk_cr_put(r, "fn_base", a->fn_base << 1);
+    if (a->relocation != 1) fk_cr_put(r, "relocation", fk_admission_maps_read(a));
     return fk_rbox(r);
 }
 static long long fk_ast_function_arg(long long value) {
@@ -20148,7 +20201,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long expected = fk_isrec(target) ? fk_cr_key_find(target, "expected") : fk_nothing;
         long long path = fk_isrec(target) ? fk_cr_key_find(target, "path") : target;
         int guarded = fk_isrec(target);
-        if (!fk_door_path(fk_vs[saved], a) || !fk_door_path(path, b) || (guarded && !fk_is_str(expected))) {
+        if (!fk_door_path(fk_vs[saved], a) || !fk_door_path(path, b) || (guarded &&
+            (fk_rfind(fk_ridx(target), fk_stri(fk_cr_str("expected"))) < 0 || (expected != fk_nothing && !fk_is_str(expected))))) {
             fk_vsp = saved; return fk_nothing;
         }
         fk_vsp = saved;
@@ -20157,8 +20211,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         /* Plain rename retains the host operation's permission contract.
          * The conditional image publisher and C image writer share the lock. */
         if (!guarded) return rename(a, b) == 0 ? 0 : -2;
-        long long si = guarded ? fk_stri(expected) : -1;
-        fk_publication published = fk_path_publish(a, b, guarded ? FK_SBYTES(si) : 0, guarded ? FK_SLEN(si) : 0);
+        long long si = fk_stri(expected);
+        fk_publication published = fk_path_publish(a, b, si >= 0 ? FK_SBYTES(si) : 0, si >= 0 ? FK_SLEN(si) : -1);
         long long r = fk_cr_new();
         fk_cr_put(r, "published", published.published << 1);
         fk_cr_put(r, "matched", published.matched << 1);
@@ -22470,13 +22524,18 @@ static void fk_srcseg_push(long long off, const char *path) {
     fk_srcseg_dep[fk_srcseg_n] = -1;
     fk_srcseg_n = fk_srcseg_n + 1;
 }
+static long long fk_srcseg_at(long long off) {
+    long long lo = 0, hi = fk_srcseg_n;
+    while (lo < hi) {
+        long long mid = lo + (hi - lo) / 2;
+        if (fk_srcseg_off[mid] <= off) lo = mid + 1; else hi = mid;
+    }
+    return lo - 1;
+}
 /* the file and its own line for an offset into the assembled unit: 1 with both set, 0 when the
  * offset lies in text no file holds (a symbol an image carried, or a unit built in memory) */
 static int fk_srcseg_where(long long off, const char **path, long long *line) {
-    long long i = fk_srcseg_n - 1;
-    while (i >= 0 && fk_srcseg_off[i] > off) {
-        i = i - 1;
-    }
+    long long i = fk_srcseg_at(off);
     if (i < 0 || fk_srcseg_path[i] == 0) {
         return 0;
     }
@@ -25878,6 +25937,7 @@ static int fk_src_prelude_bml_token(const char *text, long long start, long long
            text[start + n - 2] == 'm' && text[start + n - 1] == 'l';
 }
 static char *fk_bml_lower_to_mem(const char *bml_path, long long *out_len);
+static const char *fk_native_unit_path(const char *unit, const char *tail);
 /* THE BML FLOOR IS LOWERED IN THIS PROCESS (no child, no pipe). State the lowering below reads:
  *   fk_load_phase   1 from process start until the program (or a cached image) begins to walk: the arena is still being
  *                   built, so a memo miss met mid-collection abandons the collection, lowers (fk_bml_bootstrap) and
@@ -27218,9 +27278,8 @@ static int fk_fkb_open_checked(const char *path, const char *source, const char 
 }
 /* Retain only the admitted artifact's location and relocation. No runtime
  * values or unrelated cells are serialized; Form owns result persistence. */
-static void fk_admission_image_note(const char *path, long long node_base,
+static void fk_admission_image_note(fk_admission *a, const char *path, long long node_base,
                                     long long node_count, long long fn_base) {
-    fk_admission *a = fk_admissions;
     char absolute[FK_PATH_CAP];
     if (!a || !a->hash[0] || fk_fkb_bad || fk_fkb_errors || fk_fkb_unrunnable ||
         !fk_cstr_eq(a->hash, fk_fkb_source_hash)) return;
@@ -27378,7 +27437,8 @@ static long long fk_fkb_node_arity_for_tag(long long tag) {
 }
 static long long fk_fkb_remap_field(long long tag, long long field, long long value,
                                     long long node_base, long long fn_base,
-                                    long long str_base) {
+                                    long long str_base, int *node_child) {
+    if (node_child) *node_child = 0;
     if (value < 0) {
         return value;
     }
@@ -27389,14 +27449,17 @@ static long long fk_fkb_remap_field(long long tag, long long field, long long va
         return fk_fkb_remap_fn(value, fn_base);
     }
     if (tag == 12 && field == 2) {
+        if (node_child) *node_child = 1;
         return value + node_base;
     }
     if (tag == 243 && field == 2) {
         /* the closure-capture env chain (a 242-cell list, or -1 for a plain non-capturing
          * fn-value -- already returned unchanged above by the value<0 guard). */
+        if (node_child) *node_child = 1;
         return value + node_base;
     }
     if ((tag == 240 || tag == 241) && field >= 2) {
+        if (node_child) *node_child = 1;
         return value + node_base;
     }
     if (tag == FK_TAG_CONST_HOLD && field >= 2) {
@@ -27406,16 +27469,19 @@ static long long fk_fkb_remap_field(long long tag, long long field, long long va
         return 0;
     }
     if (tag == 77) {
+        if (field == 2 && node_child) *node_child = 1;
         return field == 2 ? value + node_base : value;
     }
     if (tag == 201 && field == 3) {
         /* substring: the rewrite row builds (201 LIT-9 s (cons start end)), so field 3 is the
          * range's tag-19 node -- a child the float_leaf row's arity of 2 does not count. It
          * shifts with the image's nodes like any child; 0 is float_leaf's own shape, no range. */
+        if (value != 0 && node_child) *node_child = 1;
         return value == 0 ? 0 : value + node_base;
     }
     long long ar = fk_fkb_node_arity_for_tag(tag);
     if (field <= ar) {
+        if (node_child) *node_child = 1;
         return value + node_base;
     }
     return value;
@@ -27467,6 +27533,18 @@ static int fk_fkb_restore_functions(long long nf, long long fn_base) {
     }
     return !fk_fkb_bad;
 }
+static long long fk_cell_import_root = -1, fk_cell_import_fresh;
+#if !defined(_WIN32)
+static long long fk_cell_import_dep(unsigned long long unit);
+static int fk_cell_import_reused(unsigned long long unit);
+static void fk_cell_import_name(long long off, unsigned long long unit);
+static void fk_cell_import_sequence(unsigned long long unit, long long sequence);
+#else
+#define fk_cell_import_dep(unit) (-1)
+#define fk_cell_import_reused(unit) 0
+#define fk_cell_import_name(off, unit) ((void)0)
+#define fk_cell_import_sequence(unit, sequence) ((void)0)
+#endif
 static int fk_src_import_fkb_image(const char *fkb_path, fk_fkb_snapshot *snapshot) {
     fk_fkb_snapshot_use(snapshot);
     int image_graph_retained = 1;
@@ -27508,10 +27586,19 @@ static int fk_src_import_fkb_image(const char *fkb_path, fk_fkb_snapshot *snapsh
         long long c1 = fk_fkb_read_signed();
         long long c2 = fk_fkb_read_signed();
         long long c3 = fk_fkb_read_signed();
+        int n1 = 0, n2 = 0, n3 = 0;
+        long long f1 = fk_fkb_remap_field(tag, 1, c1, node_base, fn_base, str_base, &n1);
+        long long f2 = fk_fkb_remap_field(tag, 2, c2, node_base, fn_base, str_base, &n2);
+        long long f3 = fk_fkb_remap_field(tag, 3, c3, node_base, fn_base, str_base, &n3);
+        if ((n1 && c1 >= nr) || (n2 && c2 >= nr) || (n3 && c3 >= nr)) {
+            fk_fkb_mark_bad("import node child is outside the image");
+            free(fn_roots);
+            return 0;
+        }
         fk_node[node_base + i][0] = tag;
-        fk_node[node_base + i][1] = fk_fkb_remap_field(tag, 1, c1, node_base, fn_base, str_base);
-        fk_node[node_base + i][2] = fk_fkb_remap_field(tag, 2, c2, node_base, fn_base, str_base);
-        fk_node[node_base + i][3] = fk_fkb_remap_field(tag, 3, c3, node_base, fn_base, str_base);
+        fk_node[node_base + i][1] = f1;
+        fk_node[node_base + i][2] = f2;
+        fk_node[node_base + i][3] = f3;
         i = i + 1;
     }
     fk_node_count = fk_node_count + nr;
@@ -27562,7 +27649,9 @@ static int fk_src_import_fkb_image(const char *fkb_path, fk_fkb_snapshot *snapsh
             free(used_exports); free(fn_roots);
             return 0;
         }
-        if (owner && fk_lane_have_find((unsigned long long)owner) >= 0) {
+        if (fk_cell_import_root >= 0) fk_cell_import_name(name_s, (unsigned long long)owner);
+        if (fk_fkb_bad) { free(used_exports); free(fn_roots); return 0; }
+        if (owner && (fk_cell_import_root >= 0 ? fk_cell_import_reused((unsigned long long)owner) : fk_lane_have_find((unsigned long long)owner) >= 0)) {
             long long previous = -1;
             for (long long j = 0; j < retained_exports; j++) {
                 long long fn = fk_fnidx[j];
@@ -27679,6 +27768,7 @@ static int fk_src_import_fkb_image(const char *fkb_path, fk_fkb_snapshot *snapsh
     i = 0;
     while (!fk_fkb_bad && i < const_count) {
         cown[i] = (unsigned long long)fk_fkb_read_signed();
+        if (fk_cell_import_root >= 0) fk_cell_import_name(ccs[i], cown[i]);
         i = i + 1;
     }
     if (!fk_fkb_bad && fk_fkb_pos != fk_fkb_len) fk_fkb_mark_bad("trailing import bytes");
@@ -27702,13 +27792,14 @@ static int fk_src_import_fkb_image(const char *fkb_path, fk_fkb_snapshot *snapsh
          * unrun, and this copy's holds for its lets read the earlier image's */
         u = 0;
         while (u < unit_count) {
-            udup[u] = fk_lane_have_find(uid[u]) >= 0;
+            udup[u] = fk_cell_import_root >= 0 ? fk_cell_import_reused(uid[u]) : fk_lane_have_find(uid[u]) >= 0;
             u = u + 1;
         }
         u = 0;
         while (u < unit_count) {
             if (!udup[u]) {
-                fk_lane_have_add(uid[u], uchain[u]);
+                if (fk_cell_import_root >= 0) fk_cell_import_sequence(uid[u], uchain[u]);
+                else fk_lane_have_add(uid[u], uchain[u]);
             }
             u = u + 1;
         }
@@ -27756,9 +27847,10 @@ static int fk_src_import_fkb_image(const char *fkb_path, fk_fkb_snapshot *snapsh
         return 0;
     }
     fk_admission_bind(fn_base, fn_base + nf - 1, fk_fkb_source_hash);
+    fk_admissions->image_bytes = fk_fkb_len + 8;
     /* Cross-image holds change the admitted graph. The original image is no
      * longer a complete publication target for that graph's pure results. */
-    if (image_graph_retained) fk_admission_image_note(fkb_path, node_base, nr, fn_base);
+    if (image_graph_retained) fk_admission_image_note(fk_admissions, fkb_path, node_base, nr, fn_base);
     fk_prog_note_ice(fkb_path, fk_fkb_len, fk_fkb_source_hash);
     return 1;
 }
@@ -27939,7 +28031,7 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
     fk_root = fk_fn_count > 0 ? fk_fn[0] : -1;
     fk_admission_clear();
     fk_admission_bind(0, fk_fn_count, fk_fkb_errors || fk_fkb_unrunnable ? 0 : fk_fkb_source_hash);
-    fk_admission_image_note(fkb_path, 0, nr, 0);
+    fk_admission_image_note(fk_admissions, fkb_path, 0, nr, 0);
     fk_prog_note_ice(fkb_path, fk_fkb_len, expected_source_hash);
     fk_prog_note_counts();
     return 1;
@@ -28262,7 +28354,7 @@ static void fk_src_compile_current_unit(const char *path, const char *fkb_path,
     /* A competing writer may have replaced the path after our rename. Its
      * valid image is not the relocation map of the graph already in RAM. */
     if (written_bytes == fk_fkb_len + 8 && written_checksum == admitted_checksum)
-        fk_admission_image_note(fkb_path, 0, fk_node_count, 0);
+        fk_admission_image_note(fk_admissions, fkb_path, 0, fk_node_count, 0);
     else fk_diag_path("cache-failure", fkb_path, "published image changed before descriptor capture; running graph has no image mapping");
     if (!fk_fkb_errors && !fk_fkb_unrunnable) fk_sig_heal_settle(fkb_path);
 }
@@ -29038,8 +29130,7 @@ static long long fk_cell_dep_find(const char *path) {
     return d;
 }
 static long long fk_cell_dep_of_off(long long off) {
-    long long seg = fk_srcseg_n - 1;
-    while (seg >= 0 && fk_srcseg_off[seg] > off) seg--;
+    long long seg = fk_srcseg_at(off);
     if (seg >= 0 && fk_srcseg_dep[seg] >= fk_cell_base_dep && fk_srcseg_dep[seg] < fk_src_dep_count)
         return fk_srcseg_dep[seg];
     long long d = fk_cell_base_dep;
@@ -29086,6 +29177,32 @@ static void fk_win_set(long long root) {
     k = 0;
     while (k < fk_cd_win_n[root]) { fk_win_bits_store[fk_cd_win[root][k]] = 1; k = k + 1; }
     fk_win_bits = fk_win_bits_store;
+}
+/* The selected window owns imported names and sequences. No path-wide alias
+ * can replace an older live incarnation's declarations or held values. */
+static long long fk_cell_import_dep(unsigned long long unit) {
+    for (long long i = 0; i < fk_cd_win_n[fk_cell_import_root]; i++) {
+        long long d = fk_cd_win[fk_cell_import_root][i];
+        if (fk_cd_id[d] == unit) return d;
+    }
+    fk_fkb_mark_bad("image unit is outside the selected cell closure");
+    return -1;
+}
+static int fk_cell_import_reused(unsigned long long unit) {
+    long long d = fk_cell_import_dep(unit);
+    return d >= 0 && d < fk_cell_import_fresh;
+}
+static void fk_cell_import_name(long long off, unsigned long long unit) {
+    long long d = fk_cell_import_dep(unit), seg = fk_srcseg_at(off);
+    if (d >= 0 && seg >= 0 && !fk_srcseg_path[seg]) fk_srcseg_dep[seg] = d;
+    else fk_fkb_mark_bad("imported name has no selected source-map row");
+}
+static void fk_cell_import_sequence(unsigned long long unit, long long sequence) {
+    long long d = fk_cell_import_dep(unit);
+    if (d >= fk_cell_import_fresh) {
+        fk_cd_framed[d] = sequence;
+        if (fk_cd_unit[d] >= 0) fk_unit_sec[fk_cd_unit[d]] = sequence;
+    }
 }
 static long long fk_cell_member_index(long long root, long long dep) {
     for (long long i = 0; i < fk_cd_win_n[root]; i++) if (fk_cd_win[root][i] == dep) return i;
@@ -29175,6 +29292,12 @@ static int fk_cell_closure_identity(long long root, long long fresh, char *ident
         fk_source_hash_append_ll(identity, FK_SRC_HASH_CAP, &pos, retained) &&
         fk_source_hash_append(identity, FK_SRC_HASH_CAP, &pos, "|") &&
         fk_source_hash_append_ll(identity, FK_SRC_HASH_CAP, &pos, (long long)(context >> 1));
+}
+static int fk_cell_image_busy;
+static int fk_cell_image_path(const char *source, char *image) {
+    if (fk_cstrlen(source) + 10 >= FK_PATH_CAP) return 0;
+    sprintf(image, "%s.cell.fkb", source);
+    return 1;
 }
 
 /* ── the stdout sink ── */
@@ -29487,59 +29610,6 @@ FK_PHASED(FK_PHASE_LOAD, int, fk_cell_load, (const char *path, long long *root_o
         fk_spos = spos0; fk_nerr = ne0; fk_nwarn = nw0; fk_src_truncated = trunc0; fk_src_unrunnable = unr0;
         return 0;
     }
-    /* A raw cell whose current image matches is admitted through the unit,
-     * function and constant tables an import already restores. This transport
-     * leaves with the native Form loader. A prelude, a lowered unit, or a
-     * changed source still parses. The cell does not publish an image of its own. */
-    int from_image = 0;
-    if (fk_src_dep_count == d0 + 1 && !fk_src_dep_lowered[*root_out]) {
-        char image_hash[FK_SRC_HASH_CAP];
-        char image_path[FK_PATH_CAP];
-        if (fk_src_unit_hash_members(d0, fk_src_dep_count, 0, image_hash, FK_SRC_HASH_CAP) &&
-            fk_path_replace_ext(path, ".fkb", image_path, FK_PATH_CAP)) {
-            if (fk_fkb_open_checked(image_path, path, image_hash) && !fk_fkb_errors && !fk_fkb_unrunnable) {
-                fk_fkb_snapshot image_snapshot;
-                fk_fkb_snapshot_take(&image_snapshot);
-                long long nodes_before = fk_node_count;
-                long long segs_before = fk_srcseg_n;
-                if (fk_src_import_fkb_image(image_path, &image_snapshot)) {
-                    long long s = segs_before;
-                    while (s < fk_srcseg_n) { fk_srcseg_dep[s] = *root_out; s = s + 1; }
-                    from_image = 1;
-                } else if (fk_node_count != nodes_before) from_image = -1;
-            } else if (fk_fkb_bad) {
-                fk_fkb_repair_signal(image_path);
-            }
-        }
-    }
-    if (from_image < 0) {
-        k = d0;
-        while (k < fk_src_dep_count) { free(fk_cd_win[k]); fk_cd_win[k] = 0; k = k + 1; }
-        fk_srcseg_drop_from(slen0);
-        fk_src_dep_count = d0;
-        fk_slen = slen0;
-        fk_srctext[fk_slen] = 0;
-        fk_spos = spos0; fk_nerr = ne0; fk_nwarn = nw0; fk_src_truncated = trunc0; fk_src_unrunnable = unr0;
-        return 0;
-    }
-    if (from_image) {
-        long long root = *root_out;
-        long long have = fk_lane_have_find(fk_cd_id[root]);
-        long long chain = have >= 0 ? fk_lane_have_chain[have] : -1;
-        if (fk_src_dep_text_len[root] > 0) {
-            fk_units_add(fk_cd_id[root], fk_src_dep_text_off[root], fk_src_dep_text_off[root] + fk_src_dep_text_len[root], chain);
-            fk_cd_unit[root] = fk_units_n - 1;
-        }
-        if (chain >= 0) fk_cd_framed[root] = fk_smknode(111, fk_smklit(16), chain, 0);
-        fk_cd_loaded[root] = 1;
-        fk_cd_ran[root] = 0;
-        fk_cd_unrunnable[root] = 0;
-        if (fk_admissions && fk_admissions->hash[0]) fk_cd_identity[root] = fk_admissions->hash;
-        fk_root = root0; fk_units_cur = ucur0; fk_const_unit_now = cun0; fk_maxslot = maxslot0; fk_bd_top = bdtop0; fk_spos = spos0;
-        fk_nerr = ne0; fk_nwarn = nw0; fk_nerr_seen = nes0; fk_nwarn_seen = nws0;
-        fk_src_truncated = trunc0; fk_src_unrunnable = unr0; fk_prescan_from = prescan0;
-        return 1;
-    }
     /* each new unit gets its place in the unit table, so a form is filed under the unit whose text holds it */
     k = d0;
     while (k < fk_src_dep_count) {
@@ -29563,7 +29633,24 @@ FK_PHASED(FK_PHASE_LOAD, int, fk_cell_load, (const char *path, long long *root_o
     fn0 = fk_defn_next;
     fk_src_check_balance();
     int parsed = !fk_src_unrunnable;
-    if (parsed) {
+    char identity[FK_SRC_HASH_CAP], image_path[FK_PATH_CAP];
+    int identified = parsed && fk_cell_closure_identity(*root_out, d0, identity);
+    int image_loaded = 0, image_failed = 0;
+    if (!fk_cell_image_busy && identified && fk_cell_image_path(path, image_path) && fk_path_size_raw(image_path) >= 0) {
+        if (fk_fkb_open_checked(image_path, path, identity)) {
+            fk_fkb_snapshot snapshot = {0}; fk_fkb_snapshot_take(&snapshot);
+            long long nodes_before = fk_node_count, fn_before = fk_defn_next;
+            fk_cell_import_root = *root_out; fk_cell_import_fresh = d0;
+            image_loaded = fk_src_import_fkb_image(image_path, &snapshot);
+            fk_cell_import_root = -1;
+            if (!image_loaded && (fk_node_count != nodes_before || fk_defn_next != fn_before)) {
+                /* The live tables moved, so the source cannot be parsed in their place. */
+                fk_fkb_repair_signal(image_path);
+                image_failed = 1; parsed = 0; fk_src_unrunnable = 1;
+            }
+        }
+    }
+    if (parsed && !image_loaded) {
         for (k = d0; k < fk_src_dep_count; k++)
             if (fk_src_dep_text_len[k] > 0) fk_cell_source_units++;
         fk_prescan_defns();
@@ -29587,15 +29674,14 @@ FK_PHASED(FK_PHASE_LOAD, int, fk_cell_load, (const char *path, long long *root_o
     k = d0;
     while (k < fk_src_dep_count) {
         long long u = fk_cd_unit[k];
-        if (u >= 0 && fk_unit_chain[u] >= 0) { fk_cd_framed[k] = fk_smknode(111, fk_smklit(16), fk_unit_chain[u], 0); }
+        if (!image_loaded && u >= 0 && fk_unit_chain[u] >= 0) { fk_cd_framed[k] = fk_smknode(111, fk_smklit(16), fk_unit_chain[u], 0); }
         fk_cd_unrunnable[k] = fk_cell_closure_refused(k);
         fk_cd_loaded[k] = parsed || fk_cd_unrunnable[k];
         fk_cd_ran[k] = 0;
         k = k + 1;
     }
-    char identity[FK_SRC_HASH_CAP];
-    int identified = !fk_nerr && !fk_src_unrunnable && !fk_src_truncated && fk_cell_closure_identity(*root_out, d0, identity);
-    const char *admitted = fk_admission_bind(fn0, fk_defn_next, identified ? identity : 0);
+    identified = identified && !fk_nerr && !fk_src_unrunnable && !fk_src_truncated && !image_failed;
+    const char *admitted = image_loaded ? fk_admissions->hash : fk_admission_bind(fn0, fk_defn_next, identified ? identity : 0);
     /* Each new dependency was parsed in this same complete name window. It
      * may later be called as a resident root without another load. */
     for (k = d0; k < fk_src_dep_count; k++) fk_cd_identity[k] = admitted;
@@ -29604,6 +29690,56 @@ FK_PHASED(FK_PHASE_LOAD, int, fk_cell_load, (const char *path, long long *root_o
     fk_nerr = ne0; fk_nwarn = nw0; fk_nerr_seen = nes0; fk_nwarn_seen = nws0;
     fk_src_truncated = trunc0; fk_src_unrunnable = unr0; fk_prescan_from = prescan0;
     (void)fnt0;
+    return 1;
+}
+/* Form owns projection and publication. This seed only supplies its admitted
+ * catalog and carries the returned outcome; it leaves with cell admission. */
+static int fk_cell_image_prepare(const char *path, long long root, long long *publication) {
+    if (fk_cell_image_busy || fk_bml_floor_busy || fk_cd_unrunnable[root]) return 1;
+    fk_admission *a = fk_admissions;
+    while (a && a->hash != fk_cd_identity[root]) a = a->previous;
+    if (!a || !a->hash[0] || a->catalog == 1 || a->image_bytes > 0) return 1;
+    char image[FK_PATH_CAP];
+    if (!fk_cell_image_path(path, image)) { fk_diag_path("cache-failure", path, "cell image path exceeds host capacity"); return 0; }
+    const char *saved_identity = fk_cell_identity;
+    fk_cell_identity = a->hash;
+    long long catalog = fk_admission_catalog_read(0), request = fk_cr_new();
+    fk_cell_identity = saved_identity;
+    fk_cr_put(request, "kind", fk_cr_str("raw-cell-image"));
+    fk_cr_put(request, "catalog", catalog);
+    fk_cr_put(request, "path", fk_cr_str(image));
+    fk_cr_put(request, "mtime", fk_src_dep_mtime[root] << 1);
+    if (a->publication != 1) fk_cr_put(request, "pending", fk_admission_at(a->publication, 1));
+    fk_cell_image_busy = 1;
+    long long units = fk_cell_source_units, functions = fk_cell_source_functions;
+    long long response = fk_cell_run_door(fk_cr_str(fk_native_unit_path(path, "form-stdlib/program-image-fkb-byte-decode.fk")), fk_rbox(request), fk_nothing, fk_nothing, 1);
+    fk_cell_source_units = units; fk_cell_source_functions = functions;
+    fk_cell_image_busy = 0;
+    long long value = fk_cr_key_find(response, "value");
+    long long resume = a->publication == 1 ? fk_cr_key_find(value, "resume") : fk_admission_at(a->publication, 1);
+    if (fk_is_fnval(resume)) {
+        long long held[] = {value, resume}; a->publication = fk_admission_tuple(held, 2);
+    }
+    long long status = fk_stri(fk_cr_key_find(value, "status"));
+    int published = status >= 0 && FK_SLEN(status) == 15 && !memcmp(FK_SBYTES(status), "image-published", 15);
+    if (!published) {
+        *publication = value == fk_nothing ? response : value;
+        long long reason = fk_cr_key_find(value, "reason");
+        if (reason == fk_nothing) reason = fk_cr_key_find(fk_cr_key_find(response, "stopped"), "message");
+        char detail[1024]; fk_cstr(fk_value_str(reason), detail, sizeof(detail));
+        fk_diag_path("cache-failure", path, detail);
+        return 0;
+    }
+    if (!fk_fkb_open_checked(image, path, a->hash)) {
+        fk_fkb_repair_signal(image); return 0;
+    }
+    a->relocation = fk_admission_maps_capture(fk_cr_key_find(fk_cr_key_find(value, "proof"), "relocation"));
+    if (a->relocation == 1) {
+        fk_diag_path("cache-failure", path, "published cell image has no relocation"); return 0;
+    }
+    fk_admission_image_note(a, image, 0, 0, 0);
+    a->publication = 1;
+    fk_sig_heal_settle(image);
     return 1;
 }
 /* the program's answer is its last sequence in text order: the cell's own, or, for a root that only names preludes
@@ -29678,7 +29814,7 @@ static long long fk_cell_run_door(long long pathw, long long argw, long long dlw
     char path[FK_PATH_CAP];
     long long mono0 = fk_mono_ns() / 1000000LL, cpu0 = fk_cell_cpu_us();
     long long source_units0 = fk_cell_source_units, source_functions0 = fk_cell_source_functions;
-    long long deadline = 0, value = fk_nothing, root = -1, stopped = fk_nothing, errors = 0, vsp0 = fk_vsp;
+    long long deadline = 0, value = fk_nothing, root = -1, stopped = fk_nothing, errors = 0, vsp0 = fk_vsp, publication = fk_nothing;
     int resident = 0, how = 0, refused = 0, check_only = 0;
     const char *refusal = "";
     fk_vp(argw); /* keep the typed argument rooted while the unit and its dependencies load */
@@ -29782,14 +29918,23 @@ static long long fk_cell_run_door(long long pathw, long long argw, long long dlw
                     }
                     root = -1;
                 } else {
+                    int image_ready = fk_cell_image_prepare(path, root, &publication);
                     fk_cell_rows_keep(root, db, dn0, fk_dg_n);
                     /* Retained dependencies keep their diagnostics on a new
                      * root too. Replay after keeping only newly voiced rows. */
                     fk_cell_rows_replay(root, db);
+                    if (!image_ready) {
+                        stopped = fk_stopped_record("image-publication", "the admitted cell image needs its publication resource");
+                        root = -1;
+                    }
                 }
             } else {
                 fk_bml_defer = sv_defer;
                 fk_cell_rows_replay(root, fk_src_dep_count);
+                if (!fk_cell_image_prepare(path, root, &publication)) {
+                    stopped = fk_stopped_record("image-publication", "the admitted cell image needs its publication resource");
+                    root = -1;
+                }
             }
             break;
         }
@@ -29802,14 +29947,15 @@ static long long fk_cell_run_door(long long pathw, long long argw, long long dlw
                 long long fp = vsp0, order_n = 0, k, m;
                 long long *order;
                 fk_cell_arg_slot = fp;
-                /* a cell starts with no JIT page released: a node is its content, so the node a cell released at its close is the
-                 * very node the next run of the same unit mints, and the tombstone made every call of that second run answer nothing
-                 * (anf-shadow-band read 31 the first time and 3 the second, in one process). SHRINK PATH: the tombstone moves into
-                 * the cell's own frame when residency is owned per cell in Form (jit-once-born.fk), and this loop goes. */
+                /* Reset only actual releases. A released slot has no live page;
+                 * its existing column links the touched nodes, not the field's
+                 * whole population. Form's cell frame takes this ownership. */
 #if defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
-                if (fk_inram_node_released != 0) {
-                    long long zi = 1;
-                    while (zi <= fk_np && zi < fk_node_cap) { fk_inram_node_released[zi] = 0; zi = zi + 1; }
+                while (fk_inram_released_head) {
+                    unsigned long long ix = fk_inram_released_head;
+                    fk_inram_released_head = fk_inram_node_slot[ix];
+                    fk_inram_node_slot[ix] = 0;
+                    fk_inram_node_released[ix] = 0;
                 }
 #endif
                 fk_cell_deadline_ms = one_deadline;
@@ -29904,6 +30050,7 @@ static long long fk_cell_run_door(long long pathw, long long argw, long long dlw
     fk_cellrun_n = fk_cellrun_n - 1;
     r = fk_cr_new();
     fk_cr_put(r, "value", fk_vs[answer_roots]);
+    fk_cr_put(r, "publication", publication);
     fk_cr_put(r, "out", fk_vs[answer_roots + 2]);
     fk_cr_put(r, "err", fk_vs[answer_roots + 3]);
     fk_cr_put(r, "diag", fk_vs[answer_roots + 4]);
@@ -30477,47 +30624,45 @@ static int fk_hex16_parse(const char *p, unsigned long long *out) {
 }
 /* The floor compiler is selected from the current working directory. Form
  * records this same choice and context in each lowering packet. */
-/* The floor compiler that lowers a unit is its checkout's: found from the working directory (the checkout's root or its
+/* Native compiler units belong to their checkout: found from the working directory (the checkout's root or its
  * form/), else under the /form/ root the unit's own path names, else beside the binary (as the Metal carrier and the JIT
  * unit are). A unit lowered from a directory outside any checkout -- the JIT's own page compiler among them, when the run
  * began elsewhere -- is lowered by the floor its checkout holds. */
-static char fk_bml_floor_found[FK_PATH_CAP];
-static const char *fk_bml_floor_path(const char *unit) {
-    const char *tail = "form-stdlib/bml-floor-compile.fk";
+static char fk_native_unit_found[FK_PATH_CAP];
+static const char *fk_native_unit_path(const char *unit, const char *tail) {
     long long tn = fk_cstrlen(tail), s = 0, root = -1, n = 0, i = 0;
-    if (fk_path_size_raw("form/form-stdlib/bml-floor-compile.fk") >= 0) {
-        return "form/form-stdlib/bml-floor-compile.fk";
-    }
-    if (fk_path_size_raw("form-stdlib/bml-floor-compile.fk") >= 0) {
-        return "form-stdlib/bml-floor-compile.fk";
-    }
+    if (tn + 6 >= FK_PATH_CAP) return tail;
+    sprintf(fk_native_unit_found, "form/%s", tail);
+    if (fk_path_size_raw(fk_native_unit_found) >= 0) return fk_native_unit_found;
+    if (fk_path_size_raw(tail) >= 0) return tail;
     while (unit != 0 && unit[s] != 0) {
         if (unit[s] == '/' && unit[s + 1] == 'f' && unit[s + 2] == 'o' && unit[s + 3] == 'r' && unit[s + 4] == 'm' && unit[s + 5] == '/') { root = s + 6; }
         s = s + 1;
     }
     if (root > 0 && root + tn + 1 < FK_PATH_CAP) {
         n = 0;
-        while (n < root) { fk_bml_floor_found[n] = unit[n]; n = n + 1; }
+        while (n < root) { fk_native_unit_found[n] = unit[n]; n = n + 1; }
         i = 0;
-        while (i < tn) { fk_bml_floor_found[n + i] = tail[i]; i = i + 1; }
-        fk_bml_floor_found[n + i] = 0;
-        if (fk_path_size_raw(fk_bml_floor_found) >= 0) { return fk_bml_floor_found; }
+        while (i < tn) { fk_native_unit_found[n + i] = tail[i]; i = i + 1; }
+        fk_native_unit_found[n + i] = 0;
+        if (fk_path_size_raw(fk_native_unit_found) >= 0) { return fk_native_unit_found; }
     }
     long long last = -1;
     i = 0;
     while (fk_self_path[i] != 0) { if (fk_self_path[i] == '/') { last = i; } i = i + 1; }
     if (last + 1 + 5 + tn + 1 < FK_PATH_CAP) {
         n = 0;
-        while (n <= last) { fk_bml_floor_found[n] = fk_self_path[n]; n = n + 1; }
+        while (n <= last) { fk_native_unit_found[n] = fk_self_path[n]; n = n + 1; }
         const char *form = "form/";
         i = 0;
-        while (form[i] != 0) { fk_bml_floor_found[n] = form[i]; n = n + 1; i = i + 1; }
+        while (form[i] != 0) { fk_native_unit_found[n] = form[i]; n = n + 1; i = i + 1; }
         i = 0;
-        while (i < tn) { fk_bml_floor_found[n + i] = tail[i]; i = i + 1; }
-        fk_bml_floor_found[n + i] = 0;
-        if (fk_path_size_raw(fk_bml_floor_found) >= 0) { return fk_bml_floor_found; }
+        while (i < tn) { fk_native_unit_found[n + i] = tail[i]; i = i + 1; }
+        fk_native_unit_found[n + i] = 0;
+        if (fk_path_size_raw(fk_native_unit_found) >= 0) { return fk_native_unit_found; }
     }
-    return "form/form-stdlib/bml-floor-compile.fk";
+    sprintf(fk_native_unit_found, "form/%s", tail);
+    return fk_native_unit_found;
 }
 /* A packet answers its lowered body when every row reads and every observation it carries still holds. When it does
  * not, `moved` (FK_BML_MOVED_CAP bytes, when given) says which: the observation the tree has moved past since it was
@@ -30857,7 +31002,7 @@ FK_PHASED(FK_PHASE_RECIPE, fk_char_p, fk_bml_floor_call, (char **paths, long lon
     long long list = 1, i = n, rec, out_w, stopped_w, dg;
     char *out;
     char floor[FK_PATH_CAP];
-    fk_cstr_copy(floor, fk_bml_floor_path(n > from ? paths[from] : 0), FK_PATH_CAP);
+    fk_cstr_copy(floor, fk_native_unit_path(n > from ? paths[from] : 0, "form-stdlib/bml-floor-compile.fk"), FK_PATH_CAP);
     fk_jit_warm();
     while (i > from) {
         i = i - 1;

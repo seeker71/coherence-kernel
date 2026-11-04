@@ -26,6 +26,7 @@ import form-stdlib/program-image-fkb.fk;
 import form-stdlib/program-image-fkb-byte-container.fk;
 import form-stdlib/program-image-fkb-byte-file-witness.fk;
 import form-stdlib/organ-health.bml;
+import form-stdlib/bml/cell-said.bml;
 section [form.bml] {
     def pifbd-version() = "program-image-fkb-byte-decode-v5";
     def pifbd-feature(name, status) = ["program-image-fkb-byte-decode-feature", name, status];
@@ -442,9 +443,20 @@ section [form.bml] {
     def pifbd-v8-constants(r,n) = n <= 0 || !pifbd-v8-good(r) ? r : {
         pifbd-v8-skip-string(r); pifbd-v8-skip(r,9); pifbd-v8-constants(r,n - 1);
     };
-    def pifbd-v8-local-fn(owner,fn) = record_get(owner,"fn_base") == 0 ? fn : fn - record_get(owner,"fn_base") + 1;
+    def pifbd-v8-relocation?(owner) = !record_has(owner,"relocation") ? 1 : {
+        let maps = record_get(owner,"relocation");
+        value_kind(maps) != "list" ? 0 : len(maps) != 3 ? 0 : record?(maps[0]) && record?(maps[1]) && record?(maps[2]);
+    };
+    def pifbd-v8-mapped(owner,slot,index) = !pifbd-v8-relocation?(owner) ? nothing() : {
+        let map = record_get(owner,"relocation")[slot]; let key = index.str();
+        !record_has(map,key) ? nothing() : value_kind(record_get(map,key)) == "int" ? record_get(map,key) : nothing();
+    };
+    def pifbd-v8-local-fn(owner,fn) = record_has(owner,"relocation") ? pifbd-v8-mapped(owner,1,fn)
+        : record_get(owner,"fn_base") == 0 ? fn : fn - record_get(owner,"fn_base") + 1;
+    def pifbd-v8-local-node(owner,node) = record_has(owner,"relocation") ? pifbd-v8-mapped(owner,0,node) : node - record_get(owner,"node_base");
     def pifbd-v8-wanted(owner,ledger,held) = nil?(ledger) ? held : {
-        record_set(held,pifbd-v8-local-fn(owner,ledger[0][0]).str(),1);
+        let fn = pifbd-v8-local-fn(owner,ledger[0][0]);
+        nothing?(fn) ? held : record_set(held,fn.str(),1);
         pifbd-v8-wanted(owner,tail(ledger),held);
     };
     def pifbd-v8-index(bytes,owner,ledger) {
@@ -493,8 +505,8 @@ section [form.bml] {
     }
     def pifbd-v8-ledger?(r,owner,ledger) = nil?(ledger) ? 1 : {
         let definition = head(ledger); let fn = pifbd-v8-local-fn(owner,definition[0]);
-        let body = definition[1] - record_get(owner,"node_base");
-        definition[3][0] != record_get(owner,"builder") || definition[3][1] != record_get(owner,"closure")
+        let body = pifbd-v8-local-node(owner,definition[1]);
+        nothing?(fn) || nothing?(body) ? 0 : definition[3][0] != record_get(owner,"builder") || definition[3][1] != record_get(owner,"closure")
             || fn <= 0 || fn >= record_get(r,"function_count") || body < 0 || body >= record_get(r,"node_count") ? 0 : {
             record_set(r,"pos",record_get(r,"roots") + fn * 9);
             pifbd-v8-int(r) == body && record_has(record_get(r,"arities"),fn.str()) && record_get(record_get(r,"arities"),fn.str()) == definition[2]
@@ -532,9 +544,9 @@ section [form.bml] {
     def pifbd-v8-owner?(owner) = !record?(owner) ? 0 : record_get(owner,"kind") != "program-image-owner" ? 0
         : !pifbd-v8-fields?(owner,["fn","body","arity","local_fn","local_body","node_base","fn_base","bytes"],"int") ? 0
         : !pifbd-v8-fields?(owner,["path","checksum","builder","closure"],"string") ? 0
-        : record_get(owner,"fn") > 0 && record_get(owner,"node_base") >= 0 && record_get(owner,"fn_base") >= 0
+        : pifbd-v8-relocation?(owner) && record_get(owner,"fn") > 0 && record_get(owner,"node_base") >= 0 && record_get(owner,"fn_base") >= 0
         && record_get(owner,"local_fn") == pifbd-v8-local-fn(owner,record_get(owner,"fn"))
-        && record_get(owner,"local_body") == record_get(owner,"body") - record_get(owner,"node_base")
+        && record_get(owner,"local_body") == pifbd-v8-local-node(owner,record_get(owner,"body"))
         && record_get(owner,"local_body") >= 0 && record_get(owner,"bytes") >= 20 && len(record_get(owner,"path")) > 0;
     def pifbd-v8-definition?(entry) = value_kind(entry) != "list" ? 0 : len(entry) != 4 ? 0
         : value_kind(entry[0]) != "int" || value_kind(entry[1]) != "int" || value_kind(entry[2]) != "int" ? 0
@@ -542,7 +554,8 @@ section [form.bml] {
     def pifbd-v8-owner-fields-equal?(a,b,keys) = nil?(keys) ? 1
         : value_eq(record_get(a,head(keys)),record_get(b,head(keys))) && pifbd-v8-owner-fields-equal?(a,b,tail(keys));
     def pifbd-v8-owner-bound?(owner,actual) = pifbd-v8-owner?(actual) && pifbd-v8-owner-fields-equal?(owner,actual,
-        ["kind","fn","body","arity","local_fn","local_body","node_base","fn_base","path","bytes","checksum","builder","closure"]);
+        ["kind","fn","body","arity","local_fn","local_body","node_base","fn_base","path","bytes","checksum","builder","closure"])
+        && pifbd-v8-equal-fields?(owner,actual,["relocation"]);
     def pifbd-v8-definitions?(ledger) = nil?(ledger) ? 1 : pifbd-v8-definition?(head(ledger)) ? pifbd-v8-definitions?(tail(ledger)) : 0;
     def pifbd-v8-in-ledger?(entry,ledger) = nil?(ledger) ? 0 : value_eq(entry,head(ledger)) || pifbd-v8-in-ledger?(entry,tail(ledger));
     def pifbd-v8-granted?(granted) = value_kind(granted) != "list" ? 0 : len(granted) != 4 ? 0
@@ -727,7 +740,7 @@ section [form.bml] {
         : value_kind(pifbd-v8-optional(held,"resume")) != "closure"
             ? pifbd-v8-refused("image-publication-permission-unavailable",pifbd-v8-optional(held,"owner"),pifbd-v8-optional(held,"proof"))
         : record_get(held,"resume")(held,response);
-    def pifbd-v8-resume-owned(state,offered,response) {
+    def pifbd-v8-resume-owned(state,offered,response) = nothing?(offered) && nothing?(response) ? pifbd-v8-publication-view(state) : {
         let held = record_get(state,"result");
         let same = pifbd-v8-equal-fields?(offered,held,["kind","status","reason","owner","proof","bytes","expected","temporary","wrote","readback","guard","phase","completed","event","previous_event"]);
         !same ? {
@@ -744,5 +757,27 @@ section [form.bml] {
             record_set(state,"result",result);
             pifbd-v8-publication-view(state);
         };
-    }
+    };
+
+    def pifbd-raw-cell-image(request) = !record?(request) ? pifbd-v8-refused("raw-cell-image-request-invalid",nothing(),request)
+        : !pifbc-proj-fields?(request,["kind","catalog","path","mtime"]) ? pifbd-v8-refused("raw-cell-image-request-invalid",nothing(),request)
+        : record_get(request,"kind") != "raw-cell-image" ? pifbd-v8-refused("raw-cell-image-request-invalid",nothing(),request)
+        : record_has(request,"pending") ? value_kind(record_get(request,"pending")) == "closure" ? record_get(request,"pending")(nothing(),nothing())
+            : pifbd-v8-refused("raw-cell-image-continuation-unavailable",nothing(),request) : {
+        let catalog = record_get(request,"catalog"); let path = record_get(request,"path"); let pid = host_pid();
+        let projection = pifbc-project(catalog,selection => pifbc-proj-int?(selection) ? kernel_ast(pid,selection)
+            : selection[0] == "catalog" ? catalog : selection[0] == "function" ? kernel_ast(pid,["fnmeta",selection[1]])
+            : selection[0] == "literal" ? kernel_ast(pid,["str",selection[1]]) : nothing());
+        let encoded = pifbc-project-v9(projection,path,record_get(request,"mtime"));
+        let owner = record_new(0,"kind","raw-cell-image-owner","path",path);
+        record_get(projection,"status") != "projected" ? pifbd-v8-refused(record_get(projection,"reason"),owner,record_get(projection,"detail"))
+        : record_get(encoded,"status") != "ready" ? pifbd-v8-refused(record_get(encoded,"reason"),owner,catalog) : {
+            let bytes = record_get(encoded,"bytes");
+            record_set(owner,"builder",record_get(catalog,"builder")); record_set(owner,"closure",record_get(catalog,"closure"));
+            record_set(owner,"checksum",pifbd-v8-checksum(bytes)); record_set(owner,"bytes",len(bytes));
+            let proof = record_new(0,"kind","raw-cell-image-projection","catalog",catalog,"relocation",record_get(projection,"relocation"));
+            pifbd-v8-publish-patch(path,read_file(path),pifbd-v8-outcome("candidate-ready","",owner,proof,bytes));
+        };
+    };
+    cs-entry?("form/form-stdlib/program-image-fkb-byte-decode.fk") ? pifbd-raw-cell-image(cell_input()) : nothing();
 }
