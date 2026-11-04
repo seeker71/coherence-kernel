@@ -958,3 +958,16 @@ arbitrary external resource. The landing predecessor sequence still returns
 cell 16777215, structural 1, freshness 31, ground 42 and door-links 0. Private
 raw-jit-*-trace*, raw-admission-roots*, raw-jit-event* and raw-jit-stop* records
 retain the before, failure, repair and re-observation evidence.
+
+Native landing committed that movement as 35deee811 but held publication at
+the fresh private CLI build. Visible JIT failures exposed a bootstrap ordering
+error: while the BML floor was busy, an absent emitter could request that same
+floor to lower itself. The readiness boundary now leaves such requests in the
+existing pending queue until the floor returns; a resident emitter remains
+available. The retained cold body previously stopped with "the unit could not
+be read". With this one condition changed, it regenerated, compiled and proved
+the native CLI successfully (source 3ebd0fa49e5d055a). Later real emitter failures
+still stop; no alternate execution path or new queue was added. Private
+raw-reconstruction-build-retained* and raw-jit-floor-* retain the exact failure
+and successful source build. Latest isolated SHA remains correct at 3,116
+microseconds disk and 1,586 resident, both compiling zero source units.

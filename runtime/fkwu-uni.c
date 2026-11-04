@@ -30414,7 +30414,7 @@ static int fk_jit_resident(void) {
     long long d = fk_cell_dep_find_raw(fk_jit_unit);
     return d >= 0 && fk_cd_loaded[d];
 }
-static int fk_jit_quiet(void) { return !fk_jit_busy && ((fk_collect_depth == 0 && !fk_cell_collect) || fk_jit_resident()); }
+static int fk_jit_quiet(void) { return !fk_jit_busy && ((fk_collect_depth == 0 && !fk_cell_collect && !fk_bml_floor_busy) || fk_jit_resident()); }
 /* The first floor call loads the JIT unit (a cell run with no request: it binds nothing), where the floor compiler's own
  * first load already runs, so a process whose work is lowering inside its loads (form-cli --compile-source, any cold load of
  * BML) has its hot recipes offered: a JIT that waited for a quiet load walked the whole of such a run. */
