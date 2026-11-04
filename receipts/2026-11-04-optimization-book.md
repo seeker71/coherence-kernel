@@ -553,6 +553,21 @@ remain mechanical seed transport to leave with the native Form loader. Exact
 failures, alias lifecycle observations and timing samples remain in the private
 research and image-review directories of the isolated checkout.
 
+The next measured change keeps the FNV-1a checksum exactly: eight zero bytes
+contribute multiplication by the eighth power of its existing prime modulo
+2^64. Other bytes retain the ordered recurrence. Form's independent two-limb
+fingerprint agrees with the loader's full 64-bit source digest in 49 cases,
+including block boundaries, every byte value and long zero runs. Bulk copies
+also replace scalar source/symbol loops and a duplicate newline scan, removing
+nine seed lines overall; no further timing gain is attributed to those copies.
+The final 2,048-function disk readings are 1982/2015/2025 microseconds versus
+2320/2417/2309 before these measured rounds, about 13% lower median in this
+fixture. Resident readings are 88/89/89 microseconds. Cell and image capability
+still return 16777215 and import-carry 255. SHA disk demand loads literal tags,
+does zero proofs and source work, and produces the expected digest; its hash
+operation takes 80 microseconds on first demand and 35 resident. Storage-only
+parity is still not established.
+
 The subsequent shared-field probe observed all 110 GC generations across three
 500-call windows. Heap capacity and growth count stayed fixed; RSS reads caused
 no collection. RSS grew 480 KiB, 240 KiB and 128 KiB. The earlier large step was

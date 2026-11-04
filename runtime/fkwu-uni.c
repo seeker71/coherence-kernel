@@ -25385,10 +25385,21 @@ static long long *fk_src_dep_size;
 static unsigned long long *fk_src_dep_digest;
 static unsigned long long fk_bytes_fnv1a(const char *p, long long n) {
     unsigned long long h = 14695981039346656037ULL;
+    const unsigned long long prime = 1099511628211ULL;
+    const unsigned long long square = prime * prime, fourth = square * square, eighth = fourth * fourth;
     long long k = 0;
+    /* Eight zero bytes contribute exactly prime^8, including modulo-2^64
+     * overflow. Fixed-width image fields need no eight-step recurrence. */
+    while (n - k >= 8) {
+        unsigned long long block;
+        memcpy(&block, p + k, 8);
+        if (block == 0) h *= eighth;
+        else for (long long j = 0; j < 8; j++) h = (h ^ (unsigned char)p[k + j]) * prime;
+        k += 8;
+    }
     while (k < n) {
         h = h ^ (unsigned long long)(unsigned char)p[k];
-        h = h * 1099511628211ULL;
+        h = h * prime;
         k = k + 1;
     }
     return h;
@@ -25881,23 +25892,17 @@ static int fk_src_append_text(const char *path, const char *text, long long n) {
         int line_quoted = quoted;
         fk_src_line_comment(text, line_start, line_end, &quoted);
         if (line_quoted || !fk_src_line_is_bare_import(text, line_start, line_end)) {
-            while (i < line_end) {
-                fk_srctext[fk_slen] = text[i];
-                fk_slen = fk_slen + 1;
-                i = i + 1;
-            }
+            memcpy(fk_srctext + fk_slen, text + i, (unsigned long)(line_end - i));
+            fk_slen += line_end - i;
         }
         /* a bare import line leaves its line break, so every line after it keeps its number */
         i = line_end;
         while (i < n && (text[i] == FK_CH_LF || text[i] == FK_CH_CR)) {
-            fk_srctext[fk_slen] = text[i];
-            fk_slen = fk_slen + 1;
             i = i + 1;
         }
-        line_start = line_end;
-        while (line_start < n && (text[line_start] == FK_CH_LF || text[line_start] == FK_CH_CR)) {
-            line_start = line_start + 1;
-        }
+        memcpy(fk_srctext + fk_slen, text + line_end, (unsigned long)(i - line_end));
+        fk_slen += i - line_end;
+        line_start = i;
     }
     fk_srctext[fk_slen] = FK_CH_LF;
     fk_slen = fk_slen + 1;
@@ -26472,11 +26477,7 @@ FK_PHASED(FK_PHASE_LOAD, int, fk_src_collect_file, (const char *path, long long 
     if (owned == 0) {
         fk_die("fk_run_src: out of memory reading dependency source");
     }
-    long long i = 0;
-    while (i < got) {
-        owned[i] = fk_buf[i];
-        i = i + 1;
-    }
+    memcpy(owned, fk_buf, (unsigned long)got);
     owned[got] = 0;
     return fk_src_collect_bytes(path, owned, got, mtime, size, parent_idx);
 }
@@ -26486,8 +26487,6 @@ FK_PHASED(FK_PHASE_LOAD, int, fk_src_collect_file, (const char *path, long long 
  * itself; the validated lowering memo remains a disposable local cache. */
 static int fk_src_collect_bytes(const char *path, char *owned, long long got,
                                 long long mtime, long long size, long long parent_idx) {
-    long long i = 0;
-    (void)i;
     if (!fk_src_dep_reserve(fk_src_dep_count + 1)) {
         free(owned);
         fk_diag_path("error", path, "could not grow .fk dependency metadata");
@@ -26511,11 +26510,7 @@ static int fk_src_collect_bytes(const char *path, char *owned, long long got,
     }
     if (fk_cstr_eq(path, fk_src_root_path)) {
         fk_src_root_reserve(got + 1);
-        i = 0;
-        while (i < got) {
-            fk_src_root_text[i] = owned[i];
-            i = i + 1;
-        }
+        memcpy(fk_src_root_text, owned, (unsigned long)got);
         fk_src_root_text[got] = 0;
         fk_src_root_len = got;
     }
@@ -27531,12 +27526,8 @@ static int fk_fkb_read_symbol_to_srctext(long long *start, long long *len) {
     fk_slen = fk_slen + 1;
     *start = fk_slen;
     *len = n;
-    long long i = 0;
-    while (i < n) {
-        fk_srctext[fk_slen] = fk_buf[fk_fkb_pos + i];
-        fk_slen = fk_slen + 1;
-        i = i + 1;
-    }
+    memcpy(fk_srctext + fk_slen, fk_buf + fk_fkb_pos, (unsigned long)n);
+    fk_slen += n;
     fk_fkb_pos = fk_fkb_pos + n;
     fk_srctext[fk_slen] = FK_CH_LF;
     fk_slen = fk_slen + 1;
