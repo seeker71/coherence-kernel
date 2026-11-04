@@ -780,3 +780,38 @@ The 2,048-function file wrote a fixed crowd so a reload could be timed.
 The call that ran was one function. An unreached row stays sealed until a
 call or a read names it. That file, its image, and the generator that
 wrote the crowd are retired. A reached call is the witness.
+
+Deferred malformed nodes also exposed a silent failure: inspection changed an
+uncalled function's body to -1, returned no diagnostic, and stayed silent on a
+second demand. The existing demand owner now retains the first failing image
+and reason. Its access boundary isolates decoder scratch, emits the image
+failure and stops through the existing native handler. A failed argument no
+longer poisons an untouched callee; a failed callee is attributed to that
+callee's image. Two repeated demands retain the same named failure, an unrelated
+function still returns 73, and an attempted JIT binding leaves no page installed.
+The pending publication witness then completed and landed these ownership
+repairs in 110d8a5141c482e01caa20d78ef2458c3fe45cd2. No root execution is replayed.
+
+Direct numeric node inspection had still exposed reserved zero rows. The same
+access boundary now serves function, numeric-node, string and JIT-node reads.
+A fresh image read formerly returned [0,0,0,0] and nothing for its untouched
+literal; numeric, string-first and JIT-word-first observations now reconstruct
+the actual tag-24 node and exact string with zero source compilation. These
+seed operations leave with native image admission and inspection.
+
+Catalog export projection now happens on demand using the existing declaration
+and dependency-window tables. Admission freezes its root and declaration-row
+limit; later projection uses that window rather than the caller's current one.
+It avoids allocating 10,240 export-list pairs for the 2,048-function disk load.
+A nonempty original export catalog stayed equal after same-name source
+replacement, nested parsing, malformed-image repair and native BML lowering;
+old and new function values still returned 41 and 42. Source observations,
+constant rows and context identities retain their existing captured form.
+
+Before the roster change and retirement above, candidate disk CPU measured
+1507/1380/1390 microseconds, resident 93/93/90;
+the reversed control measured 1506/1570/1541, resident 91/94/91. This supports a
+modest reduction with overlapping readings, not storage-only parity. The image
+was 466,582 bytes and source compilation was zero. Cell and image witnesses
+return 16777215, import-carry 255 and JIT-page 63. Private raw-demand-* and
+raw-catalog-* observations retain the failures, ownership checks and timings.

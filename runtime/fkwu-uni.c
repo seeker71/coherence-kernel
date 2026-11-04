@@ -10228,7 +10228,7 @@ static unsigned char *fk_fn_asleep;
 static long long fk_fn_asleep_cap;
 struct fk_demand;
 static struct fk_demand *fk_demand_ensure(long long fn);
-static void fk_demand_wake(long long fn);
+static void fk_demand_access(long long index, int node);
 static long long fk_call_value(long long c, long long base, long long n, long long clo) {
     char fk_sp_probe;
     if (fk_stack_base != 0 && (long long)(fk_stack_base - &fk_sp_probe) > fk_stack_wall) {
@@ -10242,7 +10242,7 @@ static long long fk_call_value(long long c, long long base, long long n, long lo
     fk_heat_pulse();
     if (lane && (fk_fn_heat[c] & (FK_F64_HEAT - 1)) == 0) { fk_f64_loop_pulse(c, base, n); }
     fk_call_caps(clo);
-    fk_demand_wake(c);
+    fk_demand_access(c, 0);
     long long r = fk_walk_body(fk_fn[c], base);
     FK_FR_POP();
     fk_cur_fn = caller;
@@ -10267,7 +10267,7 @@ static long long fk_call_tail(long long c, long long fp, long long from, long lo
     if (lane && (h & (FK_F64_HEAT - 1)) == 0) { fk_f64_loop_pulse(c, fp, n); }
     if (!lane) { clo = fk_vs[fk_vsp - 1]; fk_vsp = fk_vsp - 1; }
     fk_call_caps(clo);
-    fk_demand_wake(c);
+    fk_demand_access(c, 0);
     return fk_fn[c];
 }
 /* the page's calls: its arguments sit in its own temporaries, fk_vs[fp + t ..] */
@@ -10345,7 +10345,7 @@ static long long fk_jit_bind(long long x) {
 #if !defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
     return 0;
 #else
-    fk_demand_wake(c);
+    fk_demand_access(c, 0);
     long long page = getpagesize();
     size_t span = (((size_t)n * 4 + (size_t)page - 1) / (size_t)page) * (size_t)page;
     unsigned int *words = (unsigned int *)malloc((size_t)n * 4);
@@ -10513,6 +10513,7 @@ static long long fk_jit_node(long long x) {
         return 2;
     }
     if (!fk_jit_node_ok(k)) { return fk_nothing; }
+    fk_demand_access(k, 1);
     long long kids[16];
     if (fk_cstr_eq(what, "kids")) {
         long long n = fk_jit_kids_of(k, kids, 0, 16), l = 1;
@@ -19395,6 +19396,11 @@ static long long fk_admission_maps_read(fk_admission *a) {
     }
     return fk_admission_tuple(maps, 3);
 }
+#if !defined(_WIN32) && defined(FK_HAVE_SETJMP)
+static long long fk_cell_catalog_exports(long long frozen);
+#else
+#define fk_cell_catalog_exports(frozen) 1
+#endif
 static long long fk_admission_catalog_read(long long fn) {
     fk_admission *a = fk_admission_owner(fn);
     if (!a || a->catalog == 1 || !a->hash[0]) return fk_nothing;
@@ -19421,7 +19427,7 @@ static long long fk_admission_catalog_read(long long fn) {
     fk_cr_put(r, "closure", fk_cr_str(a->hash));
     fk_cr_put(r, "root_unit", fk_admission_at(a->catalog, 0));
     fk_cr_put(r, "units", units);
-    fk_cr_put(r, "exports", fk_admission_at(a->catalog, 2));
+    fk_cr_put(r, "exports", fk_cell_catalog_exports(fk_admission_at(a->catalog, 2)));
     fk_cr_put(r, "constants", fk_admission_at(a->catalog, 3));
     fk_cr_put(r, "contexts", fk_admission_at(a->catalog, 4));
     return fk_rbox(r);
@@ -19435,7 +19441,7 @@ static long long fk_admission_image_read(long long fn) {
     fk_admission *a = fk_admissions;
     while (a && !(a->first <= fn && fn < a->end)) a = a->previous;
     if (!a || !a->image_path || !a->hash[0]) return fk_nothing;
-    fk_demand_wake(fn);
+    fk_demand_access(fn, 0);
     long long body = fk_fn[fn];
     if (body >= 0 && body < fk_node_count && fk_node[body][0] == 194) body = fk_node[body][2];
     long long local_fn = a->relocation == 1 ? (fn - (a->fn_base ? a->fn_base - 1 : 0)) << 1 : fk_admission_relocated(a, 1, fn);
@@ -19471,6 +19477,7 @@ static long long fk_prog_read(long long pid, long long spec) {
     if (pid == (long long)getpid() && spec != fk_nothing && (spec & 1) == 0 && (spec >> 1) >= 0) {
         long long k = spec >> 1;
         if (k >= fk_node_count) { return fk_nothing; }
+        fk_demand_access(k, 1);
         return fk_cons_val(fk_node[k][0] << 1, fk_cons_val(fk_node[k][1] << 1, fk_cons_val(fk_node[k][2] << 1, fk_cons_val(fk_node[k][3] << 1, 1))));
     }
     if (pid == (long long)getpid() && spec != fk_nothing && spec >= 3 && (spec & 1) != 0 && !fk_is_str(spec) && FK_POK(spec >> 1)) {
@@ -19492,7 +19499,7 @@ static long long fk_prog_read(long long pid, long long spec) {
         if (fk_cstr_eq(mode, "fnmeta") && q && FK_POK(q)) {
             long long fn = fk_ast_function_arg(FK_HH(q));
             if (fn <= 0 || fn >= fk_fn_count || fn >= fk_fn_cap_capacity || !fk_fn_meta_known[fn]) return fk_nothing;
-            fk_demand_wake(fn);
+            fk_demand_access(fn, 0);
             long long body = fk_fn[fn], identity = fk_admission_read(fn);
             if (body >= 0 && body < fk_node_count && fk_node[body][0] == 194) body = fk_node[body][2];
             if (body < 0 || body >= fk_node_count || identity == fk_nothing) return fk_nothing;
@@ -19506,6 +19513,7 @@ static long long fk_prog_read(long long pid, long long spec) {
         }
         if (fk_cstr_eq(mode, "str") && q && FK_POK(q) && (FK_HH(q) & 1) == 0) {
             long long k = FK_HH(q) >> 1;
+            if (k >= 0 && k < fk_node_count) fk_demand_access(k, 1);
             return k >= 0 && k < fk_node_count && (fk_node[k][0] == 24 || fk_node[k][0] == 50)
                 ? fk_strv(fk_node[k][1]) : fk_nothing;
         }
@@ -19514,7 +19522,7 @@ static long long fk_prog_read(long long pid, long long spec) {
         if (fk_cstr_eq(mode, "fn") && q >= 1 && FK_POK(q)) {
             long long c = fk_ast_function_arg(FK_HH(q));
             if (c <= 0 || c >= fk_fn_count || (c < fk_fn_cap_capacity && fk_fn_cap_count[c] > 0)) { return fk_nothing; }
-            fk_demand_wake(c);
+            fk_demand_access(c, 0);
             long long b = fk_fn[c];
             if (b >= 0 && b < fk_node_count && fk_node[b][0] == 194) { b = fk_node[b][2]; }
             return b >= 0 && b < fk_node_count ? fk_cons_val(b << 1, fk_cons_val(fk_fnar[c] << 1, 1)) : fk_nothing;
@@ -19523,7 +19531,7 @@ static long long fk_prog_read(long long pid, long long spec) {
             long long j = FK_HH(q) >> 1;
             if (j < 0 || j >= fk_fntop) { return fk_nothing; }
             long long idx = fk_fnidx[j];
-            if (idx >= 0 && idx < fk_fn_count) fk_demand_wake(idx);
+            if (idx >= 0 && idx < fk_fn_count) fk_demand_access(idx, 0);
             long long body = idx >= 0 && idx < fk_fn_count ? fk_fn[idx] : -1;
             return fk_cons_val(fk_fnsym_s[j] << 1, fk_cons_val(fk_fnsym_n[j] << 1, fk_cons_val(idx << 1, fk_cons_val(body << 1, 1))));
         }
@@ -27707,15 +27715,31 @@ static int fk_demand_ensure_one(fk_demand *d, long long fn) {
     else if (fk_fn_asleep && fn < fk_fn_asleep_cap) fk_fn_asleep[fn] = 0;
     return 1;
 }
-static void fk_demand_wake(long long fn) {
-    if (!fk_fn_asleep || fn < 0 || fn >= fk_fn_asleep_cap || !fk_fn_asleep[fn]) return;
-    if (fk_demand_building) { fk_demand_ensure(fn); return; }
+static void fk_demand_access(long long index, int node) {
+    fk_demand *d = 0;
+    if (node) {
+        if (fk_demand_building && index >= fk_demand_building->node_base && index < fk_demand_building->node_base + fk_demand_building->nr)
+            d = fk_demand_building;
+        else for (d = fk_demands; d; d = d->next)
+            if (index >= d->node_base && index < d->node_base + d->nr) break;
+        if (!d || (d->live[index - d->node_base] && !d->failed)) return;
+    } else if (!fk_fn_asleep || index < 0 || index >= fk_fn_asleep_cap || !fk_fn_asleep[index]) return;
+    if (fk_demand_building) {
+        if (node) fk_demand_node(d, index - d->node_base);
+        else fk_demand_ensure(index);
+        return;
+    }
     /* Deferred reconstruction owns its failure; another reader's scratch
      * cannot poison it or erase it. Restore that scratch before a named stop. */
     int bad = fk_fkb_bad; const char *why = fk_fkb_bad_why;
     long long pos = fk_fkb_pos;
     fk_fkb_bad = 0; fk_fkb_bad_why = "";
-    fk_demand *d = fk_demand_ensure(fn);
+    if (node) {
+        if (d->failed) fk_fkb_mark_bad(d->failed->failure);
+        else fk_demand_node(d, index - d->node_base);
+        if (fk_fkb_bad && !d->failed) { d->failure = fk_fkb_bad_why; d->failed = d; }
+        if (d->failed) d = d->failed;
+    } else d = fk_demand_ensure(index);
     const char *failed = fk_fkb_bad ? fk_fkb_bad_why : 0;
     fk_fkb_bad = bad; fk_fkb_bad_why = why; fk_fkb_pos = pos;
     if (failed) {
@@ -29416,7 +29440,7 @@ static void fk_cell_note_unrunnable(long long off) {
 static int fk_win_dep_ok(long long d) {
     return d >= 0 && d < fk_win_cap && fk_win_bits_store[d] != 0;
 }
-static int fk_win_row_ok(long long row) {
+static long long fk_fsym_owner(long long row) {
     if (row >= fk_fsym_dep_cap) {
         long long nc = fk_fsym_dep_cap > 0 ? fk_fsym_dep_cap : 1024;
         while (nc <= row) { nc = nc * 2; }
@@ -29426,8 +29450,9 @@ static int fk_win_row_ok(long long row) {
     }
     while (fk_fsym_dep_n <= row) { fk_fsym_dep[fk_fsym_dep_n] = -2; fk_fsym_dep_n = fk_fsym_dep_n + 1; }
     if (fk_fsym_dep[row] == -2) { fk_fsym_dep[row] = fk_cell_dep_of_off(fk_fnsym_s[row]); }
-    return fk_win_dep_ok(fk_fsym_dep[row]);
+    return fk_fsym_dep[row];
 }
+static int fk_win_row_ok(long long row) { return fk_win_dep_ok(fk_fsym_owner(row)); }
 static int fk_win_const_ok(long long row) {
     /* A path can have several admitted incarnations. A removed declaration
      * in an old incarnation is not visible merely because its path returned. */
@@ -29478,8 +29503,22 @@ static long long fk_cell_member_index(long long root, long long dep) {
 /* Capture the exact admitted window before another cell can change the source
  * tables. Values here are static source observations and graph addresses, not
  * hold memos, mutable records, file handles or completed-effect state. */
+static long long fk_cell_catalog_exports(long long frozen) {
+    long long root = fk_admission_at(frozen, 0) >> 1, limit = fk_admission_at(frozen, 1) >> 1, exports = 1;
+    /* Live cells append declaration rows. The admitted prefix and root window
+     * stay fixed even when later calls select another window or stale source. */
+    for (long long i = limit; i-- > 0;) {
+        long long unit = fk_cell_member_index(root, fk_fsym_owner(i));
+        if (unit >= 0) {
+            long long row[] = {fk_sbuf(fk_srctext + fk_fnsym_s[i], fk_fnsym_n[i]),
+                fk_fnidx[i] << 1, fk_fnar[fk_fnidx[i]] << 1, unit << 1};
+            exports = fk_cons_val(fk_admission_tuple(row, 4), exports);
+        }
+    }
+    return exports;
+}
 static long long fk_cell_catalog_capture(long long root, long long fresh) {
-    long long units = 1, exports = 1, constants = 1, contexts = 1;
+    long long units = 1, constants = 1, contexts = 1;
     long long n = fk_cd_win_n[root];
     for (long long i = n; i-- > 0;) {
         long long dep = fk_cd_win[root][i], members = 1, order = 0;
@@ -29502,15 +29541,6 @@ static long long fk_cell_catalog_capture(long long root, long long fresh) {
             contexts = fk_cons_val(fk_admission_tuple(context, 2), contexts);
         }
     }
-    for (long long i = fk_fntop; i-- > 0;) {
-        if (!fk_win_row_ok(i)) continue;
-        long long unit = fk_cell_member_index(root, fk_fsym_dep[i]);
-        if (unit >= 0) {
-            long long row[] = {fk_sbuf(fk_srctext + fk_fnsym_s[i], fk_fnsym_n[i]),
-                fk_fnidx[i] << 1, fk_fnar[fk_fnidx[i]] << 1, unit << 1};
-            exports = fk_cons_val(fk_admission_tuple(row, 4), exports);
-        }
-    }
     for (long long i = fk_const_top; i-- > 0;) {
         long long unit = fk_cell_member_index(root, fk_cell_dep_of_off(fk_const_s[i]));
         if (unit >= 0) {
@@ -29519,7 +29549,8 @@ static long long fk_cell_catalog_capture(long long root, long long fresh) {
             constants = fk_cons_val(fk_admission_tuple(row, 3), constants);
         }
     }
-    long long fields[] = {fk_cell_member_index(root, root) << 1, units, exports, constants, contexts};
+    long long bounds[] = {root << 1, fk_fntop << 1};
+    long long fields[] = {fk_cell_member_index(root, root) << 1, units, fk_admission_tuple(bounds, 2), constants, contexts};
     return fk_admission_tuple(fields, 5);
 }
 
