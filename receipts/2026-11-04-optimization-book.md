@@ -435,3 +435,25 @@ compare future timings with that attribution change in view. The synthetic
 `source-artifact-cache.fk` policy model still uses timestamp freshness and is
 another caller contract to migrate alongside its descriptor chain; it does not
 implement actual program-image admission.
+
+## Raw-cell source ownership, 2026-11-04
+
+Deleting a constant already changes the source hash. The observed defect was
+name lookup retaining the removed declaration from an older load of that path.
+Lookup now admits declarations from the current dependency only. A refreshed
+declaration gets its own row; resetting the current root's holds leaves older
+callers' holds intact. The existing cell check observes old mutable value 42,
+new value 100, an unbound-name failure after deletion, then restored value 1
+with the old value still 42. Its complete verdict is 16777215.
+
+The existing image capability check also returns 16777215. It now exercises
+inert projection of real captured functions and library state, including
+restored identical source with distinct retained values. Four actual AST layouts
+were corrected: empty indirect/method argument chains retain -1; packed record
+and print nodes traverse only their one child. Independent native execution
+returns 7 and 11 and projection reads no unrelated node zero.
+
+Projection is verified; raw-cell disk reconstruction and the storage-only
+cold/warm target remain open. No provenance tree or additional image format was
+introduced. The next loader change must follow an actual failing reload and
+reuse the existing unit, function and constant tables.

@@ -29459,10 +29459,10 @@ static long long fk_cell_eff_of(long long root) {
     return fk_cd_eff[root];
 }
 /* the cell's own top-level lets are built again for each call; a library's are built once */
-static void fk_cell_reset_lets(unsigned long long id) {
+static void fk_cell_reset_lets(long long dep) {
     long long i = 0;
     while (i < fk_const_top) {
-        if (fk_const_unit[i] == id && fk_const_wrapp1[i] != 0) { fk_node[fk_const_wrapp1[i] - 1][3] = 0; }
+        if (fk_cell_dep_of_off(fk_const_s[i]) == dep && fk_const_wrapp1[i] != 0) { fk_node[fk_const_wrapp1[i] - 1][3] = 0; }
         i = i + 1;
     }
 }
@@ -29676,7 +29676,7 @@ static long long fk_cell_run_door(long long pathw, long long argw, long long dlw
                 if (how == 0) {
                     long long eff = fk_cell_eff_of(root);
                     if (eff >= 0) {
-                        fk_cell_reset_lets(fk_cd_id[eff]);
+                        fk_cell_reset_lets(eff);
                         value = fk_cell_walk_guarded(fk_cd_framed[eff], fp, &how);
                     } else {
                         value = 0;
