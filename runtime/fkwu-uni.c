@@ -23563,7 +23563,8 @@ static long long fk_const_set(long long s, long long n, long long node) {
     long long i = 0;
     while (i < fk_const_top) {
         /* in a cell load a row is a unit's own: the same name in another unit is another binding */
-        if (fk_sym_eq2(s, n, fk_const_s[i], fk_const_n[i]) && (!fk_win_on || fk_const_unit[i] == fk_const_unit_now)) {
+        if (fk_sym_eq2(s, n, fk_const_s[i], fk_const_n[i]) &&
+            (!fk_win_on || (fk_const_unit[i] == fk_const_unit_now && fk_win_const_ok(i)))) {
             fk_const_s[i] = s; fk_const_n[i] = n;
             if (fk_const_node[i] == FK_CONST_FORWARD && fk_const_wrapp1[i] != 0 && node != FK_CONST_FORWARD) {
                 /* the let a forward read waited for: the hold every earlier read
@@ -28776,7 +28777,7 @@ static long long *fk_cd_framed;
 static long long *fk_cd_eff;       /* the unit whose sequence is the cell's answer each call: the root, else the last unit with one */
 static char *fk_cd_unrunnable;
 static const char **fk_cd_identity;
-static long long fk_cell_source_units, fk_cell_source_functions, fk_cell_image_units;
+static long long fk_cell_source_units, fk_cell_source_functions;
 static void *fk_cd_rows_store;     /* per dep: the diagnostic rows its load voiced (fk_dgrow_t array), replayed for a resident call */
 static long long *fk_cd_rows_n;
 static long long fk_cd_cap;
@@ -29512,7 +29513,7 @@ static void fk_cell_rows_replay(long long root, long long before) {
 static long long fk_cell_run_door(long long pathw, long long argw, long long dlw, long long inw, int native_only) {
     char path[FK_PATH_CAP];
     long long mono0 = fk_mono_ns() / 1000000LL, cpu0 = fk_cell_cpu_us();
-    long long source_units0 = fk_cell_source_units, source_functions0 = fk_cell_source_functions, image_units0 = fk_cell_image_units;
+    long long source_units0 = fk_cell_source_units, source_functions0 = fk_cell_source_functions;
     long long deadline = 0, value = fk_nothing, root = -1, stopped = fk_nothing, errors = 0, vsp0 = fk_vsp;
     int resident = 0, how = 0, refused = 0, check_only = 0;
     const char *refusal = "";
@@ -29749,7 +29750,6 @@ static long long fk_cell_run_door(long long pathw, long long argw, long long dlw
     fk_cr_put(r, "cpu_us", (fk_cell_cpu_us() - cpu0) << 1);
     fk_cr_put(r, "source_units", (fk_cell_source_units - source_units0) << 1);
     fk_cr_put(r, "source_functions", (fk_cell_source_functions - source_functions0) << 1);
-    fk_cr_put(r, "image_units", (fk_cell_image_units - image_units0) << 1);
     fk_vsp = vsp0;
     return fk_rbox(r);
 }
