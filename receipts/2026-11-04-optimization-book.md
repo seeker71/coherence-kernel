@@ -568,6 +568,16 @@ does zero proofs and source work, and produces the expected digest; its hash
 operation takes 80 microseconds on first demand and 35 resident. Storage-only
 parity is still not established.
 
+A fresh process reloading that same 2,048-function image returned 42 with zero
+source compilation. Two disk readings were 2045 and 2382 microseconds; the
+resident calls were 86 and 111. One clocked pass split the disk reload into a
+source read of 5 microseconds, canonical identity 249, prelude and home scan
+288, source append 153, image open and checksum 643, table import 645, and
+catalog capture 152. The file bytes are not the cost. A home-name hash and an
+unrolled dense checksum kept the same identity and the same reload, so both
+left with the measurement. What remains is the path resolution, the source
+scans identity still requires, the dense checksum chain, and the table import.
+
 The subsequent shared-field probe observed all 110 GC generations across three
 500-call windows. Heap capacity and growth count stayed fixed; RSS reads caused
 no collection. RSS grew 480 KiB, 240 KiB and 128 KiB. The earlier large step was
