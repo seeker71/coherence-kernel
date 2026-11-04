@@ -10226,7 +10226,8 @@ static void fk_call_caps(long long clo) {
 /* A cell image keeps its node bytes. fk_fn[c] stays asleep until a call reaches it. */
 static unsigned char *fk_fn_asleep;
 static long long fk_fn_asleep_cap;
-static void fk_demand_ensure(long long fn);
+struct fk_demand;
+static struct fk_demand *fk_demand_ensure(long long fn);
 static void fk_demand_wake(long long fn);
 static long long fk_call_value(long long c, long long base, long long n, long long clo) {
     char fk_sp_probe;
@@ -10241,14 +10242,7 @@ static long long fk_call_value(long long c, long long base, long long n, long lo
     fk_heat_pulse();
     if (lane && (fk_fn_heat[c] & (FK_F64_HEAT - 1)) == 0) { fk_f64_loop_pulse(c, base, n); }
     fk_call_caps(clo);
-    int demand_body = fk_fn_asleep && c >= 0 && c < fk_fn_asleep_cap && fk_fn_asleep[c];
     fk_demand_wake(c);
-    if (demand_body && fk_fn[c] < 0) {
-        FK_FR_POP();
-        fk_cur_fn = caller;
-        fk_vsp = base;
-        return fk_nothing;
-    }
     long long r = fk_walk_body(fk_fn[c], base);
     FK_FR_POP();
     fk_cur_fn = caller;
@@ -10351,6 +10345,7 @@ static long long fk_jit_bind(long long x) {
 #if !defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
     return 0;
 #else
+    fk_demand_wake(c);
     long long page = getpagesize();
     size_t span = (((size_t)n * 4 + (size_t)page - 1) / (size_t)page) * (size_t)page;
     unsigned int *words = (unsigned int *)malloc((size_t)n * 4);
@@ -10382,7 +10377,6 @@ static long long fk_jit_bind(long long x) {
         fk_jit_cx.fr_fn = fk_fr_fn;
         fk_jit_cx.fr_cap = FK_FR_CAP;
     }
-    fk_demand_wake(c);
     long long body = fk_fn[c];
     if (body < 0 || fk_node[body][0] != 194) { fk_fn[c] = fk_smknode(194, c, body, 0); fk_prog_note_body(c); }
     fk_jit_bound = fk_jit_bound + 1;
@@ -19579,10 +19573,7 @@ static long long fk_prog_read(long long pid, long long spec) {
                 long long *row = (long long *)((char *)D + FK_PROG_D_FN_OFF) + j * 3;
                 long long idx = row[2];
                 long long body = idx >= 0 && idx < FK_PROG_FNS ? ((long long *)((char *)D + FK_PROG_D_BODY_OFF))[idx] : -1;
-                /* the process's own program answers its live body: an image-loaded defn's published
-                 * copy can read 0 when the note came before the load's assignment, and a crystallized
-                 * defn's body is the tag-194 node it wears now */
-                if (pid == (long long)getpid() && idx >= 0 && idx < fk_fn_count) { fk_demand_wake(idx); body = fk_fn[idx]; }
+                /* Self inspection already returned through the live tables above. */
                 out = fk_cons_val(row[0] << 1, fk_cons_val(row[1] << 1, fk_cons_val(idx << 1, fk_cons_val(body << 1, 1))));
             }
         }
@@ -27617,6 +27608,9 @@ static void fk_cell_import_sequence(unsigned long long unit, long long sequence)
 typedef struct fk_demand {
     struct fk_demand *next;
     char *bytes;
+    char *path;
+    const char *failure;
+    struct fk_demand *failed;
     long long *image_root;
     long long *fn_map;
     unsigned char *live;
@@ -27626,7 +27620,7 @@ typedef struct fk_demand {
 static fk_demand *fk_demands, *fk_demand_building;
 static void fk_demand_free(fk_demand *d) {
     if (!d) return;
-    free(d->bytes); free(d->image_root); free(d->fn_map); free(d->live); free(d->ready);
+    free(d->bytes); free(d->path); free(d->image_root); free(d->fn_map); free(d->live); free(d->ready);
     free(d);
 }
 static void fk_demand_abort(void) {
@@ -27673,9 +27667,10 @@ static long long fk_demand_signed(const char *p) {
 }
 static void fk_demand_node(fk_demand *d, long long image);
 static int fk_demand_ensure_one(fk_demand *d, long long fn) {
-    if (!d || !d->fn_map || fn < d->fn_base || fn >= d->fn_base + d->nf - 1) return 0;
+    if (fk_fkb_bad || !d || !d->fn_map || fn < d->fn_base || fn >= d->fn_base + d->nf - 1) return 0;
     long long image = fn - d->fn_base + 1;
     if (image <= 0 || image >= d->nf || d->fn_map[image] != fn) return 0;
+    if (d->failed) { fk_fkb_mark_bad(d->failed->failure); return 1; }
     if (d->ready[image]) return 1;
     d->ready[image] = 1;
     long long body = d->image_root[image];
@@ -27684,17 +27679,36 @@ static int fk_demand_ensure_one(fk_demand *d, long long fn) {
     if (body >= 0) fk_fn[fn] = d->node_base + body;
     if (body >= 0) fk_demand_node(d, body);
     if (body >= 0 && !fk_fkb_bad) fk_prog_note_body(fn);
-    else if (body >= 0) fk_fn[fn] = -1;
-    if (fk_fn_asleep && fn < fk_fn_asleep_cap) fk_fn_asleep[fn] = 0;
+    if (fk_fkb_bad) {
+        if (!d->failed) { d->failure = fk_fkb_bad_why; d->failed = d; }
+        fk_fn[fn] = -1;
+    }
+    else if (fk_fn_asleep && fn < fk_fn_asleep_cap) fk_fn_asleep[fn] = 0;
     return 1;
 }
 static void fk_demand_wake(long long fn) {
-    if (fk_fn_asleep && fn >= 0 && fn < fk_fn_asleep_cap && fk_fn_asleep[fn]) fk_demand_ensure(fn);
+    if (!fk_fn_asleep || fn < 0 || fn >= fk_fn_asleep_cap || !fk_fn_asleep[fn]) return;
+    if (fk_demand_building) { fk_demand_ensure(fn); return; }
+    /* Deferred reconstruction owns its failure; another reader's scratch
+     * cannot poison it or erase it. Restore that scratch before a named stop. */
+    int bad = fk_fkb_bad; const char *why = fk_fkb_bad_why;
+    long long pos = fk_fkb_pos;
+    fk_fkb_bad = 0; fk_fkb_bad_why = "";
+    fk_demand *d = fk_demand_ensure(fn);
+    const char *failed = fk_fkb_bad ? fk_fkb_bad_why : 0;
+    fk_fkb_bad = bad; fk_fkb_bad_why = why; fk_fkb_pos = pos;
+    if (failed) {
+        fk_diag_path("cache-failure", d->path, failed);
+        fk_stop(failed);
+    }
 }
-static void fk_demand_ensure(long long fn) {
-    if (fn < 0) return;
-    if (fk_demand_ensure_one(fk_demand_building, fn)) return;
-    for (fk_demand *d = fk_demands; d; d = d->next) if (fk_demand_ensure_one(d, fn)) return;
+static fk_demand *fk_demand_ensure(long long fn) {
+    if (fn < 0) return 0;
+    if (fk_demand_ensure_one(fk_demand_building, fn))
+        return fk_demand_building->failed ? fk_demand_building->failed : fk_demand_building;
+    for (fk_demand *d = fk_demands; d; d = d->next)
+        if (fk_demand_ensure_one(d, fn)) return d->failed ? d->failed : d;
+    return 0;
 }
 static void fk_demand_node(fk_demand *d, long long image) {
     if (!d || fk_fkb_bad) return;
@@ -27728,7 +27742,10 @@ static void fk_demand_node(fk_demand *d, long long image) {
     if (n1 && c1 >= 0) fk_demand_node(d, c1);
     if (n2 && c2 >= 0) fk_demand_node(d, c2);
     if (n3 && c3 >= 0) fk_demand_node(d, c3);
-    if ((tag == 12 || tag == 240 || tag == 241 || tag == 243) && f1 >= 0) fk_demand_ensure(f1);
+    if (!fk_fkb_bad && (tag == 12 || tag == 240 || tag == 241 || tag == 243) && f1 >= 0) {
+        fk_demand *callee = fk_demand_ensure(f1);
+        if (fk_fkb_bad) d->failed = callee;
+    }
 }
 static int fk_src_import_fkb_read(const char *fkb_path, fk_fkb_snapshot *snapshot) {
     fk_fkb_snapshot_use(snapshot);
@@ -27775,6 +27792,9 @@ static int fk_src_import_fkb_read(const char *fkb_path, fk_fkb_snapshot *snapsho
         }
         fk_demand *d = calloc(1, sizeof(*d));
         if (!d) fk_die("image demand: out of memory");
+        d->path = malloc((unsigned long)fk_cstrlen(fkb_path) + 1);
+        if (!d->path) fk_die("image demand: out of memory");
+        memcpy(d->path, fkb_path, (unsigned long)fk_cstrlen(fkb_path) + 1);
         d->nr = nr; d->nf = nf; d->node_base = node_base; d->fn_base = fn_base; d->str_base = str_base;
         d->bytes = nr > 0 ? malloc((unsigned long)nr * 36) : 0;
         d->image_root = malloc((unsigned long)nf * 8);
