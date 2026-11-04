@@ -19,7 +19,9 @@
 ;   512    a high-grammar cell (.bml) with a top-level let and a statement
 ;   1024   a resident call (the unit already parsed) answers what the first call answered, resident 1, diag replayed
 ;   2048   scope: two cells define crs-pick differently and prelude one library; each answers its own, in any order, and a third
-;          that defines neither is told the names are unbound (errors 1) although both are resident
+;          that defines neither is told the names are unbound (errors 1) although both are resident. A library change
+;          drops a retained binding: the same root answers the new body, its admission identity moves, a fresh load
+;          counts 2 source units and 3 source functions, and the resident call parses nothing
 ;   4096   a budget: a cell that never ends comes back stopped "deadline" within 250 ms of its 300 ms, with what it printed
 ;   8192   freshness: a cell rewritten to the same length inside the same second is the new cell
 ;   16384  nesting: a cell that runs a cell that stops goes on, its own output intact, and reads the stop as a value
@@ -201,6 +203,31 @@ section [form.bml] {
     print(["cell-dependency-admission", "unparsed-sibling-admitted-on-demand", checked]);
     checked;
   }
+  def crb-retained-bindings() {
+    let dir = crb-dir();
+    let library = dir + "/retained-binding-library.fk";
+    let a = dir + "/retained-binding-a.fk";
+    let b = dir + "/retained-binding-b.fk";
+    let source = "(defn crb-retained-f () (crb-retained-g))\n";
+    let root = "; preludes: " + library + "\n(do (defn crb-retained-g () ";
+    let end = ") (defn crb-retained-answer () (crb-retained-f)) (list (crb-retained-answer) (kernel_ast (host_pid) (list \"identity\" crb-retained-answer))))\n";
+    write_file(library,source); write_file(a,root + "1" + end); write_file(b,root + "2" + end);
+    let prior = cell_call(a,nothing(),nothing());
+    let inherited = cell_call(b,nothing(),nothing());
+    write_file(library,source + "\n");
+    let changed = cell_call(b,nothing(),nothing());
+    write_file(library,source);
+    let fresh = cell_call(b,nothing(),nothing());
+    let resident = cell_call(b,nothing(),nothing());
+    let before = record_get(inherited,"value"); let after = record_get(fresh,"value");
+    let okay = record_get(prior,"value")[0] == 1 && before[0] == 1 && after[0] == 2
+      && before[1] != after[1] && after == record_get(resident,"value")
+      && all?(r => record_get(r,"errors") == 0 && nothing?(crb-stopped(r)),[prior,inherited,changed,fresh,resident])
+      && record_get(fresh,"source_units") == 2 && record_get(fresh,"source_functions") == 3
+      && record_get(resident,"source_units") == 0 && record_get(resident,"source_functions") == 0;
+    print(["cell-retained-binding-identity",before[0],after[0],before[1] != after[1],okay]);
+    okay;
+  }
   def crb-content-change(path,before,after) {
     let stamp = now_unix_ms() - 60000;
     write_file(path,before);
@@ -253,7 +280,7 @@ section [form.bml] {
     let sa2 = cell_run(crb-fx("scope-a.fk"), 0, nothing(), nothing());
     let sc = cell_run(crb-fx("scope-c.fk"), 0, nothing(), nothing());
     let shown2 = crb-say("scope", [record_get(sa, "value"), record_get(sb, "value"), record_get(sa2, "value"), record_get(sc, "errors"), record_get(sc, "resident")]);
-    let b2048 = crb-bit((Comparable) record_get(sa, "value") == 11 && (Comparable) record_get(sb, "value") == 12 && (Comparable) record_get(sa2, "value") == 11 && (Comparable) record_get(sa2, "resident") == 1 && (Comparable) record_get(sc, "errors") > 0, 2048);
+    let b2048 = crb-bit((Comparable) record_get(sa, "value") == 11 && (Comparable) record_get(sb, "value") == 12 && (Comparable) record_get(sa2, "value") == 11 && (Comparable) record_get(sa2, "resident") == 1 && (Comparable) record_get(sc, "errors") > 0 && crb-retained-bindings(), 2048);
     let sp = cell_run(crb-fx("spin-cell.fk"), 0, 300, nothing());
     let b4096 = crb-bit(!nothing?(crb-stopped(sp)) && (String) record_get(crb-stopped(sp), "kind") == "deadline" && (Comparable) record_get(sp, "ms") >= 300 && (Comparable) record_get(sp, "ms") < 550 && (String) record_get(sp, "out") == "spinning\n", 4096);
     let rawFresh = crb-content-change(crb-dir() + "/live.fk","(do 111)\n","(do 222)\n");

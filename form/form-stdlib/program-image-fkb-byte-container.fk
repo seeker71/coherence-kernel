@@ -47,6 +47,7 @@ import form-stdlib/source-artifact-probe.fk;
 import form-stdlib/source-artifact-identity.fk;
 import form-stdlib/program-image-fkb.fk;
 import form-stdlib/bml-source.fk;
+import flatten/form-flatten.fk;
 section [form.bml] {
     def pifbc-version() = "program-image-fkb-byte-container-v5";
     def pifbc-byte-version() = 5;
@@ -168,5 +169,233 @@ pifbc-abs(n) >= 0 ? pifbc-abs(n) <= pifbc-max-signed() : 0;
             record_set(state,"text",cons(pifbc-v8-string(value),record_get(state,"text")));
             pifbc-v8-add-row(state,24,at,0,0);
         } : { record_set(state,"reason","immutable-literal-required"); 0; };
+    }
+
+    // A cell projection is an inert static graph, rooted in its admission's
+    // unit sequences, exported definitions and constants. It never reads a
+    // hold's value, a closure instance, a native page or the process's fn0.
+    // The reader belongs to the captured admission; callbacks also let the
+    // existing image band discriminate relocation without a process snapshot.
+    // catalog: cell-admission-v1 {builder,closure,root_unit,units,exports,
+    // constants,contexts}. A unit is [id,path,sequence,order,members,source
+    // observation]; exports [name,fn,arity,unit], constants [name,node,unit].
+    // read(node) -> four static words; read(["function",fn]) ->
+    // [originalBody,arity,captureCount,parent,[builder,closure]];
+    // read(["literal",node]) -> bytes; read(["catalog"]) -> fresh catalog.
+    def pifbc-proj-list?(x) = value_kind(x) == "list";
+    def pifbc-proj-int?(x) = value_kind(x) == "int";
+    def pifbc-proj-string?(x) = value_kind(x) == "string";
+    def pifbc-proj-has(xs,x) = nil?(xs) ? 0 : head(xs) == x || pifbc-proj-has(tail(xs),x);
+    def pifbc-proj-shape?(x,n) = pifbc-proj-list?(x) ? len(x) == n : 0;
+    def pifbc-proj-ints?(xs) = nil?(xs) ? 1 : pifbc-proj-int?(head(xs)) && pifbc-proj-ints?(tail(xs));
+    def pifbc-proj-pair?(x) = pifbc-proj-shape?(x,2) ? pifbc-proj-string?(x[0]) && pifbc-proj-string?(x[1]) : 0;
+    def pifbc-proj-good(s) = record_get(s,"reason") == "";
+    def pifbc-proj-fail(s,reason,detail) {
+        pifbc-proj-good(s) ? { record_set(s,"reason",reason); record_set(s,"detail",detail); } : s;
+        nothing();
+    }
+    def pifbc-proj-fields?(r,keys) = nil?(keys) ? 1 : record_has(r,head(keys)) && pifbc-proj-fields?(r,tail(keys));
+    def pifbc-proj-observation(x) = !record?(x) ? nothing()
+        : !pifbc-proj-fields?(x,["kind","bytes","digest"]) ? nothing()
+        : !pifbc-proj-string?(record_get(x,"kind")) || !pifbc-proj-int?(record_get(x,"bytes")) || !pifbc-proj-string?(record_get(x,"digest")) ? nothing()
+        : record_get(x,"bytes") < 0 || !pifbc-proj-has(["raw","lowered"],record_get(x,"kind")) ? nothing()
+        : [record_get(x,"kind"),record_get(x,"bytes"),record_get(x,"digest")];
+    def pifbc-proj-unit-key(u) = !pifbc-proj-shape?(u,6) ? nothing()
+        : !pifbc-proj-int?(u[0]) || !pifbc-proj-string?(u[1]) || !pifbc-proj-int?(u[2]) || !pifbc-proj-int?(u[3]) || !pifbc-proj-list?(u[4]) ? nothing()
+        : u[0] < 0 || len(u[1]) == 0 || u[2] < -1 || u[3] < 0 || !pifbc-proj-ints?(u[4]) ? nothing() : {
+            let observed = pifbc-proj-observation(u[5]);
+            nothing?(observed) ? nothing() : [u[0],u[1],u[2],u[3],u[4],observed];
+        };
+    def pifbc-proj-unit-keys(units) = nil?(units) ? [] : {
+        let first = pifbc-proj-unit-key(head(units)); let rest = pifbc-proj-unit-keys(tail(units));
+        nothing?(first) || nothing?(rest) ? nothing() : cons(first,rest);
+    };
+    def pifbc-proj-catalog-key(c) = !record?(c) ? nothing()
+        : !pifbc-proj-fields?(c,["kind","builder","closure","root_unit","units","exports","constants","contexts"]) ? nothing()
+        : record_get(c,"kind") != "cell-admission-v1" || !pifbc-proj-string?(record_get(c,"builder")) || !pifbc-proj-string?(record_get(c,"closure")) || !pifbc-proj-int?(record_get(c,"root_unit")) ? nothing()
+        : !pifbc-proj-list?(record_get(c,"units")) || !pifbc-proj-list?(record_get(c,"exports")) || !pifbc-proj-list?(record_get(c,"constants")) || !pifbc-proj-list?(record_get(c,"contexts")) ? nothing() : {
+            let units = pifbc-proj-unit-keys(record_get(c,"units"));
+            nothing?(units) ? nothing() : [record_get(c,"kind"),record_get(c,"builder"),record_get(c,"closure"),record_get(c,"root_unit"),units,record_get(c,"exports"),record_get(c,"constants"),record_get(c,"contexts")];
+        };
+    def pifbc-proj-unit(u,sequence) = [u[0],u[1],sequence,u[3],u[4],record_new(0,"kind",u[5][0],"bytes",u[5][1],"digest",u[5][2])];
+    def pifbc-proj-catalog(k) = record_new(0,"kind",k[0],"builder",k[1],"closure",k[2],"root_unit",k[3],"units",k[4] |> map(u => pifbc-proj-unit(u,u[2])),"exports",k[5],"constants",k[6],"contexts",k[7]);
+    def pifbc-proj-unit-index(s,units) = nil?(units) || !pifbc-proj-good(s) ? s : {
+        let u = head(units); let ids = record_get(s,"unit_ids"); let order = record_get(s,"unit_order");
+        record_has(ids,u[0].str()) || record_has(order,u[3].str()) ? pifbc-proj-fail(s,"projection-duplicate-unit",u[0]) : {
+            record_set(ids,u[0].str(),1); record_set(order,u[3].str(),1); pifbc-proj-unit-index(s,tail(units));
+        };
+    };
+    def pifbc-proj-members?(s,members) = nil?(members) ? 1 : record_has(record_get(s,"unit_ids"),head(members).str()) && pifbc-proj-members?(s,tail(members));
+    def pifbc-proj-windows(s,units) = nil?(units) || !pifbc-proj-good(s) ? s : {
+        let u = head(units);
+        !pifbc-proj-has(u[4],u[0]) || !pifbc-proj-members?(s,u[4]) ? pifbc-proj-fail(s,"projection-unit-window-invalid",u[0]) : pifbc-proj-windows(s,tail(units));
+    };
+    def pifbc-proj-contexts(s,rows) = nil?(rows) || !pifbc-proj-good(s) ? s : {
+        let r = head(rows);
+        !pifbc-proj-shape?(r,2) ? pifbc-proj-fail(s,"projection-context-invalid",r)
+        : !pifbc-proj-int?(r[0]) || !(pifbc-proj-string?(r[1]) || pifbc-proj-pair?(r[1])) ? pifbc-proj-fail(s,"projection-context-invalid",r)
+        : !record_has(record_get(s,"unit_ids"),r[0].str()) ? pifbc-proj-fail(s,"projection-context-unit-missing",r[0]) : pifbc-proj-contexts(s,tail(rows));
+    };
+    def pifbc-proj-ops(rows,out) = nil?(rows) ? out : {
+        record_set(out,head(rows)[2].str(),head(rows)[1]); pifbc-proj-ops(tail(rows),out);
+    };
+    // n=node, e=optional node ending at -1, o=optional node ending at 0,
+    // f=function, s=literal bytes, i=immediate integer, z=unused/memo zero.
+    def pifbc-proj-roles(ops,tag) = pifbc-proj-has([1,73,149],tag) ? ["i","z","z"]
+        : pifbc-proj-has([2,16,18,137],tag) ? ["z","z","z"]
+        : pifbc-proj-has([24,50],tag) ? ["s","z","z"]
+        : tag == 12 ? ["f","n","z"] : tag == 240 ? ["f","n","n"]
+        : pifbc-proj-has([241,243],tag) ? ["f","e","z"]
+        : tag == 242 ? ["n","e","z"] : tag == 190 ? ["n","z","z"]
+        : tag == 77 ? ["i","n","i"] : tag == 201 ? ["n","n","o"]
+        : pifbc-proj-has([6,79,109,199],tag) ? ["n","n","n"]
+        : pifbc-proj-has([9,14,31,45,72,74,75,76,78,91,110,138],tag) ? ["n","z","z"]
+        : pifbc-proj-has([8,13,19,44,69,70,71,102,103,111,244],tag) ? ["n","n","z"]
+        : tag == 7 || tag == 194 || !record_has(ops,tag.str()) ? nothing() : {
+            let arity = record_get(ops,tag.str());
+            arity == 0 ? ["z","z","z"] : arity == 1 ? ["n","z","z"]
+            : arity == 2 || arity == -1 ? ["n","n","z"] : arity == 3 ? ["n","n","n"] : nothing();
+        };
+    def pifbc-project-fields(tag) = pifbc-proj-int?(tag) ? pifbc-proj-roles(pifbc-proj-ops(fkwu-native-ops(),record_new(0)),tag) : nothing();
+    def pifbc-proj-normal(row) = row[0] == 190 ? [190,row[1],0,0] : row[0] == 194 ? [194,0,row[2],0] : row;
+    def pifbc-proj-row(s,read,id) {
+        let rows = record_get(s,"observed_nodes"); let key = id.str();
+        record_has(rows,key) ? record_get(rows,key) : {
+            let raw = read(id);
+            !pifbc-proj-shape?(raw,4) ? pifbc-proj-fail(s,"projection-node-unavailable",id)
+            : !pifbc-proj-ints?(raw) ? pifbc-proj-fail(s,"projection-node-invalid",id) : {
+                let row = pifbc-proj-normal(raw);
+                record_set(rows,key,row); record_set(s,"node_ledger",cons([id,row],record_get(s,"node_ledger"))); row;
+            };
+        };
+    }
+    def pifbc-proj-node(s,read,id) = !pifbc-proj-good(s) ? nothing()
+        : !pifbc-proj-int?(id) ? pifbc-proj-fail(s,"projection-node-reference-invalid",id)
+        : id < 0 ? pifbc-proj-fail(s,"projection-node-reference-invalid",id) : {
+            let names = record_get(s,"node_map"); let key = id.str();
+            record_has(names,key) ? record_get(names,key) == -2 ? pifbc-proj-fail(s,"projection-wrapper-cycle",id) : record_get(names,key) : {
+                let row = pifbc-proj-row(s,read,id);
+                nothing?(row) ? nothing() : row[0] == 194 ? {
+                    record_set(names,key,-2); let original = pifbc-proj-node(s,read,row[2]);
+                    pifbc-proj-good(s) ? record_set(names,key,original) : s; original;
+                } : row[0] == 7 ? pifbc-proj-fail(s,"projection-unowned-root-reference",id) : {
+                    let roles = pifbc-proj-roles(record_get(s,"ops"),row[0]);
+                    nothing?(roles) ? pifbc-proj-fail(s,"projection-unknown-node-tag",[id,row[0]]) : {
+                        let local = record_get(s,"node_count"); record_set(s,"node_count",local + 1); record_set(names,key,local);
+                        record_set(s,"pending",cons([id,local,row,roles],record_get(s,"pending"))); local;
+                    };
+                };
+            };
+        };
+    def pifbc-proj-fnmeta?(m) = !pifbc-proj-shape?(m,5) ? 0
+        : !pifbc-proj-int?(m[0]) || !pifbc-proj-int?(m[1]) || !pifbc-proj-int?(m[2]) || !pifbc-proj-int?(m[3]) ? 0
+        : m[0] >= 0 && m[1] >= 0 && m[2] >= 0 && m[3] >= -1 && pifbc-proj-pair?(m[4]);
+    def pifbc-proj-function(s,read,id) = !pifbc-proj-good(s) ? nothing()
+        : !pifbc-proj-int?(id) ? pifbc-proj-fail(s,"projection-function-reference-invalid",id)
+        : id <= 0 ? pifbc-proj-fail(s,"projection-unowned-root-reference",id) : {
+            let names = record_get(s,"function_map"); let key = id.str();
+            record_has(names,key) ? record_get(names,key) : {
+                let meta = read(["function",id]);
+                !pifbc-proj-fnmeta?(meta) ? pifbc-proj-fail(s,"projection-function-unavailable",id) : {
+                    let local = record_get(s,"function_count"); record_set(s,"function_count",local + 1); record_set(names,key,local);
+                    record_set(s,"function_ledger",cons([id,meta],record_get(s,"function_ledger")));
+                    let body = pifbc-proj-node(s,read,meta[0]);
+                    let parent = meta[3] == -1 ? -1 : pifbc-proj-function(s,read,meta[3]);
+                    pifbc-proj-good(s) ? record_set(record_get(s,"functions"),local.str(),[local,body,meta[1],meta[2],parent,meta[4]]) : s;
+                    local;
+                };
+            };
+        };
+    def pifbc-proj-literal(s,read,node,pool) {
+        let bytes = read(["literal",node]);
+        !pifbc-proj-string?(bytes) ? pifbc-proj-fail(s,"projection-literal-unavailable",node) : {
+            record_set(s,"literal_ledger",cons([node,bytes],record_get(s,"literal_ledger")));
+            let names = record_get(s,"string_map"); let key = pool.str();
+            record_has(names,key) ? {
+                let local = record_get(names,key);
+                record_get(record_get(s,"strings"),local.str()) == bytes ? local : pifbc-proj-fail(s,"projection-literal-changed",node);
+            } : {
+                let local = record_get(s,"string_count"); record_set(s,"string_count",local + 1); record_set(names,key,local);
+                record_set(record_get(s,"strings"),local.str(),bytes); local;
+            };
+        };
+    }
+    def pifbc-proj-field(s,read,node,role,value) = !pifbc-proj-good(s) ? nothing()
+        : role == "z" ? 0 : role == "i" ? value : role == "f" ? pifbc-proj-function(s,read,value)
+        : role == "s" ? value < 0 ? pifbc-proj-fail(s,"projection-literal-reference-invalid",node) : pifbc-proj-literal(s,read,node,value)
+        : role == "e" && value == -1 ? -1 : role == "o" && value == 0 ? 0 : pifbc-proj-node(s,read,value);
+    def pifbc-proj-walk(s,read) = !pifbc-proj-good(s) || nil?(record_get(s,"pending")) ? s : {
+        let task = head(record_get(s,"pending")); record_set(s,"pending",tail(record_get(s,"pending")));
+        let row = task[2]; let roles = task[3];
+        let a = pifbc-proj-field(s,read,task[0],roles[0],row[1]);
+        let b = pifbc-proj-field(s,read,task[0],roles[1],row[2]);
+        let c = pifbc-proj-field(s,read,task[0],roles[2],row[3]);
+        pifbc-proj-good(s) ? record_set(record_get(s,"nodes"),task[1].str(),[row[0],a,b,c]) : s;
+        pifbc-proj-walk(s,read);
+    };
+    def pifbc-proj-exports(s,read,rows,held) = nil?(rows) || !pifbc-proj-good(s) ? reverse(held) : {
+        let r = head(rows);
+        !pifbc-proj-shape?(r,4) ? pifbc-proj-fail(s,"projection-export-invalid",r)
+        : !pifbc-proj-string?(r[0]) || !pifbc-proj-int?(r[1]) || !pifbc-proj-int?(r[2]) || !pifbc-proj-int?(r[3]) ? pifbc-proj-fail(s,"projection-export-invalid",r)
+        : r[2] < 0 || !record_has(record_get(s,"unit_ids"),r[3].str()) ? pifbc-proj-fail(s,"projection-export-unit-invalid",r) : {
+            let local = pifbc-proj-function(s,read,r[1]);
+            !pifbc-proj-good(s) ? reverse(held) : record_get(record_get(s,"functions"),local.str())[2] != r[2] ? pifbc-proj-fail(s,"projection-export-arity-changed",r)
+            : pifbc-proj-exports(s,read,tail(rows),cons([r[0],local,r[2],r[3]],held));
+        };
+    };
+    def pifbc-proj-constants(s,read,rows,held) = nil?(rows) || !pifbc-proj-good(s) ? reverse(held) : {
+        let r = head(rows);
+        !pifbc-proj-shape?(r,3) ? pifbc-proj-fail(s,"projection-constant-invalid",r)
+        : !pifbc-proj-string?(r[0]) || !pifbc-proj-int?(r[1]) || !pifbc-proj-int?(r[2]) ? pifbc-proj-fail(s,"projection-constant-invalid",r)
+        : !record_has(record_get(s,"unit_ids"),r[2].str()) ? pifbc-proj-fail(s,"projection-constant-unit-invalid",r)
+        : pifbc-proj-constants(s,read,tail(rows),cons([r[0],pifbc-proj-node(s,read,r[1]),r[2]],held));
+    };
+    def pifbc-proj-units(s,read,rows,held) = nil?(rows) || !pifbc-proj-good(s) ? reverse(held) : {
+        let u = head(rows); let sequence = u[2] == -1 ? -1 : pifbc-proj-node(s,read,u[2]);
+        pifbc-proj-units(s,read,tail(rows),cons(pifbc-proj-unit(u,sequence),held));
+    };
+    def pifbc-proj-insert(u,rows) = nil?(rows) ? [u] : u[3] < head(rows)[3] ? cons(u,rows) : cons(head(rows),pifbc-proj-insert(u,tail(rows)));
+    def pifbc-proj-order(rows,held) = nil?(rows) ? held : pifbc-proj-order(tail(rows),pifbc-proj-insert(head(rows),held));
+    def pifbc-proj-add(s,row) {
+        let local = record_get(s,"node_count"); record_set(s,"node_count",local + 1);
+        record_set(record_get(s,"nodes"),local.str(),row); local;
+    }
+    def pifbc-proj-root(s,units,prior) = nil?(units) ? prior < 0 ? pifbc-proj-add(s,[1,0,0,0]) : prior
+        : head(units)[2] < 0 ? pifbc-proj-root(s,tail(units),prior)
+        : pifbc-proj-root(s,tail(units),prior < 0 ? head(units)[2] : pifbc-proj-add(s,[69,prior,head(units)[2],0]));
+    def pifbc-proj-verify(s,read,kind,rows) = nil?(rows) || !pifbc-proj-good(s) ? s : {
+        let r = head(rows); let selection = kind == "node" ? r[0] : [kind,r[0]]; let raw = read(selection);
+        let observed = kind == "node" && pifbc-proj-shape?(raw,4) ? pifbc-proj-normal(raw) : raw;
+        value_eq(observed,r[1]) ? pifbc-proj-verify(s,read,kind,tail(rows)) : pifbc-proj-fail(s,"projection-observation-changed",selection);
+    };
+    def pifbc-proj-values(rows,i,end,held) = i >= end ? reverse(held) : pifbc-proj-values(rows,i + 1,end,cons(record_has(rows,i.str()) ? record_get(rows,i.str()) : nothing(),held));
+    // Tag201's third field reserves zero for absence. No relocated source
+    // node may acquire that sentinel; row0 is an inert synthetic literal.
+    def pifbc-proj-state() = record_new(0,"reason","","detail",nothing(),"unit_ids",record_new(0),"unit_order",record_new(0),"ops",pifbc-proj-ops(fkwu-native-ops(),record_new(0)),"observed_nodes",record_new(0),"node_map",record_new(0),"function_map",record_new(0),"string_map",record_new(0),"nodes",record_new(0,"0",[1,0,0,0]),"functions",record_new(0),"strings",record_new(0),"node_count",1,"function_count",1,"string_count",0,"pending",[],"node_ledger",[],"function_ledger",[],"literal_ledger",[]);
+    def pifbc-project(catalog,read) {
+        let key = pifbc-proj-catalog-key(catalog); let s = pifbc-proj-state();
+        value_kind(read) != "closure" ? pifbc-proj-fail(s,"projection-reader-unavailable",nothing())
+        : nothing?(key) ? pifbc-proj-fail(s,"projection-catalog-invalid",nothing()) : {
+            pifbc-proj-unit-index(s,key[4]); pifbc-proj-windows(s,key[4]); pifbc-proj-contexts(s,key[7]);
+            !record_has(record_get(s,"unit_ids"),key[3].str()) ? pifbc-proj-fail(s,"projection-root-unit-missing",key[3]) : s;
+        };
+        let units = pifbc-proj-good(s) ? pifbc-proj-units(s,read,key[4],[]) : [];
+        let symbols = pifbc-proj-good(s) ? pifbc-proj-exports(s,read,key[5],[]) : [];
+        let constants = pifbc-proj-good(s) ? pifbc-proj-constants(s,read,key[6],[]) : [];
+        pifbc-proj-walk(s,read);
+        let root = pifbc-proj-good(s) ? pifbc-proj-root(s,pifbc-proj-order(units,[]),-1) : nothing();
+        pifbc-proj-verify(s,read,"node",record_get(s,"node_ledger"));
+        pifbc-proj-verify(s,read,"function",record_get(s,"function_ledger"));
+        pifbc-proj-verify(s,read,"literal",record_get(s,"literal_ledger"));
+        pifbc-proj-good(s) && !value_eq(key,pifbc-proj-catalog-key(read(["catalog"]))) ? pifbc-proj-fail(s,"projection-catalog-changed",nothing()) : s;
+        let functions = pifbc-proj-values(record_get(s,"functions"),1,record_get(s,"function_count"),[]);
+        record_new(0,"kind","program-image-static-projection","status",pifbc-proj-good(s) ? "projected" : "refused","reason",record_get(s,"reason"),"detail",record_get(s,"detail"),"catalog",nothing?(key) ? nothing() : pifbc-proj-catalog(key),"roots",cons(root,functions |> map(fn => nothing?(fn) ? nothing() : fn[1])),"functions",functions,"nodes",pifbc-proj-values(record_get(s,"nodes"),0,record_get(s,"node_count"),[]),"strings",pifbc-proj-values(record_get(s,"strings"),0,record_get(s,"string_count"),[]),"symbols",symbols,"units",units,"constants",constants,"relocation",[record_get(s,"node_map"),record_get(s,"function_map"),record_get(s,"string_map")],"ledger",[reverse(record_get(s,"node_ledger")),reverse(record_get(s,"function_ledger")),reverse(record_get(s,"literal_ledger"))]);
+    }
+    def pifbc-project-admitted(fn) {
+        let pid = host_pid(); let catalog = kernel_ast(pid,["catalog",fn]);
+        pifbc-project(catalog,selection => pifbc-proj-int?(selection) ? kernel_ast(pid,selection)
+            : selection[0] == "catalog" ? kernel_ast(pid,["catalog",fn])
+            : selection[0] == "function" ? kernel_ast(pid,["fnmeta",selection[1]])
+            : selection[0] == "literal" ? kernel_ast(pid,["str",selection[1]]) : nothing());
     }
 }

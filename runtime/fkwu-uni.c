@@ -468,6 +468,8 @@ static void fk_store_go_private(void);
 static void *fk_prog_take(char letter, long long bytes);
 static void fk_prog_note_counts(void);
 static void fk_prog_note_body(long long idx);
+static long long fk_admission_live_roots(void);
+static void fk_admission_copy_roots(void);
 static void fk_prog_note_ice(const char *path, long long len, const char *hash_text);
 static int fk_prog_ast_shared, fk_prog_src_shared;
 static long long *fk_prog_D;
@@ -9524,6 +9526,7 @@ static void fk_melt(void) {
     /* the once-holds: a top-level let's held value is a root, so the melt keeps it and no read builds it again */
     k = 0;
     while (k < fk_hold_n) { if (fk_hold_live(fk_hold_rows[k])) { nlive = nlive + fk_mlive(fk_node[fk_hold_rows[k]][2]); } k = k + 1; }
+    nlive += fk_admission_live_roots();
     long long ncap = fk_cap;
     if (nlive * 2 > fk_cap) {
         ncap = fk_cap * 2;
@@ -9593,6 +9596,7 @@ static void fk_melt(void) {
         k = k + 1;
     }
     fk_clo_mcopy_roots();
+    fk_admission_copy_roots();
     /* each held row copied once: a row listed twice is copied at its first entry (node[3] 1 -> 2) and dropped at the next,
      * and a row no longer held is dropped; then the kept rows read held again (2 -> 1) */
     k = 0;
@@ -9776,6 +9780,7 @@ static void fk_fn_reserve(long long needed) {
  *   fk_fn_cap_room[idx]     -- the seats idx's two rows hold; a row doubles when one more name is
  *                              captured than it holds, so a function captures as many as it names. */
 static long long *fk_fn_parent_idx, *fk_fn_cap_count, *fk_fn_cap_room;
+static char *fk_fn_meta_known;
 static long long **fk_fn_cap_encoff, **fk_fn_cap_slot;
 static long long fk_fn_cap_capacity;
 static void fk_fn_cap_reserve(long long needed) {
@@ -9788,6 +9793,8 @@ static void fk_fn_cap_reserve(long long needed) {
     }
     unsigned long bytes1 = (unsigned long)next * sizeof(long long);
     unsigned long bytesp = (unsigned long)next * sizeof(long long *);
+    char *nm = realloc(fk_fn_meta_known, (unsigned long)next);
+    if (nm != 0) fk_fn_meta_known = nm;
     long long *np = realloc(fk_fn_parent_idx, bytes1);
     if (np != 0) {
         fk_fn_parent_idx = np;
@@ -9808,12 +9815,13 @@ static void fk_fn_cap_reserve(long long needed) {
     if (ns != 0) {
         fk_fn_cap_slot = ns;
     }
-    if (np == 0 || nc == 0 || nr == 0 || ne == 0 || ns == 0) {
+    if (nm == 0 || np == 0 || nc == 0 || nr == 0 || ne == 0 || ns == 0) {
         fk_die("fk_fn_cap_reserve: out of memory growing closure-capture tables");
     }
     long long i = fk_fn_cap_capacity;
     while (i < next) {
         fk_fn_parent_idx[i] = -1;
+        fk_fn_meta_known[i] = 0;
         fk_fn_cap_count[i] = 0;
         fk_fn_cap_room[i] = 0;
         fk_fn_cap_encoff[i] = 0;
@@ -19264,10 +19272,27 @@ typedef struct fk_admission {
     char *hash, *image_path;
     long long image_bytes, node_base, node_end, fn_base;
     char image_checksum[17];
+    long long catalog; /* immutable tuples only; copied through the value melt */
     struct fk_admission *previous;
 } fk_admission;
 static fk_admission *fk_admissions;
 static const char *fk_cell_identity;
+static long long fk_admission_live_roots(void) {
+    long long n = 0;
+    for (fk_admission *a = fk_admissions; a; a = a->previous) n += fk_mlive(a->catalog);
+    return n;
+}
+static void fk_admission_copy_roots(void) {
+    for (fk_admission *a = fk_admissions; a; a = a->previous) a->catalog = fk_mcopy(a->catalog);
+}
+static fk_admission *fk_admission_owner(long long fn) {
+    if (fn < 0 || fn >= fk_fn_count) return 0;
+    fk_admission *a = fk_admissions;
+    if (fn == 0 && fk_cell_identity) {
+        while (a && a->hash != fk_cell_identity) a = a->previous;
+    } else while (a && !(a->first <= fn && fn < a->end)) a = a->previous;
+    return a;
+}
 static void fk_admission_clear(void) {
     while (fk_admissions) {
         fk_admission *old = fk_admissions;
@@ -19284,20 +19309,60 @@ static const char *fk_admission_bind(long long first, long long end, const char 
     if (n) memcpy(a->hash, hash, (unsigned long)n);
     a->hash[n] = 0;
     a->first = first; a->end = end; a->previous = fk_admissions;
+    a->catalog = 1;
     fk_admissions = a;
     return a->hash;
 }
 static long long fk_admission_read(long long fn) {
-    const char *hash = fn == 0 ? fk_cell_identity : 0;
-    if (fn < 0 || fn >= fk_fn_count) return fk_nothing;
-    if (!hash) {
-        fk_admission *a = fk_admissions;
-        while (a && !(a->first <= fn && fn < a->end)) a = a->previous;
-        hash = a ? a->hash : 0;
-    }
+    fk_admission *a = fk_admission_owner(fn);
+    const char *hash = a ? a->hash : 0;
     if (!hash || !hash[0] || !fk_fkb_builder_id[0]) return fk_nothing;
     return fk_cons_val(fk_sbuf(fk_fkb_builder_id, fk_cstrlen(fk_fkb_builder_id)),
                        fk_cons_val(fk_sbuf(hash, fk_cstrlen(hash)), 1));
+}
+/* Catalogs describe the admitted source window, never mutable records or
+ * process values. Form owns projection and reconstruction policy; this
+ * temporary seed carrier leaves with the native source loader. */
+static long long fk_admission_tuple(long long *items, long long n) {
+    long long out = 1;
+    while (n > 0) out = fk_cons_val(items[--n], out);
+    return out;
+}
+static long long fk_admission_at(long long tuple, long long i) {
+    long long p = tuple >> 1;
+    while (i-- > 0) p = FK_HNEXT(p);
+    return FK_HH(p);
+}
+static long long fk_admission_catalog_read(long long fn) {
+    fk_admission *a = fk_admission_owner(fn);
+    if (!a || a->catalog == 1 || !a->hash[0]) return fk_nothing;
+    long long units = 1, in = fk_admission_at(a->catalog, 1), count = 0;
+    for (long long p = in >> 1; p; p = FK_HNEXT(p)) count++;
+    long long *rows = malloc((unsigned long)(count ? count : 1) * sizeof(*rows));
+    if (!rows) fk_die("admission catalog: out of memory");
+    long long i = 0;
+    for (long long p = in >> 1; p; p = FK_HNEXT(p)) rows[i++] = FK_HH(p);
+    while (i > 0) {
+        long long row = rows[--i], items[6];
+        for (long long j = 0; j < 6; j++) items[j] = fk_admission_at(row, j);
+        long long obs = items[5], r = fk_cr_new();
+        fk_cr_put(r, "kind", fk_admission_at(obs, 0));
+        fk_cr_put(r, "bytes", fk_admission_at(obs, 1));
+        fk_cr_put(r, "digest", fk_admission_at(obs, 2));
+        items[5] = fk_rbox(r);
+        units = fk_cons_val(fk_admission_tuple(items, 6), units);
+    }
+    free(rows);
+    long long r = fk_cr_new();
+    fk_cr_put(r, "kind", fk_cr_str("cell-admission-v1"));
+    fk_cr_put(r, "builder", fk_cr_str(fk_fkb_builder_id));
+    fk_cr_put(r, "closure", fk_cr_str(a->hash));
+    fk_cr_put(r, "root_unit", fk_admission_at(a->catalog, 0));
+    fk_cr_put(r, "units", units);
+    fk_cr_put(r, "exports", fk_admission_at(a->catalog, 2));
+    fk_cr_put(r, "constants", fk_admission_at(a->catalog, 3));
+    fk_cr_put(r, "contexts", fk_admission_at(a->catalog, 4));
+    return fk_rbox(r);
 }
 /* This is an immutable image-location observation, not a write door. Form's
  * program-image owner proves pure results and owns any publication. A cell
@@ -19354,6 +19419,18 @@ static long long fk_prog_read(long long pid, long long spec) {
         if (fk_cstr_eq(mode, "image")) {
             return q && FK_POK(q) ? fk_admission_image_read(fk_ast_function_arg(FK_HH(q))) : fk_nothing;
         }
+        if (fk_cstr_eq(mode, "catalog")) {
+            return q && FK_POK(q) ? fk_admission_catalog_read(fk_ast_function_arg(FK_HH(q))) : fk_nothing;
+        }
+        if (fk_cstr_eq(mode, "fnmeta") && q && FK_POK(q)) {
+            long long fn = fk_ast_function_arg(FK_HH(q));
+            if (fn <= 0 || fn >= fk_fn_count || fn >= fk_fn_cap_capacity || !fk_fn_meta_known[fn]) return fk_nothing;
+            long long body = fk_fn[fn], identity = fk_admission_read(fn);
+            if (body >= 0 && body < fk_node_count && fk_node[body][0] == 194) body = fk_node[body][2];
+            if (body < 0 || body >= fk_node_count || identity == fk_nothing) return fk_nothing;
+            long long fields[] = {body << 1, fk_fnar[fn] << 1, fk_fn_cap_count[fn] << 1, fk_fn_parent_idx[fn] * 2, identity};
+            return fk_admission_tuple(fields, 5);
+        }
         if (fk_cstr_eq(mode, "index") && q && FK_POK(q)) {
             long long fn = fk_ast_function_arg(FK_HH(q));
             return fn > 0 && fn < fk_fn_count &&
@@ -19361,7 +19438,7 @@ static long long fk_prog_read(long long pid, long long spec) {
         }
         if (fk_cstr_eq(mode, "str") && q && FK_POK(q) && (FK_HH(q) & 1) == 0) {
             long long k = FK_HH(q) >> 1;
-            return k >= 0 && k < fk_node_count && fk_node[k][0] == 24
+            return k >= 0 && k < fk_node_count && (fk_node[k][0] == 24 || fk_node[k][0] == 50)
                 ? fk_strv(fk_node[k][1]) : fk_nothing;
         }
         /* ("fn" c): defn c's body (the one it wears under its page) and its arity, or nothing for a capturing function, whose
@@ -23487,6 +23564,7 @@ static long long fk_const_set(long long s, long long n, long long node) {
     while (i < fk_const_top) {
         /* in a cell load a row is a unit's own: the same name in another unit is another binding */
         if (fk_sym_eq2(s, n, fk_const_s[i], fk_const_n[i]) && (!fk_win_on || fk_const_unit[i] == fk_const_unit_now)) {
+            fk_const_s[i] = s; fk_const_n[i] = n;
             if (fk_const_node[i] == FK_CONST_FORWARD && fk_const_wrapp1[i] != 0 && node != FK_CONST_FORWARD) {
                 /* the let a forward read waited for: the hold every earlier read
                  * shares learns its initializer, so they all read this binding. */
@@ -23751,7 +23829,7 @@ static long long fk_sparse(void) {
             if (fk_maxslot > 0) {
                 body = fk_smknode(111, fk_smklit(fk_maxslot), body, 0);
             }
-            fk_fn[idx] = body; fk_prog_note_body(idx);
+            fk_fn[idx] = body; fk_fn_meta_known[idx] = 1; fk_prog_note_body(idx);
             fk_bd_restore(fk_bd_saved_top);
             fk_maxslot = fk_bd_saved_maxslot;
             fk_fntop = saved_fntop;
@@ -24541,7 +24619,7 @@ static long long fk_parse_do(void) {
             if (fk_maxslot > 0) {
                 dbody = fk_smknode(111, fk_smklit(fk_maxslot), dbody, 0);
             }
-            fk_fn[didx] = dbody; fk_prog_note_body(didx);
+            fk_fn[didx] = dbody; fk_fn_meta_known[didx] = 1; fk_prog_note_body(didx);
             fk_bd_restore(fk_bd_saved_top);
             fk_maxslot = fk_bd_saved_maxslot;
             fk_enc_mark = dsaved_enc_mark;
@@ -25035,7 +25113,7 @@ static void fk_parse_top_in(void) {
             if (fk_maxslot > 0) {
                 body = fk_smknode(111, fk_smklit(fk_maxslot), body, 0);
             }
-            fk_fn[idx] = body; fk_prog_note_body(idx);
+            fk_fn[idx] = body; fk_fn_meta_known[idx] = 1; fk_prog_note_body(idx);
             fk_bd_restore(fk_bd_saved_top);
             fk_maxslot = fk_bd_saved_maxslot;
             return;
@@ -27346,6 +27424,7 @@ static int fk_src_import_fkb_image(const char *fkb_path, fk_fkb_snapshot *snapsh
         fk_die("fk_import_fkb: out of memory reading function roots");
     }
     long long fn_base = fk_defn_next;
+    for (long long f = fn_base; f < fn_base + nf - 1 && f < fk_fn_cap_capacity; f++) fk_fn_meta_known[f] = 0;
     long long node_base = fk_node_count;
     long long str_base = fk_sp;
     long long i = 0;
@@ -27692,6 +27771,7 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
     }
     fk_fn_reserve(nf > 0 ? nf : 1);
     fk_fn_count = nf;
+    for (long long f = 0; f < nf && f < fk_fn_cap_capacity; f++) fk_fn_meta_known[f] = 0;
     long long i = 0;
     while (!fk_fkb_bad && i < nf) {
         fk_fn[i] = fk_fkb_read_signed(); fk_prog_note_body(i);
@@ -27840,6 +27920,7 @@ static void fk_src_reset_compile_state(void) {
     long long capreset_i = 0;
     while (capreset_i < fk_fn_cap_capacity) {
         fk_fn_cap_count[capreset_i] = 0;
+        fk_fn_meta_known[capreset_i] = 0;
         fk_fn_parent_idx[capreset_i] = -1;
         capreset_i = capreset_i + 1;
     }
@@ -28695,6 +28776,7 @@ static long long *fk_cd_framed;
 static long long *fk_cd_eff;       /* the unit whose sequence is the cell's answer each call: the root, else the last unit with one */
 static char *fk_cd_unrunnable;
 static const char **fk_cd_identity;
+static long long fk_cell_source_units, fk_cell_source_functions, fk_cell_image_units;
 static void *fk_cd_rows_store;     /* per dep: the diagnostic rows its load voiced (fk_dgrow_t array), replayed for a resident call */
 static long long *fk_cd_rows_n;
 static long long fk_cd_cap;
@@ -28871,13 +28953,9 @@ static int fk_win_row_ok(long long row) {
     return fk_win_dep_ok(fk_fsym_dep[row]);
 }
 static int fk_win_const_ok(long long row) {
-    unsigned long long id = fk_const_unit[row];
-    long long d = fk_cell_base_dep;
-    while (d < fk_src_dep_count && d < fk_win_cap) {
-        if (fk_win_bits_store[d] != 0 && fk_cd_id[d] == id) { return 1; }
-        d = d + 1;
-    }
-    return 0;
+    /* A path can have several admitted incarnations. A removed declaration
+     * in an old incarnation is not visible merely because its path returned. */
+    return fk_win_dep_ok(fk_cell_dep_of_off(fk_const_s[row]));
 }
 static void fk_win_set(long long root) {
     long long k = 0;
@@ -28890,6 +28968,75 @@ static void fk_win_set(long long root) {
     k = 0;
     while (k < fk_cd_win_n[root]) { fk_win_bits_store[fk_cd_win[root][k]] = 1; k = k + 1; }
     fk_win_bits = fk_win_bits_store;
+}
+static long long fk_cell_member_index(long long root, long long dep) {
+    for (long long i = 0; i < fk_cd_win_n[root]; i++) if (fk_cd_win[root][i] == dep) return i;
+    return -1;
+}
+/* Capture the exact admitted window before another cell can change the source
+ * tables. Values here are static source observations and graph addresses, not
+ * hold memos, mutable records, file handles or completed-effect state. */
+static long long fk_cell_catalog_capture(long long root, long long fresh) {
+    long long units = 1, exports = 1, constants = 1, contexts = 1;
+    long long n = fk_cd_win_n[root];
+    for (long long i = n; i-- > 0;) {
+        long long dep = fk_cd_win[root][i], members = 1, order = 0;
+        for (long long j = 0; j < n; j++)
+            if (fk_src_dep_text_off[fk_cd_win[root][j]] < fk_src_dep_text_off[dep]) order++;
+        for (long long j = fk_cd_win_n[dep]; j-- > 0;) {
+            long long member = fk_cell_member_index(root, fk_cd_win[dep][j]);
+            if (member < 0) return 1; /* an incomplete catalog grants no owner */
+            members = fk_cons_val(member << 1, members);
+        }
+        char digest[17], canon[FK_PATH_CAP];
+        sprintf(digest, "%016llx", fk_src_dep_digest[dep]);
+        long long obs[] = {fk_cr_str(fk_src_dep_lowered[dep] ? "lowered" : "raw"),
+            fk_src_dep_size[dep] << 1, fk_cr_str(digest)};
+        long long row[] = {i << 1, fk_cr_str(fk_path_canon_id(fk_src_dep_path[dep], canon)),
+            fk_cd_framed[dep] * 2, order << 1, members, fk_admission_tuple(obs, 3)};
+        units = fk_cons_val(fk_admission_tuple(row, 6), units);
+        if (dep < fresh) {
+            long long context[] = {i << 1, fk_cr_str(fk_cd_identity[dep])};
+            contexts = fk_cons_val(fk_admission_tuple(context, 2), contexts);
+        }
+    }
+    for (long long i = fk_fntop; i-- > 0;) {
+        long long unit = fk_cell_member_index(root, fk_cell_dep_of_off(fk_fnsym_s[i]));
+        if (unit >= 0) {
+            long long row[] = {fk_sbuf(fk_srctext + fk_fnsym_s[i], fk_fnsym_n[i]),
+                fk_fnidx[i] << 1, fk_fnar[fk_fnidx[i]] << 1, unit << 1};
+            exports = fk_cons_val(fk_admission_tuple(row, 4), exports);
+        }
+    }
+    for (long long i = fk_const_top; i-- > 0;) {
+        long long unit = fk_cell_member_index(root, fk_cell_dep_of_off(fk_const_s[i]));
+        if (unit >= 0) {
+            long long row[] = {fk_sbuf(fk_srctext + fk_const_s[i], fk_const_n[i]),
+                fk_const_node[i] * 2, unit << 1};
+            constants = fk_cons_val(fk_admission_tuple(row, 3), constants);
+        }
+    }
+    long long fields[] = {fk_cell_member_index(root, root) << 1, units, exports, constants, contexts};
+    return fk_admission_tuple(fields, 5);
+}
+
+/* Name lookup walks declaration rows backwards. Source-member order alone
+ * does not describe that precedence when libraries were admitted separately. */
+static unsigned long long fk_cell_binding_order(long long root, long long fresh, unsigned long long h) {
+    for (long long kind = 0; kind < 2; kind++) {
+        h = (h ^ (unsigned long long)kind) * 1099511628211ULL;
+        long long count = kind ? fk_const_top : fk_fntop;
+        for (long long i = 0; i < count; i++) {
+            long long off = kind ? fk_const_s[i] : fk_fnsym_s[i];
+            long long len = kind ? fk_const_n[i] : fk_fnsym_n[i];
+            long long dep = fk_cell_dep_of_off(off), unit = fk_cell_member_index(root, dep);
+            if (dep >= 0 && dep < fresh && unit >= 0) {
+                h = (h ^ (unsigned long long)unit) * 1099511628211ULL;
+                h = (h ^ fk_bytes_fnv1a(fk_srctext + off, len)) * 1099511628211ULL;
+            }
+        }
+    }
+    return h;
 }
 
 /* ── the stdout sink ── */
@@ -29220,9 +29367,14 @@ FK_PHASED(FK_PHASE_LOAD, int, fk_cell_load, (const char *path, long long *root_o
     fk_prescan_from = slen0;
     fk_spos = slen0;
     fk_srctext[fk_slen] = 0;
+    /* Lowering may admit its own cells. Only definitions parsed in this
+     * window belong to the admission below. */
+    fn0 = fk_defn_next;
     fk_src_check_balance();
     int parsed = !fk_src_unrunnable;
     if (parsed) {
+        for (k = d0; k < fk_src_dep_count; k++)
+            if (fk_src_dep_text_len[k] > 0) fk_cell_source_units++;
         fk_prescan_defns();
         fk_spos = slen0;
         while (1) {
@@ -29236,6 +29388,7 @@ FK_PHASED(FK_PHASE_LOAD, int, fk_cell_load, (const char *path, long long *root_o
         fk_const_unit_now = 0;
         fk_const_forward_finalize();
         fk_fn_count = fk_defn_next;
+        fk_cell_source_functions += fk_defn_next - fn0;
     }
     fk_win_on = 0;
     fk_cd_unrunnable[*root_out] = fk_src_unrunnable ? 1 : 0;
@@ -29250,19 +29403,39 @@ FK_PHASED(FK_PHASE_LOAD, int, fk_cell_load, (const char *path, long long *root_o
         k = k + 1;
     }
     int closure_clean = 1;
+    long long retained = 0;
+    unsigned long long context = 14695981039346656037ULL;
     for (k = 0; k < fk_cd_win_n[*root_out]; k++) {
         long long member = fk_cd_win[*root_out][k];
         if (member < d0) {
             if (!fk_cd_identity[member] || !fk_cd_identity[member][0]) closure_clean = 0;
+            else {
+                context = (context ^ (unsigned long long)k) * 1099511628211ULL;
+                context = (context ^ fk_bytes_fnv1a(fk_cd_identity[member], fk_cstrlen(fk_cd_identity[member]))) * 1099511628211ULL;
+                retained++;
+            }
         }
     }
     char identity[FK_SRC_HASH_CAP];
+    context = fk_cell_binding_order(*root_out, d0, context);
     int identified = closure_clean && !fk_nerr && !fk_src_unrunnable && !fk_src_truncated &&
         fk_src_unit_hash_members(0, fk_cd_win_n[*root_out], fk_cd_win[*root_out], identity, FK_SRC_HASH_CAP);
+    /* Reused definitions retain their original bindings, including calls to
+     * an earlier caller's definitions outside this root's source closure.
+     * Their admitted context is part of this cell's meaning. The native
+     * loader takes this composition when these admission rows leave the seed. */
+    if (identified) {
+        long long pos = fk_cstrlen(identity);
+        identified = fk_source_hash_append(identity, FK_SRC_HASH_CAP, &pos, "|retained-v2|n=") &&
+            fk_source_hash_append_ll(identity, FK_SRC_HASH_CAP, &pos, retained) &&
+            fk_source_hash_append(identity, FK_SRC_HASH_CAP, &pos, "|") &&
+            fk_source_hash_append_ll(identity, FK_SRC_HASH_CAP, &pos, (long long)(context >> 1));
+    }
     const char *admitted = fk_admission_bind(fn0, fk_defn_next, identified ? identity : 0);
     /* Each new dependency was parsed in this same complete name window. It
      * may later be called as a resident root without another load. */
     for (k = d0; k < fk_src_dep_count; k++) fk_cd_identity[k] = admitted;
+    if (identified) fk_admissions->catalog = fk_cell_catalog_capture(*root_out, d0);
     fk_root = root0; fk_units_cur = ucur0; fk_const_unit_now = cun0; fk_maxslot = maxslot0; fk_bd_top = bdtop0; fk_spos = spos0;
     fk_nerr = ne0; fk_nwarn = nw0; fk_nerr_seen = nes0; fk_nwarn_seen = nws0;
     fk_src_truncated = trunc0; fk_src_unrunnable = unr0; fk_prescan_from = prescan0;
@@ -29339,6 +29512,7 @@ static void fk_cell_rows_replay(long long root, long long before) {
 static long long fk_cell_run_door(long long pathw, long long argw, long long dlw, long long inw, int native_only) {
     char path[FK_PATH_CAP];
     long long mono0 = fk_mono_ns() / 1000000LL, cpu0 = fk_cell_cpu_us();
+    long long source_units0 = fk_cell_source_units, source_functions0 = fk_cell_source_functions, image_units0 = fk_cell_image_units;
     long long deadline = 0, value = fk_nothing, root = -1, stopped = fk_nothing, errors = 0, vsp0 = fk_vsp;
     int resident = 0, how = 0, refused = 0, check_only = 0;
     const char *refusal = "";
@@ -29573,6 +29747,9 @@ static long long fk_cell_run_door(long long pathw, long long argw, long long dlw
     fk_cr_put(r, "resident", (long long)(resident ? 1 : 0) << 1);
     fk_cr_put(r, "ms", (fk_mono_ns() / 1000000LL - mono0) << 1);
     fk_cr_put(r, "cpu_us", (fk_cell_cpu_us() - cpu0) << 1);
+    fk_cr_put(r, "source_units", (fk_cell_source_units - source_units0) << 1);
+    fk_cr_put(r, "source_functions", (fk_cell_source_functions - source_functions0) << 1);
+    fk_cr_put(r, "image_units", (fk_cell_image_units - image_units0) << 1);
     fk_vsp = vsp0;
     return fk_rbox(r);
 }

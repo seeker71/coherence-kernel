@@ -200,6 +200,64 @@ section [form.bml] {
         };
     }
     def rpicab-publisher-check() = rpmw-with-admitted(kernel_ast(host_pid(), ["index", rpicab-publisher-value]), 1000, [], rpicab-publisher-observe);
+    // Static projection copies admitted syntax and its exact bindings. These
+    // callbacks expose changed observations without executing the represented
+    // effect or carrying a held process value into the projected graph.
+    def rpicab-projection-catalog() = record_new(0,"kind","cell-admission-v1","builder","fixture-builder","closure","fixture-closure","root_unit",0,
+        "units",[[0,"/fixture/root.fk",900,1,[0,1],record_new(0,"kind","raw","bytes",10,"digest","root-source")],
+                 [1,"/fixture/lib.fk",901,0,[1],record_new(0,"kind","raw","bytes",11,"digest","lib-source")]],
+        "exports",[["entry",40,0,0]],"constants",[["held",300,1]],"contexts",[[1,"prior-closure"]]);
+    def rpicab-projection-nodes() = record_new(0,
+        "900",[69,100,200,0],"901",[115,300,0,0],"100",[190,300,987,1],"200",[241,40,-1,0],
+        "300",[24,88,0,0],"301",[1,7,0,0],"302",[1,8,0,0],"450",[194,40,400,40999],
+        "400",[69,500,600,0],"500",[240,41,301,302],"600",[243,42,700,0],"700",[242,301,-1,0],
+        "410",[3,411,412,0],"411",[2,0,0,0],"412",[110,413,0,0],"413",[1,1,0,0],
+        "420",[109,421,422,423],"421",[1,1,0,0],"422",[149,0,0,0],"423",[110,421,0,0]);
+    def rpicab-projection-meta(id) = id == 40 ? [450,0,0,-1,["fixture-builder","fixture-closure"]]
+        : id == 41 ? [410,2,0,-1,["fixture-builder","foreign-closure"]]
+        : id == 42 ? [420,0,1,40,["fixture-builder","fixture-closure"]] : nothing();
+    def rpicab-projection-read(catalog,nodes,counts,mode,selection) {
+        let key = selection.str(); let count = record_has(counts,key) ? record_get(counts,key) : 0;
+        record_set(counts,key,count + 1);
+        value_kind(selection) == "int" ? mode == "changed-node" && selection == 301 && count > 0 ? [1,99,0,0]
+            : mode == "memo-only" && selection == 100 && count > 0 ? [190,300,12345,0]
+            : record_has(nodes,key) ? record_get(nodes,key) : nothing()
+        : selection[0] == "catalog" ? mode == "changed-source" ? { record_set(record_get(catalog,"units")[0][5],"digest","changed"); catalog; } : catalog
+        : selection[0] == "function" ? mode == "changed-function" && selection[1] == 40 && count > 0 ? [450,0,0,-1,["fixture-builder","changed"]] : rpicab-projection-meta(selection[1])
+        : selection[0] == "literal" ? mode == "changed-literal" && count > 0 ? "changed" : "A" + byte_to_str(0) + "B" : nothing();
+    }
+    def rpicab-projection-run(mode) {
+        let catalog = rpicab-projection-catalog(); let nodes = rpicab-projection-nodes(); let counts = record_new(0);
+        mode == "unknown" ? record_set(nodes,"301",[999,1,2,3]) : 0;
+        mode == "function-zero" ? record_set(nodes,"200",[241,0,-1,0]) : 0;
+        mode == "wrapper-cycle" ? record_set(nodes,"450",[194,40,450,0]) : 0;
+        mode == "optional-child" ? record_set(nodes,"301",[201,302,300,901]) : 0;
+        [pifbc-project(catalog,selection => rpicab-projection-read(catalog,nodes,counts,mode,selection)),counts];
+    }
+    def rpicab-projection-static?(rows) = nil?(rows) ? 1 : head(rows)[0] != 194
+        && (head(rows)[0] != 190 || (head(rows)[2] == 0 && head(rows)[3] == 0)) && rpicab-projection-static?(tail(rows));
+    def rpicab-projection-check() {
+        let whole = rpicab-projection-run("plain"); let result = whole[0]; let mapping = record_get(result,"relocation");
+        let functions = record_get(result,"functions"); let nested = functions[record_get(mapping[1],"42") - 1];
+        let root = record_get(result,"nodes")[record_get(result,"roots")[0]];
+        let optional = rpicab-projection-run("optional-child")[0]; let optionalMap = record_get(optional,"relocation")[0];
+        let child = record_get(optional,"nodes")[record_get(optionalMap,"301")][3];
+        let cases = [["memo-only",""],["changed-node","projection-observation-changed"],["changed-source","projection-catalog-changed"],
+            ["changed-function","projection-observation-changed"],["changed-literal","projection-observation-changed"],
+            ["unknown","projection-unknown-node-tag"],["function-zero","projection-unowned-root-reference"],["wrapper-cycle","projection-wrapper-cycle"]];
+        let observations = [record_get(result,"status") == "projected" && len(functions) == 3,
+            !record_has(whole[1],"0") && rpicab-projection-static?(record_get(result,"nodes")),
+            record_get(mapping[0],"450") == record_get(mapping[0],"400"),
+            pifbc-proj-has(record_get(result,"strings"),"A" + byte_to_str(0) + "B"),
+            root[0] == 69 && root[1] == record_get(mapping[0],"901") && root[2] == record_get(mapping[0],"900"),
+            nested[3] == 1 && nested[4] == record_get(mapping[1],"40"),
+            functions[record_get(mapping[1],"41") - 1][5][1] == "foreign-closure",
+            child > 0 && child == record_get(optionalMap,"901"),
+            record_get(pifbc-project(rpicab-projection-catalog(),0),"reason") == "projection-reader-unavailable"];
+        let refusals = cases |> map(test => record_get(rpicab-projection-run(test[0])[0],"reason") == test[1]);
+        let okay = foldl((held,item) => held && item,1,observations) && foldl((held,item) => held && item,1,refusals);
+        okay ? 1 : form_error("[static-image-projection] " + [observations,refusals].str());
+    }
     def rpicab-restricted-computation-checks() {
         let changed = record_set(rpicab-held-owner, "value", "changed-after-hold");
         let held = rpicab-evaluate("rpicab-held-mutable-value", []);
@@ -237,7 +295,8 @@ section [form.bml] {
             rpicab-proof-owner-check(),
             rpicab-occupied-frame-check(),
             rpicab-explicit-budget-check(),
-            rpicab-publisher-check()
+            rpicab-publisher-check(),
+            rpicab-projection-check()
         ];
         let okay = foldl((held, item) => held && item, 1, observed);
         okay ? 1 : form_error("[restricted-image-computation] " + [observed, map(receipt => rpmw-admitted-result(receipt), [held, pure, safe, effect, eagerAnd, eagerOr, argument, divideFirst, effectFirst, three, kind, equal, bytes, ambient, code, rounds])].str());
