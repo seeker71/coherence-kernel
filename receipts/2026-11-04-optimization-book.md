@@ -900,3 +900,61 @@ resident 1658/1550, all with zero source compilation. These overlapping whole-ca
 readings establish no separate timing gain or storage-only parity. Private
 raw-memo-unique*, raw-memo-rows* and raw-memo-resolution* records retain the
 observations. The change lives in the native compiler's existing manifest writer.
+
+The landing continuation exposed a raw-image string identity defect. Source
+execution counted 10,000 equal spaces; disk execution counted only 1,023 on the
+first call and zero resident, without a stop. Imported images appended duplicate
+string IDs, while numeric JIT string equality correctly expected interned words.
+Import now uses the existing interner and extends the existing function relocation
+allocation with string relocations. Both eager and deferred literal reads use
+those rows; dormant strings stay pinned, including textual float literals.
+Standalone image loading preserves its ordinal table. No second cache or
+relocation table was introduced. This transport leaves with the native image
+loader.
+
+The existing cell image fixture now heats equality across the parent/image
+boundary. It returned 16776191 before repair and 16777215 after. The minimal disk
+probe now counts 10,000 on both calls with zero source compilation. In the landing
+predecessor sequence, the dependency reader again sees all 6,540 tokens and zero
+missing paths; before repair it joined words and reported 148 missing paths.
+The held manifest-only continuation is superseded by this combined source repair.
+
+Callee bodies now reconstruct at their actual call or JIT entry, rather than
+recursively when a caller is decoded. A malformed unused callee leaves the skipped
+branch returning 42 with no source compilation; reaching it stops with its owned
+image failure, on both demands. An out-of-image string ordinal behaves the same
+way. That failure revealed incorrect source attribution: imported names had an
+owner in the existing source-segment dependency table, but stop and hot-frame
+lookups ignored it. The shared lookup now reads that owner and two duplicate
+source scans are removed. Ordinary source attribution retains its original path
+meaning. A lowered-source stop and its resident reuse name the same recipe and
+source; imported malformed-string stops now name their target instead of the
+caller. Private raw-string-identity*, raw-string-intern*, raw-string-owner*,
+raw-string-bounds* and raw-call-demand* records retain the observations.
+
+SHA still returns the known digest with zero source compilation: the canonical
+string candidate measured 3,128 microseconds from disk and 1,578 resident. This
+does not establish storage-only parity.
+
+A separate first-source JIT observation returned 55 versus the expected 63,
+with correct values but six missing native pages. The publisher wrote the string
+"384" as the emitter image's source path, while its closure hash stayed correct.
+Admission tuples survived pair collection but were absent from the string
+collector's roots. The existing admission chain now marks its catalog, relocation
+and publication strings during the existing collection pass. No pins, cache or
+new table are needed. The same first-source observation returns 63, all six pages
+stand, and the image header retains the real source path. The existing emission
+guard returns 7. These roots leave with the native admission carrier.
+
+The JIT caller also discarded child stops. It now reports the existing native
+failure event and stops the active call; a failed admission remains offerable
+rather than being recorded as an emitter decline. A private injected emitter
+refusal previously returned 50005224 with no diagnostic. It now returns nothing,
+names the refusal and the active target recipe, and emits its owned event.
+Replacing that emitter with the healthy source in the same process returns
+50005224; the following resident call returns the same answer with zero source
+compilation. This observes source repair and reuse, not automatic repair of an
+arbitrary external resource. The landing predecessor sequence still returns
+cell 16777215, structural 1, freshness 31, ground 42 and door-links 0. Private
+raw-jit-*-trace*, raw-admission-roots*, raw-jit-event* and raw-jit-stop* records
+retain the before, failure, repair and re-observation evidence.

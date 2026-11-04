@@ -470,6 +470,7 @@ static void fk_prog_note_counts(void);
 static void fk_prog_note_body(long long idx);
 static long long fk_admission_live_roots(void);
 static void fk_admission_copy_roots(void);
+static void fk_admission_mark_strings(void);
 static void fk_prog_note_ice(const char *path, long long len, const char *hash_text);
 static int fk_prog_ast_shared, fk_prog_src_shared;
 static long long *fk_prog_D;
@@ -9374,7 +9375,7 @@ static void fk_lit_pin(long long si) {
 }
 static void fk_lit_pin_rows(long long from, long long to) {
     long long k = from;
-    while (k < to) { if (fk_node[k][0] == 24) { fk_lit_pin(fk_node[k][1]); } k = k + 1; }
+    while (k < to) { if (fk_node[k][0] == 24 || fk_node[k][0] == 50) { fk_lit_pin(fk_node[k][1]); } k = k + 1; }
 }
 static long long fk_kind_word[10];   /* value_kind's pinned names (fk_value_kind) */
 static void fk_lit_unpin_all(void) {
@@ -9441,6 +9442,7 @@ static void fk_smelt(void) {
      * word. Nothing local hangs from the field, so the melt leaves it alone -- no pass over its nodes or pairs, which
      * would mark nothing and cost every melt the whole field. */
     fk_clo_smark_roots();
+    fk_admission_mark_strings();
     k = 0;
     while (k < fk_hold_n) { if (fk_hold_live(fk_hold_rows[k])) { fk_smark(fk_node[fk_hold_rows[k]][2]); } k = k + 1; }
     long long freed = 0;
@@ -10154,7 +10156,7 @@ struct fk_jit_cx {
 static struct fk_jit_cx fk_jit_cx;
 #define FK_JIT_HEAT 4096
 static void **fk_jit_page;           /* per defn: its page, or 0 */
-/* per defn: 0 never offered, 1 offered (a page bound or the cell declined), 2 waiting in the line, 3 written in place of
+/* per defn: 0 offerable, 1 offered (a page bound or the cell declined), 2 waiting in the line, 3 written in place of
  * its calls by a page (jit_node ["inline", c]): its own time is its callers' pages' time, so it is offered by heat only */
 static unsigned char *fk_jit_state;
 static long long fk_jit_cap;
@@ -13749,6 +13751,7 @@ static int fk_f64_emit_node(int n, unsigned int *words, long long *wn, int *ntem
 static int fk_f64_body_of(long long fx, long long *root_out, long long *orig_out, long long *body_out) {
     long long arity = fk_fnar[fx];
     if (arity < 1 || arity > 8) { return 0; }
+    fk_demand_access(fx, 0);
     long long root = fk_fn[fx];
     if (root < 0 || root >= fk_node_count) { return 0; }
     long long body = root;
@@ -17251,15 +17254,6 @@ static long long fk_hot_pick(long long want, long long *picked_j, long long *pic
     }
     return np;
 }
-static const char *fk_hot_unit_of(long long so) {
-    const char *unit = fk_src_root_path;
-    long long d = 0;
-    while (d < fk_src_dep_count) {
-        if (so >= fk_src_dep_text_off[d] && so < fk_src_dep_text_off[d] + fk_src_dep_text_len[d] && fk_src_dep_text_len[d] > 0) { unit = fk_src_dep_path[d]; }
-        d = d + 1;
-    }
-    return unit;
-}
 /* ── THE FATAL-SIGNAL ORGAN ──────────────────────────────────────────────────────────────────────────────────────
  * A SIGSEGV, SIGBUS, SIGILL, SIGFPE or SIGABRT used to end the process with nothing said (rc 138/139, an empty .err):
  * a band-sweep shard lay dead for 50 minutes and the cause was read from the operating system's crash reports. Now the
@@ -19320,6 +19314,11 @@ static void fk_admission_copy_roots(void) {
         a->publication = fk_mcopy(a->publication);
     }
 }
+static void fk_admission_mark_strings(void) {
+    for (fk_admission *a = fk_admissions; a; a = a->previous) {
+        fk_smark(a->catalog); fk_smark(a->relocation); fk_smark(a->publication);
+    }
+}
 static fk_admission *fk_admission_owner(long long fn) {
     if (fn < 0 || fn >= fk_fn_count) return 0;
     fk_admission *a = fk_admissions;
@@ -20330,11 +20329,6 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             long long so = fk_fnsym_s[sj];
             /* the unit whose text holds the name; the root text has no dep row */
             const char *unit = fk_hot_unit_of(so);
-            long long d = 0;
-            while (d < fk_src_dep_count) {
-                if (so >= fk_src_dep_text_off[d] && so < fk_src_dep_text_off[d] + fk_src_dep_text_len[d] && fk_src_dep_text_len[d] > 0) { unit = fk_src_dep_path[d]; }
-                d = d + 1;
-            }
             char num[32];
             long long nl;
             nl = sprintf(num, "%lld|", picked_h[q]); fk_sappend(num, nl);
@@ -22438,11 +22432,6 @@ static const char *fk_stop_where(const char *msg, char *buf, long long cap) {
     if (j > fk_fntop || fk_srctext == 0) { buf[n] = 0; return buf; }
     long long so = fk_fnsym_s[j], nl = fk_fnsym_n[j];
     const char *unit = fk_hot_unit_of(so);
-    long long d = 0;
-    while (d < fk_src_dep_count) {
-        if (so >= fk_src_dep_text_off[d] && so < fk_src_dep_text_off[d] + fk_src_dep_text_len[d] && fk_src_dep_text_len[d] > 0) { unit = fk_src_dep_path[d]; }
-        d = d + 1;
-    }
     const char *in = " -- in ";
     while (in[k] != 0 && n < cap - 1) { buf[n] = in[k]; n = n + 1; k = k + 1; }
     k = 0;
@@ -22560,6 +22549,20 @@ static long long fk_srcseg_at(long long off) {
         if (fk_srcseg_off[mid] <= off) lo = mid + 1; else hi = mid;
     }
     return lo - 1;
+}
+static const char *fk_hot_unit_of(long long so) {
+    long long seg = fk_srcseg_at(so);
+    if (seg >= 0) {
+        long long dep = fk_srcseg_dep[seg];
+        if (dep >= 0 && dep < fk_src_dep_count) { return fk_src_dep_path[dep]; }
+    }
+    const char *unit = fk_src_root_path;
+    long long d = 0;
+    while (d < fk_src_dep_count) {
+        if (so >= fk_src_dep_text_off[d] && so < fk_src_dep_text_off[d] + fk_src_dep_text_len[d] && fk_src_dep_text_len[d] > 0) { unit = fk_src_dep_path[d]; }
+        d = d + 1;
+    }
+    return unit;
 }
 /* the file and its own line for an offset into the assembled unit: 1 with both set, 0 when the
  * offset lies in text no file holds (a symbol an image carried, or a unit built in memory) */
@@ -27406,11 +27409,16 @@ static void fk_string_table_reset(void) {
         k = k + 1;
     }
 }
-static void fk_fkb_read_table_string(void) {
+static long long fk_fkb_read_table_string(int canonical) {
     long long n = fk_fkb_read_u32();
     if (n < 0 || fk_fkb_pos + n > fk_fkb_len) {
         fk_fkb_mark_bad("truncated table string");
-        return;
+        return -1;
+    }
+    if (canonical) {
+        long long word = fk_sbuf(fk_buf + fk_fkb_pos, n);
+        fk_fkb_pos += n;
+        return fk_stri(word);
     }
     if (fk_sp >= fk_scap_s) {
         fk_so = (long long *)fk_store_grow('O', (void **)&fk_so, fk_scap_s * 8, fk_scap_s * 16, FK_STORE_STR_CELLS * 8, 0);
@@ -27441,6 +27449,7 @@ static void fk_fkb_read_table_string(void) {
     fk_snext[fk_sp] = fk_shash[bucket];
     fk_shash[bucket] = fk_sp;
     fk_sp = fk_sp + 1;
+    return fk_sp - 1;
 }
 static long long fk_fkb_remap_fn(long long old_fn, long long fn_base) {
     if (old_fn <= 0) {
@@ -27497,13 +27506,10 @@ static long long fk_fkb_node_arity_for_tag(long long tag) {
 }
 static long long fk_fkb_remap_field(long long tag, long long field, long long value,
                                     long long ar, long long node_base, long long fn_base,
-                                    long long str_base, int *node_child) {
+                                    int *node_child) {
     if (node_child) *node_child = 0;
     if (value < 0) {
         return value;
-    }
-    if ((tag == 24 || tag == 50) && field == 1) {
-        return value + str_base;
     }
     if ((tag == 12 || tag == 240 || tag == 241 || tag == 243) && field == 1) {
         return fk_fkb_remap_fn(value, fn_base);
@@ -27634,7 +27640,7 @@ typedef struct fk_demand {
     long long *fn_map;
     unsigned char *live;
     unsigned char *ready;
-    long long nr, nf, node_base, fn_base, str_base;
+    long long nr, nf, node_base, fn_base, ns;
 } fk_demand;
 static fk_demand *fk_demands, *fk_demand_building;
 static void fk_demand_free(fk_demand *d) {
@@ -27763,9 +27769,13 @@ static void fk_demand_node(fk_demand *d, long long image) {
     if (fk_fkb_bad) return;
     int n1 = 0, n2 = 0, n3 = 0;
     long long ar = fk_fkb_node_arity_for_tag(tag);
-    long long f1 = fk_fkb_remap_field(tag, 1, c1, ar, d->node_base, d->fn_base, d->str_base, &n1);
-    long long f2 = fk_fkb_remap_field(tag, 2, c2, ar, d->node_base, d->fn_base, d->str_base, &n2);
-    long long f3 = fk_fkb_remap_field(tag, 3, c3, ar, d->node_base, d->fn_base, d->str_base, &n3);
+    long long f1 = fk_fkb_remap_field(tag, 1, c1, ar, d->node_base, d->fn_base, &n1);
+    long long f2 = fk_fkb_remap_field(tag, 2, c2, ar, d->node_base, d->fn_base, &n2);
+    long long f3 = fk_fkb_remap_field(tag, 3, c3, ar, d->node_base, d->fn_base, &n3);
+    if (tag == 24 || tag == 50) {
+        if (c1 < 0 || c1 >= d->ns) { fk_fkb_mark_bad("import string is outside the image"); return; }
+        f1 = d->fn_map[d->nf + c1];
+    }
     if ((n1 && c1 >= d->nr) || (n2 && c2 >= d->nr) || (n3 && c3 >= d->nr)) {
         fk_fkb_mark_bad("import node child is outside the image");
         return;
@@ -27782,10 +27792,6 @@ static void fk_demand_node(fk_demand *d, long long image) {
     if (n1 && c1 >= 0) fk_demand_node(d, c1);
     if (n2 && c2 >= 0) fk_demand_node(d, c2);
     if (n3 && c3 >= 0) fk_demand_node(d, c3);
-    if (!fk_fkb_bad && (tag == 12 || tag == 240 || tag == 241 || tag == 243) && f1 >= 0) {
-        fk_demand *callee = fk_demand_ensure(f1);
-        if (fk_fkb_bad) d->failed = callee;
-    }
 }
 static int fk_src_import_fkb_read(const char *fkb_path, fk_fkb_snapshot *snapshot) {
     fk_fkb_snapshot_use(snapshot);
@@ -27808,7 +27814,6 @@ static int fk_src_import_fkb_read(const char *fkb_path, fk_fkb_snapshot *snapsho
     long long fn_base = fk_defn_next;
     for (long long f = fn_base; f < fn_base + nf - 1 && f < fk_fn_cap_capacity; f++) fk_fn_meta_known[f] = 0;
     long long node_base = fk_node_count;
-    long long str_base = fk_sp;
     long long i = 0;
     while (!fk_fkb_bad && i < nf) {
         fn_roots[i] = fk_fkb_read_signed();
@@ -27835,7 +27840,7 @@ static int fk_src_import_fkb_read(const char *fkb_path, fk_fkb_snapshot *snapsho
         d->path = malloc((unsigned long)fk_cstrlen(fkb_path) + 1);
         if (!d->path) fk_die("image demand: out of memory");
         memcpy(d->path, fkb_path, (unsigned long)fk_cstrlen(fkb_path) + 1);
-        d->nr = nr; d->nf = nf; d->node_base = node_base; d->fn_base = fn_base; d->str_base = str_base;
+        d->nr = nr; d->nf = nf; d->node_base = node_base; d->fn_base = fn_base;
         d->bytes = nr > 0 ? malloc((unsigned long)nr * 36) : 0;
         d->image_root = fn_roots;
         fn_roots = malloc((unsigned long)nf * 8);
@@ -27858,9 +27863,9 @@ static int fk_src_import_fkb_read(const char *fkb_path, fk_fkb_snapshot *snapsho
             long long c3 = fk_fkb_read_signed();
             int n1 = 0, n2 = 0, n3 = 0;
             long long ar = fk_fkb_node_arity_for_tag(tag);
-            long long f1 = fk_fkb_remap_field(tag, 1, c1, ar, node_base, fn_base, str_base, &n1);
-            long long f2 = fk_fkb_remap_field(tag, 2, c2, ar, node_base, fn_base, str_base, &n2);
-            long long f3 = fk_fkb_remap_field(tag, 3, c3, ar, node_base, fn_base, str_base, &n3);
+            long long f1 = fk_fkb_remap_field(tag, 1, c1, ar, node_base, fn_base, &n1);
+            long long f2 = fk_fkb_remap_field(tag, 2, c2, ar, node_base, fn_base, &n2);
+            long long f3 = fk_fkb_remap_field(tag, 3, c3, ar, node_base, fn_base, &n3);
             if ((n1 && c1 >= nr) || (n2 && c2 >= nr) || (n3 && c3 >= nr)) {
                 fk_fkb_mark_bad("import node child is outside the image");
                 free(fn_roots);
@@ -27875,15 +27880,31 @@ static int fk_src_import_fkb_read(const char *fkb_path, fk_fkb_snapshot *snapsho
     }
     fk_node_count = fk_node_count + nr;
     long long ns = fk_fkb_read_signed();
-    if (ns < 0) {
-        fk_fkb_mark_bad("negative import string count");
+    if (ns < 0 || ns > (fk_fkb_len - fk_fkb_pos) / 4 ||
+        (unsigned long long)nf + (unsigned long long)ns > ~0UL / sizeof(long long)) {
+        fk_fkb_mark_bad("import string count exceeds artifact bounds");
         free(fn_roots);
         return 0;
     }
+    /* Functions and strings share the image's relocation table. The existing
+     * interner gives equal bytes one word, including strings already resident;
+     * native string equality relies on that identity. This seed relocation
+     * leaves with the native Form image loader. */
+    fn_roots = realloc(fn_roots, (unsigned long)(nf + ns) * 8);
+    if (!fn_roots) fk_die("image relocation: out of memory");
+    if (fk_demand_building) fk_demand_building->ns = ns;
     i = 0;
     while (!fk_fkb_bad && i < ns) {
-        fk_fkb_read_table_string();
+        fn_roots[nf + i] = fk_fkb_read_table_string(1);
         i = i + 1;
+    }
+    if (!fk_demand_building) {
+        for (long long k = node_base; !fk_fkb_bad && k < node_base + nr; k++) {
+            if (fk_node[k][0] != 24 && fk_node[k][0] != 50) continue;
+            long long string = fk_node[k][1];
+            if (string < 0 || string >= ns) { fk_fkb_mark_bad("import string is outside the image"); break; }
+            fk_node[k][1] = fn_roots[nf + string];
+        }
     }
     i = 1;
     while (i < nf) {
@@ -28059,7 +28080,7 @@ static int fk_src_import_fkb_read(const char *fkb_path, fk_fkb_snapshot *snapsho
         /* The admitted image owns its strings even while their nodes sleep.
          * The existing pin table retains them without reconstructing nodes. */
         if (fk_demand_building) {
-            for (long long s = str_base; s < str_base + ns; s++) fk_lit_pin(s);
+            for (long long s = 0; s < ns; s++) fk_lit_pin(fk_demand_building->fn_map[nf + s]);
         } else if (ns > 0) fk_lit_pin_rows(node_base, node_base + nr);
         /* the hold this image built over each row's initializer */
         long long k = node_base;
@@ -28294,7 +28315,7 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
     fk_string_table_reset();
     i = 0;
     while (!fk_fkb_bad && i < ns) {
-        fk_fkb_read_table_string();
+        fk_fkb_read_table_string(0);
         i = i + 1;
     }
     fk_hold_n = 0;   /* every hold of the image starts empty */
@@ -30419,6 +30440,7 @@ static void fk_jit_offer_one(long long c) {
     if (c <= 0 || c >= fk_fn_count) { return; }
     fk_jit_reserve(c + 1);
     if (fk_jit_state[c] == 1) { return; }
+    fk_demand_access(c, 0);
     fk_jit_state[c] = 1;
     if (!fk_jit_ready()) { return; }
     long long body = fk_fn[c];
@@ -30438,6 +30460,18 @@ static void fk_jit_offer_one(long long c) {
     fk_cur_fn = cur;
     fk_jit_offers = fk_jit_offers + 1;
     fk_jit_offer_us = fk_jit_offer_us + (fk_mono_ns() - t0) / 1000;
+    long long stopped = fk_cr_key_find(r, "stopped");
+    if (stopped != fk_nothing) {
+        char detail[1024];
+        long long reason = fk_cr_key_find(fk_cr_key_find(r, "publication"), "reason");
+        if (!fk_is_str(reason)) reason = fk_cr_key_find(stopped, "message");
+        long long si = fk_stri(reason), n = FK_SLEN(si);
+        if (n >= (long long)sizeof(detail)) n = sizeof(detail) - 1;
+        memcpy(detail, FK_SBYTES(si), (unsigned long)n); detail[n] = 0;
+        fk_jit_state[c] = 0; /* a failed admission is not an emitter decline */
+        fk_diag_path("native-failure", fk_jit_unit, detail);
+        fk_stop(detail);
+    }
     if (fk_conf("FK_JIT_SAY")) {
         long long j = 0, ns = 0, nn = 0;
         while (j < fk_fntop) { if (fk_fnidx[j] == c) { ns = fk_fnsym_s[j]; nn = fk_fnsym_n[j]; break; } j = j + 1; }
