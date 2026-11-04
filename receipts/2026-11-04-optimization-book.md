@@ -723,3 +723,26 @@ calls were 79 and 83. Unreached function bodies stay bytes. A sibling that
 only reads a shared function wakes that body. These readings sit with the
 compact-image readings above and do not establish a further speedup.
 Storage-only parity remains open.
+
+A sealed raw image with a negative node-symbol count was silently admitted:
+answer 42, zero source work and no diagnostic. Both native readers now share
+the section validation already expressed by Form: the count is zero or the
+node count, rows are ordered, and dependency counts are nonnegative and fit
+the remaining bytes. This removes 12 seed lines. Execution relationships still
+come from the existing AST, roots and export tables.
+
+Negative count, partial count, unordered rows and negative dependency count
+were each exercised with a freshly sealed malformed image. Direct execution
+refused the image with its specific compile-error event. Raw-cell admission
+reported image-admission-failed, rebuilt and re-admitted the image through the
+existing repair flow, and returned 42. The next process reused the repaired
+image with zero source work and no diagnostic. Commands, malformed producers
+and outputs are retained under raw-symbol-shape and raw-symbol-* in the private
+research directory. Cell and image witnesses return 16777215, import-carry 255;
+the native authoring guide completed successfully.
+
+The current compact-image samples were 1541/1893/1663 microseconds from disk
+and 100/108/86 resident, with zero source compilation. The validation repair
+establishes correct refusal, not another timing gain. A private stage profile
+measured collection 537, image opening 363, import 467 and catalog capture 131
+microseconds; storage-only parity remains open.

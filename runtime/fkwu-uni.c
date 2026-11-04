@@ -27578,6 +27578,28 @@ static int fk_fkb_restore_functions(long long nf, long long fn_base) {
     }
     return !fk_fkb_bad;
 }
+/* Both native readers attest the same optional inspection section. Its
+ * executable relationships already live in the AST, roots and exports. */
+static int fk_fkb_read_node_symbols(long long nodes) {
+    long long count = fk_fkb_read_signed();
+    if (count != 0 && count != nodes) {
+        fk_fkb_mark_bad("node symbol count differs from the node table");
+        return 0;
+    }
+    for (long long i = 0; !fk_fkb_bad && i < count; i++) {
+        long long node = fk_fkb_read_signed();
+        (void)fk_fkb_read_signed();
+        long long deps = fk_fkb_read_signed();
+        if (node != i) fk_fkb_mark_bad("unordered node symbols");
+        if (deps < 0 || deps > (fk_fkb_len - fk_fkb_pos) / 18)
+            fk_fkb_mark_bad("node symbol dependency count exceeds artifact bounds");
+        for (long long d = 0; !fk_fkb_bad && d < deps; d++) {
+            (void)fk_fkb_read_signed();
+            (void)fk_fkb_read_signed();
+        }
+    }
+    return !fk_fkb_bad;
+}
 static long long fk_cell_import_root = -1, fk_cell_import_fresh;
 #if !defined(_WIN32)
 static long long fk_cell_import_dep(unsigned long long unit);
@@ -27901,20 +27923,7 @@ static int fk_src_import_fkb_read(const char *fkb_path, fk_fkb_snapshot *snapsho
         memcpy(fk_demand_building->fn_map, fn_roots, (unsigned long)nf * 8);
     }
     free(fn_roots);
-    long long node_symbol_count = fk_fkb_read_signed();
-    i = 0;
-    while (!fk_fkb_bad && i < node_symbol_count) {
-        (void)fk_fkb_read_signed();
-        (void)fk_fkb_read_signed();
-        long long dep_count = fk_fkb_read_signed();
-        long long d = 0;
-        while (!fk_fkb_bad && d < dep_count) {
-            (void)fk_fkb_read_signed();
-            (void)fk_fkb_read_signed();
-            d = d + 1;
-        }
-        i = i + 1;
-    }
+    if (!fk_fkb_read_node_symbols(nr)) return 0;
     /* v6: bind the unit's top-level lets, each initializer node shifted to where
      * this image's nodes landed, as its fn symbols are above. */
     long long const_count = fk_fkb_read_signed();
@@ -28132,28 +28141,7 @@ static int fk_fkb_restore_symbol_image(long long version) {
      * the image ended. Leaving them behind made every freshly-written image
      * look like it had trailing bytes, so BML and Form caches rebuilt on
      * every run despite byte-identical source and artifacts. */
-    long long node_symbol_count = fk_fkb_read_signed();
-    if (node_symbol_count < 0 || node_symbol_count > fk_fkb_len) {
-        fk_fkb_mark_bad("node symbol count exceeds artifact bounds");
-        return 0;
-    }
-    i = 0;
-    while (!fk_fkb_bad && i < node_symbol_count) {
-        (void)fk_fkb_read_signed();
-        (void)fk_fkb_read_signed();
-        long long dependency_count = fk_fkb_read_signed();
-        if (dependency_count < 0 || dependency_count > fk_fkb_len) {
-            fk_fkb_mark_bad("node symbol dependency count exceeds artifact bounds");
-            return 0;
-        }
-        long long dependency = 0;
-        while (!fk_fkb_bad && dependency < dependency_count) {
-            (void)fk_fkb_read_signed();
-            (void)fk_fkb_read_signed();
-            dependency = dependency + 1;
-        }
-        i = i + 1;
-    }
+    if (!fk_fkb_read_node_symbols(fk_node_count)) return 0;
     /* v6's constant table: a whole program image already holds its lets as
      * hold nodes, so its rows are consumed to attest the end, not rebound. */
     long long const_count = fk_fkb_read_signed();
