@@ -26434,12 +26434,6 @@ FK_PHASED(FK_PHASE_LOAD, int, fk_src_collect_file, (const char *path, long long 
     if (fk_src_dep_lookup(path) >= 0) {
         return 1;
     }
-    long long mtime = fk_path_mtime_raw(path);
-    long long size = fk_path_size_raw(path);
-    if (mtime <= 0 || size < 0) {
-        fk_diag_path("error", path, "dependency source is missing or not stat-readable");
-        return 0;
-    }
 #if defined(_WIN32)
     int fd = open(path, 0x8000);
 #else
@@ -26449,9 +26443,23 @@ FK_PHASED(FK_PHASE_LOAD, int, fk_src_collect_file, (const char *path, long long 
         fk_diag_path("error", path, "dependency source could not be opened");
         return 0;
     }
+#ifdef FK_HAVE_STAT_HEADER
+    struct stat state;
+    int stated = fstat(fd, &state);
+    long long mtime = stated == 0 ? (long long)state.st_mtime : -1;
+    long long size = stated == 0 ? (long long)state.st_size : -1;
+#else
+    long long mtime = fk_path_mtime_raw(path), size = fk_path_size_raw(path);
+#endif
+    if (mtime <= 0 || size < 0) {
+        int closed = close(fd);
+        fk_diag_path("error", path, closed == 0 ? "opened dependency metadata could not be read" :
+            "dependency metadata and descriptor release failed");
+        return 0;
+    }
     long long got = fk_read_all_dynamic(fd, size + 1);
-    close(fd);
-    if (got < 0) {
+    int closed = close(fd);
+    if (got < 0 || closed != 0) {
         if (got == -3) {
             fk_diag_path("error", path,
                     "dependency source could not grow the dynamic read buffer");
@@ -27245,7 +27253,18 @@ static int fk_fkb_open_checked(const char *path, const char *source, const char 
         if (errno != ENOENT) fk_fkb_mark_bad("image open failed");
         return 0;
     }
-    long long got = fk_read_all_dynamic(fd, fk_path_size_raw(path));
+#ifdef FK_HAVE_STAT_HEADER
+    struct stat state;
+    if (fstat(fd, &state) != 0 || state.st_size < 0) {
+        int closed = close(fd);
+        fk_fkb_mark_bad(closed == 0 ? "opened image metadata could not be read" :
+            "image metadata and descriptor release failed"); return 0;
+    }
+    long long size = (long long)state.st_size;
+#else
+    long long size = fk_path_size_raw(path);
+#endif
+    long long got = fk_read_all_dynamic(fd, size);
     int closed = close(fd);
     if (got < 20 || closed != 0) { fk_fkb_mark_bad("incomplete image read"); return 0; }
     fk_fkb_begin(got);
@@ -27697,14 +27716,16 @@ static int fk_src_import_fkb_read(const char *fkb_path, fk_fkb_snapshot *snapsho
     /* Reusing a unit preserves both its held values and its function values.
      * Rewrite direct function references through the selected export table,
      * before any imported code or initializer can run. */
-    for (long long k = node_base; k < node_base + nr; k++) {
-        long long tag = fk_node[k][0], fn = fk_node[k][1];
-        if ((tag == 12 || tag == 240 || tag == 241 || tag == 243) && fn >= fn_base && fn < fn_base + nf - 1)
-            fk_node[k][1] = fn_roots[fn - fn_base + 1];
-    }
-    for (long long fn = fn_base; fn < fn_base + nf - 1; fn++) {
-        long long parent = fk_fn_parent_idx[fn];
-        if (parent >= fn_base && parent < fn_base + nf - 1) fk_fn_parent_idx[fn] = fn_roots[parent - fn_base + 1];
+    if (!image_graph_retained) {
+        for (long long k = node_base; k < node_base + nr; k++) {
+            long long tag = fk_node[k][0], fn = fk_node[k][1];
+            if ((tag == 12 || tag == 240 || tag == 241 || tag == 243) && fn >= fn_base && fn < fn_base + nf - 1)
+                fk_node[k][1] = fn_roots[fn - fn_base + 1];
+        }
+        for (long long fn = fn_base; fn < fn_base + nf - 1; fn++) {
+            long long parent = fk_fn_parent_idx[fn];
+            if (parent >= fn_base && parent < fn_base + nf - 1) fk_fn_parent_idx[fn] = fn_roots[parent - fn_base + 1];
+        }
     }
     free(fn_roots);
     long long node_symbol_count = fk_fkb_read_signed();
@@ -29267,7 +29288,8 @@ static long long fk_cell_catalog_capture(long long root, long long fresh) {
         }
     }
     for (long long i = fk_fntop; i-- > 0;) {
-        long long unit = fk_cell_member_index(root, fk_cell_dep_of_off(fk_fnsym_s[i]));
+        if (!fk_win_row_ok(i)) continue;
+        long long unit = fk_cell_member_index(root, fk_fsym_dep[i]);
         if (unit >= 0) {
             long long row[] = {fk_sbuf(fk_srctext + fk_fnsym_s[i], fk_fnsym_n[i]),
                 fk_fnidx[i] << 1, fk_fnar[fk_fnidx[i]] << 1, unit << 1};
@@ -29288,14 +29310,17 @@ static long long fk_cell_catalog_capture(long long root, long long fresh) {
 
 /* Name lookup walks declaration rows backwards. Source-member order alone
  * does not describe that precedence when libraries were admitted separately. */
-static unsigned long long fk_cell_binding_order(long long root, long long fresh, unsigned long long h) {
+static unsigned long long fk_cell_binding_order(long long root, long long fresh, long long retained, unsigned long long h) {
     for (long long kind = 0; kind < 2; kind++) {
         h = (h ^ (unsigned long long)kind) * 1099511628211ULL;
+        if (!retained) continue;
         long long count = kind ? fk_const_top : fk_fntop;
         for (long long i = 0; i < count; i++) {
+            if (!kind && !fk_win_row_ok(i)) continue;
             long long off = kind ? fk_const_s[i] : fk_fnsym_s[i];
             long long len = kind ? fk_const_n[i] : fk_fnsym_n[i];
-            long long dep = fk_cell_dep_of_off(off), unit = fk_cell_member_index(root, dep);
+            long long dep = kind ? fk_cell_dep_of_off(off) : fk_fsym_dep[i];
+            long long unit = fk_cell_member_index(root, dep);
             if (dep >= 0 && dep < fresh && unit >= 0) {
                 h = (h ^ (unsigned long long)unit) * 1099511628211ULL;
                 h = (h ^ fk_bytes_fnv1a(fk_srctext + off, len)) * 1099511628211ULL;
@@ -29316,7 +29341,7 @@ static int fk_cell_closure_identity(long long root, long long fresh, char *ident
             retained++;
         }
     }
-    context = fk_cell_binding_order(root, fresh, context);
+    context = fk_cell_binding_order(root, fresh, retained, context);
     if (!fk_src_unit_hash_members(0, fk_cd_win_n[root], fk_cd_win[root], identity, FK_SRC_HASH_CAP)) return 0;
     long long pos = fk_cstrlen(identity);
     return fk_source_hash_append(identity, FK_SRC_HASH_CAP, &pos, "|retained-v2|n=") &&
@@ -29662,12 +29687,11 @@ FK_PHASED(FK_PHASE_LOAD, int, fk_cell_load, (const char *path, long long *root_o
     /* Lowering may admit its own cells. Only definitions parsed in this
      * window belong to the admission below. */
     fn0 = fk_defn_next;
-    fk_src_check_balance();
     int parsed = !fk_src_unrunnable;
     char identity[FK_SRC_HASH_CAP], image_path[FK_PATH_CAP];
     int identified = parsed && fk_cell_closure_identity(*root_out, d0, identity);
     int image_loaded = 0;
-    if (!fk_cell_image_busy && identified && fk_cell_image_path(path, image_path) && fk_path_size_raw(image_path) >= 0) {
+    if (!fk_cell_image_busy && identified && fk_cell_image_path(path, image_path)) {
         if (fk_fkb_open_checked(image_path, path, identity)) {
             fk_fkb_snapshot snapshot = {0}; fk_fkb_snapshot_take(&snapshot);
             fk_cell_import_root = *root_out; fk_cell_import_fresh = d0;
@@ -29675,6 +29699,12 @@ FK_PHASED(FK_PHASE_LOAD, int, fk_cell_load, (const char *path, long long *root_o
             fk_cell_import_root = -1;
             if (!image_loaded && fk_fkb_bad) fk_fkb_repair_signal(image_path);
         } else if (fk_fkb_bad) fk_fkb_repair_signal(image_path);
+    }
+    /* A validated image already witnesses syntax for this complete source
+     * identity. Balance is a source-compilation check, never an image pass. */
+    if (parsed && !image_loaded) {
+        fk_src_check_balance();
+        parsed = !fk_src_unrunnable;
     }
     if (parsed && !image_loaded) {
         for (k = d0; k < fk_src_dep_count; k++)

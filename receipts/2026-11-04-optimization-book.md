@@ -526,6 +526,33 @@ seconds. Observer scans are separate from that operation. Whole-program
 storage-only cold/warm behavior remains unestablished; measured admission and
 first native resource setup still differ.
 
+A further loader pass reads size and modification time from the already-open
+descriptor, checks its release, and removes the separate image-existence stat.
+Image admission reuses the existing symbol-to-dependency table, skips an
+unchanged function-reference map, and leaves source balance checking in source
+compilation. The retained-context hash keeps the same bytes when its binding
+scan is empty. Cell and image capability checks return 16777215; import-carry
+returns 255 and binary freshness 31.
+
+The 2,048-function observation (65,410 source bytes, 687,946 image bytes) returns
+42 with zero source work on every disk reuse. Three fresh-process CPU readings
+were 2320/2417/2309 microseconds before and 2385/2267/2247 after, with resident
+calls at 87–96 microseconds. The small median change is not a reliable speedup
+claim. A private phase observation attributes 727 microseconds to collection,
+1 to identity, 788 to image reading/validation, 587 to import and 88 to catalog
+capture. Source collection and image validation still perform CPU work; they
+are not storage bandwidth.
+
+A faster descriptor-path proposal was rejected after native hardlink probes.
+Opening alias B changed `F_GETPATH` on an already-open A; removing B left one
+link yet made that query fail while `realpath(A)` succeeded. Calling `realpath`
+first also changed the result, invalidating that ordering as a shadow test.
+Pathname ownership therefore keeps its existing resolver. This pass introduces
+no alternate loader, format or cache. Its descriptor reads and table operations
+remain mechanical seed transport to leave with the native Form loader. Exact
+failures, alias lifecycle observations and timing samples remain in the private
+research and image-review directories of the isolated checkout.
+
 The subsequent shared-field probe observed all 110 GC generations across three
 500-call windows. Heap capacity and growth count stayed fixed; RSS reads caused
 no collection. RSS grew 480 KiB, 240 KiB and 128 KiB. The earlier large step was
