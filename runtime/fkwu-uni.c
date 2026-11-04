@@ -27833,11 +27833,12 @@ static int fk_src_import_fkb_read(const char *fkb_path, fk_fkb_snapshot *snapsho
         memcpy(d->path, fkb_path, (unsigned long)fk_cstrlen(fkb_path) + 1);
         d->nr = nr; d->nf = nf; d->node_base = node_base; d->fn_base = fn_base; d->str_base = str_base;
         d->bytes = nr > 0 ? malloc((unsigned long)nr * 36) : 0;
-        d->image_root = malloc((unsigned long)nf * 8);
+        d->image_root = fn_roots;
+        fn_roots = malloc((unsigned long)nf * 8);
         d->live = nr > 0 ? calloc((unsigned long)nr, 1) : 0;
-        if ((nr > 0 && (!d->bytes || !d->live)) || !d->image_root) fk_die("image demand: out of memory");
+        if ((nr > 0 && (!d->bytes || !d->live)) || !fn_roots) fk_die("image demand: out of memory");
         if (nr > 0) memcpy(d->bytes, fk_buf + fk_fkb_pos, (unsigned long)nr * 36);
-        memcpy(d->image_root, fn_roots, (unsigned long)nf * 8);
+        fn_roots[0] = d->image_root[0];
         fk_fkb_pos += nr * 36;
         for (long long z = 0; z < nr; z++) {
             fk_node[node_base + z][0] = fk_node[node_base + z][1] = 0;

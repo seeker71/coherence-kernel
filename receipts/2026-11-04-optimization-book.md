@@ -846,3 +846,23 @@ private-binary run retained a builder-identity mismatch in bit 1024; no runtime
 behavior was changed to satisfy that mismatch. Private raw-native-realpath*,
 raw-native-path-owner*, raw-collection-profile* and raw-image-path* records retain
 the commands and observations.
+
+The path correction and image-owner repair landed as
+90df19375ec59e99f4cb21b6fbaa76906a3ced98. Its observation-ledger continuation
+preserved both sets of appended readings before resuming publication.
+
+Raw admission now transfers the already decoded function-root array into its
+existing demand owner. The second existing allocation becomes the relocation
+map; slot zero is preserved and the existing loop fills its positive entries.
+This removes one full root-array copy, with the same two allocations and no new
+table. Before the map handoff, abort frees the local map and demand-owned roots
+separately; after handoff the demand owns both. Nonraw import is unchanged.
+This transport leaves with native image admission. The malformed section still
+emits image-admission-failed followed by image-admitted and returns 42. A deferred
+malformed node stops on both demands with the original image attribution, while
+the intervening healthy function returns 73; all those reused calls compile zero
+source units. Cell and image checks return 16777215 and import-carry 255.
+Reached SHA remains correct at 2,962 microseconds disk and 1,477 resident. This
+single copy removal carries no separate elapsed-time gain claim. A checksum
+half-word candidate matched the independent native fingerprint on all 49 cases,
+but its whole-call timings overlapped the control and it remains private.
