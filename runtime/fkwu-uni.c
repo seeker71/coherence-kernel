@@ -16563,11 +16563,15 @@ static int fk_owned_contains(fk_owned_generation *g, long long v) {
     if (v < 0) { return fk_nidx(v) == g->root; }
     at = (v >> 1) - FK_PAIR_BASE; return at >= g->pb && at < g->pb + g->pu;
 }
-static int fk_owned_value(long long v) {
+static int fk_owned_candidate(long long v) {
     if (!fk_field_on || !fk_owned_reader_n || (v & 1) == 0 || v == fk_nothing) { return 0; }
     if (fk_is_str(v) && fk_stri(v) < FK_STR_BASE) { return 0; }
     if (fk_isf(v) && fk_fidx(v) < FK_FLT_BASE) { return 0; }
     if (v > 0 && (v >> 1) < FK_PAIR_BASE) { return 0; }
+    return 1;
+}
+static int fk_owned_value(long long v) {
+    if (!fk_owned_candidate(v)) { return 0; }
     for (long long j = 0; j < fk_owned_reader_n; j++) {
         fk_owned_reader *r = &fk_owned_readers[j]; fk_owned_generation *g = fk_owned_gen(r->slot);
         if (g->generation == r->generation && fk_owned_contains(g, v)) { return 1; }
@@ -16598,10 +16602,15 @@ static void fk_owned_mark_slot(long long slot, long long generation) {
     free(todo);
 }
 static void fk_owned_mark(long long v) {
-    if (!fk_owned_value(v)) { return; }
+    if (!fk_owned_candidate(v)) { return; }
+    /* Ranges are disjoint and marking retains their transitive holds. Trace
+     * each generation once, not every borrowed field through two full scans.
+     * This stays with the native heap's mark boundary when the seed leaves. */
     for (long long j = 0; j < fk_owned_reader_n; j++) {
-        fk_owned_reader *r = &fk_owned_readers[j]; fk_owned_generation *g = fk_owned_gen(r->slot);
-        if (g->generation == r->generation && fk_owned_contains(g, v)) { fk_owned_mark_slot(r->slot, r->generation); }
+        fk_owned_reader *r = &fk_owned_readers[j];
+        if (r->mark) { continue; }
+        fk_owned_generation *g = fk_owned_gen(r->slot);
+        if (g->generation == r->generation && fk_owned_contains(g, v)) { fk_owned_mark_slot(r->slot, r->generation); return; }
     }
 }
 static void fk_owned_withdraw(fk_owned_generation *g) {
@@ -16617,11 +16626,26 @@ static void fk_owned_withdraw(fk_owned_generation *g) {
     if (p) { munmap(p, (size_t)bytes); }
     g->state = 3;
 }
+typedef struct { long long pid, birth; int alive; } fk_owned_life;
+static int fk_owned_alive_in(fk_owned_life *lives, long long *count, long long pid, long long birth) {
+    for (long long j = 0; j < *count; j++) {
+        if (lives[j].pid == pid && lives[j].birth == birth) { return lives[j].alive; }
+    }
+    int alive = fk_owned_alive(pid, birth);
+    lives[(*count)++] = (fk_owned_life){pid, birth, alive};
+    return alive;
+}
 static void fk_owned_sweep(void) {
     long long count = fk_field_hdr[10], holds = fk_field_hdr[11];
+    /* One lifetime observation per owner in this locked sweep. A generation
+     * and all its reader leases share that observation; the next sweep reads
+     * again. This scratch belongs to the same shrinking field allocator. */
+    fk_owned_life *lives = malloc((size_t)(count + holds + 1) * sizeof(*lives));
+    if (!lives) { fk_die("fkwu: native owner liveness needs memory"); }
+    long long life_count = 0;
     for (long long j = 0; j < count; j++) {
         fk_owned_generation *g = fk_owned_gen(j);
-        if (g->state == 2 && g->process_owned && !fk_owned_alive(g->pid, g->birth)) { fk_owned_withdraw(g); }
+        if (g->state == 2 && g->process_owned && !fk_owned_alive_in(lives, &life_count, g->pid, g->birth)) { fk_owned_withdraw(g); }
         if (g->state == 2) {
             long long bytes = 0; char *p = fk_shm_map(g->frame, 0, 0, &bytes);
             if (!p || bytes < 80) { g->state = 3; }
@@ -16635,7 +16659,7 @@ static void fk_owned_sweep(void) {
     }
     for (long long j = 0; j < holds; j++) {
         fk_owned_hold *h = fk_owned_lease(j);
-        if (h->pid > 0 && !fk_owned_alive(h->pid, h->birth)) { h->pid = 0; }
+        if (h->pid > 0 && !fk_owned_alive_in(lives, &life_count, h->pid, h->birth)) { h->pid = 0; }
         if (h->pid > 0 && h->slot >= 0 && h->slot < count) {
             fk_owned_generation *g = fk_owned_gen(h->slot); if (g->generation == h->generation) { g->mark = 1; }
         }
@@ -16659,6 +16683,7 @@ static void fk_owned_sweep(void) {
             g->state = 0; fk_nkind[g->root] = 0; fk_owned_reclaimed++;
         }
     }
+    free(lives);
 }
 static void fk_owned_mark_end(void) {
     if (!fk_owned_reader_n || !fk_owned_lock()) { return; }
