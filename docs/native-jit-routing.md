@@ -1,8 +1,9 @@
 # Native JIT routing
 
 Run Form source with `./fkwu path.fk` or `./fkwu path.bml` from the repository
-root. Form owns lowering, emission, demand and reuse. Source is authoritative;
-native images are local cache. The executable route lives in
+root. A compiled function is assembly. The route writes the ARM64 and runs
+those bytes. It does not walk the function. Source is authoritative; the page
+is local cache. The executable route lives in
 [`native-jit-route.bml`](../form/form-stdlib/bml/native-jit-route.bml).
 
 File presence establishes availability; executable witnesses establish behavior.
