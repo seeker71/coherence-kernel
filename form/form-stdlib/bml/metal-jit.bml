@@ -3,8 +3,11 @@
 // FMJ1 | u32 mode | u32 entry bytes | u32 path bytes | entry | path | source.
 // Modes: 0 RAM, 1 capture compiled archive, 2 require compiled archive hit,
 // 3 retire the generation-qualified pipeline handle carried as a u64 payload.
-// Explicit archive modes remain strict. mj-cached owns archive retention:
-// a missing or refused archive is rebuilt on demand and published atomically.
+// Explicit archive modes remain strict. mj-cached owns archive retention.
+// A missing or refused archive is admitted in RAM and returned before publication.
+// mj-publish-held captures, seals and renames the archive. A publication that
+// does not run leaves the next process to compile again. The same process
+// reuses the live pipeline and does not read the seal again.
 // Each archive ends in FMJS, its program identity and its archive-byte seal.
 // Mode 2 loads the retained library; it never recompiles the supplied source.
 import form-stdlib/metal-door.fk;
@@ -15,7 +18,7 @@ import form-stdlib/organ-care.bml;
 import form-stdlib/form-fs.fk;
 import form-stdlib/bml/host-child.bml;
 section [form.bml] {
- let MJ-CACHE-STATE = record_new(0, "writes", 0, "reading", nothing(), "pending", [], "failure", "", "unreleased", []);
+ let MJ-CACHE-STATE = record_new(0, "writes", 0, "reading", nothing(), "pending", [], "failure", "", "unreleased", [], "live", []);
  let MJ-ARCHIVE-FOOTER-BYTES = 132;
  class MetalJit {
   def mj-source(body) = ("#include <metal_stdlib>" + (byte_to_str(10) + ("using namespace metal; " + body)));
@@ -88,22 +91,48 @@ section [form.bml] {
    !nothing?(version) ? { mj-cache-forget(context); record_set(context, "version", nothing()); } : 0;
    version;
   }
-  def mj-cache-demand(source, entry, path) {
-   let pending = mj-cache-pending(path);
-   nothing?(pending) ? mj-cache-first(source, entry, path) : mj-cache-take(pending);
+  def mj-live-find(path, rows) = nil?(rows) ? nothing() : (String) rows[0][0] == path ? rows[0][1] : mj-live-find(path, rows[1:]);
+  def mj-live-without(path, rows) = nil?(rows) ? [] : (String) rows[0][0] == path ? mj-live-without(path, rows[1:]) : cons(rows[0], mj-live-without(path, rows[1:]));
+  def mj-live-drop(handle, rows) = nil?(rows) ? [] : mj-handle(rows[0][1]) == handle ? mj-live-drop(handle, rows[1:]) : cons(rows[0], mj-live-drop(handle, rows[1:]));
+  def mj-live-put(path, version) {
+   record_set(MJ-CACHE-STATE, "live", cons([path, version], mj-live-without(path, record_get(MJ-CACHE-STATE, "live"))));
+   version;
   }
-  def mj-cache-first(source, entry, path) {
+  def mj-cache-demand(source, entry, path) {
+   let live = mj-live-find(path, record_get(MJ-CACHE-STATE, "live"));
+   !nothing?(live) && mj-handle(live) > 0 ? live : mj-cache-open(source, entry, path);
+  }
+  def mj-cache-open(source, entry, path) {
    let present = file_size(path) >= 0;
    let found = present ? mj-admit(source, entry, 2, path) : nothing();
-   nothing?(found) ? mj-cache-rebuild(source, entry, path, present ? mj-cache-diagnostic() : "archive absent") : found;
+   nothing?(found) ? mj-cache-miss(source, entry, path, present ? mj-cache-diagnostic() : "archive absent") : mj-live-put(path, found);
   }
-  def mj-cache-rebuild(source, entry, path, cause) {
-   let context = record_new(0, "source", source, "entry", entry, "path", path, "version", nothing(), "reading", nothing(), "cause", cause, "candidate", nothing());
+  // The caller receives the RAM pipeline here. Publication stays pending.
+  def mj-cache-miss(source, entry, path, cause) {
+   let version = mj-admit(source, entry, 0, "");
+   nothing?(version) ? mj-cache-uncompiled(source, entry, path, cause) : mj-cache-hold(source, entry, path, cause, version);
+  }
+  def mj-cache-hold(source, entry, path, cause, version) {
+   let kept = mj-live-put(path, version);
+   let context = record_new(0, "source", source, "entry", entry, "path", path, "version", version, "reading", nothing(), "cause", cause, "candidate", nothing(), "published", 0, "action", "publish-archive", "resource", "compiled-archive");
    record_set(MJ-CACHE-STATE, "pending", cons(context, record_get(MJ-CACHE-STATE, "pending")));
-   let reading = mj-cache-reading(path, "missing-or-refused", 0, cause, [oh-need("compiled-archive", json-node-string(path))], ["rebuild-archive"]);
+   let reading = mj-cache-reading(path, "publication-held", 1, cause, [oh-need("compiled-archive", json-node-string(path))], ["publish-archive"]);
    mj-cache-emit(context, "organ-health", reading);
-   mj-cache-care(context, reading, "compiled-archive", "rebuild-archive");
-   mj-cache-take(context);
+   kept;
+  }
+  def mj-cache-uncompiled(source, entry, path, cause) {
+   let context = record_new(0, "source", source, "entry", entry, "path", path, "version", nothing(), "reading", nothing(), "cause", cause, "candidate", nothing(), "published", 0, "action", "", "resource", "");
+   record_set(MJ-CACHE-STATE, "pending", cons(context, record_get(MJ-CACHE-STATE, "pending")));
+   let reading = mj-cache-reading(path, "archive-unavailable", 0, cause ++ "\n" ++ mj-cache-diagnostic(), [oh-need("compiled-archive", json-node-string(path))], []);
+   mj-cache-emit(context, "organ-health", reading);
+   nothing();
+  }
+  def mj-publish-held() = mj-publish-rows(record_get(MJ-CACHE-STATE, "pending"));
+  def mj-publish-rows(rows) = nil?(rows) ? 1 : mj-publish-context(rows[0]) && mj-publish-rows(rows[1:]);
+  def mj-publish-context(context) = (Comparable) record_get(context, "published") == 1 ? 1 : (String) record_get(context, "action") == "" ? 0 : mj-publish-now(context);
+  def mj-publish-now(context) {
+   mj-cache-care(context, record_get(context, "reading"), record_get(context, "resource"), record_get(context, "action"));
+   (Comparable) record_get(context, "published") == 1;
   }
   def mj-cache-care(context, reading, resource, action) = oc-hear(context, reading, [oc-provider("metal-jit-archive", [resource], action, mj-cache-supply)], mj-cache-emit, mj-cache-observe);
   def mj-cache-supply(context, reading, need) {
@@ -121,34 +150,50 @@ section [form.bml] {
    record_set(context, "cause", record_get(context, "cause") ++ "\n" ++ detail);
    json-node-object([oh-n("published", published), oh-n("released", released), oh-n("temporary_removed", file_size(temporary) < 0), oh-s("detail", detail)]);
   }
+  // Publication re-admits the sealed archive to prove the file loads, then
+  // releases that check. The caller's RAM pipeline stays the live one.
+  // A mode-1 capture handle is not that pipeline: release failure keeps it
+  // a candidate and does not report it as the RAM answer.
   def mj-cache-observe(context, reading, delivery) {
    let path = record_get(context, "path");
    let settled = json-int-value(oh-get(delivery, "published")) == 1 && json-int-value(oh-get(delivery, "released")) == 1;
-   let version = settled ? mj-admit(record_get(context, "source"), record_get(context, "entry"), 2, path) : nothing();
-   record_set(context, "version", version);
+   let checked = settled ? mj-admit(record_get(context, "source"), record_get(context, "entry"), 2, path) : nothing();
+   let check_released = nothing?(checked) ? 1 : mj-release(checked);
+   (Comparable) check_released == 1 ? 0 : record_set(context, "candidate", checked);
+   let ok = settled && !nothing?(checked) && (Comparable) check_released == 1;
+   record_set(context, "published", ok ? 1 : 0);
    let held = !nothing?(record_get(context, "candidate"));
-   let observed = !nothing?(version) ? "retained" : held ? "release-incomplete" : "archive-unavailable";
-   let cause = record_get(context, "cause") ++ (settled && nothing?(version) ? "\n" ++ mj-cache-diagnostic() : "");
-   let fresh = mj-cache-reading(path, observed, !nothing?(version), cause, !nothing?(version) ? [] : [oh-need(held ? "released-pipeline" : "writable-archive", json-node-string(path))], !nothing?(version) || held ? [] : ["retry-archive"]);
+   let observed = ok ? "retained" : held ? "release-incomplete" : "publication-held";
+   let cause = record_get(context, "cause") ++ (settled && !ok ? "\n" ++ mj-cache-diagnostic() : "");
+   record_set(context, "action", ok || held ? "" : "retry-archive");
+   record_set(context, "resource", ok ? "" : held ? "released-pipeline" : "writable-archive");
+   let fresh = mj-cache-reading(path, observed, ok, cause, ok ? [] : [oh-need(held ? "released-pipeline" : "writable-archive", json-node-string(path))], ok || held ? [] : ["retry-archive"]);
    oh-set(fresh, "care_of", oh-get(reading, "id"));
   }
   // A resource event resumes the original source, entry, path and findings.
   // Ordinary demand keeps an unchanged failure held; only a correlated offered
-  // response enters care again. Retained candidates never become RAM success.
+  // response enters care again. The RAM pipeline already returned stays put.
   def mj-cache-hear(path, response) {
    let context = mj-cache-pending(path);
    nothing?(context) ? nothing() : {
     let reading = record_get(context, "reading");
     (String) oh-select(reading, response, "") != "retry-archive" ? nothing() : {
+     record_set(context, "action", "retry-archive");
+     record_set(context, "resource", "writable-archive");
      mj-cache-care(context, reading, "writable-archive", "retry-archive");
-     mj-cache-take(context);
+     record_get(context, "version");
     };
    };
   }
   def mj-handle(version) = if nothing?(version) then 0 else version[0];
   def mj-u64(value) = ((String) md-le32((value % 4294967296)) + md-le32((value / 4294967296)));
   def mj-release-handle(handle) = if (handle <= 0) then 0 else metal_pipeline(mj-descriptor(mj-u64(handle), "", 3, ""), "form_metal_jit_v1");
-  def mj-release(version) = mj-release-handle(mj-handle(version));
+  def mj-release(version) {
+   let handle = mj-handle(version);
+   let released = mj-release-handle(handle);
+   (Comparable) released == 1 ? record_set(MJ-CACHE-STATE, "live", mj-live-drop(handle, record_get(MJ-CACHE-STATE, "live"))) : 0;
+   released;
+  }
   def mj-enqueue(version, bindings, threads) = if (mj-handle(version) <= 0) then 0 else metal_enqueue(mj-handle(version), bindings, threads);
   // The caller supplies its comparison domain and observed bytes. Selection
   // is a Form value: existing handles and submitted commands keep their version.

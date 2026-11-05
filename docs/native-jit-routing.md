@@ -107,17 +107,19 @@ and decoding costs, before the storage-only contract is met.
 
 Metal archive retention belongs to `form/form-stdlib/bml/metal-jit.bml`.
 One `.metalbin` contains the native archive, Form's source/entry/target identity
-and a seal of the archive bytes. Admission verifies both before loading the
-embedded library through the public Metal API. On Apple M4 Max with macOS
-26.3.1, a generated `f(n)=3n+7` compiled once on first demand; a new process
-loaded its archive with zero MSL source compilations and returned `f(5)=22`.
-Missing, corrupt or mismatched archives enter the existing organ-care flow,
-which creates the directory, captures, seals and atomically publishes the
-replacement, then re-observes strict admission. Failed retention remains a
-failure with the original request and findings held. A correlated resource
-response through `mj-cache-hear` resumes that request; unchanged demand does
-not repeat failed care. This owner does not yet enroll a filesystem watcher.
-Explicit archive-hit-only admission remains strict.
+and a seal of the archive bytes. `mj-cached` admits in RAM and returns that
+pipeline before publication. The same process reuses the live pipeline and does
+not read the seal again. `mj-publish-held` captures, seals and renames the
+archive; a publication that does not run leaves the next process to compile
+again. Mode 2 still verifies the seal once and loads the library without
+recompiling. `observe/metal-cache-return-run.bml` reads this: `f(n)=3n+7`
+returned 22 while the archive was still absent, and the next process loaded the
+published archive with zero further MSL compilations and returned 22. Missing,
+corrupt or mismatched archives still enter organ-care. Failed publication keeps
+the original request and findings held, and the RAM pipeline already returned
+stays. A correlated response through `mj-cache-hear` resumes publication;
+unchanged demand does not repeat failed care. This owner does not yet enroll a
+filesystem watcher. Explicit archive-hit-only admission remains strict.
 
 For recovery, search local Form cells, RAG, git history and receipts. Make the
 native attempt, retain behavior checks and per-stage streams, exit status and
