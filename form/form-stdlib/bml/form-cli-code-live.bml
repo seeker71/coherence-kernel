@@ -74,7 +74,7 @@ section [form.bml] {
   def fcac-decode-width(state,session,count) = fat-max(0,fat-min(fcac-quantum(session),fat-min((fcms-maxpos(session) - fcms-pos(session)),if (fcap-reply-token-limit(state) <= 0) then fcac-quantum(session) else (fcap-reply-token-limit(state) - count))));
   def fcac-original-context(state) = fcap-model-bind("original_context",json-node-object([json-node-pair("documents",json-node-array(fcap-model-documents(state[2])))]));
   def fcac-bootstrap-budget(state,turns) = fcap-bootstrap(state) + "\nORIGINAL SOURCE: original_context = " + ftw-coord(fcac-original-context(state)) + "\nThis read-only native cell holds the complete admitted source before edits. Current tools read the working candidate. fcap-context-field(original_context,[\"documents\",0,\"text\"]) returns the original text cell. fcap-native-tool accepts text cells directly as arguments or input; the tool control also accepts their @address. Restore or compose from those exact bytes when a candidate has lost source. Use focused native source operations; reading the whole module into decoding is unnecessary.\nCALLER REPLY BUDGET: " + fcap-model-packet(json-node-object(fcac-budget-pairs(state,turns)));
-  def fcac-observation-budget(state,turns) = fcap-model-packet(json-node-object(append(json-object-pairs(fcap-observation-node(state)),fcac-budget-pairs(state,turns)))) + "\nCURRENT REPLY: " + fcap-work-instruction(state);
+  def fcac-observation-budget(state,turns) = fcap-model-packet(json-node-object(append(json-object-pairs(fcap-observation-node(state)),fcac-budget-pairs(state,turns)))) + fcap-graph-attention(state) + "\nCURRENT REPLY: " + fcap-work-instruction(state);
   // The final-stage request carries current work and full failed-check evidence.
   // A reference to an earlier observation must not replace the active correction.
   def fcac-current-reply-fits(session,state,turns) = if (!fcac-reply-fits(session,state)) then 0 else if (!fcac-reasoning?(state)) then 1 else frbg-task-reserve-fits(session,fcac-token-allowance(state,fcap-reasoning(state)[0]),fcac-token-allowance(state,fcap-reasoning(state)[1]),fcac-observation-budget(state,turns));
@@ -90,7 +90,49 @@ section [form.bml] {
   // checker is [report callback, contract, optional source callback, contract].
   def fcac-review(model, goal, docs, checker, context, turns) = if (!(fat-docs-valid(docs, []) && ((len(goal) > 0) && ((context > 0) && (turns >= 0))))) then [fcap-terminal(fcap-open-review(goal, docs), "invalid-caller-contract"), 1, 0, 0, 0] else fcac-admit(model, fcap-open-review(goal, docs), checker, context, turns);
   def fcac-admit(model, state, checker, context, turns) = if fcap-done(state) then [state, 1, 0, 0, 0] else if (!fcac-model-ready(model)) then [fcap-terminal(state, "native-qwen-artifact-seal-tokenizer-or-lane-unavailable"), 1, 0, 0, 0] else fcac-open-timed(model, state, checker, context, turns, now_unix_ms());
-  def fcac-open-timed(model, state, checker, context, turns, started) = fcac-open-context(model,fcap-begin-context(fcac-held-state(state,context)),checker,context,turns,started);
+  def fcac-open-timed(model,state,checker,context,turns,started) = fcac-open-assisted(model,state,checker,context,turns,started,fcac-helper-ask,fcac-open-context);
+  // Consultation happens with no parent decoder resident. The helper is an
+  // unmanaged read-only review, with no checkpoint recall, learning or edits.
+  def fcac-helper-check(docs,subject) = [subject[0]==docs && len(fat-trim(subject[1]))>0,"Read-only advisory report; no claim about the parent task's completion."];
+  def fcac-helper-ask(state,prompt) {
+   let spec=fcap-helper-spec(state);let docs=fcap-graph-docs(state);
+   let helper=fcap-with-reply-token-limit(fcap-open-direct-review(prompt,docs),fcap-helper-allowance(state,"max_reply_tokens"));
+   fcac-admit(fcap-string(spec,"model"),helper,[fcac-helper-check,docs],fcap-helper-allowance(state,"context"),fcap-helper-allowance(state,"turns"));
+  }
+  def fcac-helper-event(state,prompt,status,report,reason,released,generated,injected,observations) = json-node-object([oh-s("key",fcap-helper-key(state)),oh-s("model",fcap-string(fcap-helper-spec(state),"model")),oh-s("phase",fcap-stage(state)),oh-s("prompt",prompt),oh-s("prompt_sha256",hex-encode(sha256-stream-string(prompt))),json-node-pair("selected",json-node-array(fcap-string-json(fcap-graph-focus(state)))),oh-s("status",status),oh-s("report",report),oh-s("reason",reason),oh-n("release_ok",released),oh-n("generated_ids",generated),oh-n("injected_ids",injected),oh-n("observations",observations),oh-s("scope","Read-only helper evidence; unchanged parent goal, source/check ownership and completed effects. No provider call or weight training.")]);
+  def fcac-helper-consult-with(state,ask) = !fcap-helper-due(state) ? state : {
+   let prompt=fcap-helper-prompt(state);
+   let pending=fcap-with-helper-event(state,fcac-helper-event(state,prompt,"pending","","retained-before-admission",0,0,0,0));
+   if !fcam-save(pending) then fcap-terminal(state,"helper-checkpoint-write-refused;candidate-retained") else {
+    let result=ask(state,prompt);
+    let event=fcac-helper-event(state,prompt,fcap-stage(result[0])=="complete" && result[1] ? "complete" : "unfinished",fcap-report(result[0]),fcap-note(result[0]),result[1],result[2],result[3],result[4]);
+    let next=fcap-with-helper-event(state,event);
+    if !fcam-save(next) then fcap-terminal(next,"helper-result-write-refused;candidate-retained") else !result[1] ? fcap-terminal(next,"helper-model-release-incomplete;candidate-retained") : next;
+   };
+  };
+  def fcac-helper-released(state) = all?(event=>node_value(json-object-get(event,"release_ok"))==1,fcap-helper-events(state));
+  def fcac-open-assisted(model,state,checker,context,turns,started,ask,open) {
+   let before=fcap-helper-cost(state);
+   let next=fcac-helper-released(state) ? fcac-helper-consult-with(state,ask) : fcap-terminal(state,"helper-release-unobserved;candidate-retained");
+   let after=fcap-helper-cost(next);
+   let spent=[after[0]-before[0],after[1]-before[1],after[2]-before[2]];
+   let result=fcap-done(next) ? [next,fcac-helper-released(next),0,0,0] : open(model,fcap-begin-context(fcac-held-state(next,context)),checker,context,turns,started);
+   fcac-total-result(result,spent);
+  }
+  def fcac-helper-yield?(result) = len(result)==4 && result[3]=="helper-consultation";
+  def fcac-helper-reopen(session,state,checker,turns,started) {
+   let model=mr-name(tb-first(mr-registry(),row=>mr-path(row)==fcms-path(session)) ?? mr-none());
+   fcac-open-timed(model,state,checker,fcms-maxpos(session),turns,started);
+  }
+  // The old session is closed exactly once before the helper can open. A
+  // failed close keeps the continuation and never starts a second owner.
+  def fcac-helper-handoff-with(result,checker,turns,started,prior,close,reopen) {
+   let session=result[0];let state=result[2];
+   let spent=fcac-context-cost(session,prior);
+   let released=close(session);
+   fcac-stream-release();
+   !released ? [fcap-terminal(state,"native-model-release-incomplete;helper-not-started"),0,spent[0],spent[1],spent[2]] : fcac-total-result(reopen(session,state,checker,turns,started),spent);
+  }
   def fcac-open-context(model,state,checker,context,turns,started) = fcac-resident(fcac-open-budget(model,state,context,turns),state,checker,turns,started);
   def fcac-resident(session,state,checker,turns,started) = fcac-finish-contexts(fcac-loop(session,state,checker,turns,started),checker,turns,started,fcap-turns(state),[0,0,0],1);
   // Completed actions and retained no-action attempts survive a full context.
@@ -136,7 +178,7 @@ section [form.bml] {
   // hands in its own pair to read what the lane continues with and how it ends, with no model.
   def fcac-finish-contexts(result,checker,turns,started,firstTurn,prior,number) = fcac-finish-contexts-with(result,checker,turns,started,firstTurn,prior,number,fcac-loop,fcac-renew);
   // json-serves: a log reader outside this process. text: the renewal line is the share; the session stays the owner.
-  def fcac-finish-contexts-with(result,checker,turns,started,firstTurn,prior,number,loop,renew) = if (!fcac-renewable(result,firstTurn,turns)) then fcac-total-result(fcac-settle(result,started),prior) else {
+  def fcac-finish-contexts-with(result,checker,turns,started,firstTurn,prior,number,loop,renew) = if fcac-helper-yield?(result) then fcac-helper-handoff-with(result,checker,turns,started,prior,fcms-release-ok?,fcac-helper-reopen) else if (!fcac-renewable(result,firstTurn,turns)) then fcac-total-result(fcac-settle(result,started),prior) else {
    let session = result[0]; let state = result[2];
    let reading = fcac-context-reading(state,number,0);
    oh-voice(reading); oh-voice(oh-response(reading,"renew-context"));
@@ -315,7 +357,7 @@ section [form.bml] {
    let loop = seams[1];
    if fcap-done(next) then fcac-finish(session,next,started) else if (!fcam-save(next)) then fcac-finish(session,fcap-terminal(next,"checkpoint-write-refused;candidate-retained"),started) else if (turns>0 && fcap-turns(next) >= turns) then loop(session,next,checker,turns,started) else {
     let cared = fcac-source-care(next, checker);
-    fcac-observe-next(session,cared,checker,turns,started,seams);
+    fcap-helper-due(cared) ? [session,cared,cared,"helper-consultation"] : fcac-observe-next(session,cared,checker,turns,started,seams);
    };
   }
   // Restoring a checkpoint does not guess its token density or discard context.

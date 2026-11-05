@@ -25,6 +25,54 @@ section [form.bml] {
   // repeated counterexample]. It is working memory, never a weight update.
   def fcap-state(stage, goal, originals, docs, writable, pending, brief, plan, note, turns, calls, completed) = [stage, goal, originals, docs, writable, pending, brief, plan, note, turns, calls, completed, [0, "", [], 0, 0]];
   def fcap-memory(s) = s[12];
+  // Slot 27 holds caller context links and attributed consultations. Sources,
+  // intent and effects remain in their existing state cells, not a second store.
+  def fcap-context-work(s) = len(fcap-memory(s))>27 ? fcap-memory(s)[27] : [json-node-object([]),json-node-object([]),[]];
+  def fcap-with-context-work(s,work) {
+   let state=fcap-source-check-memory(s);
+   let memory=fcap-memory(state);
+   let padded=append(memory,range(len(memory),27) |> map(i=>i==26 ? "" : []));
+   fcap-with-memory(state,append(fat-take(padded,27),[work]));
+  }
+  def fcap-graph-spec(s) = fcap-context-work(s)[0];
+  def fcap-helper-spec(s) = fcap-context-work(s)[1];
+  def fcap-helper-events(s) = fcap-context-work(s)[2];
+  def fcap-with-context-spec(s,graph,helper) = fcap-with-context-work(s,[graph,helper,fcap-helper-events(s)]);
+  def fcap-with-helper-event(s,event) = fcap-with-context-work(s,[fcap-graph-spec(s),fcap-helper-spec(s),append(fcap-helper-events(s),[event])]);
+  def fcap-graph-enabled(s) = len(json-object-pairs(fcap-graph-spec(s)))>0 || len(json-object-pairs(fcap-helper-spec(s)))>0;
+  def fcap-graph-links(s) = node_children(json-object-get(fcap-graph-spec(s),"dependencies")) |> map(row=>node_children(row) |> map(value=>node_value(value)));
+  def fcap-graph-close(frontier,edges,seen) = nil?(frontier) ? seen : fat-has(seen,frontier[0]) ? fcap-graph-close(frontier[1:],edges,seen) : fcap-graph-close(append(frontier[1:],edges |> filter(edge=>edge[0]==frontier[0]) |> map(edge=>edge[1])),edges,append(seen,[frontier[0]]));
+  def fcap-graph-focus(s) {
+   let named=fcap-array(fcap-graph-spec(s),"focus");
+   let current=nil?(s[5]) ? s[1] : s[5][0];
+   let mentioned=fcap-docs(s) |> filter(doc=>str_find(current,doc[1],0)>=0) |> map(doc=>doc[1]);
+   fcap-graph-close(append(named,!nil?(mentioned) ? mentioned : nil?(named) ? s[4] : []),fcap-graph-links(s),[]);
+  }
+  def fcap-graph-docs(s) = fcap-docs(s) |> filter(doc=>fat-has(fcap-graph-focus(s),doc[1]));
+  def fcap-graph-valid(s) {
+   let paths=fcap-docs(s) |> map(doc=>doc[1]);
+   all?(path=>fat-has(paths,path),append(fcap-array(fcap-graph-spec(s),"focus"),foldl((all,edge)=>append(all,edge),[],fcap-graph-links(s))));
+  }
+  def fcap-context-graph(s) {
+   let selected=fcap-graph-focus(s);
+   let omitted=fcap-docs(s) |> filter(doc=>!fat-has(selected,doc[1]));
+   let changed=fcap-docs(s) |> filter(doc=>{let original=fat-find-doc(s[2],doc[1]);nil?(original) || original[2]!=doc[2];});
+   json-node-object([oh-s("schema","form-code-context-graph-v1"),oh-s("owner",fcam-managed(s) ? fcam-id(s) : "current-code-state"),oh-s("role",fcap-stage(s)),json-node-pair("goal",json-node-string(s[1])),json-node-pair("constraints",json-node-object([json-node-pair("writable",json-node-array(fcap-string-json(s[4]))),oh-s("checks","The original caller checker stays with the controller; helper advice cannot replace it.")])),json-node-pair("brief",json-node-string(s[6])),json-node-pair("plan",json-node-string(s[7])),json-node-pair("pending",json-node-array(fcap-string-json(s[5]))),json-node-pair("observation",fcap-note-cell(s)),json-node-pair("failure_evidence",fcap-model-observation(fcap-evidence(s))),json-node-pair("caller_feedback",json-node-array(fcap-caller-feedback(s) |> map(row=>json-node-object([oh-s("id",row[0]),oh-s("text",row[1])])))),json-node-pair("completed_effects",json-node-object([oh-n("completed_tasks",s[11]),json-node-pair("changed_sources",json-node-array(fcap-document-catalog(changed)))])),json-node-pair("selected",json-node-array(fcap-string-json(selected))),json-node-pair("omitted",json-node-array(fcap-document-catalog(omitted))),json-node-pair("dependencies",json-node-array(fcap-graph-links(s) |> map(edge=>json-node-array(fcap-string-json(edge))))),json-node-pair("sources",json-node-array(fcap-model-documents(fcap-graph-docs(s)))),oh-s("scope","A dependency view over retained state; omitted source stays in task_context and native tools. Decoder KV remains a linear stream. Intent, constraints, corrections, completed effects and latest evidence remain pinned.")]);
+  }
+  def fcap-graph-pairs(s) = !fcap-graph-enabled(s) ? [] : [json-node-pair("context_graph",fcap-context-graph(s)),json-node-pair("helper_consultations",json-node-array(fcap-helper-events(s)))];
+  def fcap-graph-attention(s) = !fcap-graph-enabled(s) ? "" : "\nCONTEXT GRAPH: selected source paths " + fcap-graph-focus(s).str() + "; omitted paths " + (fcap-docs(s) |> filter(doc=>!fat-has(fcap-graph-focus(s),doc[1])) |> map(doc=>doc[1])).str() + ". Read task_context.context_graph.sources or code_context.context_graph for this dependency view. Original intent, constraints, completed effects, caller corrections and latest failure stay pinned; omitted sources remain retrievable. Helper consultations are attributed advisory evidence, never completed work or caller checks.\n";
+  // A consultation identity changes only with its phase, task, evidence or
+  // selected source identities. Repeating the same focus cannot spend twice.
+  // json-serves: continuity and the helper. text: exact prompt bytes are retained.
+  def fcap-helper-key(s) = hex-encode(sha256-stream-string(json-emit(json-node-array([fcap-helper-spec(s),json-node-string(fcap-stage(s)),json-node-string(s[6]),json-node-string(s[7]),json-node-array(fcap-string-json(s[5])),fcap-note-cell(s),json-node-string(fcap-evidence(s)),json-node-int(fcap-failures(s)),json-node-array(fcap-document-catalog(fcap-graph-docs(s))),json-node-array(fcap-caller-feedback(s) |> map(row=>json-node-array(fcap-string-json(row))))]))));
+  def fcap-helper-allowance(s,key) = json-object-has?(fcap-helper-spec(s),key) ? node_value(json-object-get(fcap-helper-spec(s),key)) : 0;
+  def fcap-helper-due(s) = !fcap-done(s) && !fcap-reviewing(s) && len(json-object-pairs(fcap-helper-spec(s)))>0 && (fcap-helper-allowance(s,"calls")<=0 || len(fcap-helper-events(s))<fcap-helper-allowance(s,"calls")) && fat-has(fcap-array(fcap-helper-spec(s),"phases"),fcap-stage(s)) && !any?(event=>fcap-string(event,"key")==fcap-helper-key(s),fcap-helper-events(s));
+  def fcap-helper-prompt(s) = "Give a focused advisory report for the parent task's current phase. " + fcap-string(fcap-helper-spec(s),"prompt") + "\nThis is a read-only consultation. Preserve the original intent, constraints, completed effects and latest failure. Distinguish source evidence, inference and missing context. Do not claim to complete or approve the parent task. Submit your report through the current review role.\n" + json-emit(fcap-context-graph(s));
+  def fcap-helper-cost(s) = foldl((cost,event)=>[cost[0]+node_value(json-object-get(event,"generated_ids")),cost[1]+node_value(json-object-get(event,"injected_ids")),cost[2]+node_value(json-object-get(event,"observations"))],[0,0,0],fcap-helper-events(s));
+  def fcap-helper-attention(s) = nil?(fcap-helper-events(s)) ? "" : {
+   let event=fcap-helper-events(s)[-1];
+   "\nHELPER CONSULTATION: " + fcap-string(event,"model") + "; phase=" + fcap-string(event,"phase") + "; status=" + fcap-string(event,"status") + "; key=" + fcap-string(event,"key") + "\n" + fcap-string(event,"report") + "\nThis is advisory evidence. The parent goal, candidate and original checks remain authoritative. Complete provenance is in helper_consultations.\n";
+  };
   // Checkpoint identity is shared state; reading it needs no storage organ.
   def fcam-context(s) = len(s) >= 14 ? s[13] : [];
   def fcam-managed(s) = (Comparable) len(fcam-context(s)) == 4;
@@ -352,7 +400,7 @@ section [form.bml] {
   // Slot 25 belongs to the live turn guard and its retained decoding history.
   def fcap-source-reading-slot() = 26;
   // json-serves: the model packet. text: the retained reading is those checkpoint bytes, compared with the catalog this context would render.
-  def fcap-source-reading(s) = len(fcap-memory(s)) <= fcap-source-reading-slot() ? json-node-null() : {
+  def fcap-source-reading(s) = len(fcap-memory(s)) <= fcap-source-reading-slot() || fcap-memory(s)[fcap-source-reading-slot()]=="" ? json-node-null() : {
    let reading=parse-json("retained-source-check",fcap-memory(s)[fcap-source-reading-slot()]);
    let same=json-emit(json-object-get(reading,"document_catalog"))==json-emit(json-node-array(fcap-document-catalog(fcap-docs(s))));
    json-node-object(append(json-object-pairs(reading),[json-node-pair("matches_current_documents",json-node-int(same)),json-node-pair("scope",json-node-string("Named caller assertions on the retained source identities; inspect current execution and any uncovered finding separately."))]));
@@ -810,7 +858,10 @@ section [form.bml] {
   };
   def fcap-observation-with-instruction(s,instruction,full) = json-node-object(append(fcap-amend-pairs(s),append([json-node-pair("role", json-node-string(fcap-stage(s))), json-node-pair("mode", json-node-string(fcap-mode(s))), json-node-pair("instruction", json-node-string(instruction)), json-node-pair("observation", fcap-note-cell(s)), json-node-pair("pending", json-node-array(fcap-pending-observation(s,s[5])))],fcap-failure-pairs(s,full))));
   def fcap-native-review-observation(s,instruction,full) = json-node-object(append([json-node-pair("role",json-node-string(fcap-stage(s))),json-node-pair("mode",json-node-string(fcap-mode(s))),json-node-pair("instruction",json-node-string(instruction)),json-node-pair("observation",fcap-note-cell(s)),json-node-pair("pending",json-node-array(fcap-string-json(s[5])))],if full then [json-node-pair("native_review",fcap-native-event-json(fcap-last-native(s),fcap-native-review-before(s,((Comparable) full == 2))))] else [json-node-pair("native_review_reference",json-node-int(len(fcap-native-repairs(s))))]));
-  def fcap-observation-node(s) = if fcap-awaiting-native-review(s) then fcap-native-review-observation(s,fcap-native-review-instruction(),2) else fcap-observation-with-instruction(s,fcap-work-instruction(s),1);
+  def fcap-observation-node(s) {
+   let body=if fcap-awaiting-native-review(s) then fcap-native-review-observation(s,fcap-native-review-instruction(),2) else fcap-observation-with-instruction(s,fcap-work-instruction(s),1);
+   json-node-object(append(json-object-pairs(body),fcap-graph-pairs(s)));
+  }
   // json-serves: the model tokenizer. text: the observation cells stay in the checkpoint; this string is what the decoder reads.
   def fcap-observation(s) = json-emit(if fcap-awaiting-native-review(s) then fcap-native-review-observation(s,fcap-observation-instruction(s),(len(fcap-native-repairs(s)) > fcap-context-native-review(s))) else fcap-observation-with-instruction(s,fcap-observation-instruction(s),0));
   def fcap-reflection-json(row,evidence) = json-node-object([json-node-pair("attempt",json-node-int(row[0])),json-node-pair("evidence",json-node-string(evidence)),json-node-pair("diagnosis",json-node-string(row[2])),json-node-pair("change",json-node-string(row[3])),json-node-pair("next",json-node-string(row[4]))]);
@@ -955,7 +1006,7 @@ section [form.bml] {
   def fcap-bootstrap(s) {
    let lane=fcap-model-lane(s);
    let source = if fcap-catalog?(s) then json-node-pair("document_catalog",json-node-array(fcap-document-catalog(fcap-docs(s)))) else json-node-pair("documents",json-node-array(fcap-model-documents(fcap-docs(s))));
-   let retained = append(fcap-caller-feedback-pairs(s),if fcap-amendable(s) then [json-node-pair("retained_report",json-node-string(fcap-report(s)))] else []);
+   let retained = append(fcap-graph-pairs(s),append(fcap-caller-feedback-pairs(s),if fcap-amendable(s) then [json-node-pair("retained_report",json-node-string(fcap-report(s)))] else []));
    let body = json-node-object(append(retained,[json-node-pair("goal", json-node-string(s[1])), json-node-pair("writable", json-node-array(fcap-string-json(s[4]))), source, json-node-pair("brief", json-node-string(s[6])), json-node-pair("plan", json-node-string(s[7])), json-node-pair("prior_repairs", json-node-array(fcap-prior-repairs-json(fat-take(reverse(fcap-reflections(s)), 3)))),json-node-pair("native_source_verification",fcap-source-reading(s))]));
      let protocol = "You are the local Qwen coding member inside Form. Submit one native node for the CURRENT role. " + fcap-call-head() + fcrg-submit("[[\"task\",\"done\"]]") + " for role fields, following the current role instruction. Stop after the complete role reply. Do not echo its address. Use native BML strings, no markdown fences. Original goal and caller constraints stay authoritative. Read fields with fcap-context-field(code_context,\"field-name\"). The second argument may be a dotted path or a nested path list; no third argument. Query peer fields separately. Current work is code_context: [\"pending\",0] or [\"observation\",\"stdout\"]. task_context holds goal and sources. Exact dotted keys take precedence. List indexes are integers. Large text stays a native cell. An @address already reads its value: use substring(@address,start,end) for focused text, without node_value. A cell returned directly into a variable uses node_value(cell). Bound names follow current context; historical coordinates belong to earlier observations. Context/data reads supply evidence; they do not submit tasks. Native tools: " + str-join-with(fat-tools(),", ") + ". " + fcap-awk-hint() + "Read offset is one-based, count is lines, optional fourth argument bytes. " + fcap-call-whole-read();
     let authority = "Tools read caller-supplied resident documents by exact catalog id or path, not host scratch paths. write creates absent paths; arguments=[path], input=new text. Existing documents, including empty ones, use edit. For whole replacement, edit arguments=[path,\"sha256\",resident_sha256,new_text], input=\"\"; the catalog or a read supplies that guard. Read-only tools are allowed in every role. Implement and repair may edit caller-writable paths; a changed repair runs caller checks immediately. Repeated counterexamples require next=plan or next=split before more edits. Failed tools/checks enter repair: act on the evidence or name a changed approach and route. failure_evidence may reference its matching failure_evidence_id already supplied in this context; use those exact earlier bytes. Keep replies concise and tasks few. Do not invent successful checks. ";
@@ -963,7 +1014,7 @@ section [form.bml] {
    let rules = protocol + "Structured tool results live in code_context.observation.value. Read those native fields directly. stdout is text already produced and stays empty when no text was rendered. " + guidance + authority;
    let verification = "The native verify tool takes arguments=[] and no input. It runs the caller's existing source checks; it cannot execute a command supplied by you. Review mode is read-only and returns a report, never a source edit. Documents below are already present in this context. A read may return stdout_reference for identical bytes or stdout_patch with exact changed lines against the original supplied document. Native reconstruction verifies the current bytes before either compact result is emitted. Resolve each against its original supplied text. Oversized source reads return exact stdout in observation_excerpt with source byte coordinates, resident_sha256 and next: an executable continuation. Read that content and call next only for missing evidence. Query excerpts use clipped head/tail, not whole source.\n";
    let catalogVerification = "The native verify tool takes arguments=[] and no input. It runs the caller's existing source checks; it cannot execute a command supplied by you. Review mode is read-only and returns a report, never a source edit. The document catalog lists source identities. NATIVE SOURCE OBSERVATIONS supply actual admitted query results. Use evidence already supplied and retrieve a specific missing fact. Oversized source reads return exact stdout in observation_excerpt with source byte coordinates, resident_sha256 and next: an executable continuation. Read that content and call next only for missing evidence. All original documents stay whole for native tools and unchanged caller checks.\n";
-    rules + (fcap-reviewing(s) || !fcbmr-relevant(fcap-docs(s)) ? "" : "BML repair-bml, lift-bml and rehearse-bml tools remain available. Read their native help before use. ") + (fcap-catalog?(s) ? catalogVerification : verification) + fcap-model-packet(body) + fcap-model-packet(fcap-observation-node(s)) + fcap-source-context(s) + "\nCURRENT REPLY: " + fcap-work-instruction(s);
+    rules + (fcap-reviewing(s) || !fcbmr-relevant(fcap-docs(s)) ? "" : "BML repair-bml, lift-bml and rehearse-bml tools remain available. Read their native help before use. ") + (fcap-catalog?(s) ? catalogVerification : verification) + fcap-model-packet(body) + fcap-model-packet(fcap-observation-node(s)) + fcap-source-context(s) + fcap-graph-attention(s) + fcap-helper-attention(s) + "\nCURRENT REPLY: " + fcap-work-instruction(s);
   }
  }
  0;

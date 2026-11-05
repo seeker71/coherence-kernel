@@ -9,6 +9,21 @@ guide, and the body's own doors)?
 `context` (what the voice is told about the moment; may be empty) and
 `predicates[]`. The scenarios stay held out of every training packet.
 
+A native reading keeps `status`, `complete`, `release_ok` and `reason` beside
+each scenario. Budget-ended text remains `incomplete` and earns no passed
+predicates. Its words remain available for inspection. Saved answers have a
+`.txt.json` sidecar binding native metadata to the exact answer and request;
+resume preserves that status. Missing metadata, changed text or a changed
+packet, model artifact identity, adapter bytes/configuration or allowance
+requires a fresh ask. Evaluation explicitly names the bare adapter when none
+is requested, so a live registry default cannot change the measured lane.
+Legacy text alone cannot prove
+completion. The explicit `answers` fixture lane still grades supplied prose
+without claiming that a model completed or released; it also accepts optional
+status/completion/release fields for checking those boundaries. Adapter wear
+requires each compared scenario exactly once with observed completion and
+release, not only the word `answered`.
+
 `scenarios-2.jsonl` is a second held-out set in the same row shape, written on
 the neighbourhoods the first reading's prompt missed — the voice's own
 identity (native, grounded, rent 0, on this Mac), the path-receipt vocabulary

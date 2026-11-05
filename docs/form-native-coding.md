@@ -445,6 +445,8 @@ The CLI's native tool JSON also admits `{id,path}` file snapshots before executi
 | `code_entry`, `review_entry` | Respective mode only: `staged` (default) or `direct` |
 | `document_context` | `full` (default) or `catalog` |
 | `source_queries` | Catalog-only `[{tool,arguments}]` read-only queries; no supplied input/output |
+| `context_graph` | Optional `{focus:[path],dependencies:[[source,required_source]]}` over admitted source paths |
+| `helper` | Coding-only native read-only consultation: model, prompt and phases; optional caller allowances, otherwise native completion and progress; see below |
 | `evaluation` | Integer 0/1; 1 excludes recall, resume, checkpoint writes, LoRA proposals and training |
 | `weight_training` | Integer 0/1, default 1; 0 excludes answer gradients while preserving ordinary continuity |
 | `resume` | Returned checkpoint ID with the same original request |
@@ -536,6 +538,72 @@ keeps its own kind and verified write.
 Full admission includes original document text and current identities. A successful unchanged `read` may use `stdout_reference`; a changed read may use one `stdout_patch` against the admission snapshot after exact reconstruction and size comparison. Patches never depend on earlier patches. `cat` returns current text; actual tokenizer capacity decides whether it enters whole or as a source page. Checks always consume actual document bytes.
 
 Catalog admission supplies IDs, paths, sizes and SHA-256 identities while native tools retain all text. Optional `source_queries` execute actual read-only queries before generation, for example `{"tool":"sed","arguments":["-n","10,20p","notes.md"]}`. Results retain exit and diagnostics. Excerpts do not establish full visibility; source pages carry exact bytes and executable continuations. Resume recomputes selected queries; omission clears prior selections. Supply enough source for the task and use native tools for a specific missing fact.
+
+### Dependency context and sequential helpers
+
+The existing coding owner can project its retained native cells into a source
+dependency view. `context_graph` accepts `focus` paths and `dependencies` pairs
+`[source, required_source]`, all naming admitted documents. It follows those
+links from the named focus and paths mentioned by the current pending task;
+without either, writable paths supply the focus. Cycles terminate at already
+visited sources. This is caller-selected source structure, not inferred semantic
+ranking or a change to the decoder's linear KV stream.
+
+The parent prompt names selected and omitted paths and binds the view at
+`task_context.context_graph` and `code_context.context_graph`. Its selected
+`sources` remain exact native cells, read with `fcap-context-field`; selection
+does not copy every source into the token window. Original goal, writable/check
+authority, plan, pending tasks, caller corrections, completed source effects and
+the latest observation/failure stay in the view. Omitted sources remain in the
+owner's resident documents and tools. Actual tokenizer admission and existing
+context renewal still decide capacity.
+
+A caller may also request native read-only consultations:
+
+```json
+{
+  "context_graph": {
+    "focus": ["unit.bml"],
+    "dependencies": [["unit.bml", "contract.bml"]]
+  },
+  "helper": {
+    "model": "qwen38-q4",
+    "prompt": "Identify the smallest next step and any missing evidence.",
+    "phases": ["plan", "implement", "repair"]
+  }
+}
+```
+
+These fields extend a normal `code` request. Helpers run to native completion
+and progress by default. Optional nonnegative integer `calls`, `turns` and
+`max_reply_tokens` preserve a caller's explicit cutoff; absent or zero supplies
+none. Optional `context` selects an initial context. Absent or zero uses the
+artifact's declared window, subject to actual memory admission; a full coding
+stream retains its work through the existing context renewal. Phases select planning,
+implementation or repair. The helper's task
+prompt renders the selected sources and pinned context. It runs through the
+existing unmanaged read-only review lane, with no writable paths, recalled
+answers, provider call or training. Its report is advice; it cannot complete
+the parent task or change the original checker.
+
+Consultation occurs before parent admission or after a completed turn saves its
+effects and fully releases the parent model. A failed release prevents the
+helper from starting. The helper must release before the parent reopens from
+the same checkpoint. Incomplete advice remains explicitly unfinished. Exact
+task prompt bytes and hash, selected paths, model, phase, result, release and
+usage are retained in `helper_consultations`; the native review lane adds its
+usual protocol and source bindings around that task prompt. Helper usage is
+included in total generated/injected IDs and observations. The journal and
+graph links use the existing checkpoint, with no separate graph store.
+
+The consultation key includes phase, pending work, plan/brief, exact current
+observation and failure evidence, selected source identities, caller corrections
+and helper request. Identical resumed context does not spend a second call;
+changed evidence can invite another within any explicit caller allowance. A retained
+pending consultation without observed release holds continuation rather than
+starting an overlapping model. `form-cli-code-bounded-note-band` exercises these
+contracts with scripted model ports; an actual model run separately establishes
+the usefulness of the selected context and advice.
 
 ### Read-only review
 
