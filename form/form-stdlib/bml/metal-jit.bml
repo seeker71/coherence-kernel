@@ -1,15 +1,31 @@
-// Form owns source generation, version identity, cache selection and dispatch.
-// The host adapter compiles the supplied source in RAM through Metal's API.
-// FMJ1 | u32 mode | u32 entry bytes | u32 path bytes | entry | path | source.
-// Modes: 0 RAM, 1 capture compiled archive, 2 require compiled archive hit,
-// 3 retire the generation-qualified pipeline handle carried as a u64 payload.
-// Explicit archive modes remain strict. mj-cached owns archive retention.
-// A missing or refused archive is admitted in RAM and returned before publication.
-// mj-publish-held captures, seals and renames the archive. A publication that
-// does not run leaves the next process to compile again. The same process
-// reuses the live pipeline and does not read the seal again.
-// Each archive ends in FMJS, its program identity and its archive-byte seal.
-// Mode 2 loads the retained library; it never recompiles the supplied source.
+// Metal admission for one Form process.
+//
+// A version is the admitted program. Its fields, in order, are:
+//   handle    pipeline this process can enqueue
+//   identity  digest of the device target, the source text and the kernel name
+//   source    the MSL text that was admitted
+//   entry     the kernel name
+//   mode      0 RAM, 1 write an archive, 2 load an archive, 3 retire a handle
+//   path      archive path, empty when the admission never touched a file
+// The digest finds a candidate. A live hit still has to be the same source and
+// the same kernel name. Two different programs that shared a digest stay two
+// programs.
+//
+// Threads. Form evaluates on one walker thread. The process's other thread
+// samples a time board and does not run Form. Metal runs the GPU, and its
+// completion thread only signals a semaphore. It does not call back into this
+// state. A second fkwu process has its own copy. Two processes may publish the
+// same archive name: each writes a private temporary, then rename replaces the
+// final name in one step. A reader opens that final name and checks the seal.
+// This state has no lock. One walker is the whole of its safety. A second
+// walker in this process would be a new design, and this record would not
+// survive it.
+//
+// Return, then publish. mj-cached compiles in RAM and returns that pipeline
+// before any archive exists. mj-publish-held writes, seals and renames the
+// archive later. If that publication never runs, the next process compiles
+// again. The descriptor on the wire is FMJ1, then the mode, the entry length,
+// the path length, the entry, the path and the source.
 import form-stdlib/metal-door.fk;
 import form-stdlib/sha256.fk;
 import form-stdlib/str-byte-at.fk;
@@ -60,13 +76,15 @@ section [form.bml] {
     write_file_text(path, sealed) == len(sealed) && mj-archive-held?(path, identity);
    };
   }
+  // Mode 1 is the only admission that must leave a sealed file behind.
+  // The other modes return the pipeline as the carrier handed it over.
   def mj-admit-held(version) {
-   version[4] != 1 || mj-archive-seal(version[5], version[1]) ? version : {
+   mj-version-mode(version) != 1 || mj-archive-seal(mj-version-path(version), mj-version-identity(version)) ? version : {
     let released = mj-release(version);
-    record_set(MJ-CACHE-STATE, "failure", "metal jit archive seal publication refused: " ++ version[5]);
+    record_set(MJ-CACHE-STATE, "failure", "metal jit archive seal publication refused: " ++ mj-version-path(version));
     released == 1 ? 0 : {
      record_set(MJ-CACHE-STATE, "unreleased", cons(version, record_get(MJ-CACHE-STATE, "unreleased")));
-     let reading = mj-cache-reading(version[5], "release-incomplete", 0, mj-cache-diagnostic(), [oh-need("released-pipeline", json-node-int(version[0]))], []);
+     let reading = mj-cache-reading(mj-version-path(version), "release-incomplete", 0, mj-cache-diagnostic(), [oh-need("released-pipeline", json-node-int(mj-handle(version)))], []);
      record_set(MJ-CACHE-STATE, "reading", reading); oh-frame(reading);
     };
     nothing();
@@ -74,46 +92,48 @@ section [form.bml] {
   }
   def mj-cache-diagnostic() = record_get(MJ-CACHE-STATE, "failure") ++ "\n" ++ metal_status();
   def mj-memory(source, entry) = mj-admit(source, entry, 0, "");
+  // Ask by the program, not by the archive path. The path is only where a
+  // later process will read the sealed copy.
   def mj-cached(source, entry, directory) {
-   let path = mj-cache-path(directory, source, entry);
-   nothing?(path) ? nothing() : mj-cache-demand(source, entry, path);
+   let target = mj-target();
+   nothing?(target) ? nothing() : mj-cached-for(source, entry, target, directory);
+  }
+  def mj-cached-for(source, entry, target, directory) {
+   let identity = mj-identity(source, entry, target);
+   let held = mj-live-match(identity, source, entry);
+   !nothing?(held) && mj-handle(held) > 0 ? held : mj-cache-open(source, entry, directory ++ "/" ++ identity ++ ".metalbin");
   }
   def mj-cache-reading(path, observed, health, cause, needs, offers) = oh-reading("metal-jit", path, "archive-retention", json-node-string("retained"), json-node-string(observed), json-node-int(health), needs, offers, json-node-string(cause));
+  // Organ-care calls this as (context, stage, row). The row carries its own
+  // stage. An observation becomes the publication's current reading.
   def mj-cache-emit(context, stage, row) {
    record_set(MJ-CACHE-STATE, "reading", row);
    (String) oh-str(row, "stage") == "observe" ? record_set(context, "reading", row) : 0;
    oh-frame(row);
   }
   def mj-cache-pending(path) = head(filter(context => (String) record_get(context, "path") == path, record_get(MJ-CACHE-STATE, "pending")));
-  def mj-cache-forget(context) = record_set(MJ-CACHE-STATE, "pending", filter(item => (Comparable) item != context, record_get(MJ-CACHE-STATE, "pending")));
-  def mj-cache-take(context) {
-   let version = record_get(context, "version");
-   !nothing?(version) ? { mj-cache-forget(context); record_set(context, "version", nothing()); } : 0;
-   version;
-  }
-  def mj-live-find(path, rows) = nil?(rows) ? nothing() : (String) rows[0][0] == path ? rows[0][1] : mj-live-find(path, rows[1:]);
-  def mj-live-without(path, rows) = nil?(rows) ? [] : (String) rows[0][0] == path ? mj-live-without(path, rows[1:]) : cons(rows[0], mj-live-without(path, rows[1:]));
+  // One held admission is one program: same digest, same source, same kernel.
+  def mj-same-program?(version, identity, source, entry) = (String) mj-version-identity(version) == identity && (String) mj-version-source(version) == source && (String) mj-version-entry(version) == entry;
+  def mj-live-scan(identity, source, entry, rows) = nil?(rows) ? nothing() : mj-same-program?(rows[0][1], identity, source, entry) ? rows[0][1] : mj-live-scan(identity, source, entry, rows[1:]);
+  def mj-live-match(identity, source, entry) = mj-live-scan(identity, source, entry, record_get(MJ-CACHE-STATE, "live"));
+  def mj-live-keep(version, rows) = nil?(rows) ? [] : mj-same-program?(rows[0][1], mj-version-identity(version), mj-version-source(version), mj-version-entry(version)) ? mj-live-keep(version, rows[1:]) : cons(rows[0], mj-live-keep(version, rows[1:]));
   def mj-live-drop(handle, rows) = nil?(rows) ? [] : mj-handle(rows[0][1]) == handle ? mj-live-drop(handle, rows[1:]) : cons(rows[0], mj-live-drop(handle, rows[1:]));
-  def mj-live-put(path, version) {
-   record_set(MJ-CACHE-STATE, "live", cons([path, version], mj-live-without(path, record_get(MJ-CACHE-STATE, "live"))));
+  def mj-live-put(version) {
+   record_set(MJ-CACHE-STATE, "live", cons([mj-version-identity(version), version], mj-live-keep(version, record_get(MJ-CACHE-STATE, "live"))));
    version;
-  }
-  def mj-cache-demand(source, entry, path) {
-   let live = mj-live-find(path, record_get(MJ-CACHE-STATE, "live"));
-   !nothing?(live) && mj-handle(live) > 0 ? live : mj-cache-open(source, entry, path);
   }
   def mj-cache-open(source, entry, path) {
    let present = file_size(path) >= 0;
    let found = present ? mj-admit(source, entry, 2, path) : nothing();
-   nothing?(found) ? mj-cache-miss(source, entry, path, present ? mj-cache-diagnostic() : "archive absent") : mj-live-put(path, found);
+   nothing?(found) ? mj-cache-miss(source, entry, path, present ? mj-cache-diagnostic() : "archive absent") : mj-live-put(found);
   }
-  // The caller receives the RAM pipeline here. Publication stays pending.
+  // The caller receives the RAM pipeline here. The archive write stays pending.
   def mj-cache-miss(source, entry, path, cause) {
    let version = mj-admit(source, entry, 0, "");
    nothing?(version) ? mj-cache-uncompiled(source, entry, path, cause) : mj-cache-hold(source, entry, path, cause, version);
   }
   def mj-cache-hold(source, entry, path, cause, version) {
-   let kept = mj-live-put(path, version);
+   let kept = mj-live-put(version);
    let context = record_new(0, "source", source, "entry", entry, "path", path, "version", version, "reading", nothing(), "cause", cause, "candidate", nothing(), "published", 0, "action", "publish-archive", "resource", "compiled-archive");
    record_set(MJ-CACHE-STATE, "pending", cons(context, record_get(MJ-CACHE-STATE, "pending")));
    let reading = mj-cache-reading(path, "publication-held", 1, cause, [oh-need("compiled-archive", json-node-string(path))], ["publish-archive"]);
@@ -186,6 +206,11 @@ section [form.bml] {
    };
   }
   def mj-handle(version) = if nothing?(version) then 0 else version[0];
+  def mj-version-identity(version) = version[1];
+  def mj-version-source(version) = version[2];
+  def mj-version-entry(version) = version[3];
+  def mj-version-mode(version) = version[4];
+  def mj-version-path(version) = version[5];
   def mj-u64(value) = ((String) md-le32((value % 4294967296)) + md-le32((value / 4294967296)));
   def mj-release-handle(handle) = if (handle <= 0) then 0 else metal_pipeline(mj-descriptor(mj-u64(handle), "", 3, ""), "form_metal_jit_v1");
   def mj-release(version) {
@@ -198,9 +223,11 @@ section [form.bml] {
   // The caller supplies its comparison domain and observed bytes. Selection
   // is a Form value: existing handles and submitted commands keep their version.
   def mj-select(candidate, expected, observed) = if ((mj-handle(candidate) > 0) && ((String) expected == observed)) then candidate else nothing();
-  // Addresses map to independent records. Metadata never occupies the address
-  // namespace, so every string is available to the caller. Exact source and
-  // entry seals govern reuse; a different live program refuses replacement.
+  // A thought record belongs to its caller. The address is the caller's name
+  // for a slot. The seal is the source and the kernel name. The same address
+  // with a different program is refused, and the old handle is left in place.
+  // Releasing a thought does not touch the live cache above. Same walker rule:
+  // the caller does not share this record with another thread.
   def mj-thought-table() = record_new(0);
   def mj-thought-at(table, address) = if (!record?(table)) then nothing() else if (!record_has(table, address)) then nothing() else mj-thought-row(record_get(table, address), table, address);
   def mj-thought-row(row, table, address) = if (!record?(row)) then nothing() else if (((String) record_get(row, "kind") == "metal-jit-thought") && (((Comparable) record_get(row, "owner") == table) && ((String) record_get(row, "address") == address))) then row else nothing();

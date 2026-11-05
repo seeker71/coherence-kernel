@@ -108,8 +108,10 @@ and decoding costs, before the storage-only contract is met.
 Metal archive retention belongs to `form/form-stdlib/bml/metal-jit.bml`.
 One `.metalbin` contains the native archive, Form's source/entry/target identity
 and a seal of the archive bytes. `mj-cached` admits in RAM and returns that
-pipeline before publication. The same process reuses the live pipeline and does
-not read the seal again. `mj-publish-held` captures, seals and renames the
+pipeline before publication. The same process reuses that pipeline when the
+digest, the source text and the kernel name all match, and does not read the
+seal again. Form evaluates on one walker thread. Metal's completion thread only
+signals a semaphore, and this admission state has no lock. `mj-publish-held` captures, seals and renames the
 archive; a publication that does not run leaves the next process to compile
 again. Mode 2 still verifies the seal once and loads the library without
 recompiling. `observe/metal-cache-return-run.bml` reads this: `f(n)=3n+7`
