@@ -5,7 +5,7 @@
 //   identity  digest of the device target, the source text and the kernel name
 //   source    the MSL text that was admitted
 //   entry     the kernel name
-//   mode      0 RAM, 1 write an archive, 2 load an archive, 3 retire a handle
+//   mode      0 compile in RAM, 2 load a file, 3 retire a handle, 4 copy the RAM archive
 //   path      archive path, empty when the admission never touched a file
 // The digest finds a candidate. A live hit still has to be the same source and
 // the same kernel name. Two different programs that shared a digest stay two
@@ -21,11 +21,13 @@
 // walker in this process would be a new design, and this record would not
 // survive it.
 //
-// Return, then publish. mj-cached compiles in RAM and returns that pipeline
-// before any archive exists. mj-publish-held writes, seals and renames the
-// archive later. If that publication never runs, the next process compiles
-// again. The descriptor on the wire is FMJ1, then the mode, the entry length,
-// the path length, the entry, the path and the source.
+// A miss compiles in RAM and returns that pipeline. The caller runs it.
+// mj-publish-held later copies that same archive, seals it and renames it.
+// This process does not compile into a file and does not load the file it
+// just wrote. A later process loads the file only when the program is absent
+// from its RAM and the file is present. If the copy never runs, that later
+// process compiles again. The descriptor on the wire is FMJ1, then the mode,
+// the entry length, the path length, the entry, the path and the source.
 import form-stdlib/metal-door.fk;
 import form-stdlib/sha256.fk;
 import form-stdlib/str-byte-at.fk;
@@ -34,7 +36,7 @@ import form-stdlib/organ-care.bml;
 import form-stdlib/form-fs.fk;
 import form-stdlib/bml/host-child.bml;
 section [form.bml] {
- let MJ-CACHE-STATE = record_new(0, "writes", 0, "reading", nothing(), "pending", [], "failure", "", "unreleased", [], "live", []);
+ let MJ-CACHE-STATE = record_new(0, "writes", 0, "reading", nothing(), "pending", [], "failure", "", "live", []);
  let MJ-ARCHIVE-FOOTER-BYTES = 132;
  class MetalJit {
   def mj-source(body) = ("#include <metal_stdlib>" + (byte_to_str(10) + ("using namespace metal; " + body)));
@@ -58,7 +60,7 @@ section [form.bml] {
    let valid = mode != 2 || mj-archive-held?(path, identity);
    !valid ? record_set(MJ-CACHE-STATE, "failure", "metal jit archive program identity or byte seal refused: " ++ path) : 0;
    let handle = nothing?(identity) || !valid ? 0 : metal_pipeline(mj-descriptor(source, entry, mode, path), "form_metal_jit_v1");
-   handle <= 0 ? nothing() : mj-admit-held([handle, identity, source, entry, mode, path]);
+   handle <= 0 ? nothing() : [handle, identity, source, entry, mode, path];
   }
   // One self-contained Metal archive also carries Form's program identity and
   // a seal of the actual archive bytes. Loading its library must never replace
@@ -74,20 +76,6 @@ section [form.bml] {
    nothing?(bytes) ? 0 : {
     let sealed = bytes ++ mj-archive-footer(bytes, identity);
     write_file_text(path, sealed) == len(sealed) && mj-archive-held?(path, identity);
-   };
-  }
-  // Mode 1 is the only admission that must leave a sealed file behind.
-  // The other modes return the pipeline as the carrier handed it over.
-  def mj-admit-held(version) {
-   mj-version-mode(version) != 1 || mj-archive-seal(mj-version-path(version), mj-version-identity(version)) ? version : {
-    let released = mj-release(version);
-    record_set(MJ-CACHE-STATE, "failure", "metal jit archive seal publication refused: " ++ mj-version-path(version));
-    released == 1 ? 0 : {
-     record_set(MJ-CACHE-STATE, "unreleased", cons(version, record_get(MJ-CACHE-STATE, "unreleased")));
-     let reading = mj-cache-reading(mj-version-path(version), "release-incomplete", 0, mj-cache-diagnostic(), [oh-need("released-pipeline", json-node-int(mj-handle(version)))], []);
-     record_set(MJ-CACHE-STATE, "reading", reading); oh-frame(reading);
-    };
-    nothing();
    };
   }
   def mj-cache-diagnostic() = record_get(MJ-CACHE-STATE, "failure") ++ "\n" ++ metal_status();
@@ -155,39 +143,38 @@ section [form.bml] {
    (Comparable) record_get(context, "published") == 1;
   }
   def mj-cache-care(context, reading, resource, action) = oc-hear(context, reading, [oc-provider("metal-jit-archive", [resource], action, mj-cache-supply)], mj-cache-emit, mj-cache-observe);
+  // Copy the archive the caller is already running. Seal that copy, then
+  // rename it into place. The running pipeline stays the RAM one.
   def mj-cache-supply(context, reading, need) {
-   let source = record_get(context, "source"); let entry = record_get(context, "entry"); let path = record_get(context, "path");
+   let path = record_get(context, "path");
+   let version = record_get(context, "version");
    let sequence = record_get(MJ-CACHE-STATE, "writes") + 1;
    record_set(MJ-CACHE-STATE, "writes", sequence);
    let temporary = path ++ ".writing-" ++ host_pid().str() ++ "-" ++ sequence.str();
    let made = hch-mkdirs(fs-path-dirname(path));
-   let candidate = mj-admit(source, entry, 1, temporary);
-   let published = !nothing?(candidate) && host_path_rename(temporary, path) >= 0;
-   let detail = published ? "archive published" : nothing?(candidate) ? mj-cache-diagnostic() : "archive publication refused: " ++ path;
+   let copied = mj-archive-store(mj-handle(version), temporary);
+   let sealed = copied == 1 && mj-archive-seal(temporary, mj-version-identity(version));
+   let published = sealed && host_path_rename(temporary, path) >= 0;
+   let detail = published ? "archive copied" : copied != 1 ? mj-cache-diagnostic() : "archive copy refused: " ++ path;
    let removed = published ? 0 : host_path_remove(temporary);
-   let released = nothing?(candidate) ? 1 : mj-release(candidate);
-   record_set(context, "candidate", released == 1 ? nothing() : candidate);
+   record_set(context, "candidate", nothing());
    record_set(context, "cause", record_get(context, "cause") ++ "\n" ++ detail);
-   json-node-object([oh-n("published", published), oh-n("released", released), oh-n("temporary_removed", file_size(temporary) < 0), oh-s("detail", detail)]);
+   json-node-object([oh-n("published", published), oh-n("released", 1), oh-n("temporary_removed", file_size(temporary) < 0), oh-s("detail", detail)]);
   }
-  // Publication re-admits the sealed archive to prove the file loads, then
-  // releases that check. The caller's RAM pipeline stays the live one.
-  // A mode-1 capture handle is not that pipeline: release failure keeps it
-  // a candidate and does not report it as the RAM answer.
+  // The copy is done when the sealed file is the archive that was compiled
+  // in RAM. This step does not load that file. The next process loads it
+  // when its own RAM does not already hold the program.
   def mj-cache-observe(context, reading, delivery) {
    let path = record_get(context, "path");
-   let settled = json-int-value(oh-get(delivery, "published")) == 1 && json-int-value(oh-get(delivery, "released")) == 1;
-   let checked = settled ? mj-admit(record_get(context, "source"), record_get(context, "entry"), 2, path) : nothing();
-   let check_released = nothing?(checked) ? 1 : mj-release(checked);
-   (Comparable) check_released == 1 ? 0 : record_set(context, "candidate", checked);
-   let ok = settled && !nothing?(checked) && (Comparable) check_released == 1;
+   let version = record_get(context, "version");
+   let settled = json-int-value(oh-get(delivery, "published")) == 1;
+   let ok = settled && !nothing?(version) && mj-archive-held?(path, mj-version-identity(version));
    record_set(context, "published", ok ? 1 : 0);
-   let held = !nothing?(record_get(context, "candidate"));
-   let observed = ok ? "retained" : held ? "release-incomplete" : "publication-held";
+   let observed = ok ? "retained" : "publication-held";
    let cause = record_get(context, "cause") ++ (settled && !ok ? "\n" ++ mj-cache-diagnostic() : "");
-   record_set(context, "action", ok || held ? "" : "retry-archive");
-   record_set(context, "resource", ok ? "" : held ? "released-pipeline" : "writable-archive");
-   let fresh = mj-cache-reading(path, observed, ok, cause, ok ? [] : [oh-need(held ? "released-pipeline" : "writable-archive", json-node-string(path))], ok || held ? [] : ["retry-archive"]);
+   record_set(context, "action", ok ? "" : "retry-archive");
+   record_set(context, "resource", ok ? "" : "writable-archive");
+   let fresh = mj-cache-reading(path, observed, ok, cause, ok ? [] : [oh-need("writable-archive", json-node-string(path))], ok ? [] : ["retry-archive"]);
    oh-set(fresh, "care_of", oh-get(reading, "id"));
   }
   // A resource event resumes the original source, entry, path and findings.
@@ -209,10 +196,11 @@ section [form.bml] {
   def mj-version-identity(version) = version[1];
   def mj-version-source(version) = version[2];
   def mj-version-entry(version) = version[3];
-  def mj-version-mode(version) = version[4];
-  def mj-version-path(version) = version[5];
   def mj-u64(value) = ((String) md-le32((value % 4294967296)) + md-le32((value / 4294967296)));
   def mj-release-handle(handle) = if (handle <= 0) then 0 else metal_pipeline(mj-descriptor(mj-u64(handle), "", 3, ""), "form_metal_jit_v1");
+  // Copy the archive this handle already compiled. The answer is 1 when the
+  // file holds that archive. It is not a second compile and not a new pipeline.
+  def mj-archive-store(handle, path) = handle <= 0 ? 0 : metal_pipeline(mj-descriptor("", mj-u64(handle), 4, path), "form_metal_jit_v1");
   def mj-release(version) {
    let handle = mj-handle(version);
    let released = mj-release-handle(handle);

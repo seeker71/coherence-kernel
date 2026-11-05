@@ -108,16 +108,19 @@ and decoding costs, before the storage-only contract is met.
 
 Metal archive retention belongs to `form/form-stdlib/bml/metal-jit.bml`.
 One `.metalbin` contains the native archive, Form's source/entry/target identity
-and a seal of the archive bytes. `mj-cached` admits in RAM and returns that
-pipeline before publication. The same process reuses that pipeline when the
-digest, the source text and the kernel name all match, and does not read the
-seal again. Form evaluates on one walker thread. Metal's completion thread only
-signals a semaphore, and this admission state has no lock. `mj-publish-held` captures, seals and renames the
-archive; a publication that does not run leaves the next process to compile
-again. Mode 2 still verifies the seal once and loads the library without
-recompiling. `observe/metal-cache-return-run.bml` reads this: `f(n)=3n+7`
-returned 22 while the archive was still absent, and the next process loaded the
-published archive with zero further MSL compilations and returned 22. Missing,
+and a seal of the archive bytes. A miss compiles in RAM and returns that
+pipeline. The caller runs it before any file exists. The same process reuses
+that pipeline when the digest, the source text and the kernel name all match.
+Form evaluates on one walker thread. Metal's completion thread only
+signals a semaphore, and this admission state has no lock. `mj-publish-held`
+copies that same archive, seals it and renames it. The copy does not compile,
+and this process does not load the file it just wrote. A copy that does not
+run leaves the next process to compile again. The next process loads the file
+only when the program is absent from its RAM and the file is present; that
+load checks the seal once and does not compile. `observe/metal-cache-return-run.bml`
+reads this: `f(n)=3n+7` returned 22 while the archive was still absent, the
+copy left the source-compile count unchanged, and the next process loaded the
+file with zero MSL compilations and returned 22. Missing,
 corrupt or mismatched archives still enter organ-care. Failed publication keeps
 the original request and findings held, and the RAM pipeline already returned
 stays. A correlated response through `mj-cache-hear` resumes publication;

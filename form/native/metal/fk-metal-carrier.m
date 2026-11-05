@@ -399,6 +399,12 @@ static NSMutableDictionary *fk_pipe_cache_objs = nil; // content key -> native p
 static NSMutableDictionary *fk_pipe_cache_refs = nil; // content key -> live admissions
 static NSMutableDictionary *fk_pipe_by_key = nil;     // legacy content key -> stable handle
 static NSMutableArray *fk_pipe_keys = nil;  // slot -> cache key, NSNull when retired
+// The in-memory Metal archive produced by the RAM compile. Publication copies
+// this object to disk. It is not a second compilation. The dictionary keeps
+// that archive with the compiled content, so a later admission of the same
+// pipeline can still copy it.
+static NSMutableArray *fk_pipe_archives = nil;
+static NSMutableDictionary *fk_pipe_archive_by_key = nil;
 static unsigned int *fk_pipe_gen = NULL;
 static long long *fk_pipe_free_slots = NULL;
 static size_t fk_pipe_cap = 0;
@@ -839,12 +845,16 @@ long long fk_metal_pipeline_free_external(long long h) {
             if (refs <= 1) {
                 [fk_pipe_cache_refs removeObjectForKey:key];
                 [fk_pipe_cache_objs removeObjectForKey:key];
+                [fk_pipe_archive_by_key removeObjectForKey:key];
             } else {
                 fk_pipe_cache_refs[key] = @(refs - 1);
             }
         }
         fk_pipe_objs[(NSUInteger)(slot - 1)] = [NSNull null];
         fk_pipe_keys[(NSUInteger)(slot - 1)] = [NSNull null];
+        if (fk_pipe_archives != nil && slot <= (long long)[fk_pipe_archives count]) {
+            fk_pipe_archives[(NSUInteger)(slot - 1)] = [NSNull null];
+        }
         if (fk_pipe_gen[slot - 1] == FK_PIPE_GENERATION_MAX) {
             fk_pipe_retired_slots++;
         } else {
@@ -856,15 +866,63 @@ long long fk_metal_pipeline_free_external(long long h) {
     }
 }
 
+static void fk_pipe_archive_put(long long slot, id archive) {
+    if (slot < 1) { return; }
+    if (fk_pipe_archives == nil) { fk_pipe_archives = [NSMutableArray array]; }
+    while ([fk_pipe_archives count] < (NSUInteger)slot) {
+        [fk_pipe_archives addObject:[NSNull null]];
+    }
+    fk_pipe_archives[(NSUInteger)(slot - 1)] = archive == nil ? [NSNull null] : archive;
+}
+
+// Copy the archive retained by a RAM compile. This does not compile MSL and
+// does not load the file back.
+static long long fk_metal_archive_store(long long handle, NSString *path) {
+    long long slot = fk_pipe_slot(handle);
+    if (slot == 0 || fk_pipe_archives == nil || slot > (long long)[fk_pipe_archives count]) {
+        fk_err(@"metal jit archive store: pipeline has no ram archive");
+        return 0;
+    }
+    id archive = fk_pipe_archives[(NSUInteger)(slot - 1)];
+    if (archive == [NSNull null] || archive == nil) {
+        fk_err(@"metal jit archive store: pipeline has no ram archive");
+        return 0;
+    }
+    const char *destination = [path fileSystemRepresentation];
+    int created = 0;
+    int fd = open(destination, O_WRONLY | O_CREAT | O_EXCL, 0666);
+    if (fd >= 0) { created = 1; }
+    else if (errno == EEXIST) { fd = open(destination, O_WRONLY); }
+    if (fd < 0) {
+        fk_err([NSString stringWithFormat:@"metal jit archive destination: %s", strerror(errno)]);
+        return 0;
+    }
+    if (close(fd) != 0) {
+        int why = errno;
+        if (created) { unlink(destination); }
+        fk_err([NSString stringWithFormat:@"metal jit archive destination close: %s", strerror(why)]);
+        return 0;
+    }
+    NSError *e = nil;
+    if (![archive serializeToURL:[NSURL fileURLWithPath:path] error:&e]) {
+        if (created) { unlink(destination); }
+        fk_err([NSString stringWithFormat:@"metal jit archive write: %@", e.localizedDescription]);
+        return 0;
+    }
+    fk_metal_jit_archive_writes++;
+    return 1;
+}
+
 long long fk_metal_pipeline_external(const char *msl, long long msl_len,
                                      const char *name, long long name_len) {
     @autoreleasepool {
         NSString *err = nil;
         if (!fk_metal_up(&err)) { fk_err(err); return 0; }
-        // Form owns this descriptor and the selected cache mode. All source
-        // compilation remains in memory. Mode 0 never touches a cache file;
-        // mode 1 records a compiled archive; mode 2 requires an archive hit;
-        // mode 3 carries only a u64 handle and retires that admitted pipeline.
+        // Form owns this descriptor and the selected cache mode. A miss compiles
+        // in RAM and runs that pipeline. Mode 4 later copies the retained
+        // archive to disk. Mode 2 loads a file only when the caller already
+        // found it and the program is not in RAM. Mode 3 retires a handle.
+        // Mode 1 is refused: this carrier does not compile into a file.
         // FMJ1 | u32 mode | u32 entry bytes | u32 path bytes | entry | path | MSL
         unsigned int cache_mode = 0;
         int form_admission = 0;
@@ -895,6 +953,30 @@ long long fk_metal_pipeline_external(const char *msl, long long msl_len,
                 }
                 return fk_metal_pipeline_free_external((long long)raw_handle);
             }
+            // Mode 4 copies the archive already compiled in RAM. It carries the
+            // live handle and the destination path, and no MSL source.
+            if (cache_mode == 4) {
+                if (fields[1] != 8 || fields[2] == 0 || prefix != (unsigned long long)msl_len) {
+                    fk_err(@"metal jit archive store needs one u64 handle and a path");
+                    return 0;
+                }
+                unsigned long long raw_handle = fk_le64(p + 16);
+                if (raw_handle > 0x7FFFFFFFFFFFFFFFULL) {
+                    fk_err(@"metal jit archive store handle is outside signed range");
+                    return 0;
+                }
+                NSString *dest = [[NSString alloc] initWithBytes:p + 24 length:fields[2]
+                                                        encoding:NSUTF8StringEncoding];
+                if (dest == nil || memchr(p + 24, 0, fields[2]) != NULL) {
+                    fk_err(@"metal jit archive store path is invalid UTF-8 or contains NUL");
+                    return 0;
+                }
+                return fk_metal_archive_store((long long)raw_handle, dest);
+            }
+            if (cache_mode == 1) {
+                fk_err(@"metal jit compiles in ram; the disk file is a later copy of that archive");
+                return 0;
+            }
             if (cache_mode > 2 || fields[1] == 0 || prefix >= (unsigned long long)msl_len ||
                 (cache_mode == 0 ? fields[2] != 0 : fields[2] == 0)) {
                 fk_err(@"metal jit descriptor lengths or mode invalid"); return 0;
@@ -915,6 +997,8 @@ long long fk_metal_pipeline_external(const char *msl, long long msl_len,
             fk_pipe_cache_refs = [NSMutableDictionary dictionary];
             fk_pipe_by_key = [NSMutableDictionary dictionary];
             fk_pipe_keys = [NSMutableArray array];
+            fk_pipe_archives = [NSMutableArray array];
+            fk_pipe_archive_by_key = [NSMutableDictionary dictionary];
         }
         NSString *fn = [[NSString alloc] initWithBytes:name length:(NSUInteger)name_len
                                               encoding:NSUTF8StringEncoding];
@@ -938,6 +1022,9 @@ long long fk_metal_pipeline_external(const char *msl, long long msl_len,
             fk_metal_jit_ram_hits++;
             long long h = fk_pipe_register(cached, key);
             if (h != 0 && !form_admission) { fk_pipe_by_key[key] = @(h); }
+            if (h != 0 && fk_pipe_archive_by_key[key] != nil) {
+                fk_pipe_archive_put(fk_pipe_slot(h), fk_pipe_archive_by_key[key]);
+            }
             return h;
         }
 
@@ -964,21 +1051,33 @@ long long fk_metal_pipeline_external(const char *msl, long long msl_len,
         MTLComputePipelineDescriptor *descriptor = [MTLComputePipelineDescriptor new];
         descriptor.computeFunction = f;
         id<MTLBinaryArchive> archive = nil;
-        NSURL *archive_url = nil;
-        if (cache_mode != 0) {
-            archive_url = [NSURL fileURLWithPath:cache_path];
+        int keep_archive = 0;
+        if (cache_mode == 2) {
+            // The caller already decided this is a RAM miss and a disk hit.
+            // The file supplies the library. This admission does not compile.
             MTLBinaryArchiveDescriptor *ad = [MTLBinaryArchiveDescriptor new];
-            if (cache_mode == 2) { ad.url = archive_url; }
+            ad.url = [NSURL fileURLWithPath:cache_path];
             archive = [fk_dev newBinaryArchiveWithDescriptor:ad error:&e];
             if (archive == nil) {
                 fk_err([NSString stringWithFormat:@"metal jit archive: %@", e.localizedDescription]);
                 return 0;
             }
-            if (cache_mode == 1 && ![archive addComputePipelineFunctionsWithDescriptor:descriptor error:&e]) {
-                fk_err([NSString stringWithFormat:@"metal jit archive compile: %@", e.localizedDescription]);
+            descriptor.binaryArchives = @[archive];
+        } else if (form_admission) {
+            // One RAM compile. The pipeline runs from this archive, and a later
+            // copy writes the same archive. Nothing here touches a file.
+            MTLBinaryArchiveDescriptor *ad = [MTLBinaryArchiveDescriptor new];
+            archive = [fk_dev newBinaryArchiveWithDescriptor:ad error:&e];
+            if (archive == nil) {
+                fk_err([NSString stringWithFormat:@"metal jit ram archive: %@", e.localizedDescription]);
+                return 0;
+            }
+            if (![archive addComputePipelineFunctionsWithDescriptor:descriptor error:&e]) {
+                fk_err([NSString stringWithFormat:@"metal jit ram archive: %@", e.localizedDescription]);
                 return 0;
             }
             descriptor.binaryArchives = @[archive];
+            keep_archive = 1;
         }
         MTLPipelineOption options = cache_mode == 2 ? MTLPipelineOptionFailOnBinaryArchiveMiss : MTLPipelineOptionNone;
         id<MTLComputePipelineState> pipe = [fk_dev newComputePipelineStateWithDescriptor:descriptor
@@ -987,32 +1086,12 @@ long long fk_metal_pipeline_external(const char *msl, long long msl_len,
             fk_err([NSString stringWithFormat:@"pipeline: %@", [e localizedDescription]]);
             return 0;
         }
-        if (cache_mode == 1) {
-            // Admit the physical destination before Metal serializes into it.
-            // A filesystem refusal stays a named return at this host boundary.
-            const char *destination = [cache_path fileSystemRepresentation];
-            int created = 0;
-            int fd = open(destination, O_WRONLY | O_CREAT | O_EXCL, 0666);
-            if (fd >= 0) { created = 1; }
-            else if (errno == EEXIST) { fd = open(destination, O_WRONLY); }
-            if (fd < 0) {
-                fk_err([NSString stringWithFormat:@"metal jit archive destination: %s", strerror(errno)]);
-                return 0;
-            }
-            if (close(fd) != 0) {
-                int why = errno;
-                if (created) { unlink(destination); }
-                fk_err([NSString stringWithFormat:@"metal jit archive destination close: %s", strerror(why)]);
-                return 0;
-            }
-            if (![archive serializeToURL:archive_url error:&e]) {
-                if (created) { unlink(destination); }
-                fk_err([NSString stringWithFormat:@"metal jit archive write: %@", e.localizedDescription]);
-                return 0;
-            }
-            fk_metal_jit_archive_writes++;
-        } else if (cache_mode == 2) { fk_metal_jit_archive_reads++; }
+        if (cache_mode == 2) { fk_metal_jit_archive_reads++; }
         long long h = fk_pipe_register(pipe, key);
+        if (h != 0 && keep_archive) {
+            fk_pipe_archive_by_key[key] = archive;
+            fk_pipe_archive_put(fk_pipe_slot(h), archive);
+        }
         if (h != 0 && !form_admission) { fk_pipe_by_key[key] = @(h); }
         return h;
     }
