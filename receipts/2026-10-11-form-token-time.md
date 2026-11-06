@@ -197,3 +197,22 @@ matrix-vector kernels are ALU- and latency-bound (6.6 to 15 times slower than st
 the GPU moves the same work between 30 s and 51 s of device busy. The next floor lies in the kernel, not in the host: a matrix-unit
 matvec for eight streams, validated by outcomes (the bits change), and the dispatch descriptors (`md-le32`, `md-bind16`: byte strings
 built by Form for the carrier to unpack, 2 to 4% of the time board) as shared lists or a recorded step program, one crossing a step.
+
+## 2026-11-06 — the batched matvec, the device's own floor
+
+`FORM_NAM_PROFILE=1` on the isolated eight-stream decode loop named the device time: `nam_affine_mt4` (the 4-bit matvec, 196 dispatches a
+step, 260 us each) was 51 of the step's 61 ms. Streaming one layer's weights is about 17 us and the ALU floor without fused multiply-add
+about 66 us per product; the kernel ran at 15 times the first. It held all eight tokens' activations beside its accumulators (96
+registers) and computed the empty token lanes of a partial block as zeros. The kernel now dequantizes the four rows' weights first and
+streams each token's activations through, and skips the token lanes that are not in the block: the same arithmetic in the same order, the
+same output bytes (eight products of each real 3B shape, three scale types, byte-compared with the old kernel), and in an interleaved A/B on
+the real shapes, 1.2 to 2.5 times faster (a quiet window measured 1.7 to 3 times with 32-bit loads; the offset-safe kernel is under that).
+Outcomes unchanged: 29 of 40 exact, 70 controls, 68 observations, 2512 IDs, the decode ids token for token.
+
+The first version loaded the weight word through a `uint*`. The bands held (511, 31) and the model decoded into noise: the weights of a
+mapped safetensors model start at any byte offset (the carrier binds each at its offset into the page), and a 32-bit load through an
+unaligned pointer reads other bytes, while every band's buffers start at offset 0. `CURRENT_FLOOR.md` already held the same lesson for
+scales; I had not read it before touching a kernel. The band now maps its tensors from a file at odd offsets (claim 512, red against the
+`uint*` load, green against the byte one), and the kernel says why it reads bytes. What was not settled: the machine ran 3 to 5 times
+slower than its quiet state through most of the afternoon (neighbouring doors; the candle read 60 to 170 ms against 28), so no
+whole-evaluation wall-clock is claimed for this change.

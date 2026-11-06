@@ -500,8 +500,10 @@ answers to 1e-4 of the logits because the hardware chooses the association); rec
 once they hold 24 (`fk_rfind`, `record-hash-band` 31), so the Llama tokenizer's tables are records and opening the voice fell
 from 52 to 6 seconds, tokenization identical over 256,038 corpus ids; `nlg-open` holds the machine's one GPU lease until
 `nlg-close` (`gpu-lease-inherit-band` 15) and the cycle holds it across its stages. Aligned wide loads of scales gave NaN on
-the real model's buffers while the band's synthetic ones passed: a kernel change goes through
-`observe/native-lora-score-bench-run.bml` on real rows before the trainer. Bands: `native-affine-mt-band` 511,
+the real model's buffers while the band's synthetic ones passed; a weight word loaded through `uint*` did the same on 2026-11-06
+(decode into noise, every band at offset 0 green), so `native-affine-mt-band` claim 512 now maps its tensors from a file at odd
+byte offsets, as a safetensors model's are, and `nam_affine_mt4` reads bytes only. A kernel change still goes through
+`observe/native-lora-score-bench-run.bml` on real rows before the trainer. Bands: `native-affine-mt-band` 1023,
 `affine4-t-mma-band` 7, `affine4-t-band` 63. Still open: the baseline validation re-scores 81 unchanged rows every run
 (cacheable by adapter and row), the corpus digest is a 4 s Form SHA-256, and the neighbours' time-slices (a day-turn, band
 sweeps) inflate every timing until their doors take the lease too.
