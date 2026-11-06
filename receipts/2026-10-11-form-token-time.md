@@ -172,3 +172,28 @@ round 60 on while the held-out loss ends at 0.03 to 0.04, so some of the 100 ste
 inflate timings; the corpus digest is a 4 s Form SHA-256; the 17 MB tokenizer JSON parses in 3 s; forward and backward
 are 25% non-device (a decode token is 621 dispatches, fusing q/k/v and gate/up would cut a fifth); `eval-compare`,
 `eval-refusal` and `recipe-import` (10 refusals) are the model's own gaps, now visible without a harness ceiling over them.
+
+## 2026-11-06 — the batched evaluation, read down to the host and the device
+
+Eight questions to a forward (`batch 8`, the cycle's default now) took a 40-question evaluation from 212 s and 206 s (one at a time, two
+readings) to 87.9 s, with the same answers (29 of 40 exact, 2512 local IDs, in every reading). The Llama kernels' pipelines are now kept
+for the process (`nll-pipe`, as `NAM-CACHE` did for the affine ones): the source text of a unit was being rebuilt and looked up on every
+dispatch, 9.1% of the wall by the time board's own-time column. Same answers; the host's share (wall minus device busy) fell from
+16.6 s to 11.0 s.
+
+Where the rest goes is now read by the evaluation itself (`fte-wall`, printed after the arms' lines), the host's milliseconds with the
+device's own busy milliseconds beside them, in the slow state of the machine (candle 320 then 581 tenths):
+
+| part | wall | device busy | host share |
+|---|---|---|---|
+| one-token forwards, eight streams to a forward | 36.5 s | 35.0 s | 1.5 s |
+| multi-token feeds (Form's seams and observations), one stream at a time | 13.9 s | 10.9 s | 3.0 s |
+| the questions' prompts (prefill) | 7.6 s | 4.8 s | 2.8 s |
+| Form walking the questions (pick, scan, observe, finish) | 1.0 s | — | 1.0 s |
+
+So the walker is 1.4% of the wall and the host in every part together is about 8 s of 73; the evaluation is a device read. The decode
+forward is 71 ms of device time for about five streams, where the bytes it must stream are a 3.3 ms floor at 546 GB/s: the 4-bit
+matrix-vector kernels are ALU- and latency-bound (6.6 to 15 times slower than streaming the same bytes), and the sustained-load state of
+the GPU moves the same work between 30 s and 51 s of device busy. The next floor lies in the kernel, not in the host: a matrix-unit
+matvec for eight streams, validated by outcomes (the bits change), and the dispatch descriptors (`md-le32`, `md-bind16`: byte strings
+built by Form for the carrier to unpack, 2 to 4% of the time board) as shared lists or a recorded step program, one crossing a step.
