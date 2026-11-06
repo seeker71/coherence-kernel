@@ -42,5 +42,24 @@ Current targeted results on this rewrite:
   lastbreath outcome, and attempted failure retained its actual diagnostic.
 
 Exact commands and outputs, including earlier failures, remain in the private
-`rewrite-*.log` files. Native evaluations stay outside gradients. The branch must
-still complete the actual rebase, pending native observations and release checks.
+`rewrite-*.log` files. Native evaluations stay outside gradients.
+
+The actual rebase onto `487855a90` completed. Subsequent native runs closed the
+three outstanding response fixtures: `rewrite-five-causal.log` retains the
+unresolved 146/164 inventory and the exact unavailable resource, and
+`rewrite-five-history-choice.log` retains November 26 with two actual history
+evaluations. All five latest per-case answers retain completion and release.
+These observations span three runs; they are not a final-build suite. The history
+repair reduced generation from 848 to 137 IDs and observation injections from 34
+to 2. GPU sharing differs, so no latency improvement is inferred.
+
+Pinned canonical conformance now passes all 13 expressions, the FORMBIN2 round
+trip and 12 malformed artifacts (`rewrite-canonical-resident.log`). Substring
+4095, attempt 4095, backtrack 255 and token grammar 1023 also passed. In-process
+cell probes verify retained function ownership, typed input, nested restoration,
+capture and deadline handling. The first closure probe incorrectly called dynamic
+`cell_input` outside a cell; its corrected probe retains the owner through actual
+globals and returns 42/100 across a source change. Full cell compatibility still
+has observed gaps in shared library admission, diagnostics, publication, import
+selection and AST/cache support. The graph/helper run and release checks remain
+active. Integration of rewrite `03b0ee372` follows this checkpoint.

@@ -12,6 +12,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include "fkwu-optable.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <float.h>
@@ -374,6 +375,7 @@ typedef struct Frame Frame;
 typedef struct Record Record;
 typedef struct Cell Cell;
 typedef struct List List;
+typedef struct CellProgram CellProgram;
 
 typedef Value (*OperationOffer)(Value *arguments, size_t argument_count);
 
@@ -398,6 +400,7 @@ struct Value {
     Record *record;
     Cell *cell;
     List *list;
+    CellProgram *program;
 };
 
 struct List {
@@ -464,6 +467,7 @@ struct Operation {
     ArityPolicy arity_policy;
     EvaluationPolicy evaluation;
     OperationId id;
+    long long tag;
     OperationOffer offer;
     size_t calls;
     int answers;
@@ -503,6 +507,8 @@ struct Frame {
     const char *prior_failure;
     int prior_failure_reported;
     size_t stage_base;
+    CellProgram *previous_program;
+    int restore_program;
 };
 
 static const char *source_bytes;
@@ -524,6 +530,8 @@ static size_t local_capacity;
 static Binding *globals;
 static size_t global_count;
 static size_t global_capacity;
+static char **loaded_units;
+static size_t loaded_count, loaded_capacity;
 
 static Frame *frames;
 static size_t frame_count;
@@ -533,6 +541,30 @@ static jmp_buf *evaluation_recovery;
 static size_t frame_capacity;
 static Value finished;
 static int result_ready;
+
+typedef struct CellCall CellCall;
+struct CellCall {
+    CellCall *parent;
+    jmp_buf recovery;
+    Value argument;
+    const char *path;
+    char *input;
+    size_t input_length, input_offset;
+    FILE *out, *err;
+    char *out_bytes, *err_bytes;
+    size_t out_length, err_length;
+    int capture, checking, parsing, errors, resident;
+    size_t source_units, source_functions;
+    const char *stop_kind, *message, *recipe, *unit;
+    unsigned long long deadline;
+};
+static CellCall *active_cell;
+static Value offer_cell_run(Value *arguments, size_t argument_count);
+static Value offer_cell_call(Value *arguments, size_t argument_count);
+static Value offer_cell_input(Value *arguments, size_t argument_count);
+static void cell_stop(const char *kind, const char *message);
+static FILE *runtime_output(void) { return active_cell != NULL ? active_cell->out : stdout; }
+static FILE *runtime_error(void) { return active_cell != NULL ? active_cell->err : stderr; }
 
 typedef struct {
     Value word;
@@ -577,7 +609,7 @@ static void note_stack(void) {
         if (form == NULL || form->kind != FORM_GROUP || form->part_count == EMPTY_COUNT) continue;
         Form *head = form->parts[CALL_HEAD];
         if (head->kind != FORM_SYMBOL || head->text == NULL) continue;
-        fprintf(stderr, "  %.*s at byte %zu in %s\n", (int)head->text_length, head->text, form->offset, form->path != NULL ? form->path : "<native>");
+        fprintf(runtime_error(), "  %.*s at byte %zu in %s\n", (int)head->text_length, head->text, form->offset, form->path != NULL ? form->path : "<native>");
         shown += ONE_ELEMENT;
     }
 }
@@ -587,10 +619,11 @@ static void fail(const char *reason) {
         failure_message = strdup(reason);
         if (failure_message == NULL) { fputs("fkwu: out of memory retaining failure\n", stderr); exit(EXIT_FAILURE); }
         failure_reported = 1;
-        fprintf(stderr, ERROR_BARE, reason);
+        fprintf(runtime_error(), ERROR_BARE, reason);
         longjmp(*evaluation_recovery, 1);
     }
-    fprintf(stderr, ERROR_BARE, reason);
+    fprintf(runtime_error(), ERROR_BARE, reason);
+    if (active_cell != NULL) cell_stop(active_cell->parsing ? "unrunnable" : "stop", reason);
     note_stack();
     exit(EXIT_FAILURE);
 }
@@ -598,6 +631,7 @@ static void fail(const char *reason) {
 static void fail_at(size_t offset, const char *reason) {
     if (parser_choice != NULL) longjmp(*parser_choice, 1);
     if (evaluation_recovery != NULL) fail(reason);
+    if (active_cell != NULL) cell_stop("unrunnable", reason);
     if (source_path != NULL) fprintf(stderr, ERROR_FORMAT_PATH, reason, offset, source_path);
     else fprintf(stderr, ERROR_FORMAT, reason, offset);
     note_stack();
@@ -1564,6 +1598,41 @@ typedef struct {
 
 static NameIndex operation_names, function_names, global_names;
 
+struct CellProgram {
+    CellProgram *next;
+    char *path;
+    const char *bytes;
+    size_t length;
+    Form **forms;
+    size_t form_count;
+    Binding *functions, *globals;
+    size_t function_count, function_capacity, global_count, global_capacity, library_globals;
+    NameIndex function_names, global_names;
+    char **units;
+    size_t unit_count, unit_capacity;
+    uint64_t *digests;
+    int admitted, busy;
+};
+static CellProgram main_program;
+static CellProgram *current_program = &main_program, *cell_programs;
+
+static void capture_program(CellProgram *program) {
+    program->functions = functions; program->function_count = function_count; program->function_capacity = function_capacity;
+    program->globals = globals; program->global_count = global_count; program->global_capacity = global_capacity;
+    program->function_names = function_names; program->global_names = global_names;
+    program->units = loaded_units; program->unit_count = loaded_count; program->unit_capacity = loaded_capacity;
+}
+
+static void select_program(CellProgram *program) {
+    if (program == current_program) return;
+    capture_program(current_program);
+    functions = program->functions; function_count = program->function_count; function_capacity = program->function_capacity;
+    globals = program->globals; global_count = program->global_count; global_capacity = program->global_capacity;
+    function_names = program->function_names; global_names = program->global_names;
+    loaded_units = program->units; loaded_count = program->unit_count; loaded_capacity = program->unit_capacity;
+    current_program = program;
+}
+
 static size_t name_index_find(NameIndex *index, const char *bytes, size_t length) {
     if (index->capacity == 0) return SIZE_MAX;
     uint64_t hash = hash_bytes(VALUE_HASH_OFFSET, bytes, length);
@@ -1609,6 +1678,10 @@ static void register_operation(const char *spelling, size_t arity, ArityPolicy a
     operations[operation_count].arity_policy = arity_policy;
     operations[operation_count].evaluation = evaluation;
     operations[operation_count].id = id;
+    operations[operation_count].tag = 0;
+    for (long long row = 0; row < fk_optab_n; ++row) {
+        if (strcmp(spelling, fk_optab[row].name) == 0) { operations[operation_count].tag = fk_optab[row].tag; break; }
+    }
     operations[operation_count].offer = offer;
     operations[operation_count].calls = EMPTY_COUNT;
     operations[operation_count].answers = 0;
@@ -1629,6 +1702,15 @@ static const Operation *find_operation_text(const char *bytes, size_t length) {
 static Binding *find_function_text(const char *bytes, size_t length) {
     size_t index = name_index_find(&function_names, bytes, length);
     return index == SIZE_MAX ? NULL : &functions[index];
+}
+
+static Binding *find_function_owned(const char *bytes, size_t length, const char *path) {
+    for (size_t i = function_count; path != NULL && i > 0; --i) {
+        Binding *binding = &functions[i - 1];
+        Form *body = binding->value.body;
+        if (body != NULL && body->path != NULL && strcmp(path, body->path) == 0 && bytes_equal(binding->bytes, binding->length, bytes, length)) return binding;
+    }
+    return find_function_text(bytes, length);
 }
 
 static void bind_definition(Form *form) {
@@ -1653,6 +1735,7 @@ static void bind_definition(Form *form) {
     }
     Value function = nothing_value();
     function.kind = KIND_FUNCTION;
+    function.program = current_program;
     function.body = form->parts[DEFN_BODY];
     function.parameter_count = parameters->part_count;
     function.parameters = allocate_zeroed(parameters->part_count, sizeof *function.parameters);
@@ -1661,7 +1744,8 @@ static void bind_definition(Form *form) {
         function.parameters[index].length = parameters->parts[index]->text_length;
     }
     Binding *existing = find_function_text(name->text, name->text_length);
-    if (existing != NULL) {
+    if (existing != NULL && existing->value.body != NULL && existing->value.body->path != NULL &&
+        form->path != NULL && strcmp(existing->value.body->path, form->path) == 0) {
         existing->value = function;
         form->is_bound = 1;
         return;
@@ -1932,12 +2016,13 @@ static Value offer_str(Value *arguments, size_t argument_count) {
 static Value offer_print_str(Value *arguments, size_t argument_count) {
     (void)argument_count;
     expect_kind(arguments[SOLE_OPERAND], KIND_TEXT, "print_str expects text");
+    if (active_cell != NULL && !active_cell->capture) return integer_value(0);
     if (arguments[SOLE_OPERAND].text_length != EMPTY_COUNT) {
-        fwrite(arguments[SOLE_OPERAND].text, sizeof(char), arguments[SOLE_OPERAND].text_length, stdout);
+        fwrite(arguments[SOLE_OPERAND].text, sizeof(char), arguments[SOLE_OPERAND].text_length, runtime_output());
     }
-    fputc(NEWLINE, stdout);
-    fflush(stdout);
-    return nothing_value();
+    fputc(NEWLINE, runtime_output());
+    fflush(runtime_output());
+    return integer_value(0);
 }
 
 static void print_value(Value root);
@@ -2013,6 +2098,7 @@ static Value offer_tail(Value *arguments, size_t argument_count) {
 }
 
 static Value offer_cons(Value *arguments, size_t argument_count) {
+    if (arguments[1].kind == KIND_NOTHING) fail("cons onto nothing has no list");
     (void)argument_count;
     if (arguments[RIGHT_OPERAND].kind != KIND_LIST) {
         Value pair = list_from(arguments, 1);
@@ -2230,7 +2316,7 @@ static size_t clamp_text_index(Value bound, size_t length, size_t when_absent) {
 static Value offer_substring(Value *arguments, size_t argument_count) {
     (void)argument_count;
     if (arguments[SOLE_OPERAND].kind == KIND_NOTHING) return nothing_value();
-    expect_kind(arguments[SOLE_OPERAND], KIND_TEXT, "substring expects text");
+    if (arguments[SOLE_OPERAND].kind != KIND_TEXT) return text_value("", 0);
     size_t length = arguments[SOLE_OPERAND].text_length;
     size_t start = clamp_text_index(arguments[RIGHT_OPERAND], length, FIRST_INDEX);
     size_t end = clamp_text_index(arguments[SLICE_END], length, length);
@@ -2318,7 +2404,7 @@ static Value offer_value_str(Value *arguments, size_t argument_count) {
     Value value = arguments[SOLE_OPERAND];
     if (value.kind == KIND_TEXT) return value;
     if (value.kind == KIND_INTEGER) return integer_text(value.integer);
-    if (value.kind == KIND_NOTHING) return text_value("nothing", 7);
+    if (value.kind == KIND_NOTHING) return text_value("", 0);
     char *bytes = NULL;
     size_t length = 0;
     FILE *output = open_memstream(&bytes, &length);
@@ -3174,8 +3260,10 @@ static Value offer_file_append_bytes(Value *arguments, size_t argument_count) {
         written = checked_add(written, (size_t)step);
     }
     free(bytes);
-    if (close(descriptor) != SYSTEM_CALL_OK) return integer_value(-WORD_TRUE);
-    return integer_value((long long)written);
+    struct stat state;
+    int measured = fstat(descriptor, &state) == 0;
+    if (close(descriptor) != SYSTEM_CALL_OK || !measured) return integer_value(-WORD_TRUE);
+    return integer_value((long long)state.st_size);
 }
 
 static Value offer_file_mtime(Value *arguments, size_t argument_count) {
@@ -3184,6 +3272,16 @@ static Value offer_file_mtime(Value *arguments, size_t argument_count) {
     if (path.kind != KIND_TEXT || memchr(path.text, 0, path.text_length) != NULL) return integer_value(-1);
     struct stat observed;
     return stat(path.text, &observed) == 0 ? integer_value((long long)observed.st_mtime) : integer_value(-1);
+}
+
+static Value offer_host_utimes(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    Value path = arguments[0], stamp = arguments[1];
+    if (path.kind != KIND_TEXT || stamp.kind != KIND_INTEGER || memchr(path.text, 0, path.text_length) != NULL) return integer_value(-2);
+    long long seconds = stamp.integer / 1000, remainder = stamp.integer % 1000;
+    if (remainder < 0) { --seconds; remainder += 1000; }
+    struct timespec times[2] = {{(time_t)seconds, (long)(remainder * 1000000)}, {(time_t)seconds, (long)(remainder * 1000000)}};
+    return integer_value(utimensat(AT_FDCWD, path.text, times, 0) == 0 ? 0 : -1);
 }
 
 static Value offer_read_file_slice(Value *arguments, size_t argument_count) {
@@ -3911,8 +4009,9 @@ static Value offer_host_exec(Value *arguments, size_t argument_count) {
 
 static Value offer_print(Value *arguments, size_t argument_count) {
     (void)argument_count;
+    if (active_cell != NULL && !active_cell->capture) return arguments[0];
     print_value(arguments[SOLE_OPERAND]);
-    fputc(NEWLINE, stdout);
+    fputc(NEWLINE, runtime_output());
     return arguments[SOLE_OPERAND];
 }
 
@@ -4021,6 +4120,13 @@ static Value offer_file_read(Value *arguments, size_t argument_count) {
         arguments[1].kind != KIND_INTEGER || arguments[1].integer <= 0) return text_value("", 0);
     size_t count = (size_t)arguments[1].integer;
     if (count > SSIZE_MAX) return text_value("", 0);
+    if (active_cell != NULL && arguments[0].integer == 0) {
+        size_t remaining = active_cell->input_length - active_cell->input_offset;
+        if (count > remaining) count = remaining;
+        Value result = text_value(active_cell->input + active_cell->input_offset, count);
+        active_cell->input_offset += count;
+        return result;
+    }
     char *bytes = allocate_zeroed(count, 1);
     ssize_t got;
     do { got = read((int)arguments[0].integer, bytes, count); } while (got < 0 && errno == EINTR);
@@ -4039,6 +4145,14 @@ static Value offer_file_close(Value *arguments, size_t argument_count) {
 static Value offer_read_line(Value *arguments, size_t argument_count) {
     (void)arguments;
     (void)argument_count;
+    if (active_cell != NULL) {
+        if (active_cell->input_offset == active_cell->input_length) return nothing_value();
+        size_t from = active_cell->input_offset;
+        while (active_cell->input_offset < active_cell->input_length && active_cell->input[active_cell->input_offset] != '\n') ++active_cell->input_offset;
+        size_t end = active_cell->input_offset;
+        if (end < active_cell->input_length) ++active_cell->input_offset;
+        return text_value(active_cell->input + from, end - from);
+    }
     char *line = NULL;
     size_t capacity = EMPTY_COUNT;
     ssize_t got = getline(&line, &capacity, stdin);
@@ -4072,7 +4186,8 @@ static Value offer_fs_truncate(Value *arguments, size_t argument_count) {
 static Value offer_cell_path(Value *arguments, size_t argument_count) {
     (void)arguments;
     (void)argument_count;
-    return text_value(source_path, strlen(source_path));
+    const char *root = active_cell != NULL ? active_cell->path : source_path;
+    return text_value(root, strlen(root));
 }
 
 static Value offer_self_source(Value *arguments, size_t argument_count) {
@@ -4378,7 +4493,7 @@ static DispatchCensus dispatch_census(void) {
         census.distinct = checked_add(census.distinct, ONE_ELEMENT);
         if (calls > census.hottest_count) {
             census.hottest_count = calls;
-            census.hottest_tag = (size_t)operations[index].id;
+            census.hottest_tag = (size_t)operations[index].tag;
         }
     }
     return census;
@@ -4525,9 +4640,12 @@ static Value offer_kernel_stat(Value *arguments, size_t argument_count) {
     (void)argument_count;
     expect_kind(arguments[SOLE_OPERAND], KIND_INTEGER, "kernel_stat expects an integer key");
     long long key = arguments[SOLE_OPERAND].integer;
-    if (key == 164) {
-        const Operation *constructor = find_operation_text("record_new", 10);
-        return constructor == NULL ? nothing_value() : count_word(constructor->calls);
+    if (key >= 100) {
+        size_t calls = 0;
+        for (size_t index = 0; index < operation_count; ++index) {
+            if (operations[index].tag == key - 100) calls = checked_add(calls, operations[index].calls);
+        }
+        return count_word(calls);
     }
     if (key == STAT_ROOTS_SINCE_CLEAR) return count_word(frame_since_clear);
     if (key == STAT_REJECTED) return count_word(frame_rejected);
@@ -4963,6 +5081,9 @@ static Value offer_socket_close(Value *arguments, size_t argument_count) {
 }
 
 static void register_builtin_operations(void) {
+    register_operation("cell_run", ARITY_FOUR, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_cell_run);
+    register_operation("cell_call", ARITY_THREE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_cell_call);
+    register_operation("cell_input", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_cell_input);
     register_operation("socket_listen", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_socket_listen);
     register_operation("socket_port", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_socket_port);
     register_operation("socket_accept", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_socket_accept);
@@ -5090,6 +5211,7 @@ static void register_builtin_operations(void) {
     register_operation("file_size", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_file_size);
     register_operation("host_file_size", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_file_size);
     register_operation("host_file_mtime", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_file_mtime);
+    register_operation("host_utimes", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_utimes);
     register_operation("file_mtime", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_file_mtime);
     register_operation("host_path_is_dir", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_path_is_dir);
     register_operation("fs_is_dir", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_path_is_dir);
@@ -5271,6 +5393,7 @@ static Frame *append_frame(void) {
 static void pop_frame(void) {
     Frame *frame = &frames[frame_count - ONE_ELEMENT];
     if (frame->kind == FRAME_LET && frame->stage == 1) local_count = frame->local_base;
+    if (frame->restore_program) select_program(frame->previous_program);
     free(frame->arguments);
     frame->arguments = NULL;
     frame_count -= ONE_ELEMENT;
@@ -5313,6 +5436,10 @@ static int find_value_binding(const char *bytes, size_t length, Value *out) {
         *out = integer_value(WORD_FALSE);
         return 1;
     }
+    if (bytes_equal_cstr(bytes, length, "empty")) {
+        *out = list_from(NULL, 0);
+        return 1;
+    }
     if (bytes_equal_cstr(bytes, length, NAME_NOTHING) || bytes_equal_cstr(bytes, length, FAIL_NAME) || bytes_equal_cstr(bytes, length, STOP_NAME)) {
         *out = nothing_value();
         return 1;
@@ -5332,7 +5459,7 @@ static Value value_from_atom(Form *form) {
     if (form->kind == FORM_SYMBOL) {
         Value bound;
         if (find_value_binding(form->text, form->text_length, &bound)) return bound;
-        Binding *function = find_function_text(form->text, form->text_length);
+        Binding *function = find_function_owned(form->text, form->text_length, form->path);
         if (function != NULL) return function->value;
         fail_at(form->offset, message_with_name(UNBOUND_PREFIX, form->text, form->text_length));
     }
@@ -5390,8 +5517,8 @@ static void begin_call(Form *form) {
         return;
     }
     const Operation *operation = find_operation_text(head->text, head->text_length);
-    Binding *function = find_function_text(head->text, head->text_length);
-    if (operation != NULL && (operation->evaluation == LEAVE_ARGUMENTS || operation->answers)) function = NULL;
+    Binding *function = find_function_owned(head->text, head->text_length, form->path);
+    if (operation != NULL) function = NULL;
     if (function != NULL) {
         begin_function_call(form, function->value);
         return;
@@ -5512,6 +5639,12 @@ static void step_if(size_t index) {
 
 static void run_function_body(size_t index) {
     Frame frame = frames[index];
+    CellProgram *owner = frame.callee.program != NULL ? frame.callee.program : &main_program;
+    if (owner != current_program) {
+        frame.previous_program = current_program;
+        frame.restore_program = 1;
+        select_program(owner);
+    }
     size_t base = local_count;
     for (size_t parameter = FIRST_INDEX; parameter < frame.callee.parameter_count; parameter = checked_add(parameter, ONE_ELEMENT)) {
         append_local(frame.callee.parameters[parameter].bytes, frame.callee.parameters[parameter].length, frame.arguments[parameter]);
@@ -5617,6 +5750,7 @@ static Value closure_value(Form *parameters, Form *body, size_t offset) {
     if (parameters->kind != FORM_GROUP) fail_at(parameters->offset, "a lambda parameter list must be a group");
     Value function = nothing_value();
     function.kind = KIND_FUNCTION;
+    function.program = current_program;
     function.body = body;
     function.parameter_count = parameters->part_count;
     function.parameters = allocate_zeroed(parameters->part_count, sizeof *function.parameters);
@@ -5738,6 +5872,14 @@ static void step_try(size_t index) {
         local_count = frame.local_base;
         failure_message = frame.prior_failure;
         failure_reported = frame.prior_failure_reported;
+        if (value.kind == KIND_NOTHING && frame.stage == TRY_STAGE_BODY &&
+            (frame.operation == NULL || frame.operation->id != OP_ATTEMPT)) {
+            frame.has_incoming = 0;
+            frame.stage = TRY_STAGE_HANDLER;
+            stage_unwind(frame.stage_base, 3, "nothing");
+            frames[index] = frame;
+            return;
+        }
         pop_frame();
         deliver(value);
         return;
@@ -5761,7 +5903,7 @@ static void step_try(size_t index) {
 static void step_fail(size_t index) {
     (void)index;
     if (failure_message != NULL && !failure_reported) {
-        fprintf(stderr, ERROR_BARE, failure_message);
+        fprintf(runtime_error(), ERROR_BARE, failure_message);
         failure_reported = 1;
     }
     for (size_t cursor = frame_count; cursor > FIRST_INDEX; ) {
@@ -5783,6 +5925,7 @@ static void step_fail(size_t index) {
         return;
     }
     evaluation_recovery = NULL;
+    if (active_cell != NULL) cell_stop("stop", failure_message != NULL ? failure_message : "a failure was not caught");
     if (failure_reported) { note_stack(); exit(EXIT_FAILURE); }
     fail(failure_message != NULL ? failure_message : "a failure was not caught");
 }
@@ -5872,6 +6015,7 @@ static void drive(Form *program) {
     }
     evaluation_recovery = &recovery;
     while (frame_count != EMPTY_COUNT) {
+        if (active_cell != NULL && active_cell->deadline != 0 && monotonic_ns() / 1000000 >= active_cell->deadline) cell_stop("deadline", "cell deadline reached");
         size_t index = frame_count - ONE_ELEMENT;
         FrameKind kind = frames[index].kind;
         if (kind == FRAME_SEQUENCE) step_series(index, 0);
@@ -5901,7 +6045,7 @@ typedef struct {
 } PrintItem;
 
 static void print_atom(Value value, FILE *output) {
-    if (value.kind == KIND_NOTHING) { fputs("nothing", output); return; }
+    if (value.kind == KIND_NOTHING) { fputs("null", output); return; }
     if (value.kind == KIND_NODE) {
         fk_node_id id = node_word(value, "node rendering expects a node");
         fprintf(output, "@%lld.%lld.%lld.%lld", fk_nid_get(id, 0), fk_nid_get(id, 1), fk_nid_get(id, 2), fk_nid_get(id, 3));
@@ -5919,10 +6063,11 @@ static void print_atom(Value value, FILE *output) {
         fwrite(value.text, sizeof *value.text, value.text_length, output);
         return;
     }
-    fputs(kind_name(value.kind), output);
+    fprintf(output, "<%s>", kind_name(value.kind));
 }
 
 static void print_value_to(Value root, FILE *output) {
+    if (root.kind == KIND_NOTHING) return;
     PrintItem *items = NULL;
     size_t item_count = EMPTY_COUNT;
     size_t item_capacity = EMPTY_COUNT;
@@ -5970,7 +6115,7 @@ static void print_value_to(Value root, FILE *output) {
 }
 
 static void print_value(Value root) {
-    print_value_to(root, stdout);
+    print_value_to(root, runtime_output());
 }
 
 typedef struct {
@@ -5978,10 +6123,6 @@ typedef struct {
     size_t length;
     size_t offset;
 } SourceCursor;
-
-static char **loaded_units;
-static size_t loaded_count;
-static size_t loaded_capacity;
 
 static int file_is_source(const char *path) {
     struct stat info;
@@ -6534,6 +6675,7 @@ static Form *parse_bml_postfix(void) {
         if (character == CALL_OPEN) {
             Form *arguments = parse_bml_arguments();
             if (form_is_symbol(expression, "offer") && arguments->part_count == 2) expression = form_symbol("oac-offer", expression->offset);
+            if (form_is_symbol(expression, "choice") && arguments->part_count == 2) expression = form_symbol("oac-choice", expression->offset);
             expression = form_call_head(expression, arguments->parts, arguments->part_count);
             continue;
         }
@@ -7318,10 +7460,10 @@ static void load_preludes(const char *bytes, size_t length, const char *from_fil
         if (cursor < index && index - cursor >= mark_length && memcmp(bytes + cursor, PRELUDE_WORD, mark_length) == STRING_COMPARE_EQUAL) {
             cursor = checked_add(cursor, mark_length);
             while (cursor < index) {
-                while (cursor < index && isspace((unsigned char)bytes[cursor])) cursor = checked_add(cursor, ONE_ELEMENT);
+                while (cursor < index && (isspace((unsigned char)bytes[cursor]) || bytes[cursor] == ',')) cursor = checked_add(cursor, ONE_ELEMENT);
                 if (cursor >= index) break;
                 size_t start = cursor;
-                while (cursor < index && !isspace((unsigned char)bytes[cursor])) cursor = checked_add(cursor, ONE_ELEMENT);
+                while (cursor < index && !isspace((unsigned char)bytes[cursor]) && bytes[cursor] != ',') cursor = checked_add(cursor, ONE_ELEMENT);
                 size_t token_length = cursor - start;
                 int path = token_length != EMPTY_COUNT;
                 for (size_t mark = FIRST_INDEX; path && mark < token_length; mark = checked_add(mark, ONE_ELEMENT)) {
@@ -7465,7 +7607,7 @@ static void load_unit(const char *from_file, const char *relative) {
     Form **forms = parse_current_source(&form_count);
     bind_definitions(forms, form_count);
     link_home_names(forms, form_count, path);
-    if (form_count != EMPTY_COUNT) drive_forms(forms, form_count);
+    if (form_count != EMPTY_COUNT && (active_cell == NULL || !active_cell->checking)) drive_forms(forms, form_count);
     source_path = saved_path;
     restore_source(saved);
 }
@@ -7475,6 +7617,216 @@ static void drive_forms(Form **forms, size_t form_count) {
     program->parts = forms;
     program->part_count = form_count;
     drive(program);
+}
+
+static Value cell_record_field(Value record, const char *key, Value value) {
+    Value fields[] = {record, text_value(key, strlen(key)), value};
+    return offer_record_set(fields, 3);
+}
+
+static Value cell_result(CellCall *call, Value value, long long elapsed, long long cpu) {
+    Value result = record_value(allocate_zeroed(1, sizeof(Record)));
+    Value stopped = nothing_value(), diagnostics = list_from(NULL, 0);
+    if (call->stop_kind != NULL) {
+        stopped = record_value(allocate_zeroed(1, sizeof(Record)));
+        cell_record_field(stopped, "kind", text_value(call->stop_kind, strlen(call->stop_kind)));
+        cell_record_field(stopped, "message", text_value(call->message, strlen(call->message)));
+        cell_record_field(stopped, "recipe", text_value(call->recipe != NULL ? call->recipe : "", call->recipe != NULL ? strlen(call->recipe) : 0));
+        cell_record_field(stopped, "unit", text_value(call->unit != NULL ? call->unit : call->path, strlen(call->unit != NULL ? call->unit : call->path)));
+        Value diagnostic = record_value(allocate_zeroed(1, sizeof(Record)));
+        cell_record_field(diagnostic, "organ", text_value("fkwu", 4));
+        cell_record_field(diagnostic, "aspect", text_value("cell", 4));
+        cell_record_field(diagnostic, "stage", text_value(call->parsing ? "compile" : "execute", call->parsing ? 7 : 7));
+        cell_record_field(diagnostic, "observed", text_value(call->stop_kind, strlen(call->stop_kind)));
+        cell_record_field(diagnostic, "detail", text_value(call->message, strlen(call->message)));
+        cell_record_field(diagnostic, "path", text_value(call->path, strlen(call->path)));
+        cell_record_field(diagnostic, "health", integer_value(0));
+        diagnostics = list_from(&diagnostic, 1);
+    }
+    cell_record_field(result, "value", stopped.kind == KIND_NOTHING ? value : nothing_value());
+    cell_record_field(result, "out", text_value(call->out_bytes != NULL ? call->out_bytes : "", call->out_length));
+    cell_record_field(result, "err", text_value(call->err_bytes != NULL ? call->err_bytes : "", call->err_length));
+    cell_record_field(result, "diag", diagnostics);
+    cell_record_field(result, "stopped", stopped);
+    cell_record_field(result, "errors", integer_value(call->errors));
+    cell_record_field(result, "resident", integer_value(call->resident));
+    cell_record_field(result, "source_units", count_word(call->source_units));
+    cell_record_field(result, "source_functions", count_word(call->source_functions));
+    cell_record_field(result, "ms", integer_value(elapsed));
+    cell_record_field(result, "cpu_us", integer_value(cpu));
+    return result;
+}
+
+static void cell_stop(const char *kind, const char *message) {
+    CellCall *call = active_cell;
+    call->stop_kind = kind;
+    call->message = strdup(message);
+    if (strcmp(kind, "unrunnable") == 0) call->errors += 1;
+    for (size_t i = frame_count; i > 0; --i) {
+        Form *form = frames[i - 1].form;
+        if (form == NULL || form->kind != FORM_GROUP || form->part_count == 0) continue;
+        Form *head = form->parts[0];
+        if (head->kind != FORM_SYMBOL) continue;
+        call->recipe = copy_bytes(head->text, head->text_length);
+        call->unit = form->path;
+        break;
+    }
+    longjmp(call->recovery, 1);
+}
+
+static Value offer_cell_input(Value *arguments, size_t argument_count) {
+    (void)arguments; (void)argument_count;
+    return active_cell != NULL ? active_cell->argument : nothing_value();
+}
+
+static uint64_t cell_source_digest(const char *path) {
+    FILE *file = fopen(path, "rb");
+    if (file == NULL) return 0;
+    char bytes[65536];
+    size_t got;
+    uint64_t digest = VALUE_HASH_OFFSET;
+    while ((got = fread(bytes, 1, sizeof bytes, file)) != 0) digest = hash_bytes(digest, bytes, got);
+    int read_ok = !ferror(file), closed = fclose(file) == 0;
+    return read_ok && closed ? (digest != 0 ? digest : 1) : 0;
+}
+
+static int cell_program_fresh(CellProgram *program) {
+    if (!program->admitted || program->busy) return 0;
+    for (size_t i = 0; i < program->unit_count; ++i) {
+        uint64_t current = cell_source_digest(program->units[i]);
+        if (current == 0 || current != program->digests[i]) return 0;
+    }
+    return 1;
+}
+
+/* A child cell has its own parser, names, input and recovery. Native values and
+ * effects stay in this process. Admission caching belongs to this same owner. */
+static Value cell_execute(Value path, Value argument, Value deadline, Value input, int capture) {
+    CellCall *call = allocate_zeroed(1, sizeof *call);
+    call->parent = active_cell;
+    call->capture = capture;
+    call->path = path.kind == KIND_TEXT ? path.text : "";
+    call->argument = argument;
+    call->input = copy_bytes("", 0);
+    int check = deadline.kind == KIND_TEXT && bytes_equal_cstr(deadline.text, deadline.text_length, "check");
+    int valid = path.kind == KIND_TEXT && path.text_length > 0 && memchr(path.text, 0, path.text_length) == NULL &&
+        (deadline.kind == KIND_NOTHING || deadline.kind == KIND_INTEGER || check) &&
+        (input.kind == KIND_NOTHING || input.kind == KIND_LIST);
+    size_t input_length = 0;
+    for (List *line = input.kind == KIND_LIST ? input.list : NULL; valid && line != NULL; line = line->tail) {
+        if (line->head.kind != KIND_TEXT) valid = 0;
+        else input_length = checked_add(input_length, checked_add(line->head.text_length, 1));
+    }
+    if (!valid) {
+        call->stop_kind = "refused"; call->message = "cell requires a path, deadline and input lines";
+        return cell_result(call, nothing_value(), 0, 0);
+    }
+    call->checking = check;
+    call->input = allocate_zeroed(input_length + 1, 1);
+    call->input_length = input_length;
+    size_t cursor = 0;
+    for (List *line = input.kind == KIND_LIST ? input.list : NULL; line != NULL; line = line->tail) {
+        memcpy(call->input + cursor, line->head.text, line->head.text_length);
+        cursor += line->head.text_length;
+        call->input[cursor++] = '\n';
+    }
+    call->out = capture ? open_memstream(&call->out_bytes, &call->out_length) : fopen("/dev/null", "w");
+    call->err = capture ? open_memstream(&call->err_bytes, &call->err_length) : fopen("/dev/null", "w");
+    if (call->out == NULL || call->err == NULL) {
+        if (call->out != NULL) fclose(call->out);
+        if (call->err != NULL) fclose(call->err);
+        call->stop_kind = "refused"; call->message = "cell capture unavailable";
+        return cell_result(call, nothing_value(), 0, 0);
+    }
+    unsigned long long began = monotonic_ns() / 1000000;
+    long long began_cpu = cpu_microseconds();
+    CellProgram *program = NULL;
+    for (CellProgram *candidate = cell_programs; !check && candidate != NULL; candidate = candidate->next) {
+        if (strcmp(candidate->path, path.text) == 0 && cell_program_fresh(candidate)) { program = candidate; break; }
+    }
+    call->resident = program != NULL;
+    if (program == NULL) {
+        program = allocate_zeroed(1, sizeof *program);
+        program->path = copy_bytes(path.text, path.text_length);
+        program->next = cell_programs; cell_programs = program;
+    }
+    program->busy += 1;
+    if (deadline.kind == KIND_INTEGER && deadline.integer > 0) call->deadline = began + (unsigned long long)deadline.integer;
+    if (active_cell != NULL && active_cell->deadline != 0 && (call->deadline == 0 || active_cell->deadline < call->deadline)) call->deadline = active_cell->deadline;
+    SourceCursor saved_source = capture_source();
+    const char *saved_path = source_path, *saved_entry = entry_source_bytes;
+    size_t saved_entry_length = entry_source_length;
+    Frame *saved_frames = frames;
+    size_t saved_frame_count = frame_count, saved_frame_capacity = frame_capacity;
+    Binding *saved_locals = locals;
+    size_t saved_local_count = local_count, saved_local_capacity = local_capacity;
+    CellProgram *saved_program = current_program;
+    Value saved_finished = finished;
+    int saved_result_ready = result_ready, saved_reported = failure_reported;
+    const char *saved_failure = failure_message;
+    jmp_buf *saved_recovery = evaluation_recovery, *saved_choice = parser_choice;
+    size_t saved_stage_depth = stage_depth;
+    frames = NULL; frame_count = frame_capacity = 0;
+    locals = NULL; local_count = local_capacity = 0;
+    select_program(program);
+    finished = nothing_value(); result_ready = 0;
+    failure_message = NULL; failure_reported = 0; evaluation_recovery = NULL; parser_choice = NULL;
+    active_cell = call;
+    if (setjmp(call->recovery) == 0) {
+        call->parsing = 1;
+        source_path = program->path;
+        if (!call->resident) {
+            source_bytes = read_source(source_path, &source_length);
+            program->bytes = source_bytes; program->length = source_length;
+            entry_source_bytes = source_bytes; entry_source_length = source_length;
+            source_offset = 0;
+            remember_unit(copy_bytes(source_path, strlen(source_path)));
+            load_preludes(source_bytes, source_length, source_path);
+            program->forms = parse_current_source(&program->form_count);
+            bind_definitions(program->forms, program->form_count);
+            link_home_names(program->forms, program->form_count, source_path);
+            program->library_globals = global_count;
+            capture_program(program);
+            program->digests = allocate_zeroed(loaded_count, sizeof *program->digests);
+            for (size_t i = 0; i < loaded_count; ++i) program->digests[i] = cell_source_digest(loaded_units[i]);
+            program->admitted = !check;
+            call->source_units = loaded_count; call->source_functions = function_count;
+        } else {
+            source_bytes = program->bytes; source_length = program->length; source_offset = 0;
+            entry_source_bytes = source_bytes; entry_source_length = source_length;
+            global_count = program->library_globals;
+            free(global_names.slots); global_names = (NameIndex){0};
+            for (size_t i = 0; i < global_count; ++i) name_index_set(&global_names, globals[i].bytes, globals[i].length, i);
+        }
+        call->parsing = 0;
+        if (!check) drive_forms(program->forms, program->form_count);
+    }
+    Value answer = finished;
+    stage_unwind(saved_stage_depth, 3, call->stop_kind != NULL ? call->stop_kind : "cell-return");
+    while (frame_count > 0) pop_frame();
+    free(frames); free(locals);
+    frames = saved_frames; frame_count = saved_frame_count; frame_capacity = saved_frame_capacity;
+    locals = saved_locals; local_count = saved_local_count; local_capacity = saved_local_capacity;
+    select_program(saved_program);
+    program->busy -= 1;
+    finished = saved_finished; result_ready = saved_result_ready;
+    failure_message = saved_failure; failure_reported = saved_reported; evaluation_recovery = saved_recovery; parser_choice = saved_choice;
+    restore_source(saved_source); source_path = saved_path; entry_source_bytes = saved_entry; entry_source_length = saved_entry_length;
+    active_cell = call->parent;
+    fclose(call->out); fclose(call->err);
+    Value result = cell_result(call, answer, (long long)(monotonic_ns() / 1000000 - began), cpu_microseconds() - began_cpu);
+    free(call->input); free(call->out_bytes); free(call->err_bytes); free(call);
+    return result;
+}
+
+static Value offer_cell_run(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    return cell_execute(arguments[0], arguments[1], arguments[2], arguments[3], 1);
+}
+
+static Value offer_cell_call(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    return cell_execute(arguments[0], arguments[1], arguments[2], nothing_value(), 0);
 }
 
 int main(int argc, char **argv) {
