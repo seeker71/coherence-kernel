@@ -89,6 +89,13 @@ shrinks as its lanes lower into Form organs (`release-ledger.bml` R13, stones R5
                                             wrong kind or given twice: `form/form-stdlib/bml/door-options.bml`), a `match` that selects no
                                             workload, and a form/band-verdicts.txt or band file that does not read or is empty each end in a
                                             named refusal and exit 1, never the default sweep or "answered every pin"
+./fkwu observe/candidate-floor-run.bml  -> reads a candidate runtime by argv through host-child, in sweep order, against band-head pins;
+                                            stdin {"fkwu":"<executable path>"}, optional {"match":"<regex>","deadline_s":N} (positive seconds,
+                                            default sweep ceiling). One path/reading/pin/exit/class row per band (full, short, stop, deadline),
+                                            then candidate-floor fkwu=<path> bands=N full=F short=S stop=T deadline=D, exit 0.
+                                            Absent pins/readings/exits stay nothing; an absent pin or above-pin number is stop.
+                                            Refuses unreadable/unknown/duplicate/wrong-kind options, missing or non-executable fkwu,
+                                            invalid deadline or regex, and an empty match selection by name, exit 1.
 form/form-stdlib/tests/band-sweep-band   -> 1048575  (enumeration against the tree, the heads read in process, the judgment order and the
                                             judgment fed synthetic records, the content-keyed unit, six fixtures run as cell_run legs and
                                             printing in order though one spins to its deadline, the lines and the evidence a failing leg
