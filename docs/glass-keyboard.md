@@ -67,11 +67,17 @@ the line's end) and the age of its source frame; translations can lag the
 original. A row the ear's own frame puts in doubt is painted dimmer and its
 header says why: `tongue not offered` (heard outside the offered tongues),
 `untranslated copy of the line`, `same text in every tongue`, `its line is in
-doubt`. The doubt is a typed bitmask in the row (`etr-doubt`), never parsed from
-text; a doubted line stays visible. A growing line from lanes that are no
-longer standing is not shown as growing. A newborn ear sensor reads the spool
-from its last 64 KiB (`ea-birth-mark`). Witness:
-`form/form-stdlib/tests/glass-transcripts-band.bml` (127). Selection changes what is displayed, not
+doubt`, `heard over the room's named sound`, `carries the room's own tag`. The
+doubt is a typed bitmask in the row (`etr-doubt`), never parsed from text; a
+doubted line stays visible, and the same line keeps the doubt it was first read
+with. Music and nature reach the ear as passes that name only the room's sound
+(`[MUSIC]`, `(water running)`); the sensor keeps those over the last 30 s of
+frames and gives one `ear.room.named` row, which the view shows under its
+header (`room: [MUSIC] named 8x in the last 10 s`). A line heard with six or
+more of them in the 10 s before it is heard over the room's sound. A growing
+line from lanes that are no longer standing is not shown as growing. A newborn
+ear sensor reads the spool from its last 64 KiB (`ea-birth-mark`). Witness:
+`form/form-stdlib/tests/glass-transcripts-band.bml` (2047). Selection changes what is displayed, not
 which translations the ear produces. Missing selected languages say they are
 unpublished. Selecting a language never opens a microphone or admits a model.
 The shared natural-language catalog is in `bml/transcript-languages.bml`.
