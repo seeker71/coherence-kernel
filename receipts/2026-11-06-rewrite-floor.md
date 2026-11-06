@@ -117,3 +117,41 @@ What still stops, and where:
 So the blocker has moved from unbound primitive names to reader coverage in
 the BML lane (index/form parsing at those bytes), and the next movement is in
 that parser seam.
+
+## Cursor lane update — 2026-11-06 18:xx WITA
+
+Housekeeping landed first as its own commit:
+
+```text
+git commit "Query coverage rows from the rewrite's own readings"
+-> 7867f887e
+```
+
+Then reader/runtime healing in `runtime/fkwu-uni.c` landed as:
+
+```text
+git commit "Reader coverage through door-options band"
+-> d993707da
+```
+
+Observed now, on this rewritten runtime (`cc -O2 -o fkwu runtime/fkwu-uni.c`,
+exit 0, no warnings):
+
+```text
+./fkwu form/form-stdlib/primitive-registry.fk </dev/null
+-> 0, exit 0
+
+./fkwu form/form-stdlib/tests/door-options-band.bml </dev/null
+-> 1023, exit 0
+```
+
+Current next stop (seam 3 path): no parser/index-close refusal remains on this
+path, but the run does not return yet:
+
+```text
+./fkwu observe/door-link-health-run.bml </dev/null
+-> no output after >120s; process remains running
+```
+
+So seams 1 and 2 now read to pin, and seam 3 is now a live runtime hang rather
+than the earlier parser/index-close refusal.
