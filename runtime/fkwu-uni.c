@@ -569,6 +569,9 @@ static size_t method_definition_capacity;
 static int *socket_descriptors;
 static size_t socket_descriptor_count;
 static size_t socket_descriptor_capacity;
+static char **loaded_units;
+static size_t loaded_count;
+static size_t loaded_capacity;
 
 static void note_stack(void) {
     size_t shown = EMPTY_COUNT;
@@ -588,6 +591,8 @@ static void fail(const char *reason) {
     note_stack();
     exit(EXIT_FAILURE);
 }
+
+static int unwind_to_recovery(void);
 
 static void fail_at(size_t offset, const char *reason) {
     if (source_path != NULL) fprintf(stderr, ERROR_FORMAT_PATH, reason, offset, source_path);
@@ -1157,6 +1162,14 @@ static const char *kind_name(ValueKind kind) {
     if (kind == KIND_RECORD) return KIND_NAME_RECORD;
     fail("a word has an unknown kind");
     return KIND_NAME_NOTHING;
+}
+
+static Value text_literal_value(const char *bytes) {
+    Value value = nothing_value();
+    value.kind = KIND_TEXT;
+    value.text = (char *)bytes;
+    value.text_length = strlen(bytes);
+    return value;
 }
 
 static void expect_kind(Value value, ValueKind kind, const char *reason) {
@@ -1887,13 +1900,27 @@ static Value integer_text(long long integer) {
     return value;
 }
 
+static Value real_text(double real) {
+    char buffer[64];
+    int count = snprintf(buffer, sizeof buffer, REAL_FORMAT, DBL_DECIMAL_DIG, real);
+    if (count < 0) fail("a real could not be rendered");
+    if ((size_t)count < sizeof buffer) return text_value(buffer, (size_t)count);
+    char *exact = allocate_zeroed((size_t)count + ONE_ELEMENT, sizeof *exact);
+    int wrote = snprintf(exact, (size_t)count + ONE_ELEMENT, REAL_FORMAT, DBL_DECIMAL_DIG, real);
+    if (wrote < 0) fail("a real could not be rendered");
+    Value text = text_value(exact, (size_t)wrote);
+    free(exact);
+    return text;
+}
+
 static Value offer_str(Value *arguments, size_t argument_count) {
     (void)argument_count;
     Value value = arguments[SOLE_OPERAND];
     if (value.kind == KIND_TEXT) return value;
     if (value.kind == KIND_INTEGER) return integer_text(value.integer);
+    if (value.kind == KIND_REAL) return real_text(value.real);
     if (value.kind == KIND_NOTHING) return text_value("nothing", strlen("nothing"));
-    fail("str expects text, an integer, or nothing");
+    fail("str expects text, a number, or nothing");
     return nothing_value();
 }
 
@@ -1930,9 +1957,13 @@ static Value offer_div(Value *arguments, size_t argument_count) {
     Value left = arguments[LEFT_OPERAND];
     Value right = arguments[RIGHT_OPERAND];
     if (!is_number(left) || !is_number(right)) fail("div expects two numbers");
+    if ((right.kind == KIND_INTEGER && right.integer == WORD_FALSE)
+        || (right.kind == KIND_REAL && right.real == REAL_ZERO)) {
+        if (unwind_to_recovery()) return nothing_value();
+        fail("div expects a nonzero divisor");
+    }
     if (left.kind == KIND_INTEGER && right.kind == KIND_INTEGER) return integer_value(checked_integer_div(left.integer, right.integer));
     double divisor = number_as_real(right);
-    if (divisor == 0.0) fail("div expects a nonzero divisor");
     double quotient = number_as_real(left) / divisor;
     if (!isfinite(quotient)) fail("div is outside the native real range");
     return real_value(quotient);
@@ -1943,9 +1974,13 @@ static Value offer_mod(Value *arguments, size_t argument_count) {
     Value left = arguments[LEFT_OPERAND];
     Value right = arguments[RIGHT_OPERAND];
     if (!is_number(left) || !is_number(right)) fail("mod expects two numbers");
+    if ((right.kind == KIND_INTEGER && right.integer == WORD_FALSE)
+        || (right.kind == KIND_REAL && right.real == REAL_ZERO)) {
+        if (unwind_to_recovery()) return nothing_value();
+        fail("mod expects a nonzero divisor");
+    }
     if (left.kind == KIND_INTEGER && right.kind == KIND_INTEGER) return integer_value(checked_integer_mod(left.integer, right.integer));
     double divisor = number_as_real(right);
-    if (divisor == 0.0) fail("mod expects a nonzero divisor");
     double remainder = fmod(number_as_real(left), divisor);
     if (!isfinite(remainder)) fail("mod is outside the native real range");
     return real_value(remainder);
@@ -3850,6 +3885,24 @@ static Value offer_fs_rename(Value *arguments, size_t argument_count) {
     return offer_host_path_rename(arguments, argument_count);
 }
 
+static Value offer_fs_truncate(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[LEFT_OPERAND], KIND_TEXT, "fs_truncate expects a path");
+    expect_kind(arguments[RIGHT_OPERAND], KIND_INTEGER, "fs_truncate expects a byte count");
+    if (arguments[RIGHT_OPERAND].integer < WORD_FALSE) return integer_value(-WORD_TRUE);
+    char *path = copy_bytes(arguments[LEFT_OPERAND].text, arguments[LEFT_OPERAND].text_length);
+    off_t target = (off_t)arguments[RIGHT_OPERAND].integer;
+    if (truncate(path, target) != SYSTEM_CALL_OK) {
+        free(path);
+        return integer_value(-WORD_TRUE);
+    }
+    struct stat info;
+    int observed = stat(path, &info);
+    free(path);
+    if (observed != SYSTEM_CALL_OK || info.st_size < (off_t)SYSTEM_CALL_OK) return integer_value(-WORD_TRUE);
+    return integer_value((long long)info.st_size);
+}
+
 static Value offer_fs_list(Value *arguments, size_t argument_count) {
     return offer_host_dir_list(arguments, argument_count);
 }
@@ -4188,7 +4241,7 @@ static Value offer_str_concat(Value *arguments, size_t argument_count) {
 static Value offer_value_kind(Value *arguments, size_t argument_count) {
     (void)argument_count;
     const char *name = kind_name(arguments[SOLE_OPERAND].kind);
-    return text_value(name, strlen(name));
+    return text_literal_value(name);
 }
 
 static Value offer_nothing_value(Value *arguments, size_t argument_count) {
@@ -4212,6 +4265,7 @@ static Value offer_form_error(Value *arguments, size_t argument_count) {
     }
     if (unwind_to_recovery()) return nothing_value();
     fprintf(stderr, "fkwu: form_error: %.*s\n", (int)length, message);
+    note_stack();
     exit(EXIT_FAILURE);
 }
 
@@ -4311,6 +4365,15 @@ static Value offer_cell_run(Value *arguments, size_t argument_count) {
     Binding *saved_locals = locals;
     size_t saved_local_count = local_count;
     size_t saved_local_capacity = local_capacity;
+    Binding *saved_functions = functions;
+    size_t saved_function_count = function_count;
+    size_t saved_function_capacity = function_capacity;
+    Binding *saved_globals = globals;
+    size_t saved_global_count = global_count;
+    size_t saved_global_capacity = global_capacity;
+    char **saved_loaded_units = loaded_units;
+    size_t saved_loaded_count = loaded_count;
+    size_t saved_loaded_capacity = loaded_capacity;
     Value saved_finished = finished;
     int saved_result_ready = result_ready;
     Value saved_cell_input = active_cell_input;
@@ -4327,6 +4390,24 @@ static Value offer_cell_run(Value *arguments, size_t argument_count) {
     locals = NULL;
     local_count = EMPTY_COUNT;
     local_capacity = EMPTY_COUNT;
+    functions = saved_function_count == EMPTY_COUNT ? NULL : allocate_zeroed(saved_function_count, sizeof *functions);
+    if (saved_function_count != EMPTY_COUNT) {
+        memcpy(functions, saved_functions, saved_function_count * sizeof *functions);
+    }
+    function_count = saved_function_count;
+    function_capacity = saved_function_count;
+    globals = saved_global_count == EMPTY_COUNT ? NULL : allocate_zeroed(saved_global_count, sizeof *globals);
+    if (saved_global_count != EMPTY_COUNT) {
+        memcpy(globals, saved_globals, saved_global_count * sizeof *globals);
+    }
+    global_count = saved_global_count;
+    global_capacity = saved_global_count;
+    loaded_units = NULL;
+    loaded_count = EMPTY_COUNT;
+    loaded_capacity = EMPTY_COUNT;
+    for (size_t i = FIRST_INDEX; i < saved_loaded_count; i = checked_add(i, ONE_ELEMENT)) {
+        remember_unit(copy_bytes(saved_loaded_units[i], strlen(saved_loaded_units[i])));
+    }
     finished = nothing_value();
     result_ready = 0;
     remember_unit(copy_bytes(source_path, strlen(source_path)));
@@ -4336,8 +4417,13 @@ static Value offer_cell_run(Value *arguments, size_t argument_count) {
     bind_definitions(forms, form_count);
     drive_forms(forms, form_count);
     Value answer = finished;
+    for (size_t i = FIRST_INDEX; i < loaded_count; i = checked_add(i, ONE_ELEMENT)) free(loaded_units[i]);
+    free(loaded_units);
     free(frames);
     free(locals);
+    free(functions);
+    free(globals);
+    free((char *)source_bytes);
 
     source_bytes = saved_source_bytes;
     source_length = saved_source_length;
@@ -4349,6 +4435,15 @@ static Value offer_cell_run(Value *arguments, size_t argument_count) {
     locals = saved_locals;
     local_count = saved_local_count;
     local_capacity = saved_local_capacity;
+    functions = saved_functions;
+    function_count = saved_function_count;
+    function_capacity = saved_function_capacity;
+    globals = saved_globals;
+    global_count = saved_global_count;
+    global_capacity = saved_global_capacity;
+    loaded_units = saved_loaded_units;
+    loaded_count = saved_loaded_count;
+    loaded_capacity = saved_loaded_capacity;
     finished = saved_finished;
     result_ready = saved_result_ready;
     active_cell_input = saved_cell_input;
@@ -5073,6 +5168,7 @@ static void register_builtin_operations(void) {
     register_operation("fs_remove", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_fs_remove);
     register_operation("host_path_rename", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_path_rename);
     register_operation("fs_rename", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_fs_rename);
+    register_operation("fs_truncate", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_fs_truncate);
     register_operation("host_dir_list", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_dir_list);
     register_operation("fs_list", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_fs_list);
     register_operation("host_pid", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_pid);
@@ -5467,7 +5563,9 @@ static void step_eager(size_t index) {
             return;
         }
         operations[(size_t)(frame.operation - operations)].calls = checked_add(frame.operation->calls, ONE_ELEMENT);
+        size_t before = frame_count;
         Value result = frame.operation->offer(frame.arguments, frame.argument_count);
+        if (frame_count != before) return;
         pop_frame();
         deliver(result);
         return;

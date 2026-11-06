@@ -212,3 +212,50 @@ What still stops in this sitting:
 So correction (1) now holds (`primitive-registry-band` reaches 47), correction
 (3) now holds (`band-truth` continues to summary with `flaws=0`), and the
 shared spin in door-link-health/local-flow-review remains open.
+
+## Cursor lane update — 2026-11-06 19:xx WITA (round four)
+
+This round moved the runtime seam itself in `runtime/fkwu-uni.c`:
+
+- `str` now renders reals (`nfb-f64(...).str()` no longer fails on valid binary64 values),
+- `cell_run` now isolates its runtime state (frames, locals, globals, functions, loaded-unit cache) and restores the caller context after run,
+- `cell_run` now releases its temporary loaded-unit paths and source bytes,
+- `fs_truncate(path, bytes)` is now a native primitive (used by canonical malformed-vector builders),
+- eager operation dispatch now preserves recovery-frame rewinds (`unwind_to_recovery` from an operation no longer gets popped away by `step_eager`),
+- divide/mod zero-divisor errors now route through recovery when a `try/else` frame is active.
+
+Observed now (`cc -O2 -o fkwu runtime/fkwu-uni.c`, exit 0, no warnings):
+
+```text
+./fkwu .hearth/door-link-bisect.bml </dev/null
+  where file is:
+    section [form.bml] {
+      try 1 / 0 else 42;
+    }
+-> 42
+-> exit 0
+```
+
+```text
+./fkwu gate/canonical-conformance-run.bml </dev/null
+-> PASS/FAIL rows to summary, including:
+   - PASS FORMBIN2: the pinned kernel artifact (119 bytes) decodes...
+   - PASS malformed FORMBIN2 ... (12/12 refused)
+   - FAIL canonical-nodeid-render: fkwu='node'
+   - FAIL native-bypasses-portable-binding: fkwu='fallback-shadow'
+-> canonical-conformance: FAIL 11/13 canonical expressions on fkwu; FORMBIN2 interop green; 12/12 malformed artifacts refused
+-> 0
+-> exit 0
+```
+
+Shared long-running path status in this sitting:
+
+```text
+./fkwu observe/door-link-health-run.bml </dev/null
+-> no output after >180s; process remains running (sampled; killed for reading)
+
+./fkwu observe/local-flow-review.bml </dev/null
+-> no output after >120s; process remains running (killed for reading)
+```
+
+Sampling while `observe/door-link-health-run.bml` runs shows active evaluator progress in `offer_form`/`step_eager` (not a dead unknown frame kind), with high allocation pressure and large process footprint (~1.5 GB) during this path.
