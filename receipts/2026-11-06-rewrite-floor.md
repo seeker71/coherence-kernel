@@ -155,3 +155,60 @@ path, but the run does not return yet:
 
 So seams 1 and 2 now read to pin, and seam 3 is now a live runtime hang rather
 than the earlier parser/index-close refusal.
+
+## Cursor lane update — 2026-11-06 19:xx WITA
+
+This round healed the registry-band stop path in `runtime/fkwu-uni.c` and kept
+the top-level registry contract (`primitive-registry.fk` still answers `0`):
+
+- added lazy `attempt` as a real recovery frame (`attempt(x)` now runs `x` under
+  unwind/recovery, instead of being unbound),
+- repaired `method_invoke` argument packing (receiver + call args arity now
+  matches the method definition),
+- restored missing primitive semantics used by the registry probes (`round`,
+  `str_byte_at` out-of-range `-1`, `print_str` answer/newline, append-bytes
+  returning total file size, `value_kind` null surface, `value_str` list/null rendering),
+- reduced one runtime hotspot by removing dynamic-stack allocation from
+  `values_equal` and by caching operation spelling lengths.
+
+Observed on this rewritten runtime (`cc -O2 -o fkwu runtime/fkwu-uni.c`, exit 0,
+no warnings):
+
+```text
+./fkwu form/form-stdlib/primitive-registry.fk </dev/null
+-> 0, exit 0
+
+./fkwu form/form-stdlib/tests/primitive-registry-band.fk </dev/null
+-> prim-registry-print-probe
+-> prim-registry-print-str-probe
+-> prim-registry-print-probe
+-> prim-registry-print-str-probe
+-> 47, exit 0
+```
+
+Band-truth now reads through unreadable rows to summary as main does:
+
+```text
+./fkwu observe/band-truth-run.bml </dev/null
+-> ... unreadable ... rows ...
+-> band-truth bands=535 readable=321 unreadable=214 absent=0 seen=3 flaws=0
+-> 0, exit 0
+```
+
+What still stops in this sitting:
+
+```text
+./fkwu gate/canonical-conformance-run.bml </dev/null
+-> fkwu: form_error: native fp64: binary64 requires exactly eight bytes
+-> exit 1
+
+./fkwu observe/door-link-health-run.bml </dev/null
+-> no output after >120s; process remains running (killed for this reading)
+
+./fkwu observe/local-flow-review.bml </dev/null
+-> no output after >120s; process remains running (killed for this reading)
+```
+
+So correction (1) now holds (`primitive-registry-band` reaches 47), correction
+(3) now holds (`band-truth` continues to summary with `flaws=0`), and the
+shared spin in door-link-health/local-flow-review remains open.

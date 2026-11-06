@@ -81,7 +81,7 @@ static const char *const NAME_DEFN = "defn";
 static const char *const NAME_TRUE = "true";
 static const char *const NAME_FALSE = "false";
 static const char *const NAME_NOTHING = "nothing";
-static const char *const KIND_NAME_NOTHING = "nothing";
+static const char *const KIND_NAME_NOTHING = "null";
 static const char *const KIND_NAME_INTEGER = "int";
 static const char *const KIND_NAME_REAL = "float";
 static const char *const KIND_NAME_TEXT = "string";
@@ -237,6 +237,7 @@ typedef enum {
     OP_PRINT,
     OP_COALESCE,
     OP_TRY,
+    OP_ATTEMPT,
     OP_FAIL,
     OP_CHOICE
 } OperationId;
@@ -460,6 +461,7 @@ struct Binding {
 
 struct Operation {
     const char *spelling;
+    size_t spelling_length;
     size_t arity;
     ArityPolicy arity_policy;
     EvaluationPolicy evaluation;
@@ -481,6 +483,7 @@ typedef enum {
     FRAME_LAMBDA,
     FRAME_COALESCE,
     FRAME_TRY,
+    FRAME_ATTEMPT,
     FRAME_FAIL,
     FRAME_APPLY,
     FRAME_CHOICE
@@ -525,6 +528,8 @@ static size_t frame_count;
 static size_t frame_capacity;
 static Value finished;
 static int result_ready;
+static Value active_cell_input;
+static int active_cell_input_set;
 
 typedef struct {
     Value word;
@@ -1559,6 +1564,7 @@ static void register_operation(const char *spelling, size_t arity, ArityPolicy a
     size_t needed = checked_add(operation_count, ONE_ELEMENT);
     operations = grow_list(operations, &operation_capacity, sizeof *operations, needed);
     operations[operation_count].spelling = spelling;
+    operations[operation_count].spelling_length = strlen(spelling);
     operations[operation_count].arity = arity;
     operations[operation_count].arity_policy = arity_policy;
     operations[operation_count].evaluation = evaluation;
@@ -1570,14 +1576,15 @@ static void register_operation(const char *spelling, size_t arity, ArityPolicy a
 }
 
 static void operation_answers(const char *spelling) {
+    size_t spelling_length = strlen(spelling);
     for (size_t index = FIRST_INDEX; index < operation_count; index = checked_add(index, ONE_ELEMENT)) {
-        if (bytes_equal_cstr(spelling, strlen(spelling), operations[index].spelling)) operations[index].answers = 1;
+        if (bytes_equal(spelling, spelling_length, operations[index].spelling, operations[index].spelling_length)) operations[index].answers = 1;
     }
 }
 
 static const Operation *find_operation_text(const char *bytes, size_t length) {
     for (size_t index = FIRST_INDEX; index < operation_count; index = checked_add(index, ONE_ELEMENT)) {
-        if (bytes_equal_cstr(bytes, length, operations[index].spelling)) return &operations[index];
+        if (bytes_equal(bytes, length, operations[index].spelling, operations[index].spelling_length)) return &operations[index];
     }
     return NULL;
 }
@@ -1896,7 +1903,8 @@ static Value offer_print_str(Value *arguments, size_t argument_count) {
     if (arguments[SOLE_OPERAND].text_length != EMPTY_COUNT) {
         fwrite(arguments[SOLE_OPERAND].text, sizeof(char), arguments[SOLE_OPERAND].text_length, stdout);
     }
-    return nothing_value();
+    fputc(NEWLINE, stdout);
+    return integer_value(WORD_FALSE);
 }
 
 static void print_value(Value root);
@@ -2141,7 +2149,7 @@ static Value offer_method_invoke(Value *arguments, size_t argument_count) {
     ssize_t index = find_method(receiver.record->blueprint, name);
     if (index < 0) fail("method_invoke could not find a method under that name");
     MethodDefinition *method = method_definitions + index;
-    size_t invoke_count = checked_add(argument_count - ONE_ELEMENT, ONE_ELEMENT);
+    size_t invoke_count = argument_count - ONE_ELEMENT;
     Value *invoke_arguments = allocate_zeroed(invoke_count, sizeof *invoke_arguments);
     invoke_arguments[FIRST_INDEX] = receiver;
     for (size_t argument = ARITY_TWO; argument < argument_count; argument = checked_add(argument, ONE_ELEMENT)) {
@@ -2251,6 +2259,7 @@ static Value offer_str_find(Value *arguments, size_t argument_count) {
     size_t start = (size_t)requested;
     size_t haystack = arguments[SOLE_OPERAND].text_length;
     size_t needle = arguments[RIGHT_OPERAND].text_length;
+    if (needle == EMPTY_COUNT) return integer_value(-WORD_TRUE);
     if (start > haystack || needle > haystack - start) return integer_value(-WORD_TRUE);
     for (size_t index = start; index <= haystack - needle; index = checked_add(index, ONE_ELEMENT)) {
         if (bytes_equal(arguments[SOLE_OPERAND].text + index, needle, arguments[RIGHT_OPERAND].text, needle)) return count_word(index);
@@ -2403,6 +2412,14 @@ static Value offer_round_ndigits(Value *arguments, size_t argument_count) {
     return real_value(nearbyint(value * factor) / factor);
 }
 
+static Value offer_round(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    if (!is_number(arguments[SOLE_OPERAND])) fail("round expects a number");
+    double rounded = round(number_as_real(arguments[SOLE_OPERAND]));
+    if (!isfinite(rounded) || rounded > (double)LLONG_MAX || rounded < (double)LLONG_MIN) fail("round is outside the native integer range");
+    return integer_value((long long)rounded);
+}
+
 static Value offer_str_len(Value *arguments, size_t argument_count) {
     (void)argument_count;
     expect_kind(arguments[SOLE_OPERAND], KIND_TEXT, "str_len expects text");
@@ -2413,20 +2430,82 @@ static Value offer_str_byte_at(Value *arguments, size_t argument_count) {
     (void)argument_count;
     expect_kind(arguments[LEFT_OPERAND], KIND_TEXT, "str_byte_at expects text");
     expect_kind(arguments[RIGHT_OPERAND], KIND_INTEGER, "str_byte_at expects an integer index");
-    if (arguments[RIGHT_OPERAND].integer < WORD_FALSE) return nothing_value();
+    if (arguments[RIGHT_OPERAND].integer < WORD_FALSE) return integer_value(-WORD_TRUE);
     size_t index = (size_t)arguments[RIGHT_OPERAND].integer;
-    if (index >= arguments[LEFT_OPERAND].text_length) return nothing_value();
+    if (index >= arguments[LEFT_OPERAND].text_length) return integer_value(-WORD_TRUE);
     return integer_value((unsigned char)arguments[LEFT_OPERAND].text[index]);
+}
+
+typedef struct {
+    char *bytes;
+    size_t length;
+    size_t capacity;
+} TextBuilder;
+
+static void text_builder_append(TextBuilder *builder, const char *bytes, size_t length) {
+    if (length == EMPTY_COUNT) return;
+    size_t needed = checked_add(builder->length, length);
+    if (needed > builder->capacity) {
+        size_t next = grown_capacity(builder->capacity, needed);
+        if (next > SIZE_MAX - TEXT_TERMINATOR_SIZE) fail("text exceeds addressable memory");
+        builder->bytes = grow_list(builder->bytes, &builder->capacity, sizeof *builder->bytes, next);
+    }
+    memcpy(builder->bytes + builder->length, bytes, length);
+    builder->length = needed;
+}
+
+static void render_value_text(TextBuilder *builder, Value value, int nested) {
+    if (value.kind == KIND_NOTHING) {
+        if (nested) text_builder_append(builder, KIND_NAME_NOTHING, strlen(KIND_NAME_NOTHING));
+        return;
+    }
+    if (value.kind == KIND_INTEGER) {
+        Value text = integer_text(value.integer);
+        text_builder_append(builder, text.text, text.text_length);
+        free((char *)text.text);
+        return;
+    }
+    if (value.kind == KIND_REAL) {
+        char buffer[64];
+        int count = snprintf(buffer, sizeof buffer, REAL_FORMAT, DBL_DECIMAL_DIG, value.real);
+        if (count < 0) fail("a real could not be rendered");
+        if ((size_t)count < sizeof buffer) {
+            text_builder_append(builder, buffer, (size_t)count);
+            return;
+        }
+        char *exact = allocate_zeroed((size_t)count + ONE_ELEMENT, sizeof *exact);
+        int wrote = snprintf(exact, (size_t)count + ONE_ELEMENT, REAL_FORMAT, DBL_DECIMAL_DIG, value.real);
+        if (wrote < 0) fail("a real could not be rendered");
+        text_builder_append(builder, exact, (size_t)wrote);
+        free(exact);
+        return;
+    }
+    if (value.kind == KIND_TEXT) {
+        text_builder_append(builder, value.text, value.text_length);
+        return;
+    }
+    if (value.kind == KIND_LIST) {
+        text_builder_append(builder, LIST_OPEN, strlen(LIST_OPEN));
+        List *cursor = value.list;
+        for (size_t index = FIRST_INDEX; index < value.item_count; index = checked_add(index, ONE_ELEMENT)) {
+            if (index > FIRST_INDEX) text_builder_append(builder, LIST_SEPARATOR, strlen(LIST_SEPARATOR));
+            render_value_text(builder, cursor->head, 1);
+            cursor = cursor->tail;
+        }
+        text_builder_append(builder, LIST_CLOSE, strlen(LIST_CLOSE));
+        return;
+    }
+    const char *name = kind_name(value.kind);
+    text_builder_append(builder, name, strlen(name));
 }
 
 static Value offer_value_str(Value *arguments, size_t argument_count) {
     (void)argument_count;
-    Value value = arguments[SOLE_OPERAND];
-    if (value.kind == KIND_TEXT) return value;
-    if (value.kind == KIND_INTEGER) return integer_text(value.integer);
-    if (value.kind == KIND_NOTHING) return text_value(KIND_NAME_NOTHING, strlen(KIND_NAME_NOTHING));
-    const char *name = kind_name(value.kind);
-    return text_value(name, strlen(name));
+    TextBuilder builder = {0};
+    render_value_text(&builder, arguments[SOLE_OPERAND], 0);
+    Value text = text_value(builder.bytes == NULL ? "" : builder.bytes, builder.length);
+    free(builder.bytes);
+    return text;
 }
 
 static int terminal_input_request(Value request) {
@@ -3203,9 +3282,11 @@ static Value offer_file_append_bytes(Value *arguments, size_t argument_count) {
         }
         written = checked_add(written, (size_t)step);
     }
+    off_t total = lseek(descriptor, 0, SEEK_END);
     free(bytes);
     if (close(descriptor) != SYSTEM_CALL_OK) return integer_value(-WORD_TRUE);
-    return integer_value((long long)written);
+    if (total < (off_t)SYSTEM_CALL_OK) return integer_value(-WORD_TRUE);
+    return integer_value((long long)total);
 }
 
 static Value offer_write_file(Value *arguments, size_t argument_count) {
@@ -4176,10 +4257,104 @@ static Value offer_file_mtime(Value *arguments, size_t argument_count) {
     return integer_value((long long)info.st_mtime);
 }
 
+static void load_preludes(const char *bytes, size_t length, const char *from_file);
+static Form **parse_current_source(size_t *form_count);
+static void drive_forms(Form **forms, size_t form_count);
+static void remember_unit(char *path);
+
 static Value offer_cell_path(Value *arguments, size_t argument_count) {
     (void)arguments;
     (void)argument_count;
     return text_value(source_path, strlen(source_path));
+}
+
+static Value record_kv4(const char *k0, Value v0, const char *k1, Value v1, const char *k2, Value v2, const char *k3, Value v3) {
+    Record *record = allocate_zeroed(ONE_ELEMENT, sizeof *record);
+    record->blueprint = integer_value(WORD_FALSE);
+    record->count = 4;
+    record->capacity = 4;
+    record->keys = allocate_zeroed(record->count, sizeof *record->keys);
+    record->values = allocate_zeroed(record->count, sizeof *record->values);
+    record->keys[0] = text_value(k0, strlen(k0));
+    record->values[0] = v0;
+    record->keys[1] = text_value(k1, strlen(k1));
+    record->values[1] = v1;
+    record->keys[2] = text_value(k2, strlen(k2));
+    record->values[2] = v2;
+    record->keys[3] = text_value(k3, strlen(k3));
+    record->values[3] = v3;
+    Value value = nothing_value();
+    value.kind = KIND_RECORD;
+    value.record = record;
+    return value;
+}
+
+static Value offer_cell_input(Value *arguments, size_t argument_count) {
+    (void)arguments;
+    (void)argument_count;
+    return active_cell_input_set ? active_cell_input : nothing_value();
+}
+
+static Value offer_cell_run(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    if (arguments[LEFT_OPERAND].kind != KIND_TEXT) return nothing_value();
+    expect_kind(arguments[RIGHT_OPERAND], KIND_INTEGER, "cell_run expects an integer mode");
+    char *path = copy_bytes(arguments[LEFT_OPERAND].text, arguments[LEFT_OPERAND].text_length);
+
+    const char *saved_source_bytes = source_bytes;
+    size_t saved_source_length = source_length;
+    size_t saved_source_offset = source_offset;
+    const char *saved_source_path = source_path;
+    Frame *saved_frames = frames;
+    size_t saved_frame_count = frame_count;
+    size_t saved_frame_capacity = frame_capacity;
+    Binding *saved_locals = locals;
+    size_t saved_local_count = local_count;
+    size_t saved_local_capacity = local_capacity;
+    Value saved_finished = finished;
+    int saved_result_ready = result_ready;
+    Value saved_cell_input = active_cell_input;
+    int saved_cell_input_set = active_cell_input_set;
+
+    active_cell_input = arguments[3];
+    active_cell_input_set = 1;
+    source_path = path;
+    source_bytes = read_source(path, &source_length);
+    source_offset = FIRST_INDEX;
+    frames = NULL;
+    frame_count = EMPTY_COUNT;
+    frame_capacity = EMPTY_COUNT;
+    locals = NULL;
+    local_count = EMPTY_COUNT;
+    local_capacity = EMPTY_COUNT;
+    finished = nothing_value();
+    result_ready = 0;
+    remember_unit(copy_bytes(source_path, strlen(source_path)));
+    load_preludes(source_bytes, source_length, source_path);
+    size_t form_count = EMPTY_COUNT;
+    Form **forms = parse_current_source(&form_count);
+    bind_definitions(forms, form_count);
+    drive_forms(forms, form_count);
+    Value answer = finished;
+    free(frames);
+    free(locals);
+
+    source_bytes = saved_source_bytes;
+    source_length = saved_source_length;
+    source_offset = saved_source_offset;
+    source_path = saved_source_path;
+    frames = saved_frames;
+    frame_count = saved_frame_count;
+    frame_capacity = saved_frame_capacity;
+    locals = saved_locals;
+    local_count = saved_local_count;
+    local_capacity = saved_local_capacity;
+    finished = saved_finished;
+    result_ready = saved_result_ready;
+    active_cell_input = saved_cell_input;
+    active_cell_input_set = saved_cell_input_set;
+    free(path);
+    return record_kv4("value", answer, "out", text_value("", EMPTY_COUNT), "errors", integer_value(WORD_FALSE), "stopped", nothing_value());
 }
 
 static Value offer_intern_bool(Value *arguments, size_t argument_count) {
@@ -4803,6 +4978,8 @@ static void register_builtin_operations(void) {
     register_operation("read_line", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_READ_LINE, offer_read_line);
     register_operation("file_mtime", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_FILE_MTIME, offer_file_mtime);
     register_operation("cell_path", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_CELL_PATH, offer_cell_path);
+    register_operation("cell_input", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_cell_input);
+    register_operation("cell_run", ARITY_FOUR, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_cell_run);
     register_operation("intern_trivial_bool", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_INTERN_BOOL, offer_intern_bool);
     register_operation("kernel_stat", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_KERNEL_STAT, offer_kernel_stat);
     register_operation("kernel_live_pids", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_KERNEL_STAT, offer_kernel_live_pids);
@@ -4870,6 +5047,7 @@ static void register_builtin_operations(void) {
     register_operation("math_log", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_math_log);
     register_operation("math_pow", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_math_pow);
     register_operation("round_ndigits", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_round_ndigits);
+    register_operation("round", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_round);
     register_operation("str_byte_at", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_str_byte_at);
     register_operation("value_str", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_value_str);
     register_operation("value_eq", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_value_eq);
@@ -4972,6 +5150,7 @@ static void register_builtin_operations(void) {
     register_operation("host_spawn_at", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_spawn_at);
     register_operation(COALESCE_WORD, ARITY_TWO, FIXED_ARITY, LEAVE_ARGUMENTS, OP_COALESCE, NULL);
     register_operation(TRY_WORD, ARITY_TWO, FIXED_ARITY, LEAVE_ARGUMENTS, OP_TRY, NULL);
+    register_operation("attempt", ARITY_ONE, FIXED_ARITY, LEAVE_ARGUMENTS, OP_ATTEMPT, NULL);
     register_operation(FAIL_NAME, ARITY_NONE, FIXED_ARITY, LEAVE_ARGUMENTS, OP_FAIL, NULL);
     register_operation("choice", ARITY_NONE, VARIADIC, LEAVE_ARGUMENTS, OP_CHOICE, NULL);
 }
@@ -4997,61 +5176,16 @@ static int atom_equal(Value left, Value right) {
 }
 
 static int values_equal(Value left, Value right) {
-    EqualPair *pairs = NULL;
-    size_t pair_count = EMPTY_COUNT;
-    size_t pair_capacity = EMPTY_COUNT;
-    size_t needed = checked_add(pair_count, ONE_ELEMENT);
-    pairs = grow_list(pairs, &pair_capacity, sizeof *pairs, needed);
-    pairs[pair_count].left = left;
-    pairs[pair_count].right = right;
-    pairs[pair_count].left_cursor = NULL;
-    pairs[pair_count].right_cursor = NULL;
-    pairs[pair_count].index = FIRST_INDEX;
-    pairs[pair_count].entered = 0;
-    pair_count = needed;
-    int same = 1;
-    while (pair_count != EMPTY_COUNT) {
-        EqualPair pair = pairs[pair_count - ONE_ELEMENT];
-        if (pair.left.kind == KIND_LIST || pair.right.kind == KIND_LIST) {
-            if (pair.left.kind != KIND_LIST || pair.right.kind != KIND_LIST || pair.left.item_count != pair.right.item_count) {
-                same = 0;
-                break;
-            }
-            if (!pair.entered) {
-                pair.entered = 1;
-                pair.index = FIRST_INDEX;
-                pair.left_cursor = pair.left.list;
-                pair.right_cursor = pair.right.list;
-            }
-            if (pair.index == pair.left.item_count) {
-                pair_count -= ONE_ELEMENT;
-                continue;
-            }
-            Value child_left = pair.left_cursor->head;
-            Value child_right = pair.right_cursor->head;
-            pair.left_cursor = pair.left_cursor->tail;
-            pair.right_cursor = pair.right_cursor->tail;
-            pair.index = checked_add(pair.index, ONE_ELEMENT);
-            pairs[pair_count - ONE_ELEMENT] = pair;
-            needed = checked_add(pair_count, ONE_ELEMENT);
-            pairs = grow_list(pairs, &pair_capacity, sizeof *pairs, needed);
-            pairs[pair_count].left = child_left;
-            pairs[pair_count].right = child_right;
-            pairs[pair_count].left_cursor = NULL;
-            pairs[pair_count].right_cursor = NULL;
-            pairs[pair_count].index = FIRST_INDEX;
-            pairs[pair_count].entered = 0;
-            pair_count = needed;
-            continue;
-        }
-        if (!atom_equal(pair.left, pair.right)) {
-            same = 0;
-            break;
-        }
-        pair_count -= ONE_ELEMENT;
+    if (left.kind != KIND_LIST || right.kind != KIND_LIST) return atom_equal(left, right);
+    if (left.item_count != right.item_count) return 0;
+    List *left_cursor = left.list;
+    List *right_cursor = right.list;
+    for (size_t index = FIRST_INDEX; index < left.item_count; index = checked_add(index, ONE_ELEMENT)) {
+        if (!values_equal(left_cursor->head, right_cursor->head)) return 0;
+        left_cursor = left_cursor->tail;
+        right_cursor = right_cursor->tail;
     }
-    free(pairs);
-    return same;
+    return 1;
 }
 
 static void deliver(Value value) {
@@ -5108,15 +5242,17 @@ static int find_value_binding(const char *bytes, size_t length, Value *out) {
         }
         break;
     }
-    if (bytes_equal_cstr(bytes, length, NAME_TRUE)) {
+    if (bytes_equal(bytes, length, NAME_TRUE, strlen(NAME_TRUE))) {
         *out = integer_value(WORD_TRUE);
         return 1;
     }
-    if (bytes_equal_cstr(bytes, length, NAME_FALSE)) {
+    if (bytes_equal(bytes, length, NAME_FALSE, strlen(NAME_FALSE))) {
         *out = integer_value(WORD_FALSE);
         return 1;
     }
-    if (bytes_equal_cstr(bytes, length, NAME_NOTHING) || bytes_equal_cstr(bytes, length, FAIL_NAME) || bytes_equal_cstr(bytes, length, STOP_NAME)) {
+    if (bytes_equal(bytes, length, NAME_NOTHING, strlen(NAME_NOTHING))
+        || bytes_equal(bytes, length, FAIL_NAME, strlen(FAIL_NAME))
+        || bytes_equal(bytes, length, STOP_NAME, strlen(STOP_NAME))) {
         *out = nothing_value();
         return 1;
     }
@@ -5204,6 +5340,7 @@ static void begin_call(Form *form) {
         else if (operation->id == OP_LAMBDA) frame->kind = FRAME_LAMBDA;
         else if (operation->id == OP_COALESCE) frame->kind = FRAME_COALESCE;
         else if (operation->id == OP_TRY) frame->kind = FRAME_TRY;
+        else if (operation->id == OP_ATTEMPT) frame->kind = FRAME_ATTEMPT;
         else if (operation->id == OP_FAIL) frame->kind = FRAME_FAIL;
         else if (operation->id == OP_CHOICE) frame->kind = FRAME_CHOICE;
         else {
@@ -5499,12 +5636,44 @@ static void step_try(size_t index) {
     fail("a try did not offer a result");
 }
 
+static void step_attempt(size_t index) {
+    Frame frame = frames[index];
+    if (frame.stage == IF_STAGE_TEST) {
+        frame.local_base = local_count;
+        frame.stage = TRY_STAGE_BODY;
+        frames[index] = frame;
+        offer_form(call_argument(frame.form, LEFT_OPERAND));
+        return;
+    }
+    if (frame.has_incoming) {
+        Value value = frame.incoming;
+        local_count = frame.local_base;
+        pop_frame();
+        deliver(value);
+        return;
+    }
+    if (frame.stage == TRY_STAGE_HANDLER) {
+        local_count = frame.local_base;
+        pop_frame();
+        deliver(nothing_value());
+        return;
+    }
+    fail("an attempt did not offer a result");
+}
+
 static int unwind_to_recovery(void) {
     for (size_t cursor = frame_count; cursor > FIRST_INDEX; ) {
         cursor -= ONE_ELEMENT;
         if (frames[cursor].kind == FRAME_CHOICE) {
             frames[cursor].has_incoming = 0;
             frames[cursor].stage = checked_add(frames[cursor].stage, ONE_ELEMENT);
+            local_count = frames[cursor].local_base;
+            frame_count = checked_add(cursor, ONE_ELEMENT);
+            return 1;
+        }
+        if (frames[cursor].kind == FRAME_ATTEMPT && frames[cursor].stage != TRY_STAGE_HANDLER) {
+            frames[cursor].has_incoming = 0;
+            frames[cursor].stage = TRY_STAGE_HANDLER;
             local_count = frames[cursor].local_base;
             frame_count = checked_add(cursor, ONE_ELEMENT);
             return 1;
@@ -5623,6 +5792,7 @@ static void drive(Form *program) {
         else if (kind == FRAME_LAMBDA) step_lambda(index);
         else if (kind == FRAME_COALESCE) step_coalesce(index);
         else if (kind == FRAME_TRY) step_try(index);
+        else if (kind == FRAME_ATTEMPT) step_attempt(index);
         else if (kind == FRAME_CHOICE) step_choice(index);
         else if (kind == FRAME_FAIL) step_fail(index);
         else if (kind == FRAME_APPLY) step_apply(index);
@@ -5646,6 +5816,7 @@ static void drive_active_frames(void) {
         else if (kind == FRAME_LAMBDA) step_lambda(index);
         else if (kind == FRAME_COALESCE) step_coalesce(index);
         else if (kind == FRAME_TRY) step_try(index);
+        else if (kind == FRAME_ATTEMPT) step_attempt(index);
         else if (kind == FRAME_CHOICE) step_choice(index);
         else if (kind == FRAME_FAIL) step_fail(index);
         else if (kind == FRAME_APPLY) step_apply(index);
