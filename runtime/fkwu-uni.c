@@ -1,6 +1,8 @@
 /* The Form runtime reads one source file and offers its forms.
  * A word is nothing, an integer, a real, text, a list, a function, or a node.
  * Definitions are bound before any form runs, so a later definition is visible.
+ * A prelude line names sources whose definitions join this program.
+ * A form.bml section lowers its definitions into the same forms.
  * Words live until the process exits. Collections grow with the data.
  */
 
@@ -10,14 +12,20 @@
 #include <float.h>
 #include <limits.h>
 #include <math.h>
+#include <signal.h>
 #include <stdint.h>
+#include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+
+extern char **environ;
 
 static const size_t EMPTY_COUNT = 0;
 static const size_t FIRST_INDEX = 0;
@@ -47,6 +55,9 @@ static const char CALL_CLOSE = ')';
 static const char TEXT_DELIMITER = '"';
 static const char TEXT_TERMINATOR = '\0';
 static const char NEWLINE = '\n';
+static const char TAB = '\t';
+static const char RETURN_MARK = '\r';
+static const char ESCAPE_MARK = '\\';
 static const char DECIMAL_POINT = '.';
 static const char SIGN_PLUS = '+';
 static const char SIGN_MINUS = '-';
@@ -66,6 +77,7 @@ static const char *const KIND_NAME_TEXT = "string";
 static const char *const KIND_NAME_LIST = "list";
 static const char *const KIND_NAME_FUNCTION = "function";
 static const char *const KIND_NAME_NODE = "node";
+static const char *const KIND_NAME_RECORD = "record";
 static const char *const LIST_OPEN = "[";
 static const char *const LIST_SEPARATOR = ", ";
 static const char *const LIST_CLOSE = "]";
@@ -74,8 +86,51 @@ static const char *const SOURCE_OPEN_MODE = "rb";
 static const char *const INTEGER_FORMAT = "%lld";
 static const char *const REAL_FORMAT = "%.*g";
 static const char *const ERROR_FORMAT = "fkwu: %s at byte %zu\n";
+static const char *const ERROR_FORMAT_PATH = "fkwu: %s at byte %zu in %s\n";
 static const char *const ERROR_BARE = "fkwu: %s\n";
-static const char *const USAGE_TEXT = "usage: fkwu-rewrite SOURCE\n";
+static const char LINE_COMMENT_MARK = '/';
+static const char PATH_SEPARATOR = '/';
+static const char SECTION_OPEN = '{';
+static const char SECTION_CLOSE = '}';
+static const char INDEX_OPEN = '[';
+static const char INDEX_CLOSE = ']';
+static const char STATEMENT_END = ';';
+static const char NAME_MARK = '=';
+static const char ARGUMENT_SEPARATOR = ',';
+static const char TERNARY_MARK = '?';
+static const char PAIR_MARK = ':';
+static const char NEGATION_MARK = '!';
+static const char PRODUCT_MARK = '*';
+static const char REMAINDER_MARK = '%';
+static const char DISJUNCTION_MARK = '|';
+static const char ARROW_MARK = '>';
+static const char *const USAGE_TEXT = "usage: fkwu SOURCE\n";
+static const char *const FORM_ROOT = "form";
+static const char *const PRELUDE_WORD = "preludes:";
+static const char *const SECTION_WORD = "section";
+static const char *const DEF_WORD = "def";
+static const char *const IMPORT_WORD = "import";
+static const char *const FORM_BML_SECTION = "form.bml";
+static const char *const SECTION_TAG = "section [";
+static const char *const UNBOUND_PREFIX = "an unbound name was offered: ";
+static const char *const COALESCE_WORD = "??";
+static const char *const FAIL_NAME = "fail";
+static const char *const STOP_NAME = "stop";
+static const char *const TRY_WORD = "try";
+static const char *const NULL_DEVICE = "/dev/null";
+static const char *const TERMINAL_INPUT_DOOR = "terminal-input";
+static const long long TERMINAL_INPUT_READ = 2;
+static const mode_t DIRECTORY_MODE = 0755;
+static const mode_t TEXT_FILE_MODE = 0644;
+static const unsigned U32_MASK = 0xffffffffu;
+static const unsigned U32_BITS = 32;
+static const int TERMINAL_COLUMNS = 0;
+static const int TERMINAL_ROWS = 1;
+static const mode_t NULL_DEVICE_MODE = 0;
+static const long long MILLISECONDS_PER_SECOND = 1000;
+static const long long NANOSECONDS_PER_MILLISECOND = 1000000;
+static const size_t SLEEP_REST_FIELDS = 4;
+static const size_t SLEEP_WOKE = 1;
 
 enum {
     BOOLEAN_NODE_FALSE = 1,
@@ -89,7 +144,8 @@ typedef enum {
     KIND_TEXT,
     KIND_LIST,
     KIND_FUNCTION,
-    KIND_NODE
+    KIND_NODE,
+    KIND_RECORD
 } ValueKind;
 
 typedef enum {
@@ -124,7 +180,27 @@ typedef enum {
     OP_FB_CLEAR,
     OP_BUS_OPEN,
     OP_BUS_CLOSE,
-    OP_BUS_READ
+    OP_BUS_READ,
+    OP_GT,
+    OP_LE,
+    OP_NTH,
+    OP_SLICE,
+    OP_PLUS,
+    OP_LET,
+    OP_OR,
+    OP_LAMBDA,
+    OP_NOT,
+    OP_MUL,
+    OP_DIV,
+    OP_MOD,
+    OP_HEAD,
+    OP_TAIL,
+    OP_CONS,
+    OP_PRINT,
+    OP_COALESCE,
+    OP_TRY,
+    OP_FAIL,
+    OP_CHOICE
 } OperationId;
 
 typedef enum { FIXED_ARITY, VARIADIC } ArityPolicy;
@@ -143,8 +219,11 @@ enum {
     IF_ARGUMENT_COUNT = 3,
     IF_STAGE_TEST = 0,
     IF_STAGE_BRANCH = 1,
+    TRY_STAGE_BODY = 1,
+    TRY_STAGE_HANDLER = 2,
     LEFT_OPERAND = 0,
     RIGHT_OPERAND = 1,
+    SLICE_END = 2,
     SOLE_OPERAND = 0,
     ARITY_NONE = 0,
     ARITY_ONE = 1,
@@ -185,6 +264,7 @@ typedef struct Name Name;
 typedef struct Binding Binding;
 typedef struct Operation Operation;
 typedef struct Frame Frame;
+typedef struct Record Record;
 
 typedef Value (*OperationOffer)(Value *arguments, size_t argument_count);
 
@@ -204,6 +284,14 @@ struct Value {
     Form *body;
     Name *parameters;
     size_t parameter_count;
+    Record *record;
+};
+
+struct Record {
+    Value *keys;
+    Value *values;
+    size_t count;
+    size_t capacity;
 };
 
 struct Form {
@@ -240,7 +328,15 @@ typedef enum {
     FRAME_AND,
     FRAME_IF,
     FRAME_EAGER,
-    FRAME_FUNCTION
+    FRAME_FUNCTION,
+    FRAME_LET,
+    FRAME_OR,
+    FRAME_LAMBDA,
+    FRAME_COALESCE,
+    FRAME_TRY,
+    FRAME_FAIL,
+    FRAME_APPLY,
+    FRAME_CHOICE
 } FrameKind;
 
 struct Frame {
@@ -273,6 +369,9 @@ static size_t function_capacity;
 static Binding *locals;
 static size_t local_count;
 static size_t local_capacity;
+static Binding *globals;
+static size_t global_count;
+static size_t global_capacity;
 
 static Frame *frames;
 static size_t frame_count;
@@ -309,8 +408,20 @@ static void fail(const char *reason) {
 }
 
 static void fail_at(size_t offset, const char *reason) {
-    fprintf(stderr, ERROR_FORMAT, reason, offset);
+    if (source_path != NULL) fprintf(stderr, ERROR_FORMAT_PATH, reason, offset, source_path);
+    else fprintf(stderr, ERROR_FORMAT, reason, offset);
     exit(EXIT_FAILURE);
+}
+
+static char *message_with_name(const char *prefix, const char *bytes, size_t length) {
+    size_t prefix_length = strlen(prefix);
+    if (prefix_length > SIZE_MAX - length - TEXT_TERMINATOR_SIZE) fail("a message exceeds addressable memory");
+    char *message = malloc(prefix_length + length + TEXT_TERMINATOR_SIZE);
+    if (message == NULL) fail("out of memory");
+    memcpy(message, prefix, prefix_length);
+    if (length != EMPTY_COUNT) memcpy(message + prefix_length, bytes, length);
+    message[prefix_length + length] = TEXT_TERMINATOR;
+    return message;
 }
 
 static size_t checked_add(size_t left, size_t right) {
@@ -430,6 +541,7 @@ static const char *kind_name(ValueKind kind) {
     if (kind == KIND_LIST) return KIND_NAME_LIST;
     if (kind == KIND_FUNCTION) return KIND_NAME_FUNCTION;
     if (kind == KIND_NODE) return KIND_NAME_NODE;
+    if (kind == KIND_RECORD) return KIND_NAME_RECORD;
     fail("a word has an unknown kind");
     return KIND_NAME_NOTHING;
 }
@@ -457,6 +569,24 @@ static long long checked_integer_sub(long long left, long long right) {
     long long difference = WORD_FALSE;
     if (__builtin_ssubll_overflow(left, right, &difference)) fail("sub is outside the native integer range");
     return difference;
+}
+
+static long long checked_integer_mul(long long left, long long right) {
+    long long product = WORD_FALSE;
+    if (__builtin_smulll_overflow(left, right, &product)) fail("mul is outside the native integer range");
+    return product;
+}
+
+static long long checked_integer_div(long long left, long long right) {
+    if (right == WORD_FALSE) fail("div expects a nonzero divisor");
+    if (left == LLONG_MIN && right == -WORD_TRUE) fail("div is outside the native integer range");
+    return left / right;
+}
+
+static long long checked_integer_mod(long long left, long long right) {
+    if (right == WORD_FALSE) fail("mod expects a nonzero divisor");
+    if (left == LLONG_MIN && right == -WORD_TRUE) return WORD_FALSE;
+    return left % right;
 }
 
 static Form *new_form(FormKind kind, size_t offset) {
@@ -493,8 +623,35 @@ static void skip_space_and_comments(void) {
             source_offset = checked_add(source_offset, ONE_ELEMENT);
             continue;
         }
+        if (source_bytes[source_offset] == LINE_COMMENT_MARK) {
+            size_t next = checked_add(source_offset, ONE_ELEMENT);
+            if (next < source_length && source_bytes[next] == LINE_COMMENT_MARK) {
+                source_offset = checked_add(next, ONE_ELEMENT);
+                while (source_offset < source_length && source_bytes[source_offset] != NEWLINE) {
+                    source_offset = checked_add(source_offset, ONE_ELEMENT);
+                }
+                continue;
+            }
+        }
         if (source_bytes[source_offset] != COMMENT_INTRODUCER) return;
         source_offset = checked_add(source_offset, ONE_ELEMENT);
+        while (source_offset < source_length && source_bytes[source_offset] != NEWLINE) {
+            source_offset = checked_add(source_offset, ONE_ELEMENT);
+        }
+    }
+}
+
+static void skip_bml(void) {
+    while (source_offset < source_length) {
+        unsigned char character = (unsigned char)source_bytes[source_offset];
+        if (isspace(character)) {
+            source_offset = checked_add(source_offset, ONE_ELEMENT);
+            continue;
+        }
+        if (source_bytes[source_offset] != LINE_COMMENT_MARK) return;
+        size_t next = checked_add(source_offset, ONE_ELEMENT);
+        if (next >= source_length || source_bytes[next] != LINE_COMMENT_MARK) return;
+        source_offset = checked_add(next, ONE_ELEMENT);
         while (source_offset < source_length && source_bytes[source_offset] != NEWLINE) {
             source_offset = checked_add(source_offset, ONE_ELEMENT);
         }
@@ -553,19 +710,42 @@ static int token_is_number(const char *text, size_t length, Form *form) {
     return 1;
 }
 
+static char escaped_character(char mark, size_t offset) {
+    if (mark == TEXT_DELIMITER || mark == ESCAPE_MARK || mark == LINE_COMMENT_MARK) return mark;
+    if (mark == 'n') return NEWLINE;
+    if (mark == 't') return TAB;
+    if (mark == 'r') return RETURN_MARK;
+    fail_at(offset, "a text escape was not recognized");
+    return mark;
+}
+
 static Form *parse_text(void) {
     size_t opening = source_offset;
     source_offset = checked_add(source_offset, ONE_ELEMENT);
-    size_t start = source_offset;
+    char *text = NULL;
+    size_t length = EMPTY_COUNT;
+    size_t capacity = EMPTY_COUNT;
     while (source_offset < source_length && source_bytes[source_offset] != TEXT_DELIMITER) {
+        char character = source_bytes[source_offset];
         source_offset = checked_add(source_offset, ONE_ELEMENT);
+        if (character == ESCAPE_MARK) {
+            if (source_offset >= source_length) fail_at(opening, "a text escape was not finished");
+            character = escaped_character(source_bytes[source_offset], source_offset);
+            source_offset = checked_add(source_offset, ONE_ELEMENT);
+        }
+        size_t needed = checked_add(length, ONE_ELEMENT);
+        text = grow_list(text, &capacity, sizeof *text, needed);
+        text[length] = character;
+        length = needed;
     }
     if (source_offset >= source_length) fail_at(opening, "a text value was not closed");
-    size_t length = source_offset - start;
-    Form *form = new_form(FORM_TEXT, opening);
-    form->text = copy_bytes(source_bytes + start, length);
-    form->text_length = length;
     source_offset = checked_add(source_offset, ONE_ELEMENT);
+    size_t terminated = checked_add(length, TEXT_TERMINATOR_SIZE);
+    text = grow_list(text, &capacity, sizeof *text, terminated);
+    text[length] = TEXT_TERMINATOR;
+    Form *form = new_form(FORM_TEXT, opening);
+    form->text = text;
+    form->text_length = length;
     return form;
 }
 
@@ -708,10 +888,10 @@ static void bind_definition(Form *form) {
     Form *name = form->parts[DEFN_NAME];
     Form *parameters = form->parts[DEFN_PARAMETERS];
     if (name->kind != FORM_SYMBOL) fail_at(name->offset, "a definition name must be a symbol");
-    if (find_operation_text(name->text, name->text_length) != NULL) {
-        fail_at(name->offset, "a definition uses a reserved operation name");
+    const Operation *reserved = find_operation_text(name->text, name->text_length);
+    if (reserved != NULL && reserved->evaluation == LEAVE_ARGUMENTS) {
+        fail_at(name->offset, message_with_name("a definition uses a reserved operation name: ", name->text, name->text_length));
     }
-    if (find_function_text(name->text, name->text_length) != NULL) fail_at(name->offset, "a definition name is already bound");
     if (parameters->kind != FORM_GROUP) fail_at(parameters->offset, "a parameter list must be a group");
     for (size_t index = FIRST_INDEX; index < parameters->part_count; index = checked_add(index, ONE_ELEMENT)) {
         Form *parameter = parameters->parts[index];
@@ -731,6 +911,12 @@ static void bind_definition(Form *form) {
     for (size_t index = FIRST_INDEX; index < parameters->part_count; index = checked_add(index, ONE_ELEMENT)) {
         function.parameters[index].bytes = parameters->parts[index]->text;
         function.parameters[index].length = parameters->parts[index]->text_length;
+    }
+    Binding *existing = find_function_text(name->text, name->text_length);
+    if (existing != NULL) {
+        existing->value = function;
+        form->is_bound = 1;
+        return;
     }
     size_t needed = checked_add(function_count, ONE_ELEMENT);
     functions = grow_list(functions, &function_capacity, sizeof *functions, needed);
@@ -803,6 +989,7 @@ static Value offer_lt(Value *arguments, size_t argument_count) {
     (void)argument_count;
     Value left = arguments[LEFT_OPERAND];
     Value right = arguments[RIGHT_OPERAND];
+    if (left.kind == KIND_NOTHING || right.kind == KIND_NOTHING) return boolean_word(0);
     if (!is_number(left) || !is_number(right)) fail("lt expects two numbers");
     if (left.kind == KIND_INTEGER && right.kind == KIND_INTEGER) return boolean_word(left.integer < right.integer);
     return boolean_word(number_as_real(left) < number_as_real(right));
@@ -812,9 +999,666 @@ static Value offer_ge(Value *arguments, size_t argument_count) {
     (void)argument_count;
     Value left = arguments[LEFT_OPERAND];
     Value right = arguments[RIGHT_OPERAND];
+    if (left.kind == KIND_NOTHING || right.kind == KIND_NOTHING) return boolean_word(0);
     if (!is_number(left) || !is_number(right)) fail("ge expects two numbers");
     if (left.kind == KIND_INTEGER && right.kind == KIND_INTEGER) return boolean_word(left.integer >= right.integer);
     return boolean_word(number_as_real(left) >= number_as_real(right));
+}
+
+static Value offer_str_concat(Value *arguments, size_t argument_count);
+static Value list_from(Value *items, size_t item_count);
+static Value count_word(size_t count);
+
+static Value offer_gt(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    Value left = arguments[LEFT_OPERAND];
+    Value right = arguments[RIGHT_OPERAND];
+    if (left.kind == KIND_NOTHING || right.kind == KIND_NOTHING) return boolean_word(0);
+    if (!is_number(left) || !is_number(right)) fail("gt expects two numbers");
+    if (left.kind == KIND_INTEGER && right.kind == KIND_INTEGER) return boolean_word(left.integer > right.integer);
+    return boolean_word(number_as_real(left) > number_as_real(right));
+}
+
+static Value offer_le(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    Value left = arguments[LEFT_OPERAND];
+    Value right = arguments[RIGHT_OPERAND];
+    if (left.kind == KIND_NOTHING || right.kind == KIND_NOTHING) return boolean_word(0);
+    if (!is_number(left) || !is_number(right)) fail("le expects two numbers");
+    if (left.kind == KIND_INTEGER && right.kind == KIND_INTEGER) return boolean_word(left.integer <= right.integer);
+    return boolean_word(number_as_real(left) <= number_as_real(right));
+}
+
+static Value offer_nth(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[LEFT_OPERAND], KIND_LIST, "nth expects a list");
+    expect_kind(arguments[RIGHT_OPERAND], KIND_INTEGER, "nth expects an integer index");
+    if (arguments[RIGHT_OPERAND].integer < WORD_FALSE) return nothing_value();
+    size_t index = (size_t)arguments[RIGHT_OPERAND].integer;
+    if (index >= arguments[LEFT_OPERAND].item_count) return nothing_value();
+    return arguments[LEFT_OPERAND].items[index];
+}
+
+static Value offer_slice(Value *arguments, size_t argument_count) {
+    if (argument_count != ARITY_TWO && argument_count != ARITY_THREE) fail("slice expects a list and a start");
+    expect_kind(arguments[LEFT_OPERAND], KIND_LIST, "slice expects a list");
+    expect_kind(arguments[RIGHT_OPERAND], KIND_INTEGER, "slice expects an integer start");
+    Value list = arguments[LEFT_OPERAND];
+    size_t end = list.item_count;
+    size_t start = EMPTY_COUNT;
+    if (arguments[RIGHT_OPERAND].integer > WORD_FALSE) {
+        start = (size_t)arguments[RIGHT_OPERAND].integer;
+        if (start > end) start = end;
+    }
+    if (argument_count == ARITY_THREE) {
+        expect_kind(arguments[SLICE_END], KIND_INTEGER, "slice expects an integer end");
+        if (arguments[SLICE_END].integer <= WORD_FALSE) end = EMPTY_COUNT;
+        else {
+            size_t requested = (size_t)arguments[SLICE_END].integer;
+            if (requested < end) end = requested;
+        }
+    }
+    if (start > end) start = end;
+    size_t count = end - start;
+    Value *items = allocate_zeroed(count, sizeof *items);
+    for (size_t index = FIRST_INDEX; index < count; index = checked_add(index, ONE_ELEMENT)) {
+        items[index] = list.items[checked_add(start, index)];
+    }
+    return list_from(items, count);
+}
+
+static Value offer_plus(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    Value left = arguments[LEFT_OPERAND];
+    Value right = arguments[RIGHT_OPERAND];
+    if (left.kind == KIND_TEXT && right.kind == KIND_TEXT) return offer_str_concat(arguments, argument_count);
+    if (!is_number(left) || !is_number(right)) fail("plus expects two numbers or two texts");
+    return offer_add(arguments, argument_count);
+}
+
+static Value offer_len(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    Value value = arguments[SOLE_OPERAND];
+    if (value.kind == KIND_LIST) return count_word(value.item_count);
+    if (value.kind == KIND_TEXT) return count_word(value.text_length);
+    fail("len expects a list or text");
+    return nothing_value();
+}
+
+static Value offer_empty(Value *arguments, size_t argument_count) {
+    (void)arguments;
+    (void)argument_count;
+    return list_from(NULL, EMPTY_COUNT);
+}
+
+static Value integer_text(long long integer) {
+    unsigned long long magnitude = integer < WORD_FALSE ? (unsigned long long)(-(integer + WORD_TRUE)) + ONE_ELEMENT : (unsigned long long)integer;
+    size_t digits = ONE_ELEMENT;
+    unsigned long long scale = magnitude;
+    while (scale >= (unsigned long long)DECIMAL_RADIX) {
+        scale /= (unsigned long long)DECIMAL_RADIX;
+        digits = checked_add(digits, ONE_ELEMENT);
+    }
+    size_t length = digits;
+    if (integer < WORD_FALSE) length = checked_add(length, ONE_ELEMENT);
+    char *text = malloc(checked_add(length, TEXT_TERMINATOR_SIZE));
+    if (text == NULL) fail("out of memory");
+    text[length] = TEXT_TERMINATOR;
+    size_t cursor = length;
+    if (magnitude == 0) text[FIRST_INDEX] = DIGIT_ZERO;
+    while (magnitude != 0) {
+        cursor -= ONE_ELEMENT;
+        text[cursor] = (char)(DIGIT_ZERO + (magnitude % (unsigned long long)DECIMAL_RADIX));
+        magnitude /= (unsigned long long)DECIMAL_RADIX;
+    }
+    if (integer < WORD_FALSE) text[FIRST_INDEX] = SIGN_MINUS;
+    Value value = nothing_value();
+    value.kind = KIND_TEXT;
+    value.text = text;
+    value.text_length = length;
+    return value;
+}
+
+static Value offer_str(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    Value value = arguments[SOLE_OPERAND];
+    if (value.kind == KIND_TEXT) return value;
+    if (value.kind == KIND_INTEGER) return integer_text(value.integer);
+    if (value.kind == KIND_NOTHING) return text_value("nothing", strlen("nothing"));
+    fail("str expects text, an integer, or nothing");
+    return nothing_value();
+}
+
+static Value offer_print_str(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[SOLE_OPERAND], KIND_TEXT, "print_str expects text");
+    if (arguments[SOLE_OPERAND].text_length != EMPTY_COUNT) {
+        fwrite(arguments[SOLE_OPERAND].text, sizeof(char), arguments[SOLE_OPERAND].text_length, stdout);
+    }
+    return nothing_value();
+}
+
+static void print_value(Value root);
+
+static Value offer_not(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    return boolean_word(!integer_is_nonzero(arguments[SOLE_OPERAND]));
+}
+
+static Value offer_mul(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    Value left = arguments[LEFT_OPERAND];
+    Value right = arguments[RIGHT_OPERAND];
+    if (!is_number(left) || !is_number(right)) fail("mul expects two numbers");
+    if (left.kind == KIND_INTEGER && right.kind == KIND_INTEGER) return integer_value(checked_integer_mul(left.integer, right.integer));
+    double product = number_as_real(left) * number_as_real(right);
+    if (!isfinite(product)) fail("mul is outside the native real range");
+    return real_value(product);
+}
+
+static Value offer_div(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    Value left = arguments[LEFT_OPERAND];
+    Value right = arguments[RIGHT_OPERAND];
+    if (!is_number(left) || !is_number(right)) fail("div expects two numbers");
+    if (left.kind == KIND_INTEGER && right.kind == KIND_INTEGER) return integer_value(checked_integer_div(left.integer, right.integer));
+    double divisor = number_as_real(right);
+    if (divisor == 0.0) fail("div expects a nonzero divisor");
+    double quotient = number_as_real(left) / divisor;
+    if (!isfinite(quotient)) fail("div is outside the native real range");
+    return real_value(quotient);
+}
+
+static Value offer_mod(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    Value left = arguments[LEFT_OPERAND];
+    Value right = arguments[RIGHT_OPERAND];
+    if (!is_number(left) || !is_number(right)) fail("mod expects two numbers");
+    if (left.kind == KIND_INTEGER && right.kind == KIND_INTEGER) return integer_value(checked_integer_mod(left.integer, right.integer));
+    double divisor = number_as_real(right);
+    if (divisor == 0.0) fail("mod expects a nonzero divisor");
+    double remainder = fmod(number_as_real(left), divisor);
+    if (!isfinite(remainder)) fail("mod is outside the native real range");
+    return real_value(remainder);
+}
+
+static Value offer_head(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[SOLE_OPERAND], KIND_LIST, "head expects a list");
+    if (arguments[SOLE_OPERAND].item_count == EMPTY_COUNT) return nothing_value();
+    return arguments[SOLE_OPERAND].items[FIRST_INDEX];
+}
+
+static Value offer_tail(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[SOLE_OPERAND], KIND_LIST, "tail expects a list");
+    if (arguments[SOLE_OPERAND].item_count == EMPTY_COUNT) return list_from(NULL, EMPTY_COUNT);
+    return list_from(arguments[SOLE_OPERAND].items + ONE_ELEMENT, arguments[SOLE_OPERAND].item_count - ONE_ELEMENT);
+}
+
+static Value offer_cons(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[RIGHT_OPERAND], KIND_LIST, "cons expects a list");
+    size_t count = checked_add(arguments[RIGHT_OPERAND].item_count, ONE_ELEMENT);
+    Value *items = allocate_zeroed(count, sizeof *items);
+    items[FIRST_INDEX] = arguments[LEFT_OPERAND];
+    for (size_t index = FIRST_INDEX; index < arguments[RIGHT_OPERAND].item_count; index = checked_add(index, ONE_ELEMENT)) {
+        items[checked_add(index, ONE_ELEMENT)] = arguments[RIGHT_OPERAND].items[index];
+    }
+    return list_from(items, count);
+}
+
+static int record_find(Record *record, Value key, size_t *index) {
+    for (size_t cursor = FIRST_INDEX; cursor < record->count; cursor = checked_add(cursor, ONE_ELEMENT)) {
+        if (!values_equal(record->keys[cursor], key)) continue;
+        *index = cursor;
+        return 1;
+    }
+    return 0;
+}
+
+static Value record_value(Record *record) {
+    Value value = nothing_value();
+    value.kind = KIND_RECORD;
+    value.record = record;
+    return value;
+}
+
+static Value offer_record_set(Value *arguments, size_t argument_count);
+
+static Value offer_record_new(Value *arguments, size_t argument_count) {
+    if (argument_count == EMPTY_COUNT) fail("record_new expects a size");
+    expect_kind(arguments[FIRST_INDEX], KIND_INTEGER, "record_new expects an integer size");
+    size_t fields = argument_count - ONE_ELEMENT;
+    if ((fields % ARITY_TWO) != EMPTY_COUNT) fail("record_new expects key and value pairs");
+    Value created = record_value(allocate_zeroed(ONE_ELEMENT, sizeof(Record)));
+    for (size_t index = ONE_ELEMENT; index < argument_count; index = checked_add(index, ARITY_TWO)) {
+        Value triple[] = {created, arguments[index], arguments[checked_add(index, ONE_ELEMENT)]};
+        created = offer_record_set(triple, ARITY_THREE);
+    }
+    return created;
+}
+
+static Value offer_record_has(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[LEFT_OPERAND], KIND_RECORD, "record_has expects a record");
+    size_t index = FIRST_INDEX;
+    return boolean_word(record_find(arguments[LEFT_OPERAND].record, arguments[RIGHT_OPERAND], &index));
+}
+
+static Value offer_record_get(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[LEFT_OPERAND], KIND_RECORD, "record_get expects a record");
+    size_t index = FIRST_INDEX;
+    if (!record_find(arguments[LEFT_OPERAND].record, arguments[RIGHT_OPERAND], &index)) return nothing_value();
+    return arguments[LEFT_OPERAND].record->values[index];
+}
+
+static Value offer_record_set(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[LEFT_OPERAND], KIND_RECORD, "record_set expects a record");
+    Record *record = arguments[LEFT_OPERAND].record;
+    Value key = arguments[RIGHT_OPERAND];
+    Value stored = arguments[SLICE_END];
+    size_t index = FIRST_INDEX;
+    if (record_find(record, key, &index)) {
+        record->values[index] = stored;
+        return arguments[LEFT_OPERAND];
+    }
+    size_t needed = checked_add(record->count, ONE_ELEMENT);
+    size_t key_capacity = record->capacity;
+    size_t value_capacity = record->capacity;
+    record->keys = grow_list(record->keys, &key_capacity, sizeof *record->keys, needed);
+    record->values = grow_list(record->values, &value_capacity, sizeof *record->values, needed);
+    record->capacity = key_capacity;
+    record->keys[record->count] = key;
+    record->values[record->count] = stored;
+    record->count = needed;
+    return arguments[LEFT_OPERAND];
+}
+
+static Value offer_range(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[LEFT_OPERAND], KIND_INTEGER, "range expects an integer start");
+    expect_kind(arguments[RIGHT_OPERAND], KIND_INTEGER, "range expects an integer end");
+    long long start = arguments[LEFT_OPERAND].integer;
+    long long end = arguments[RIGHT_OPERAND].integer;
+    if (end <= start) return list_from(NULL, EMPTY_COUNT);
+    long long span = checked_integer_sub(end, start);
+    Value *items = allocate_zeroed((size_t)span, sizeof *items);
+    for (long long step = WORD_FALSE; step < span; step = checked_integer_add(step, WORD_TRUE)) {
+        items[step] = integer_value(checked_integer_add(start, step));
+    }
+    return list_from(items, (size_t)span);
+}
+
+static Value offer_byte_to_str(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[SOLE_OPERAND], KIND_INTEGER, "byte_to_str expects an integer");
+    long long byte = arguments[SOLE_OPERAND].integer;
+    if (byte < WORD_FALSE || byte > UCHAR_MAX) fail("byte_to_str expects a byte");
+    char text = (char)byte;
+    return text_value(&text, ONE_ELEMENT);
+}
+
+static Value offer_str_len(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[SOLE_OPERAND], KIND_TEXT, "str_len expects text");
+    return count_word(arguments[SOLE_OPERAND].text_length);
+}
+
+static Value offer_str_byte_at(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[LEFT_OPERAND], KIND_TEXT, "str_byte_at expects text");
+    expect_kind(arguments[RIGHT_OPERAND], KIND_INTEGER, "str_byte_at expects an integer index");
+    if (arguments[RIGHT_OPERAND].integer < WORD_FALSE) return nothing_value();
+    size_t index = (size_t)arguments[RIGHT_OPERAND].integer;
+    if (index >= arguments[LEFT_OPERAND].text_length) return nothing_value();
+    return integer_value((unsigned char)arguments[LEFT_OPERAND].text[index]);
+}
+
+static Value offer_value_str(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    Value value = arguments[SOLE_OPERAND];
+    if (value.kind == KIND_TEXT) return value;
+    if (value.kind == KIND_INTEGER) return integer_text(value.integer);
+    if (value.kind == KIND_NOTHING) return text_value(KIND_NAME_NOTHING, strlen(KIND_NAME_NOTHING));
+    const char *name = kind_name(value.kind);
+    return text_value(name, strlen(name));
+}
+
+static int terminal_input_request(Value request) {
+    return request.kind == KIND_LIST && request.item_count >= ARITY_TWO && request.items[FIRST_INDEX].kind == KIND_TEXT
+        && bytes_equal_cstr(request.items[FIRST_INDEX].text, request.items[FIRST_INDEX].text_length, TERMINAL_INPUT_DOOR);
+}
+
+static Value offer_terminal_input(Value request) {
+    expect_kind(request.items[ONE_ELEMENT], KIND_INTEGER, "terminal input expects an operation");
+    if (request.items[ONE_ELEMENT].integer == TERMINAL_INPUT_READ) return nothing_value();
+    return integer_value(WORD_FALSE);
+}
+
+static long long sleep_milliseconds(Value request) {
+    if (request.kind == KIND_INTEGER) return request.integer;
+    if (request.kind == KIND_LIST && request.item_count != EMPTY_COUNT && request.items[FIRST_INDEX].kind == KIND_INTEGER) {
+        return request.items[FIRST_INDEX].integer;
+    }
+    fail("host_sleep_ms expects an integer duration");
+    return WORD_FALSE;
+}
+
+static Value deadline_rest(void) {
+    Value *fields = allocate_zeroed(SLEEP_REST_FIELDS, sizeof *fields);
+    fields[FIRST_INDEX] = integer_value(WORD_FALSE);
+    fields[SLEEP_WOKE] = integer_value(-WORD_TRUE);
+    fields[ARITY_TWO] = integer_value(WORD_FALSE);
+    fields[ARITY_THREE] = list_from(NULL, EMPTY_COUNT);
+    return list_from(fields, SLEEP_REST_FIELDS);
+}
+
+static Value offer_host_sleep_ms(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    Value request = arguments[SOLE_OPERAND];
+    if (terminal_input_request(request)) return offer_terminal_input(request);
+    long long milliseconds = sleep_milliseconds(request);
+    if (milliseconds < WORD_FALSE) fail("host_sleep_ms expects a nonnegative duration");
+    struct timespec remaining;
+    remaining.tv_sec = (time_t)(milliseconds / MILLISECONDS_PER_SECOND);
+    remaining.tv_nsec = (long)((milliseconds % MILLISECONDS_PER_SECOND) * NANOSECONDS_PER_MILLISECOND);
+    while (nanosleep(&remaining, &remaining) != SYSTEM_CALL_OK) {
+        if (errno != EINTR) fail("host_sleep_ms could not wait");
+    }
+    if (request.kind == KIND_LIST) return deadline_rest();
+    return integer_value(milliseconds);
+}
+
+static Value offer_host_monotonic_ms(Value *arguments, size_t argument_count) {
+    (void)arguments;
+    (void)argument_count;
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != SYSTEM_CALL_OK) fail("host_monotonic_ms could not read the clock");
+    long long milliseconds = (long long)now.tv_sec * MILLISECONDS_PER_SECOND + (long long)now.tv_nsec / NANOSECONDS_PER_MILLISECOND;
+    return integer_value(milliseconds);
+}
+
+static Value offer_now_unix_ms(Value *arguments, size_t argument_count) {
+    (void)arguments;
+    (void)argument_count;
+    struct timespec now;
+    if (clock_gettime(CLOCK_REALTIME, &now) != SYSTEM_CALL_OK) fail("now_unix_ms could not read the clock");
+    long long milliseconds = (long long)now.tv_sec * MILLISECONDS_PER_SECOND + (long long)now.tv_nsec / NANOSECONDS_PER_MILLISECOND;
+    return integer_value(milliseconds);
+}
+
+static Value offer_host_getenv(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[SOLE_OPERAND], KIND_TEXT, "host_getenv expects text");
+    const char *value = getenv(arguments[SOLE_OPERAND].text);
+    if (value == NULL) return nothing_value();
+    return text_value(value, strlen(value));
+}
+
+static pid_t integer_pid(Value value, const char *reason) {
+    expect_kind(value, KIND_INTEGER, reason);
+    if (value.integer <= WORD_FALSE) return 0;
+    return (pid_t)value.integer;
+}
+
+static Value offer_host_alive(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    pid_t pid = integer_pid(arguments[SOLE_OPERAND], "host_alive expects a process");
+    if (pid == 0) return integer_value(WORD_FALSE);
+    return boolean_word(kill(pid, 0) == SYSTEM_CALL_OK);
+}
+
+static Value offer_host_kill(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    pid_t pid = integer_pid(arguments[SOLE_OPERAND], "host_kill expects a process");
+    if (pid == 0) return integer_value(WORD_FALSE);
+    if (kill(pid, SIGTERM) == SYSTEM_CALL_OK || errno == ESRCH) return integer_value(WORD_FALSE);
+    return integer_value(-WORD_TRUE);
+}
+
+static Value offer_host_wait(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    pid_t pid = integer_pid(arguments[SOLE_OPERAND], "host_wait expects a process");
+    if (pid == 0) return integer_value(WORD_FALSE);
+    int status = 0;
+    if (waitpid(pid, &status, 0) < SYSTEM_CALL_OK) return integer_value(-WORD_TRUE);
+    if (WIFEXITED(status)) return integer_value(WEXITSTATUS(status));
+    return integer_value(WORD_FALSE);
+}
+
+static Value terminal_extent(int axis) {
+    struct winsize window;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &window) != SYSTEM_CALL_OK) return nothing_value();
+    unsigned short cells = axis == TERMINAL_COLUMNS ? window.ws_col : window.ws_row;
+    if (cells == 0) return nothing_value();
+    return integer_value((long long)cells);
+}
+
+static unsigned unsigned_word(Value value, const char *reason) {
+    expect_kind(value, KIND_INTEGER, reason);
+    return (unsigned)((unsigned long long)value.integer & U32_MASK);
+}
+
+static Value offer_add_u32(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    unsigned sum = unsigned_word(arguments[LEFT_OPERAND], "add_u32 expects an integer") + unsigned_word(arguments[RIGHT_OPERAND], "add_u32 expects an integer");
+    return integer_value((long long)sum);
+}
+
+static Value offer_band(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    unsigned bits = unsigned_word(arguments[LEFT_OPERAND], "band expects an integer") & unsigned_word(arguments[RIGHT_OPERAND], "band expects an integer");
+    return integer_value((long long)bits);
+}
+
+static Value offer_shr_u32(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    unsigned bits = unsigned_word(arguments[LEFT_OPERAND], "shr_u32 expects an integer");
+    expect_kind(arguments[RIGHT_OPERAND], KIND_INTEGER, "shr_u32 expects a shift");
+    if (arguments[RIGHT_OPERAND].integer < WORD_FALSE) fail("shr_u32 expects a non-negative shift");
+    if ((unsigned long long)arguments[RIGHT_OPERAND].integer >= U32_BITS) return integer_value(WORD_FALSE);
+    return integer_value((long long)(bits >> (unsigned)arguments[RIGHT_OPERAND].integer));
+}
+
+static Value offer_bor(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    unsigned bits = unsigned_word(arguments[LEFT_OPERAND], "bor expects an integer") | unsigned_word(arguments[RIGHT_OPERAND], "bor expects an integer");
+    return integer_value((long long)bits);
+}
+
+static Value offer_bxor(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    unsigned bits = unsigned_word(arguments[LEFT_OPERAND], "bxor expects an integer") ^ unsigned_word(arguments[RIGHT_OPERAND], "bxor expects an integer");
+    return integer_value((long long)bits);
+}
+
+static Value offer_bnot_u32(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    unsigned bits = ~unsigned_word(arguments[SOLE_OPERAND], "bnot_u32 expects an integer");
+    return integer_value((long long)bits);
+}
+
+static Value offer_shl_u32(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    unsigned bits = unsigned_word(arguments[LEFT_OPERAND], "shl_u32 expects an integer");
+    expect_kind(arguments[RIGHT_OPERAND], KIND_INTEGER, "shl_u32 expects a shift");
+    if (arguments[RIGHT_OPERAND].integer < WORD_FALSE) fail("shl_u32 expects a non-negative shift");
+    if ((unsigned long long)arguments[RIGHT_OPERAND].integer >= U32_BITS) return integer_value(WORD_FALSE);
+    return integer_value((long long)(bits << (unsigned)arguments[RIGHT_OPERAND].integer));
+}
+
+static Value offer_rotr_u32(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    unsigned bits = unsigned_word(arguments[LEFT_OPERAND], "rotr_u32 expects an integer");
+    expect_kind(arguments[RIGHT_OPERAND], KIND_INTEGER, "rotr_u32 expects a rotation");
+    if (arguments[RIGHT_OPERAND].integer < WORD_FALSE) fail("rotr_u32 expects a non-negative rotation");
+    unsigned count = (unsigned)(arguments[RIGHT_OPERAND].integer % (long long)U32_BITS);
+    unsigned turned = count == 0 ? bits : (bits >> count) | (bits << (U32_BITS - count));
+    return integer_value((long long)turned);
+}
+
+static Value offer_shm_receive(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[SOLE_OPERAND], KIND_TEXT, "shm_receive expects a name");
+    return nothing_value();
+}
+
+static Value offer_terminal_cols(Value *arguments, size_t argument_count) {
+    (void)arguments;
+    (void)argument_count;
+    return terminal_extent(TERMINAL_COLUMNS);
+}
+
+static Value offer_terminal_lines(Value *arguments, size_t argument_count) {
+    (void)arguments;
+    (void)argument_count;
+    return terminal_extent(TERMINAL_ROWS);
+}
+
+static Value offer_host_file_write_text(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[LEFT_OPERAND], KIND_TEXT, "host_file_write_text expects a path");
+    expect_kind(arguments[RIGHT_OPERAND], KIND_TEXT, "host_file_write_text expects text");
+    char *path = copy_bytes(arguments[LEFT_OPERAND].text, arguments[LEFT_OPERAND].text_length);
+    int descriptor = open(path, O_WRONLY | O_CREAT | O_TRUNC, TEXT_FILE_MODE);
+    free(path);
+    if (descriptor < SYSTEM_CALL_OK) return integer_value(-WORD_TRUE);
+    const char *bytes = arguments[RIGHT_OPERAND].text;
+    size_t length = arguments[RIGHT_OPERAND].text_length;
+    size_t written = EMPTY_COUNT;
+    while (written < length) {
+        ssize_t step = write(descriptor, bytes + written, length - written);
+        if (step < SYSTEM_CALL_OK) {
+            if (errno == EINTR) continue;
+            close(descriptor);
+            return integer_value(-WORD_TRUE);
+        }
+        written = checked_add(written, (size_t)step);
+    }
+    if (close(descriptor) != SYSTEM_CALL_OK) return integer_value(-WORD_TRUE);
+    return integer_value((long long)written);
+}
+
+static Value offer_read_file_slice(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[LEFT_OPERAND], KIND_TEXT, "read_file_slice expects a path");
+    expect_kind(arguments[RIGHT_OPERAND], KIND_INTEGER, "read_file_slice expects a start");
+    expect_kind(arguments[SLICE_END], KIND_INTEGER, "read_file_slice expects a length");
+    if (arguments[RIGHT_OPERAND].integer < WORD_FALSE || arguments[SLICE_END].integer < WORD_FALSE) return nothing_value();
+    if (arguments[SLICE_END].integer == WORD_FALSE) return text_value("", EMPTY_COUNT);
+    if ((unsigned long long)arguments[SLICE_END].integer > SIZE_MAX) fail("read_file_slice length exceeds addressable memory");
+    char *path = copy_bytes(arguments[LEFT_OPERAND].text, arguments[LEFT_OPERAND].text_length);
+    int descriptor = open(path, O_RDONLY);
+    free(path);
+    if (descriptor < SYSTEM_CALL_OK) return nothing_value();
+    size_t length = (size_t)arguments[SLICE_END].integer;
+    char *bytes = allocate_zeroed(checked_add(length, TEXT_TERMINATOR_SIZE), sizeof *bytes);
+    ssize_t filled = pread(descriptor, bytes, length, (off_t)arguments[RIGHT_OPERAND].integer);
+    close(descriptor);
+    if (filled <= SYSTEM_CALL_OK) {
+        free(bytes);
+        return nothing_value();
+    }
+    Value text = text_value(bytes, (size_t)filled);
+    free(bytes);
+    return text;
+}
+
+static Value offer_host_file_read_text(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[SOLE_OPERAND], KIND_TEXT, "host_file_read_text expects a path");
+    char *path = copy_bytes(arguments[SOLE_OPERAND].text, arguments[SOLE_OPERAND].text_length);
+    int descriptor = open(path, O_RDONLY);
+    free(path);
+    if (descriptor < SYSTEM_CALL_OK) return nothing_value();
+    struct stat info;
+    if (fstat(descriptor, &info) != SYSTEM_CALL_OK || info.st_size < SYSTEM_CALL_OK) {
+        close(descriptor);
+        return nothing_value();
+    }
+    size_t length = (size_t)info.st_size;
+    char *bytes = allocate_zeroed(checked_add(length, TEXT_TERMINATOR_SIZE), sizeof *bytes);
+    size_t filled = EMPTY_COUNT;
+    while (filled < length) {
+        ssize_t step = read(descriptor, bytes + filled, length - filled);
+        if (step < SYSTEM_CALL_OK) {
+            if (errno == EINTR) continue;
+            free(bytes);
+            close(descriptor);
+            return nothing_value();
+        }
+        if (step == SYSTEM_CALL_OK) break;
+        filled = checked_add(filled, (size_t)step);
+    }
+    close(descriptor);
+    Value text = text_value(bytes, filled);
+    free(bytes);
+    return text;
+}
+
+static Value offer_file_size(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[SOLE_OPERAND], KIND_TEXT, "file_size expects a path");
+    char *path = copy_bytes(arguments[SOLE_OPERAND].text, arguments[SOLE_OPERAND].text_length);
+    struct stat info;
+    int found = stat(path, &info);
+    free(path);
+    if (found != SYSTEM_CALL_OK) return integer_value(-WORD_TRUE);
+    return integer_value((long long)info.st_size);
+}
+
+static Value offer_host_pid(Value *arguments, size_t argument_count) {
+    (void)arguments;
+    (void)argument_count;
+    return integer_value((long long)getpid());
+}
+
+static Value offer_host_dir_mkdir(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[SOLE_OPERAND], KIND_TEXT, "host_dir_mkdir expects a path");
+    char *path = copy_bytes(arguments[SOLE_OPERAND].text, arguments[SOLE_OPERAND].text_length);
+    int made = mkdir(path, DIRECTORY_MODE);
+    if (made != 0 && errno == EEXIST) {
+        struct stat info;
+        if (stat(path, &info) == 0 && S_ISDIR(info.st_mode)) made = 0;
+    }
+    free(path);
+    return integer_value(made == 0 ? WORD_FALSE : -WORD_TRUE);
+}
+
+static Value offer_host_spawn_quiet(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[SOLE_OPERAND], KIND_LIST, "host_spawn_quiet expects a command list");
+    Value command = arguments[SOLE_OPERAND];
+    if (command.item_count == EMPTY_COUNT) fail("host_spawn_quiet expects a program");
+    char **argv = allocate_zeroed(checked_add(command.item_count, ONE_ELEMENT), sizeof *argv);
+    for (size_t index = FIRST_INDEX; index < command.item_count; index = checked_add(index, ONE_ELEMENT)) {
+        expect_kind(command.items[index], KIND_TEXT, "host_spawn_quiet expects text arguments");
+        argv[index] = command.items[index].text;
+    }
+    posix_spawn_file_actions_t actions;
+    if (posix_spawn_file_actions_init(&actions) != SYSTEM_CALL_OK) fail("host_spawn_quiet could not prepare output");
+    if (posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, NULL_DEVICE, O_WRONLY, NULL_DEVICE_MODE) != SYSTEM_CALL_OK
+        || posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, NULL_DEVICE, O_WRONLY, NULL_DEVICE_MODE) != SYSTEM_CALL_OK) {
+        posix_spawn_file_actions_destroy(&actions);
+        fail("host_spawn_quiet could not prepare output");
+    }
+    pid_t pid = 0;
+    int started = posix_spawnp(&pid, argv[FIRST_INDEX], &actions, NULL, argv, environ);
+    posix_spawn_file_actions_destroy(&actions);
+    free(argv);
+    if (started != SYSTEM_CALL_OK) fail("host_spawn_quiet could not start");
+    return integer_value((long long)pid);
+}
+
+static Value offer_print(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    print_value(arguments[SOLE_OPERAND]);
+    fputc(NEWLINE, stdout);
+    return arguments[SOLE_OPERAND];
 }
 
 static Value offer_str_eq(Value *arguments, size_t argument_count) {
@@ -848,6 +1692,12 @@ static Value offer_value_kind(Value *arguments, size_t argument_count) {
     (void)argument_count;
     const char *name = kind_name(arguments[SOLE_OPERAND].kind);
     return text_value(name, strlen(name));
+}
+
+static Value offer_nothing_value(Value *arguments, size_t argument_count) {
+    (void)arguments;
+    (void)argument_count;
+    return nothing_value();
 }
 
 static Value offer_nothing(Value *arguments, size_t argument_count) {
@@ -1168,6 +2018,7 @@ static void register_builtin_operations(void) {
     register_operation("str_concat", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_STR_CONCAT, offer_str_concat);
     register_operation("value_kind", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_VALUE_KIND, offer_value_kind);
     register_operation("nothing?", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_NOTHING, offer_nothing);
+    register_operation(NAME_NOTHING, ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_NOTHING, offer_nothing_value);
     register_operation("read_line", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_READ_LINE, offer_read_line);
     register_operation("file_mtime", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_FILE_MTIME, offer_file_mtime);
     register_operation("cell_path", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_CELL_PATH, offer_cell_path);
@@ -1179,6 +2030,64 @@ static void register_builtin_operations(void) {
     register_operation("bus_open", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_BUS_OPEN, offer_bus_open);
     register_operation("bus_close", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_BUS_CLOSE, offer_bus_close);
     register_operation("bus_read", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_BUS_READ, offer_bus_read);
+    register_operation("gt", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_GT, offer_gt);
+    register_operation("le", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_LE, offer_le);
+    register_operation("nth", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_NTH, offer_nth);
+    register_operation("slice", ARITY_NONE, VARIADIC, EVALUATE_ARGUMENTS, OP_SLICE, offer_slice);
+    register_operation("+", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PLUS, offer_plus);
+    register_operation("let", ARITY_TWO, FIXED_ARITY, LEAVE_ARGUMENTS, OP_LET, NULL);
+    register_operation("len", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PLUS, offer_len);
+    register_operation("empty", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PLUS, offer_empty);
+    register_operation("str", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PLUS, offer_str);
+    register_operation("print_str", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PLUS, offer_print_str);
+    register_operation("or", ARITY_NONE, VARIADIC, LEAVE_ARGUMENTS, OP_OR, NULL);
+    register_operation("lambda", ARITY_TWO, FIXED_ARITY, LEAVE_ARGUMENTS, OP_LAMBDA, NULL);
+    register_operation("not", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_NOT, offer_not);
+    register_operation("mul", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_MUL, offer_mul);
+    register_operation("div", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_DIV, offer_div);
+    register_operation("mod", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_MOD, offer_mod);
+    register_operation("head", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_HEAD, offer_head);
+    register_operation("tail", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_TAIL, offer_tail);
+    register_operation("cons", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_CONS, offer_cons);
+    register_operation("print", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_print);
+    register_operation("record_new", ARITY_NONE, VARIADIC, EVALUATE_ARGUMENTS, OP_PRINT, offer_record_new);
+    register_operation("record_has", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_record_has);
+    register_operation("record_get", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_record_get);
+    register_operation("record_set", ARITY_THREE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_record_set);
+    register_operation("byte_to_str", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_byte_to_str);
+    register_operation("str_len", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_str_len);
+    register_operation("str_byte_at", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_str_byte_at);
+    register_operation("value_str", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_value_str);
+    register_operation("range", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_range);
+    register_operation("host_sleep_ms", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_sleep_ms);
+    register_operation("host_monotonic_ms", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_monotonic_ms);
+    register_operation("now_unix_ms", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_now_unix_ms);
+    register_operation("host_getenv", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_getenv);
+    register_operation("host_alive", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_alive);
+    register_operation("host_kill", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_kill);
+    register_operation("host_wait", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_wait);
+    register_operation("host_dir_mkdir", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_dir_mkdir);
+    register_operation("host_pid", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_pid);
+    register_operation("host_file_write_text", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_file_write_text);
+    register_operation("file_size", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_file_size);
+    register_operation("host_file_read_text", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_file_read_text);
+    register_operation("read_file_slice", ARITY_THREE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_read_file_slice);
+    register_operation("terminal_cols", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_terminal_cols);
+    register_operation("shm_receive", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_shm_receive);
+    register_operation("add_u32", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_add_u32);
+    register_operation("band", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_band);
+    register_operation("shr_u32", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_shr_u32);
+    register_operation("shl_u32", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_shl_u32);
+    register_operation("rotr_u32", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_rotr_u32);
+    register_operation("bor", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_bor);
+    register_operation("bxor", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_bxor);
+    register_operation("bnot_u32", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_bnot_u32);
+    register_operation("terminal_lines", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_terminal_lines);
+    register_operation("host_spawn_quiet", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_spawn_quiet);
+    register_operation(COALESCE_WORD, ARITY_TWO, FIXED_ARITY, LEAVE_ARGUMENTS, OP_COALESCE, NULL);
+    register_operation(TRY_WORD, ARITY_TWO, FIXED_ARITY, LEAVE_ARGUMENTS, OP_TRY, NULL);
+    register_operation(FAIL_NAME, ARITY_NONE, FIXED_ARITY, LEAVE_ARGUMENTS, OP_FAIL, NULL);
+    register_operation("choice", ARITY_NONE, VARIADIC, LEAVE_ARGUMENTS, OP_CHOICE, NULL);
 }
 
 typedef struct {
@@ -1259,7 +2168,7 @@ static Frame *append_frame(void) {
     return &frames[frame_count - ONE_ELEMENT];
 }
 
-static Value lookup_value_binding(const char *bytes, size_t length) {
+static int find_value_binding(const char *bytes, size_t length, Value *out) {
     size_t base = FIRST_INDEX;
     for (size_t index = frame_count; index > FIRST_INDEX; ) {
         index -= ONE_ELEMENT;
@@ -1270,13 +2179,38 @@ static Value lookup_value_binding(const char *bytes, size_t length) {
     }
     for (size_t index = local_count; index > base; ) {
         index -= ONE_ELEMENT;
-        if (bytes_equal(locals[index].bytes, locals[index].length, bytes, length)) return locals[index].value;
+        if (bytes_equal(locals[index].bytes, locals[index].length, bytes, length)) {
+            *out = locals[index].value;
+            return 1;
+        }
     }
-    if (bytes_equal_cstr(bytes, length, NAME_TRUE)) return integer_value(WORD_TRUE);
-    if (bytes_equal_cstr(bytes, length, NAME_FALSE)) return integer_value(WORD_FALSE);
-    if (bytes_equal_cstr(bytes, length, NAME_NOTHING)) return nothing_value();
+    if (bytes_equal_cstr(bytes, length, NAME_TRUE)) {
+        *out = integer_value(WORD_TRUE);
+        return 1;
+    }
+    if (bytes_equal_cstr(bytes, length, NAME_FALSE)) {
+        *out = integer_value(WORD_FALSE);
+        return 1;
+    }
+    if (bytes_equal_cstr(bytes, length, NAME_NOTHING) || bytes_equal_cstr(bytes, length, FAIL_NAME) || bytes_equal_cstr(bytes, length, STOP_NAME)) {
+        *out = nothing_value();
+        return 1;
+    }
+    for (size_t index = global_count; index > FIRST_INDEX; ) {
+        index -= ONE_ELEMENT;
+        if (bytes_equal(globals[index].bytes, globals[index].length, bytes, length)) {
+            *out = globals[index].value;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static Value lookup_value_binding(const char *bytes, size_t length) {
+    Value found;
+    if (find_value_binding(bytes, length, &found)) return found;
     if (find_function_text(bytes, length) != NULL) fail("a function is offered by calling it");
-    fail("an unbound name was offered");
+    fail(message_with_name(UNBOUND_PREFIX, bytes, length));
     return nothing_value();
 }
 
@@ -1291,10 +2225,26 @@ static Value value_from_atom(Form *form) {
 
 static void offer_form(Form *form);
 
+static void begin_function_call(Form *form, Value callee) {
+    size_t argument_count = call_argument_count(form);
+    if (argument_count != callee.parameter_count) fail_at(form->offset, "a function received the wrong number of arguments");
+    Frame *frame = append_frame();
+    frame->kind = FRAME_EAGER;
+    frame->form = form;
+    frame->argument_count = argument_count;
+    frame->arguments = allocate_zeroed(argument_count, sizeof *frame->arguments);
+    frame->callee = callee;
+}
+
 static void begin_call(Form *form) {
     if (form->part_count == EMPTY_COUNT) fail_at(form->offset, "a call needs a head");
     Form *head = form->parts[CALL_HEAD];
-    if (head->kind != FORM_SYMBOL) fail_at(head->offset, "a call head must be a name");
+    if (head->kind != FORM_SYMBOL) {
+        Frame *frame = append_frame();
+        frame->kind = FRAME_APPLY;
+        frame->form = form;
+        return;
+    }
     if (form_is_symbol(head, NAME_DEFN)) {
         if (form->is_bound) {
             deliver(nothing_value());
@@ -1303,7 +2253,18 @@ static void begin_call(Form *form) {
         fail_at(form->offset, "a definition inside a function is not offered");
     }
     size_t argument_count = call_argument_count(form);
+    Value bound;
+    if (find_value_binding(head->text, head->text_length, &bound) && bound.kind == KIND_FUNCTION) {
+        begin_function_call(form, bound);
+        return;
+    }
     const Operation *operation = find_operation_text(head->text, head->text_length);
+    Binding *function = find_function_text(head->text, head->text_length);
+    if (operation != NULL && operation->evaluation == LEAVE_ARGUMENTS) function = NULL;
+    if (function != NULL) {
+        begin_function_call(form, function->value);
+        return;
+    }
     if (operation != NULL) {
         if (operation->arity_policy == FIXED_ARITY && argument_count != operation->arity) {
             fail_at(form->offset, "an operation received the wrong number of arguments");
@@ -1315,22 +2276,20 @@ static void begin_call(Form *form) {
         if (operation->id == OP_IF) frame->kind = FRAME_IF;
         else if (operation->id == OP_DO) frame->kind = FRAME_DO;
         else if (operation->id == OP_AND) frame->kind = FRAME_AND;
+        else if (operation->id == OP_LET) frame->kind = FRAME_LET;
+        else if (operation->id == OP_OR) frame->kind = FRAME_OR;
+        else if (operation->id == OP_LAMBDA) frame->kind = FRAME_LAMBDA;
+        else if (operation->id == OP_COALESCE) frame->kind = FRAME_COALESCE;
+        else if (operation->id == OP_TRY) frame->kind = FRAME_TRY;
+        else if (operation->id == OP_FAIL) frame->kind = FRAME_FAIL;
+        else if (operation->id == OP_CHOICE) frame->kind = FRAME_CHOICE;
         else {
             frame->kind = FRAME_EAGER;
             frame->arguments = allocate_zeroed(argument_count, sizeof *frame->arguments);
         }
         return;
     }
-    Binding *function = find_function_text(head->text, head->text_length);
-    if (function == NULL) fail_at(head->offset, "an unbound name was offered");
-    if (argument_count != function->value.parameter_count) fail_at(form->offset, "a function received the wrong number of arguments");
-    Frame *frame = append_frame();
-    frame->kind = FRAME_EAGER;
-    frame->form = form;
-    frame->argument_count = argument_count;
-    frame->arguments = allocate_zeroed(argument_count, sizeof *frame->arguments);
-    frame->callee = function->value;
-    return;
+    fail_at(head->offset, message_with_name(UNBOUND_PREFIX, head->text, head->text_length));
 }
 
 static void offer_form(Form *form) {
@@ -1457,6 +2416,206 @@ static void step_eager(size_t index) {
     offer_form(child);
 }
 
+static void bind_global(const char *bytes, size_t length, Value value) {
+    size_t needed = checked_add(global_count, ONE_ELEMENT);
+    globals = grow_list(globals, &global_capacity, sizeof *globals, needed);
+    globals[global_count].bytes = bytes;
+    globals[global_count].length = length;
+    globals[global_count].value = value;
+    global_count = needed;
+}
+
+static int inside_function(void) {
+    for (size_t index = frame_count; index > FIRST_INDEX; ) {
+        index -= ONE_ELEMENT;
+        if (frames[index].kind == FRAME_FUNCTION) return 1;
+    }
+    return 0;
+}
+
+static void step_or(size_t index) {
+    Frame frame = frames[index];
+    if (frame.has_incoming) {
+        int truth = integer_is_nonzero(frame.incoming);
+        frame.has_incoming = 0;
+        if (truth) {
+            frame_count -= ONE_ELEMENT;
+            deliver(integer_value(WORD_TRUE));
+            return;
+        }
+        frame.next_part = checked_add(frame.next_part, ONE_ELEMENT);
+        frames[index] = frame;
+        return;
+    }
+    if (frame.next_part >= call_argument_count(frame.form)) {
+        frame_count -= ONE_ELEMENT;
+        deliver(integer_value(WORD_FALSE));
+        return;
+    }
+    Form *child = call_argument(frame.form, frame.next_part);
+    frames[index] = frame;
+    offer_form(child);
+}
+
+static void step_lambda(size_t index) {
+    Frame frame = frames[index];
+    if (call_argument_count(frame.form) != ARITY_TWO) fail_at(frame.form->offset, "a lambda names parameters and a body");
+    Form *parameters = call_argument(frame.form, LEFT_OPERAND);
+    Form *body = call_argument(frame.form, RIGHT_OPERAND);
+    if (parameters->kind != FORM_GROUP) fail_at(parameters->offset, "a lambda parameter list must be a group");
+    Value function = nothing_value();
+    function.kind = KIND_FUNCTION;
+    function.body = body;
+    function.parameter_count = parameters->part_count;
+    function.parameters = allocate_zeroed(parameters->part_count, sizeof *function.parameters);
+    for (size_t parameter = FIRST_INDEX; parameter < parameters->part_count; parameter = checked_add(parameter, ONE_ELEMENT)) {
+        Form *name = parameters->parts[parameter];
+        if (name->kind != FORM_SYMBOL) fail_at(name->offset, "a lambda parameter must be a symbol");
+        function.parameters[parameter].bytes = name->text;
+        function.parameters[parameter].length = name->text_length;
+    }
+    frame_count -= ONE_ELEMENT;
+    deliver(function);
+}
+
+static void step_coalesce(size_t index) {
+    Frame frame = frames[index];
+    if (!frame.has_incoming) {
+        Form *child = frame.stage == IF_STAGE_TEST
+            ? call_argument(frame.form, LEFT_OPERAND)
+            : call_argument(frame.form, RIGHT_OPERAND);
+        frames[index] = frame;
+        offer_form(child);
+        return;
+    }
+    if (frame.stage == IF_STAGE_TEST && frame.incoming.kind == KIND_NOTHING) {
+        frame.has_incoming = 0;
+        frame.stage = IF_STAGE_BRANCH;
+        frames[index] = frame;
+        offer_form(call_argument(frame.form, RIGHT_OPERAND));
+        return;
+    }
+    Value value = frame.incoming;
+    frame_count -= ONE_ELEMENT;
+    deliver(value);
+}
+
+static void step_choice(size_t index) {
+    Frame frame = frames[index];
+    if (!frame.has_accumulator) {
+        frame.local_base = local_count;
+        frame.has_accumulator = 1;
+        frames[index] = frame;
+    }
+    if (frame.has_incoming) {
+        Value value = frame.incoming;
+        frame.has_incoming = 0;
+        if (value.kind != KIND_NOTHING) {
+            local_count = frame.local_base;
+            frame_count -= ONE_ELEMENT;
+            deliver(value);
+            return;
+        }
+        frame.stage = checked_add(frame.stage, ONE_ELEMENT);
+        frames[index] = frame;
+    }
+    if (frame.stage >= call_argument_count(frame.form)) {
+        local_count = frame.local_base;
+        frame_count -= ONE_ELEMENT;
+        deliver(nothing_value());
+        return;
+    }
+    Form *child = call_argument(frame.form, frame.stage);
+    frames[index] = frame;
+    offer_form(child);
+}
+
+static void step_try(size_t index) {
+    Frame frame = frames[index];
+    if (frame.stage == IF_STAGE_TEST) {
+        frame.local_base = local_count;
+        frame.stage = TRY_STAGE_BODY;
+        frames[index] = frame;
+        offer_form(call_argument(frame.form, LEFT_OPERAND));
+        return;
+    }
+    if (frame.has_incoming) {
+        Value value = frame.incoming;
+        local_count = frame.local_base;
+        frame_count -= ONE_ELEMENT;
+        deliver(value);
+        return;
+    }
+    if (frame.stage == TRY_STAGE_HANDLER) {
+        frames[index] = frame;
+        offer_form(call_argument(frame.form, RIGHT_OPERAND));
+        return;
+    }
+    fail("a try did not offer a result");
+}
+
+static void step_fail(size_t index) {
+    (void)index;
+    for (size_t cursor = frame_count; cursor > FIRST_INDEX; ) {
+        cursor -= ONE_ELEMENT;
+        if (frames[cursor].kind == FRAME_CHOICE) {
+            frames[cursor].has_incoming = 0;
+            frames[cursor].stage = checked_add(frames[cursor].stage, ONE_ELEMENT);
+            local_count = frames[cursor].local_base;
+            frame_count = checked_add(cursor, ONE_ELEMENT);
+            return;
+        }
+        if (frames[cursor].kind != FRAME_TRY || frames[cursor].stage == TRY_STAGE_HANDLER) continue;
+        frames[cursor].has_incoming = 0;
+        frames[cursor].stage = TRY_STAGE_HANDLER;
+        local_count = frames[cursor].local_base;
+        frame_count = checked_add(cursor, ONE_ELEMENT);
+        return;
+    }
+    fail("a failure was not caught");
+}
+
+static void step_apply(size_t index) {
+    Frame frame = frames[index];
+    if (frame.has_incoming) {
+        if (frame.stage == IF_STAGE_TEST) {
+            if (frame.incoming.kind != KIND_FUNCTION) fail_at(frame.form->parts[CALL_HEAD]->offset, "a call head is not a function");
+            size_t argument_count = call_argument_count(frame.form);
+            if (argument_count != frame.incoming.parameter_count) fail_at(frame.form->offset, "a function received the wrong number of arguments");
+            frame.callee = frame.incoming;
+            frame.argument_count = argument_count;
+            frame.arguments = allocate_zeroed(argument_count, sizeof *frame.arguments);
+        } else {
+            frame.arguments[frame.stage - ONE_ELEMENT] = frame.incoming;
+        }
+        frame.has_incoming = 0;
+        frame.stage = checked_add(frame.stage, ONE_ELEMENT);
+        frames[index] = frame;
+        if (frame.stage >= frame.form->part_count) run_function_body(index);
+        return;
+    }
+    Form *child = frame.form->parts[frame.stage];
+    frames[index] = frame;
+    offer_form(child);
+}
+
+static void step_let(size_t index) {
+    Frame frame = frames[index];
+    if (call_argument_count(frame.form) != ARITY_TWO) fail_at(frame.form->offset, "let expects a name and a value");
+    if (!frame.has_incoming) {
+        frames[index] = frame;
+        offer_form(call_argument(frame.form, RIGHT_OPERAND));
+        return;
+    }
+    Form *name = call_argument(frame.form, LEFT_OPERAND);
+    if (name->kind != FORM_SYMBOL) fail_at(name->offset, "a let name must be a symbol");
+    if (inside_function()) append_local(name->text, name->text_length, frame.incoming);
+    else bind_global(name->text, name->text_length, frame.incoming);
+    Value value = frame.incoming;
+    frame_count -= ONE_ELEMENT;
+    deliver(value);
+}
+
 static void step_function(size_t index) {
     Frame frame = frames[index];
     if (!frame.has_incoming) fail("a function body was not offered");
@@ -1477,8 +2636,16 @@ static void drive(Form *program) {
         else if (kind == FRAME_DO) step_series(index, 1);
         else if (kind == FRAME_AND) step_and(index);
         else if (kind == FRAME_IF) step_if(index);
+        else if (kind == FRAME_OR) step_or(index);
         else if (kind == FRAME_EAGER) step_eager(index);
         else if (kind == FRAME_FUNCTION) step_function(index);
+        else if (kind == FRAME_LET) step_let(index);
+        else if (kind == FRAME_LAMBDA) step_lambda(index);
+        else if (kind == FRAME_COALESCE) step_coalesce(index);
+        else if (kind == FRAME_TRY) step_try(index);
+        else if (kind == FRAME_CHOICE) step_choice(index);
+        else if (kind == FRAME_FAIL) step_fail(index);
+        else if (kind == FRAME_APPLY) step_apply(index);
         else fail("an evaluation frame has an unknown kind");
     }
     if (!result_ready) fail("the program produced no result");
@@ -1552,21 +2719,1155 @@ static void print_value(Value root) {
     }
 }
 
+typedef struct {
+    const char *bytes;
+    size_t length;
+    size_t offset;
+} SourceCursor;
+
+static char **loaded_units;
+static size_t loaded_count;
+static size_t loaded_capacity;
+
+static int file_is_source(const char *path) {
+    struct stat info;
+    if (stat(path, &info) != SYSTEM_CALL_OK) return 0;
+    return S_ISREG(info.st_mode);
+}
+
+static char *join_path(const char *left, const char *right) {
+    size_t left_length = strlen(left);
+    size_t right_length = strlen(right);
+    int need_slash = left_length != EMPTY_COUNT && left[left_length - ONE_ELEMENT] != PATH_SEPARATOR;
+    size_t slash = need_slash ? ONE_ELEMENT : EMPTY_COUNT;
+    if (left_length > SIZE_MAX - slash || left_length + slash > SIZE_MAX - right_length) fail("a path exceeds addressable memory");
+    size_t total = left_length + slash + right_length;
+    char *joined = malloc(checked_add(total, TEXT_TERMINATOR_SIZE));
+    if (joined == NULL) fail("out of memory");
+    if (left_length != EMPTY_COUNT) memcpy(joined, left, left_length);
+    if (need_slash) joined[left_length] = PATH_SEPARATOR;
+    if (right_length != EMPTY_COUNT) memcpy(joined + left_length + slash, right, right_length);
+    joined[total] = TEXT_TERMINATOR;
+    return joined;
+}
+
+static char *directory_of(const char *path) {
+    const char *slash = strrchr(path, PATH_SEPARATOR);
+    if (slash == NULL || slash == path) return copy_bytes("", EMPTY_COUNT);
+    return copy_bytes(path, (size_t)(slash - path));
+}
+
+static int is_path_char(unsigned char character) {
+    if (isalnum(character)) return 1;
+    return character == PATH_SEPARATOR || character == DECIMAL_POINT || character == '_' || character == SIGN_MINUS || character == SIGN_PLUS;
+}
+
+static int token_is_none(const char *bytes, size_t length) {
+    return bytes_equal_cstr(bytes, length, "NONE");
+}
+
+static int same_path(const char *left, const char *right) {
+    return strcmp(left, right) == STRING_COMPARE_EQUAL;
+}
+
+static char *resolve_unit(const char *from_file, const char *relative) {
+    if (file_is_source(relative)) return copy_bytes(relative, strlen(relative));
+    char *under_form = join_path(FORM_ROOT, relative);
+    if (file_is_source(under_form)) return under_form;
+    free(under_form);
+    char *directory = copy_bytes(from_file, strlen(from_file));
+    while (directory[FIRST_INDEX] != TEXT_TERMINATOR) {
+        char *parent = directory_of(directory);
+        free(directory);
+        if (parent[FIRST_INDEX] == TEXT_TERMINATOR || same_path(parent, from_file)) {
+            free(parent);
+            break;
+        }
+        char *beside = join_path(parent, relative);
+        if (file_is_source(beside)) {
+            free(parent);
+            return beside;
+        }
+        free(beside);
+        char *root = join_path(parent, FORM_ROOT);
+        char *nested = join_path(root, relative);
+        free(root);
+        if (file_is_source(nested)) {
+            free(parent);
+            return nested;
+        }
+        free(nested);
+        directory = parent;
+    }
+    fail(message_with_name("a source could not be opened: ", relative, strlen(relative)));
+    return NULL;
+}
+
+static int unit_is_loaded(const char *path) {
+    for (size_t index = FIRST_INDEX; index < loaded_count; index = checked_add(index, ONE_ELEMENT)) {
+        if (same_path(loaded_units[index], path)) return 1;
+    }
+    return 0;
+}
+
+static void remember_unit(char *path) {
+    size_t needed = checked_add(loaded_count, ONE_ELEMENT);
+    loaded_units = grow_list(loaded_units, &loaded_capacity, sizeof *loaded_units, needed);
+    loaded_units[loaded_count] = path;
+    loaded_count = needed;
+}
+
+static int contains_text(const char *bytes, size_t length, const char *needle) {
+    size_t needle_length = strlen(needle);
+    if (needle_length > length) return 0;
+    size_t last = length - needle_length;
+    for (size_t index = FIRST_INDEX; index <= last; index = checked_add(index, ONE_ELEMENT)) {
+        if (memcmp(bytes + index, needle, needle_length) == STRING_COMPARE_EQUAL) return 1;
+    }
+    return 0;
+}
+
+static SourceCursor capture_source(void) {
+    SourceCursor cursor;
+    cursor.bytes = source_bytes;
+    cursor.length = source_length;
+    cursor.offset = source_offset;
+    return cursor;
+}
+
+static void restore_source(SourceCursor cursor) {
+    source_bytes = cursor.bytes;
+    source_length = cursor.length;
+    source_offset = cursor.offset;
+}
+
+static int is_symbol_char(char character) {
+    unsigned char classified = (unsigned char)character;
+    if (isalnum(classified)) return 1;
+    return character == '_' || character == SIGN_MINUS || character == TERNARY_MARK || character == '!';
+}
+
+static int at_keyword(const char *word) {
+    size_t length = strlen(word);
+    if (source_offset > source_length || source_length - source_offset < length) return 0;
+    if (memcmp(source_bytes + source_offset, word, length) != STRING_COMPARE_EQUAL) return 0;
+    size_t next = source_offset + length;
+    if (next < source_length && is_symbol_char(source_bytes[next])) return 0;
+    return 1;
+}
+
+static int take_keyword(const char *word) {
+    skip_bml();
+    if (!at_keyword(word)) return 0;
+    source_offset = checked_add(source_offset, strlen(word));
+    return 1;
+}
+
+static void expect_character(char expected, const char *reason) {
+    skip_bml();
+    if (source_offset >= source_length || source_bytes[source_offset] != expected) fail_at(source_offset, reason);
+    source_offset = checked_add(source_offset, ONE_ELEMENT);
+}
+
+static Form *form_integer(long long integer, size_t offset) {
+    Form *form = new_form(FORM_INTEGER, offset);
+    form->integer = integer;
+    return form;
+}
+
+static Form *form_symbol(const char *spelling, size_t offset) {
+    Form *form = new_form(FORM_SYMBOL, offset);
+    form->text = copy_bytes(spelling, strlen(spelling));
+    form->text_length = strlen(spelling);
+    return form;
+}
+
+static Form *form_call(const char *name, Form **arguments, size_t argument_count, size_t offset) {
+    Form *call = new_form(FORM_GROUP, offset);
+    group_add(call, form_symbol(name, offset));
+    for (size_t index = FIRST_INDEX; index < argument_count; index = checked_add(index, ONE_ELEMENT)) {
+        group_add(call, arguments[index]);
+    }
+    return call;
+}
+
+static Form *pipe_call(Form *input, Form *stage) {
+    if (stage->kind == FORM_GROUP && stage->part_count != EMPTY_COUNT) {
+        group_add(stage, input);
+        return stage;
+    }
+    if (stage->kind == FORM_SYMBOL) {
+        Form *call = new_form(FORM_GROUP, stage->offset);
+        group_add(call, stage);
+        group_add(call, input);
+        return call;
+    }
+    fail_at(stage->offset, "a pipe stage must be a call");
+    return stage;
+}
+
+static Form *form_call_head(Form *head, Form **arguments, size_t argument_count) {
+    Form *call = new_form(FORM_GROUP, head->offset);
+    group_add(call, head);
+    for (size_t index = FIRST_INDEX; index < argument_count; index = checked_add(index, ONE_ELEMENT)) {
+        group_add(call, arguments[index]);
+    }
+    return call;
+}
+
+static void append_form(Form ***forms, size_t *count, size_t *capacity, Form *form) {
+    size_t needed = checked_add(*count, ONE_ELEMENT);
+    *forms = grow_list(*forms, capacity, sizeof **forms, needed);
+    (*forms)[*count] = form;
+    *count = needed;
+}
+
+static Form *parse_bml_expression(void);
+static void parse_bml_statements(Form ***forms, size_t *count, size_t *capacity);
+
+static Form *read_bml_symbol(void) {
+    skip_bml();
+    size_t start = source_offset;
+    if (start >= source_length || !is_symbol_char(source_bytes[start]) || is_digit_char(source_bytes[start])) {
+        fail_at(start, "a name was expected");
+    }
+    while (source_offset < source_length && is_symbol_char(source_bytes[source_offset])) {
+        source_offset = checked_add(source_offset, ONE_ELEMENT);
+    }
+    size_t length = source_offset - start;
+    Form *form = new_form(FORM_SYMBOL, start);
+    form->text = copy_bytes(source_bytes + start, length);
+    form->text_length = length;
+    return form;
+}
+
+static Form *read_bml_number(void) {
+    size_t start = source_offset;
+    while (source_offset < source_length && is_digit_char(source_bytes[source_offset])) {
+        source_offset = checked_add(source_offset, ONE_ELEMENT);
+    }
+    if (source_offset < source_length && source_bytes[source_offset] == DECIMAL_POINT) {
+        source_offset = checked_add(source_offset, ONE_ELEMENT);
+        while (source_offset < source_length && is_digit_char(source_bytes[source_offset])) {
+            source_offset = checked_add(source_offset, ONE_ELEMENT);
+        }
+    }
+    size_t length = source_offset - start;
+    char *text = copy_bytes(source_bytes + start, length);
+    Form *form = new_form(FORM_SYMBOL, start);
+    if (!token_is_number(text, length, form)) fail_at(start, "a number was not readable");
+    return form;
+}
+
+static const char *take_compare_operator(void) {
+    skip_bml();
+    if (source_offset >= source_length) return NULL;
+    char character = source_bytes[source_offset];
+    char following = TEXT_TERMINATOR;
+    size_t next = checked_add(source_offset, ONE_ELEMENT);
+    if (next < source_length) following = source_bytes[next];
+    if (character == NAME_MARK && following == NAME_MARK) {
+        source_offset = checked_add(next, ONE_ELEMENT);
+        return "eq";
+    }
+    if (character == '>' && following == NAME_MARK) {
+        source_offset = checked_add(next, ONE_ELEMENT);
+        return "ge";
+    }
+    if (character == '<' && following == NAME_MARK) {
+        source_offset = checked_add(next, ONE_ELEMENT);
+        return "le";
+    }
+    if (character == '>') {
+        source_offset = next;
+        return "gt";
+    }
+    if (character == '<') {
+        source_offset = next;
+        return "lt";
+    }
+    return NULL;
+}
+
+static const char *take_sum_operator(void) {
+    skip_bml();
+    if (source_offset >= source_length) return NULL;
+    char character = source_bytes[source_offset];
+    if (character == SIGN_PLUS) {
+        size_t next = checked_add(source_offset, ONE_ELEMENT);
+        if (next < source_length && source_bytes[next] == SIGN_PLUS) {
+            source_offset = checked_add(next, ONE_ELEMENT);
+            return "str_concat";
+        }
+        source_offset = next;
+        return "+";
+    }
+    if (character == SIGN_MINUS) {
+        source_offset = checked_add(source_offset, ONE_ELEMENT);
+        return "sub";
+    }
+    return NULL;
+}
+
+static Form *parse_bml_list(void) {
+    size_t opening = source_offset;
+    expect_character(INDEX_OPEN, "a list was not opened");
+    Form **items = NULL;
+    size_t item_count = EMPTY_COUNT;
+    size_t item_capacity = EMPTY_COUNT;
+    skip_bml();
+    if (source_offset < source_length && source_bytes[source_offset] == INDEX_CLOSE) {
+        source_offset = checked_add(source_offset, ONE_ELEMENT);
+        return form_call("list", NULL, EMPTY_COUNT, opening);
+    }
+    while (1) {
+        append_form(&items, &item_count, &item_capacity, parse_bml_expression());
+        skip_bml();
+        if (source_offset < source_length && source_bytes[source_offset] == INDEX_CLOSE) {
+            source_offset = checked_add(source_offset, ONE_ELEMENT);
+            break;
+        }
+        expect_character(ARGUMENT_SEPARATOR, "a list value was not separated");
+    }
+    return form_call("list", items, item_count, opening);
+}
+
+static Form *parse_bml_arguments(void) {
+    expect_character(CALL_OPEN, "a call was not opened");
+    Form *group = new_form(FORM_GROUP, source_offset);
+    skip_bml();
+    if (source_offset < source_length && source_bytes[source_offset] == CALL_CLOSE) {
+        source_offset = checked_add(source_offset, ONE_ELEMENT);
+        return group;
+    }
+    while (1) {
+        group_add(group, parse_bml_expression());
+        skip_bml();
+        if (source_offset < source_length && source_bytes[source_offset] == CALL_CLOSE) {
+            source_offset = checked_add(source_offset, ONE_ELEMENT);
+            break;
+        }
+        expect_character(ARGUMENT_SEPARATOR, "a call argument was not separated");
+    }
+    return group;
+}
+
+static Form *parse_bml_postfix(void);
+static void skip_type_arguments(void);
+static int take_arrow(void);
+
+static Form *parse_parenthesized_lambda(void) {
+    size_t saved = source_offset;
+    if (source_offset >= source_length || source_bytes[source_offset] != CALL_OPEN) return NULL;
+    source_offset = checked_add(source_offset, ONE_ELEMENT);
+    Form *parameters = new_form(FORM_GROUP, saved);
+    skip_bml();
+    if (source_offset < source_length && source_bytes[source_offset] == CALL_CLOSE) {
+        source_offset = checked_add(source_offset, ONE_ELEMENT);
+        if (!take_arrow()) {
+            source_offset = saved;
+            return NULL;
+        }
+        return parameters;
+    }
+    while (1) {
+        skip_bml();
+        if (source_offset >= source_length || !is_symbol_char(source_bytes[source_offset]) || is_digit_char(source_bytes[source_offset])) {
+            source_offset = saved;
+            return NULL;
+        }
+        group_add(parameters, read_bml_symbol());
+        skip_bml();
+        if (source_offset < source_length && source_bytes[source_offset] == PAIR_MARK) {
+            source_offset = checked_add(source_offset, ONE_ELEMENT);
+            skip_bml();
+            if (source_offset >= source_length || !is_symbol_char(source_bytes[source_offset]) || is_digit_char(source_bytes[source_offset])) {
+                source_offset = saved;
+                return NULL;
+            }
+            read_bml_symbol();
+            skip_type_arguments();
+            skip_bml();
+        }
+        if (source_offset < source_length && source_bytes[source_offset] == CALL_CLOSE) {
+            source_offset = checked_add(source_offset, ONE_ELEMENT);
+            if (!take_arrow()) {
+                source_offset = saved;
+                return NULL;
+            }
+            return parameters;
+        }
+        if (source_offset >= source_length || source_bytes[source_offset] != ARGUMENT_SEPARATOR) {
+            source_offset = saved;
+            return NULL;
+        }
+        source_offset = checked_add(source_offset, ONE_ELEMENT);
+    }
+}
+
+static Form *parse_bml_primary(void) {
+    skip_bml();
+    if (source_offset >= source_length) fail_at(source_offset, "an expression ended early");
+    char character = source_bytes[source_offset];
+    if (character == TEXT_DELIMITER) return parse_text();
+    if (is_digit_char(character)) return read_bml_number();
+    if (character == NEGATION_MARK) {
+        size_t next = checked_add(source_offset, ONE_ELEMENT);
+        if (next >= source_length || source_bytes[next] != NAME_MARK) {
+            size_t mark = source_offset;
+            source_offset = next;
+            Form *inner = parse_bml_postfix();
+            Form *arguments[] = {inner};
+            return form_call("not", arguments, ARITY_ONE, mark);
+        }
+    }
+    if (character == SIGN_MINUS) {
+        size_t mark = source_offset;
+        source_offset = checked_add(source_offset, ONE_ELEMENT);
+        skip_bml();
+        if (source_offset < source_length && (is_digit_char(source_bytes[source_offset]) || source_bytes[source_offset] == DECIMAL_POINT)) {
+            Form *number = read_bml_number();
+            if (number->kind == FORM_INTEGER) number->integer = checked_integer_sub(WORD_FALSE, number->integer);
+            else {
+                number->real = -number->real;
+                if (!isfinite(number->real)) fail_at(mark, "a real is outside the native range");
+            }
+            return number;
+        }
+        Form *inner = parse_bml_postfix();
+        Form *arguments[] = {form_integer(WORD_FALSE, mark), inner};
+        return form_call("sub", arguments, ARITY_TWO, mark);
+    }
+    if (character == INDEX_OPEN) return parse_bml_list();
+    if (character == SECTION_OPEN) {
+        size_t mark = source_offset;
+        source_offset = checked_add(source_offset, ONE_ELEMENT);
+        Form **statements = NULL;
+        size_t statement_count = EMPTY_COUNT;
+        size_t statement_capacity = EMPTY_COUNT;
+        parse_bml_statements(&statements, &statement_count, &statement_capacity);
+        return form_call("do", statements, statement_count, mark);
+    }
+    if (character == CALL_OPEN) {
+        Form *lambda_parameters = parse_parenthesized_lambda();
+        if (lambda_parameters != NULL) {
+            Form *body = parse_bml_expression();
+            Form *lambda_arguments[] = {lambda_parameters, body};
+            return form_call("lambda", lambda_arguments, ARITY_TWO, lambda_parameters->offset);
+        }
+        size_t saved = source_offset;
+        source_offset = checked_add(source_offset, ONE_ELEMENT);
+        skip_bml();
+        if (source_offset < source_length && is_symbol_char(source_bytes[source_offset]) && !is_digit_char(source_bytes[source_offset])) {
+            size_t name_at = source_offset;
+            while (source_offset < source_length && is_symbol_char(source_bytes[source_offset])) {
+                source_offset = checked_add(source_offset, ONE_ELEMENT);
+            }
+            size_t name_length = source_offset - name_at;
+            skip_bml();
+            if (source_offset < source_length && source_bytes[source_offset] == CALL_CLOSE && isupper((unsigned char)source_bytes[name_at])) {
+                source_offset = checked_add(source_offset, ONE_ELEMENT);
+                return parse_bml_postfix();
+            }
+            (void)name_length;
+        }
+        source_offset = saved;
+        expect_character(CALL_OPEN, "a group was not opened");
+        Form *inner = parse_bml_expression();
+        expect_character(CALL_CLOSE, "a group was not closed");
+        return inner;
+    }
+    if (is_symbol_char(character) && !is_digit_char(character)) return read_bml_symbol();
+    fail_at(source_offset, "an expression was not recognized");
+    return NULL;
+}
+
+static Form *parse_bml_postfix(void) {
+    Form *expression = parse_bml_primary();
+    while (1) {
+        skip_bml();
+        if (source_offset >= source_length) break;
+        char character = source_bytes[source_offset];
+        if (character == CALL_OPEN) {
+            Form *arguments = parse_bml_arguments();
+            expression = form_call_head(expression, arguments->parts, arguments->part_count);
+            continue;
+        }
+        if (character == DECIMAL_POINT) {
+            size_t range_next = checked_add(source_offset, ONE_ELEMENT);
+            if (range_next < source_length && source_bytes[range_next] == DECIMAL_POINT) break;
+            source_offset = checked_add(source_offset, ONE_ELEMENT);
+            Form *method = read_bml_symbol();
+            Form **arguments = NULL;
+            size_t argument_count = EMPTY_COUNT;
+            size_t argument_capacity = EMPTY_COUNT;
+            append_form(&arguments, &argument_count, &argument_capacity, expression);
+            skip_bml();
+            if (source_offset < source_length && source_bytes[source_offset] == CALL_OPEN) {
+                Form *rest = parse_bml_arguments();
+                for (size_t index = FIRST_INDEX; index < rest->part_count; index = checked_add(index, ONE_ELEMENT)) {
+                    append_form(&arguments, &argument_count, &argument_capacity, rest->parts[index]);
+                }
+            }
+            expression = form_call_head(method, arguments, argument_count);
+            continue;
+        }
+        if (character != INDEX_OPEN) break;
+        size_t opening = source_offset;
+        source_offset = checked_add(source_offset, ONE_ELEMENT);
+        Form *start = parse_bml_expression();
+        skip_bml();
+        if (source_offset < source_length && source_bytes[source_offset] == PAIR_MARK) {
+            source_offset = checked_add(source_offset, ONE_ELEMENT);
+            skip_bml();
+            if (source_offset < source_length && source_bytes[source_offset] == INDEX_CLOSE) {
+                source_offset = checked_add(source_offset, ONE_ELEMENT);
+                Form *arguments[] = {expression, start};
+                expression = form_call("slice", arguments, ARITY_TWO, opening);
+                continue;
+            }
+            Form *end = parse_bml_expression();
+            expect_character(INDEX_CLOSE, "an index was not closed");
+            Form *arguments[] = {expression, start, end};
+            expression = form_call("slice", arguments, ARITY_THREE, opening);
+            continue;
+        }
+        expect_character(INDEX_CLOSE, "an index was not closed");
+        Form *arguments[] = {expression, start};
+        expression = form_call("nth", arguments, ARITY_TWO, opening);
+    }
+    return expression;
+}
+
+static Form *parse_bml_product(void) {
+    Form *expression = parse_bml_postfix();
+    while (1) {
+        skip_bml();
+        if (source_offset >= source_length) break;
+        char character = source_bytes[source_offset];
+        const char *operation = NULL;
+        if (character == PRODUCT_MARK) operation = "mul";
+        else if (character == REMAINDER_MARK) operation = "mod";
+        else if (character == LINE_COMMENT_MARK) {
+            size_t next = checked_add(source_offset, ONE_ELEMENT);
+            if (next < source_length && source_bytes[next] == LINE_COMMENT_MARK) break;
+            operation = "div";
+        }
+        if (operation == NULL) break;
+        source_offset = checked_add(source_offset, ONE_ELEMENT);
+        Form *right = parse_bml_postfix();
+        Form *arguments[] = {expression, right};
+        expression = form_call(operation, arguments, ARITY_TWO, expression->offset);
+    }
+    return expression;
+}
+
+static Form *parse_bml_sum(void) {
+    Form *expression = parse_bml_product();
+    while (1) {
+        size_t saved = source_offset;
+        const char *operation = take_sum_operator();
+        if (operation == NULL) {
+            source_offset = saved;
+            break;
+        }
+        Form *right = parse_bml_product();
+        Form *arguments[] = {expression, right};
+        expression = form_call(operation, arguments, ARITY_TWO, expression->offset);
+    }
+    return expression;
+}
+
+static Form *parse_bml_range(void) {
+    Form *expression = parse_bml_sum();
+    while (1) {
+        skip_bml();
+        size_t next = checked_add(source_offset, ONE_ELEMENT);
+        if (source_offset >= source_length || next >= source_length || source_bytes[source_offset] != DECIMAL_POINT || source_bytes[next] != DECIMAL_POINT) break;
+        source_offset = checked_add(next, ONE_ELEMENT);
+        Form *end = parse_bml_sum();
+        Form *arguments[] = {expression, end};
+        expression = form_call("range", arguments, ARITY_TWO, expression->offset);
+    }
+    return expression;
+}
+
+static int at_not_equal(void) {
+    skip_bml();
+    size_t next = checked_add(source_offset, ONE_ELEMENT);
+    if (source_offset >= source_length || next >= source_length) return 0;
+    return source_bytes[source_offset] == NEGATION_MARK && source_bytes[next] == NAME_MARK;
+}
+
+static Form *parse_bml_comparison(void) {
+    Form *expression = parse_bml_range();
+    while (1) {
+        if (at_not_equal()) {
+            source_offset = checked_add(checked_add(source_offset, ONE_ELEMENT), ONE_ELEMENT);
+            Form *right = parse_bml_range();
+            Form *equal_arguments[] = {expression, right};
+            Form *equal = form_call("eq", equal_arguments, ARITY_TWO, expression->offset);
+            Form *negation[] = {equal};
+            expression = form_call("not", negation, ARITY_ONE, expression->offset);
+            continue;
+        }
+        size_t saved = source_offset;
+        const char *operation = take_compare_operator();
+        if (operation == NULL) {
+            source_offset = saved;
+            break;
+        }
+        Form *right = parse_bml_range();
+        Form *arguments[] = {expression, right};
+        expression = form_call(operation, arguments, ARITY_TWO, expression->offset);
+    }
+    return expression;
+}
+
+static Form *parse_bml_conjunction(void) {
+    Form *expression = parse_bml_comparison();
+    while (1) {
+        skip_bml();
+        size_t next = checked_add(source_offset, ONE_ELEMENT);
+        if (source_offset >= source_length || next >= source_length || source_bytes[source_offset] != '&' || source_bytes[next] != '&') break;
+        source_offset = checked_add(next, ONE_ELEMENT);
+        Form *right = parse_bml_comparison();
+        Form *arguments[] = {expression, right};
+        expression = form_call("and", arguments, ARITY_TWO, expression->offset);
+    }
+    return expression;
+}
+
+static Form *parse_bml_disjunction(void) {
+    Form *expression = parse_bml_conjunction();
+    while (1) {
+        skip_bml();
+        size_t next = checked_add(source_offset, ONE_ELEMENT);
+        if (source_offset >= source_length || next >= source_length || source_bytes[source_offset] != DISJUNCTION_MARK || source_bytes[next] != DISJUNCTION_MARK) break;
+        source_offset = checked_add(next, ONE_ELEMENT);
+        Form *right = parse_bml_conjunction();
+        Form *arguments[] = {expression, right};
+        expression = form_call("or", arguments, ARITY_TWO, expression->offset);
+    }
+    return expression;
+}
+
+static int take_arrow(void) {
+    skip_bml();
+    size_t next = checked_add(source_offset, ONE_ELEMENT);
+    if (source_offset >= source_length || next >= source_length) return 0;
+    if (source_bytes[source_offset] != NAME_MARK || source_bytes[next] != ARROW_MARK) return 0;
+    source_offset = checked_add(next, ONE_ELEMENT);
+    return 1;
+}
+
+static Form *match_subject_name(size_t offset) {
+    char spelling[48];
+    if (snprintf(spelling, sizeof spelling, "match-at-%zu", offset) < SYSTEM_CALL_OK) fail("a match name could not be formed");
+    return form_symbol(spelling, offset);
+}
+
+static int form_is_wildcard(Form *form) {
+    return form->kind == FORM_SYMBOL && bytes_equal_cstr(form->text, form->text_length, "_");
+}
+
+static Form *parse_bml_match(size_t opening) {
+    Form *subject = parse_bml_expression();
+    expect_character(SECTION_OPEN, "a match is missing its arms");
+    Form *name = match_subject_name(opening);
+    Form *chain = form_symbol(NAME_NOTHING, opening);
+    Form **arms = NULL;
+    size_t arm_count = EMPTY_COUNT;
+    size_t arm_capacity = EMPTY_COUNT;
+    while (1) {
+        skip_bml();
+        if (source_offset < source_length && source_bytes[source_offset] == SECTION_CLOSE) {
+            source_offset = checked_add(source_offset, ONE_ELEMENT);
+            break;
+        }
+        Form *patterns = new_form(FORM_GROUP, source_offset);
+        while (1) {
+            skip_bml();
+            if (source_offset < source_length && source_bytes[source_offset] == TEXT_DELIMITER) group_add(patterns, parse_text());
+            else if (source_offset < source_length && is_digit_char(source_bytes[source_offset])) group_add(patterns, read_bml_number());
+            else group_add(patterns, read_bml_symbol());
+            skip_bml();
+            if (source_offset < source_length && source_bytes[source_offset] == '|') {
+                source_offset = checked_add(source_offset, ONE_ELEMENT);
+                continue;
+            }
+            break;
+        }
+        skip_bml();
+        size_t arrow = checked_add(source_offset, ONE_ELEMENT);
+        if (source_offset >= source_length || arrow >= source_length || source_bytes[source_offset] != NAME_MARK || source_bytes[arrow] != '>') {
+            fail_at(source_offset, "a match arm is missing its result");
+        }
+        source_offset = checked_add(arrow, ONE_ELEMENT);
+        Form *result = parse_bml_expression();
+        append_form(&arms, &arm_count, &arm_capacity, patterns);
+        append_form(&arms, &arm_count, &arm_capacity, result);
+        skip_bml();
+        if (source_offset < source_length && source_bytes[source_offset] == ARGUMENT_SEPARATOR) {
+            source_offset = checked_add(source_offset, ONE_ELEMENT);
+        }
+    }
+    for (size_t index = arm_count; index > FIRST_INDEX; ) {
+        index -= ARITY_TWO;
+        Form *patterns = arms[index];
+        Form *result = arms[checked_add(index, ONE_ELEMENT)];
+        int open = 0;
+        for (size_t pattern = FIRST_INDEX; pattern < patterns->part_count; pattern = checked_add(pattern, ONE_ELEMENT)) {
+            if (form_is_wildcard(patterns->parts[pattern])) open = 1;
+        }
+        Form *test = form_symbol(NAME_TRUE, opening);
+        if (!open) {
+            test = form_symbol(NAME_FALSE, opening);
+            for (size_t pattern = patterns->part_count; pattern > FIRST_INDEX; ) {
+                pattern -= ONE_ELEMENT;
+                Form *eq_arguments[] = {name, patterns->parts[pattern]};
+                Form *eq = form_call("eq", eq_arguments, ARITY_TWO, opening);
+                Form *if_arguments[] = {eq, form_symbol(NAME_TRUE, opening), test};
+                test = form_call("if", if_arguments, ARITY_THREE, opening);
+            }
+        }
+        Form *if_arguments[] = {test, result, chain};
+        chain = form_call("if", if_arguments, ARITY_THREE, opening);
+    }
+    Form *binding_arguments[] = {name, subject};
+    Form *binding = form_call("let", binding_arguments, ARITY_TWO, opening);
+    Form *sequence[] = {binding, chain};
+    return form_call("do", sequence, ARITY_TWO, opening);
+}
+
+static Form *parse_bml_conditional(size_t opening) {
+    Form *test = parse_bml_expression();
+    if (!take_keyword("then")) fail_at(source_offset, "an if is missing then");
+    Form *consequent = parse_bml_expression();
+    if (!take_keyword("else")) fail_at(source_offset, "an if is missing else");
+    Form *alternative = parse_bml_expression();
+    Form *arguments[] = {test, consequent, alternative};
+    return form_call("if", arguments, ARITY_THREE, opening);
+}
+
+static Form *parse_bml_expression(void) {
+    skip_bml();
+    size_t opening = source_offset;
+    if (take_keyword("if")) return parse_bml_conditional(opening);
+    if (take_keyword("match")) return parse_bml_match(opening);
+    if (take_keyword("choice")) {
+        expect_character(SECTION_OPEN, "a choice was not opened");
+        Form **options = NULL;
+        size_t option_count = EMPTY_COUNT;
+        size_t option_capacity = EMPTY_COUNT;
+        parse_bml_statements(&options, &option_count, &option_capacity);
+        return form_call("choice", options, option_count, opening);
+    }
+    if (take_keyword(TRY_WORD)) {
+        Form *body = parse_bml_expression();
+        if (!take_keyword("catch")) fail_at(source_offset, "a try is missing catch");
+        Form *handler = parse_bml_expression();
+        Form *try_arguments[] = {body, handler};
+        return form_call(TRY_WORD, try_arguments, ARITY_TWO, opening);
+    }
+    Form *condition = parse_bml_disjunction();
+    while (1) {
+        skip_bml();
+        size_t pipe_next = checked_add(source_offset, ONE_ELEMENT);
+        if (source_offset >= source_length || pipe_next >= source_length || source_bytes[source_offset] != DISJUNCTION_MARK || source_bytes[pipe_next] != ARROW_MARK) break;
+        source_offset = checked_add(pipe_next, ONE_ELEMENT);
+        condition = pipe_call(condition, parse_bml_postfix());
+    }
+    if (take_arrow()) {
+        if (condition->kind != FORM_SYMBOL) fail_at(condition->offset, "a lambda names one parameter");
+        Form *parameters = new_form(FORM_GROUP, condition->offset);
+        group_add(parameters, condition);
+        Form *body = parse_bml_expression();
+        Form *arguments[] = {parameters, body};
+        return form_call("lambda", arguments, ARITY_TWO, opening);
+    }
+    skip_bml();
+    size_t coalesce_next = checked_add(source_offset, ONE_ELEMENT);
+    if (source_offset < source_length && coalesce_next < source_length
+        && source_bytes[source_offset] == TERNARY_MARK && source_bytes[coalesce_next] == TERNARY_MARK) {
+        source_offset = checked_add(coalesce_next, ONE_ELEMENT);
+        Form *alternative = parse_bml_expression();
+        Form *coalesce_arguments[] = {condition, alternative};
+        return form_call(COALESCE_WORD, coalesce_arguments, ARITY_TWO, opening);
+    }
+    if (source_offset >= source_length || source_bytes[source_offset] != TERNARY_MARK) return condition;
+    source_offset = checked_add(source_offset, ONE_ELEMENT);
+    Form *consequent = parse_bml_expression();
+    expect_character(PAIR_MARK, "a conditional is missing its other branch");
+    Form *alternative = parse_bml_expression();
+    Form *arguments[] = {condition, consequent, alternative};
+    return form_call("if", arguments, ARITY_THREE, condition->offset);
+}
+
+static void parse_bml_statements(Form ***forms, size_t *count, size_t *capacity);
+
+static Form *definition_form(Form *name, Form *parameters, Form *body) {
+    Form *definition = new_form(FORM_GROUP, name->offset);
+    group_add(definition, form_symbol(NAME_DEFN, name->offset));
+    group_add(definition, name);
+    group_add(definition, parameters);
+    group_add(definition, body);
+    return definition;
+}
+
+static void skip_type_arguments(void) {
+    skip_bml();
+    if (source_offset >= source_length || source_bytes[source_offset] != '<') return;
+    size_t depth = ONE_ELEMENT;
+    source_offset = checked_add(source_offset, ONE_ELEMENT);
+    while (depth != EMPTY_COUNT) {
+        if (source_offset >= source_length) fail_at(source_offset, "a type argument was not closed");
+        char character = source_bytes[source_offset];
+        source_offset = checked_add(source_offset, ONE_ELEMENT);
+        if (character == '<') depth = checked_add(depth, ONE_ELEMENT);
+        if (character == '>') depth -= ONE_ELEMENT;
+    }
+}
+
+static void skip_member(void) {
+    size_t depth = EMPTY_COUNT;
+    while (source_offset < source_length) {
+        skip_bml();
+        if (source_offset >= source_length) fail_at(source_offset, "a member was not finished");
+        char character = source_bytes[source_offset];
+        if (character == TEXT_DELIMITER) {
+            parse_text();
+            continue;
+        }
+        source_offset = checked_add(source_offset, ONE_ELEMENT);
+        if (character == CALL_OPEN || character == SECTION_OPEN || character == INDEX_OPEN) depth = checked_add(depth, ONE_ELEMENT);
+        if (character == CALL_CLOSE || character == SECTION_CLOSE || character == INDEX_CLOSE) {
+            if (depth != EMPTY_COUNT) depth -= ONE_ELEMENT;
+        }
+        if (character == STATEMENT_END && depth == EMPTY_COUNT) return;
+    }
+    fail_at(source_offset, "a member was not finished");
+}
+
+static Form *parse_bml_parameters(void) {
+    size_t opening = source_offset;
+    expect_character(CALL_OPEN, "a parameter list was not opened");
+    Form *group = new_form(FORM_GROUP, opening);
+    skip_bml();
+    if (source_offset < source_length && source_bytes[source_offset] == CALL_CLOSE) {
+        source_offset = checked_add(source_offset, ONE_ELEMENT);
+        return group;
+    }
+    while (1) {
+        group_add(group, read_bml_symbol());
+        skip_bml();
+        if (source_offset < source_length && source_bytes[source_offset] == PAIR_MARK) {
+            source_offset = checked_add(source_offset, ONE_ELEMENT);
+            skip_bml();
+            read_bml_symbol();
+            skip_type_arguments();
+            skip_bml();
+        }
+        if (source_offset < source_length && source_bytes[source_offset] == CALL_CLOSE) {
+            source_offset = checked_add(source_offset, ONE_ELEMENT);
+            break;
+        }
+        expect_character(ARGUMENT_SEPARATOR, "a parameter was not separated");
+    }
+    return group;
+}
+
+static Form *parse_bml_definition(void) {
+    Form *name = read_bml_symbol();
+    Form *parameters = parse_bml_parameters();
+    skip_bml();
+    Form *body;
+    if (source_offset < source_length && source_bytes[source_offset] == SECTION_OPEN) {
+        source_offset = checked_add(source_offset, ONE_ELEMENT);
+        Form **statements = NULL;
+        size_t statement_count = EMPTY_COUNT;
+        size_t statement_capacity = EMPTY_COUNT;
+        parse_bml_statements(&statements, &statement_count, &statement_capacity);
+        body = form_call("do", statements, statement_count, name->offset);
+    } else {
+        expect_character(NAME_MARK, "a definition is missing its body");
+        body = parse_bml_expression();
+        expect_character(STATEMENT_END, "a definition was not finished");
+    }
+    return definition_form(name, parameters, body);
+}
+
+static Form *parse_pattern_binding(size_t opening) {
+    Form *pattern = parse_bml_list();
+    expect_character(NAME_MARK, "a binding is missing its value");
+    Form *value = parse_bml_expression();
+    expect_character(STATEMENT_END, "a binding was not finished");
+    Form *holder = match_subject_name(opening);
+    Form **statements = NULL;
+    size_t statement_count = EMPTY_COUNT;
+    size_t statement_capacity = EMPTY_COUNT;
+    Form *holder_arguments[] = {holder, value};
+    append_form(&statements, &statement_count, &statement_capacity, form_call("let", holder_arguments, ARITY_TWO, opening));
+    for (size_t index = CALL_ARGUMENTS; index < pattern->part_count; index = checked_add(index, ONE_ELEMENT)) {
+        Form *name = pattern->parts[index];
+        if (name->kind != FORM_SYMBOL) fail_at(name->offset, "a pattern name must be a symbol");
+        Form *nth_arguments[] = {holder, form_integer((long long)(index - CALL_ARGUMENTS), name->offset)};
+        Form *read_arguments[] = {name, form_call("nth", nth_arguments, ARITY_TWO, name->offset)};
+        append_form(&statements, &statement_count, &statement_capacity, form_call("let", read_arguments, ARITY_TWO, name->offset));
+    }
+    return form_call("do", statements, statement_count, opening);
+}
+
+static Form *parse_bml_binding(void) {
+    skip_bml();
+    if (source_offset < source_length && source_bytes[source_offset] == INDEX_OPEN) return parse_pattern_binding(source_offset);
+    Form *name = read_bml_symbol();
+    expect_character(NAME_MARK, "a binding is missing its value");
+    Form *value = parse_bml_expression();
+    expect_character(STATEMENT_END, "a binding was not finished");
+    Form *arguments[] = {name, value};
+    return form_call("let", arguments, ARITY_TWO, name->offset);
+}
+
+static void parse_bml_statements(Form ***forms, size_t *count, size_t *capacity) {
+    while (1) {
+        skip_bml();
+        if (source_offset >= source_length) fail_at(source_offset, "a section was not closed");
+        if (source_bytes[source_offset] == SECTION_CLOSE) {
+            source_offset = checked_add(source_offset, ONE_ELEMENT);
+            return;
+        }
+        if (take_keyword("defer")) {
+            Form *deferred = parse_bml_expression();
+            expect_character(STATEMENT_END, "a defer was not finished");
+            Form **rest = NULL;
+            size_t rest_count = EMPTY_COUNT;
+            size_t rest_capacity = EMPTY_COUNT;
+            parse_bml_statements(&rest, &rest_count, &rest_capacity);
+            Form *body = form_call("do", rest, rest_count, deferred->offset);
+            Form *propagate = form_call(FAIL_NAME, NULL, EMPTY_COUNT, deferred->offset);
+            Form *catch_statements[] = {deferred, propagate};
+            Form *handler = form_call("do", catch_statements, ARITY_TWO, deferred->offset);
+            Form *try_arguments[] = {body, handler};
+            Form *attempt = form_call(TRY_WORD, try_arguments, ARITY_TWO, deferred->offset);
+            Form *holder = match_subject_name(deferred->offset);
+            Form *binding_arguments[] = {holder, attempt};
+            Form *binding = form_call("let", binding_arguments, ARITY_TWO, deferred->offset);
+            Form *sequence[] = {binding, deferred, holder};
+            append_form(forms, count, capacity, form_call("do", sequence, ARITY_THREE, deferred->offset));
+            return;
+        }
+        if (take_keyword("let") || take_keyword("ref") || take_keyword("thought")) {
+            append_form(forms, count, capacity, parse_bml_binding());
+            continue;
+        }
+        if (take_keyword(DEF_WORD)) {
+            append_form(forms, count, capacity, parse_bml_definition());
+            continue;
+        }
+        if (take_keyword("field")) {
+            Form *name = read_bml_symbol();
+            skip_type_arguments();
+            expect_character(NAME_MARK, "a field is missing its value");
+            Form *body = parse_bml_expression();
+            expect_character(STATEMENT_END, "a field was not finished");
+            append_form(forms, count, capacity, definition_form(name, new_form(FORM_GROUP, name->offset), body));
+            continue;
+        }
+        if (take_keyword("member")) {
+            skip_member();
+            continue;
+        }
+        if (take_keyword("class") || take_keyword("template")) {
+            Form *name = read_bml_symbol();
+            bind_global(name->text, name->text_length, text_value(name->text, name->text_length));
+            skip_type_arguments();
+            expect_character(SECTION_OPEN, "a class was not opened");
+            parse_bml_statements(forms, count, capacity);
+            skip_bml();
+            if (source_offset < source_length && source_bytes[source_offset] == STATEMENT_END) {
+                source_offset = checked_add(source_offset, ONE_ELEMENT);
+            }
+            continue;
+        }
+        if (source_bytes[source_offset] == SECTION_OPEN) {
+            source_offset = checked_add(source_offset, ONE_ELEMENT);
+            Form **statements = NULL;
+            size_t statement_count = EMPTY_COUNT;
+            size_t statement_capacity = EMPTY_COUNT;
+            parse_bml_statements(&statements, &statement_count, &statement_capacity);
+            append_form(forms, count, capacity, form_call("do", statements, statement_count, source_offset));
+            skip_bml();
+            if (source_offset < source_length && source_bytes[source_offset] == STATEMENT_END) {
+                source_offset = checked_add(source_offset, ONE_ELEMENT);
+            }
+            continue;
+        }
+        append_form(forms, count, capacity, parse_bml_expression());
+        skip_bml();
+        if (source_offset < source_length && source_bytes[source_offset] == SECTION_CLOSE) continue;
+        expect_character(STATEMENT_END, "an expression was not finished");
+    }
+}
+
+static char *read_import_path(void) {
+    skip_bml();
+    size_t start = source_offset;
+    while (source_offset < source_length) {
+        char character = source_bytes[source_offset];
+        unsigned char classified = (unsigned char)character;
+        if (isspace(classified) || character == STATEMENT_END) break;
+        source_offset = checked_add(source_offset, ONE_ELEMENT);
+    }
+    if (source_offset == start) fail_at(start, "an import is missing its path");
+    return copy_bytes(source_bytes + start, source_offset - start);
+}
+
+static void load_unit(const char *from_file, const char *relative);
+static void drive_forms(Form **forms, size_t form_count);
+
+static void load_preludes(const char *bytes, size_t length, const char *from_file) {
+    size_t line_start = FIRST_INDEX;
+    for (size_t index = FIRST_INDEX; index <= length; index = checked_add(index, ONE_ELEMENT)) {
+        int at_end = index == length || bytes[index] == NEWLINE;
+        if (!at_end) continue;
+        size_t cursor = line_start;
+        while (cursor < index && isspace((unsigned char)bytes[cursor])) cursor = checked_add(cursor, ONE_ELEMENT);
+        if (cursor < index && bytes[cursor] == COMMENT_INTRODUCER) cursor = checked_add(cursor, ONE_ELEMENT);
+        else if (cursor < index && bytes[cursor] == LINE_COMMENT_MARK && checked_add(cursor, ONE_ELEMENT) < index && bytes[cursor + ONE_ELEMENT] == LINE_COMMENT_MARK) {
+            cursor = checked_add(cursor, ARITY_TWO);
+        } else {
+            line_start = checked_add(index, ONE_ELEMENT);
+            continue;
+        }
+        while (cursor < index && isspace((unsigned char)bytes[cursor])) cursor = checked_add(cursor, ONE_ELEMENT);
+        size_t mark_length = strlen(PRELUDE_WORD);
+        if (cursor < index && index - cursor >= mark_length && memcmp(bytes + cursor, PRELUDE_WORD, mark_length) == STRING_COMPARE_EQUAL) {
+            cursor = checked_add(cursor, mark_length);
+            while (cursor < index) {
+                while (cursor < index && isspace((unsigned char)bytes[cursor])) cursor = checked_add(cursor, ONE_ELEMENT);
+                if (cursor >= index) break;
+                size_t start = cursor;
+                while (cursor < index && !isspace((unsigned char)bytes[cursor])) cursor = checked_add(cursor, ONE_ELEMENT);
+                size_t token_length = cursor - start;
+                int path = token_length != EMPTY_COUNT;
+                for (size_t mark = FIRST_INDEX; path && mark < token_length; mark = checked_add(mark, ONE_ELEMENT)) {
+                    if (!is_path_char((unsigned char)bytes[start + mark])) path = 0;
+                }
+                if (!path || token_is_none(bytes + start, token_length)) break;
+                char *relative = copy_bytes(bytes + start, token_length);
+                load_unit(from_file, relative);
+                free(relative);
+            }
+        }
+        line_start = checked_add(index, ONE_ELEMENT);
+    }
+}
+
+static Form **parse_bml_source(size_t *form_count) {
+    Form **forms = NULL;
+    size_t count = EMPTY_COUNT;
+    size_t capacity = EMPTY_COUNT;
+    while (1) {
+        skip_bml();
+        if (source_offset >= source_length) break;
+        if (take_keyword(IMPORT_WORD)) {
+            char *relative = read_import_path();
+            expect_character(STATEMENT_END, "an import was not finished");
+            load_unit(source_path, relative);
+            free(relative);
+            continue;
+        }
+        if (!take_keyword(SECTION_WORD)) {
+            append_form(&forms, &count, &capacity, parse_bml_expression());
+            skip_bml();
+            if (source_offset < source_length && source_bytes[source_offset] == STATEMENT_END) {
+                source_offset = checked_add(source_offset, ONE_ELEMENT);
+            }
+            continue;
+        }
+        expect_character(INDEX_OPEN, "a section name was not opened");
+        size_t name_at = source_offset;
+        while (source_offset < source_length && source_bytes[source_offset] != INDEX_CLOSE) {
+            source_offset = checked_add(source_offset, ONE_ELEMENT);
+        }
+        size_t name_length = source_offset - name_at;
+        expect_character(INDEX_CLOSE, "a section name was not closed");
+        int executable = name_length == strlen(FORM_BML_SECTION) && memcmp(source_bytes + name_at, FORM_BML_SECTION, name_length) == STRING_COMPARE_EQUAL;
+        expect_character(SECTION_OPEN, "a section was not opened");
+        if (!executable) {
+            size_t depth = ONE_ELEMENT;
+            while (depth != EMPTY_COUNT) {
+                skip_bml();
+                if (source_offset >= source_length) fail_at(source_offset, "a section was not closed");
+                char character = source_bytes[source_offset];
+                if (character == TEXT_DELIMITER) {
+                    parse_text();
+                    continue;
+                }
+                source_offset = checked_add(source_offset, ONE_ELEMENT);
+                if (character == SECTION_OPEN) depth = checked_add(depth, ONE_ELEMENT);
+                if (character == SECTION_CLOSE) depth -= ONE_ELEMENT;
+            }
+            continue;
+        }
+        parse_bml_statements(&forms, &count, &capacity);
+    }
+    *form_count = count;
+    return forms;
+}
+
+static Form **parse_current_source(size_t *form_count) {
+    if (contains_text(source_bytes, source_length, SECTION_TAG)) return parse_bml_source(form_count);
+    return parse_source(form_count);
+}
+
+static void load_unit(const char *from_file, const char *relative) {
+    char *path = resolve_unit(from_file, relative);
+    if (unit_is_loaded(path)) {
+        free(path);
+        return;
+    }
+    remember_unit(path);
+    size_t length = EMPTY_COUNT;
+    char *bytes = read_source(path, &length);
+    load_preludes(bytes, length, path);
+    SourceCursor saved = capture_source();
+    const char *saved_path = source_path;
+    source_bytes = bytes;
+    source_length = length;
+    source_offset = FIRST_INDEX;
+    source_path = path;
+    size_t form_count = EMPTY_COUNT;
+    Form **forms = parse_current_source(&form_count);
+    bind_definitions(forms, form_count);
+    if (form_count != EMPTY_COUNT) drive_forms(forms, form_count);
+    source_path = saved_path;
+    restore_source(saved);
+}
+
+static void drive_forms(Form **forms, size_t form_count) {
+    Form *program = new_form(FORM_GROUP, FIRST_INDEX);
+    program->parts = forms;
+    program->part_count = form_count;
+    drive(program);
+}
+
 int main(int argc, char **argv) {
-    if (argc != PROGRAM_ARGUMENT_COUNT) {
+    if (argc < PROGRAM_ARGUMENT_COUNT) {
         fputs(USAGE_TEXT, stderr);
         return EXIT_FAILURE;
     }
     register_builtin_operations();
     source_path = argv[SOURCE_PATH_ARGUMENT];
     source_bytes = read_source(source_path, &source_length);
+    remember_unit(copy_bytes(source_path, strlen(source_path)));
+    load_preludes(source_bytes, source_length, source_path);
+    source_offset = FIRST_INDEX;
     size_t form_count = EMPTY_COUNT;
-    Form **forms = parse_source(&form_count);
+    Form **forms = parse_current_source(&form_count);
     bind_definitions(forms, form_count);
-    Form *program = new_form(FORM_GROUP, FIRST_INDEX);
-    program->parts = forms;
-    program->part_count = form_count;
-    drive(program);
+    drive_forms(forms, form_count);
     print_value(finished);
     fputs(LINE_ENDING, stdout);
     if (fflush(stdout) != SYSTEM_CALL_OK || ferror(stdout)) fail("the result could not be written");
