@@ -7,6 +7,9 @@ import form-stdlib/sha256.fk;
 section [form.bml] {
  // the frozen-prefix cache's counts for the process
  let NLL-PREFIX = record_new(0, "hits", 0, "misses", 0, "saved", 0, "spoiled", 0);
+ // the pipelines minted from this unit's kernels, kept for the process (as NAM-CACHE keeps the affine unit's): nll-run rebuilt the 30 KB
+ // source text and had metal_pipeline find its pipeline by it on every dispatch, 9% of an eight-stream evaluation's wall by its own time
+ let NLL-CACHE = record_new(0, "pipes", 0);
  class NativeLlamaMetal {
   def nll-msl() = "#include <metal_stdlib>\nusing namespace metal;\n" + "
 kernel void nll_rope(device float* x [[buffer(0)]],device const float* freq [[buffer(1)]],constant uint& heads [[buffer(2)]],constant uint& hd [[buffer(3)]],constant uint& tokens [[buffer(4)]],constant uint& offset [[buffer(5)]],constant uint& inverse [[buffer(6)]],uint i [[thread_position_in_grid]]) {uint hw=hd/2;if(i>=tokens*heads*hw)return;uint j=i%hw;uint h=i/hw;uint at=h*hd+j;float angle=float(offset+h/heads)*freq[j]*(inverse?-1.0f:1.0f);float c=cos(angle),s=sin(angle),a=x[at],b=x[at+hw];x[at]=a*c-b*s;x[at+hw]=a*s+b*c;}
@@ -36,8 +39,13 @@ kernel void nll_store8(device const float* x [[buffer(0)]],device float* c0 [[bu
 kernel void nll_scores8(device const float* q [[buffer(0)]],device const float* k0 [[buffer(1)]],device const float* k1 [[buffer(2)]],device const float* k2 [[buffer(3)]],device const float* k3 [[buffer(4)]],device const float* k4 [[buffer(5)]],device const float* k5 [[buffer(6)]],device const float* k6 [[buffer(7)]],device const float* k7 [[buffer(8)]],device float* p [[buffer(9)]],device const uint* positions [[buffer(10)]],constant uint& nq [[buffer(11)]],constant uint& nk [[buffer(12)]],constant uint& d [[buffer(13)]],constant uint& nhm [[buffer(14)]],uint g [[threadgroup_position_in_grid]],uint lane [[thread_index_in_simdgroup]]) {uint tok=g/nq,h=g%nq;uint last=positions[tok];uint kh=h/(nq/nk);device const float* k=nll_pick8(tok,k0,k1,k2,k3,k4,k5,k6,k7);float m=-INFINITY;for(uint s=lane;s<nhm;s+=32){float z=-INFINITY;if(s<=last){z=0;uint qb=(tok*nq+h)*d,kb=(s*nk+kh)*d;uint c=0;for(;c+7<d;c+=8){float q0=q[qb+c],q1=q[qb+c+1],q2=q[qb+c+2],q3=q[qb+c+3],q4=q[qb+c+4],q5=q[qb+c+5],q6=q[qb+c+6],q7=q[qb+c+7];float k0v=k[kb+c],k1v=k[kb+c+1],k2v=k[kb+c+2],k3v=k[kb+c+3],k4v=k[kb+c+4],k5v=k[kb+c+5],k6v=k[kb+c+6],k7v=k[kb+c+7];z+=q0*k0v;z+=q1*k1v;z+=q2*k2v;z+=q3*k3v;z+=q4*k4v;z+=q5*k5v;z+=q6*k6v;z+=q7*k7v;}for(;c<d;c++)z+=q[qb+c]*k[kb+c];z*=rsqrt(float(d));}p[g*nhm+s]=z;m=max(m,z);}m=simd_max(m);threadgroup_barrier(mem_flags::mem_device);float sum=0;for(uint s=lane;s<nhm;s+=32){float e=exp(p[g*nhm+s]-m);p[g*nhm+s]=e;sum+=e;}sum=simd_sum(sum);for(uint s=lane;s<nhm;s+=32)p[g*nhm+s]/=sum;}
 kernel void nll_attend8(device const float* p [[buffer(0)]],device const float* v0 [[buffer(1)]],device const float* v1 [[buffer(2)]],device const float* v2 [[buffer(3)]],device const float* v3 [[buffer(4)]],device const float* v4 [[buffer(5)]],device const float* v5 [[buffer(6)]],device const float* v6 [[buffer(7)]],device const float* v7 [[buffer(8)]],device float* out [[buffer(9)]],device const uint* positions [[buffer(10)]],constant uint& nq [[buffer(11)]],constant uint& nk [[buffer(12)]],constant uint& d [[buffer(13)]],constant uint& nhm [[buffer(14)]],uint g [[threadgroup_position_in_grid]],uint lane [[thread_index_in_simdgroup]]) {uint tok=g/nq,h=g%nq;uint last=positions[tok];uint kh=h/(nq/nk);device const float* v=nll_pick8(tok,v0,v1,v2,v3,v4,v5,v6,v7);for(uint c=lane;c<d;c+=32){float a=0;uint s=0;for(;s+7<=last;s+=8){float p0=p[g*nhm+s],p1=p[g*nhm+s+1],p2=p[g*nhm+s+2],p3=p[g*nhm+s+3],p4=p[g*nhm+s+4],p5=p[g*nhm+s+5],p6=p[g*nhm+s+6],p7=p[g*nhm+s+7];float w0=v[(s*nk+kh)*d+c],w1=v[((s+1)*nk+kh)*d+c],w2=v[((s+2)*nk+kh)*d+c],w3=v[((s+3)*nk+kh)*d+c],w4=v[((s+4)*nk+kh)*d+c],w5=v[((s+5)*nk+kh)*d+c],w6=v[((s+6)*nk+kh)*d+c],w7=v[((s+7)*nk+kh)*d+c];a+=p0*w0;a+=p1*w1;a+=p2*w2;a+=p3*w3;a+=p4*w4;a+=p5*w5;a+=p6*w6;a+=p7*w7;}for(;s<=last;s++)a+=p[g*nhm+s]*v[(s*nk+kh)*d+c];out[(tok*nq+h)*d+c]=a;}}
 ";
+  def nll-pipe(name) = record_has(NLL-CACHE, "pipe:" ++ name) ? record_get(NLL-CACHE, "pipe:" ++ name) : nll-pipe-kept(name, nam-held-pipe(metal_pipeline(nll-msl(), name)));
+  def nll-pipe-kept(name, p) {
+   let set = record_set(NLL-CACHE, "pipe:" ++ name, p);
+   p;
+  }
   def nll-run(name, handles, values, count, grouped) {
-   let p = nam-held-pipe(metal_pipeline(nll-msl(), name));
+   let p = nll-pipe(name);
    let rc = nam-enqueue(name, p, grouped ? md-bind16(handles, values, 32, 0, 1, 0) : md-bind(handles, values), count);
    rc < 0 ? form_error("native Llama dispatch refused: " + name) : rc;
   }
@@ -353,7 +361,7 @@ kernel void nll_attend8(device const float* p [[buffer(0)]],device const float* 
   // (1 ms a pick). The best and the best three do not depend on the order the logits are met in (value descending, the lowest
   // index among equals), so the wide merge answers what the single simdgroup answered. 1024 bytes of threadgroup memory.
   def nll-run-wide(name, handles, values) {
-   let p = nam-held-pipe(metal_pipeline(nll-msl(), name));
+   let p = nll-pipe(name);
    let rc = nam-enqueue(name, p, md-bind16(handles, values, 1024, 1024, 1, 0), 1);
    rc < 0 ? form_error("native Llama dispatch refused: " + name) : rc;
   }
