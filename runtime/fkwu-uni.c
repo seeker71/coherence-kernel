@@ -12,6 +12,7 @@
 #include <float.h>
 #include <limits.h>
 #include <math.h>
+#include <setjmp.h>
 #include <signal.h>
 #include <stdint.h>
 #include <spawn.h>
@@ -401,6 +402,7 @@ static size_t shared_mapped_bytes;
 static int shared_unavailable;
 static size_t shared_maps;
 static size_t shared_bytes;
+static jmp_buf *parser_choice;
 
 static void fail(const char *reason) {
     fprintf(stderr, ERROR_BARE, reason);
@@ -408,6 +410,7 @@ static void fail(const char *reason) {
 }
 
 static void fail_at(size_t offset, const char *reason) {
+    if (parser_choice != NULL) longjmp(*parser_choice, 1);
     if (source_path != NULL) fprintf(stderr, ERROR_FORMAT_PATH, reason, offset, source_path);
     else fprintf(stderr, ERROR_FORMAT, reason, offset);
     exit(EXIT_FAILURE);
@@ -1135,6 +1138,8 @@ static Value offer_print_str(Value *arguments, size_t argument_count) {
     if (arguments[SOLE_OPERAND].text_length != EMPTY_COUNT) {
         fwrite(arguments[SOLE_OPERAND].text, sizeof(char), arguments[SOLE_OPERAND].text_length, stdout);
     }
+    fputc(NEWLINE, stdout);
+    fflush(stdout);
     return nothing_value();
 }
 
@@ -1567,6 +1572,17 @@ static Value offer_read_file_slice(Value *arguments, size_t argument_count) {
     return text;
 }
 
+/* Host-only carrier; path policy and source selection remain in Form. */
+static Value offer_host_cwd(Value *arguments, size_t argument_count) {
+    (void)arguments;
+    (void)argument_count;
+    char *path = getcwd(NULL, 0);
+    if (path == NULL) return nothing_value();
+    Value result = text_value(path, strlen(path));
+    free(path);
+    return result;
+}
+
 static Value offer_host_file_read_text(Value *arguments, size_t argument_count) {
     (void)argument_count;
     expect_kind(arguments[SOLE_OPERAND], KIND_TEXT, "host_file_read_text expects a path");
@@ -1761,7 +1777,7 @@ static Value offer_fb_record(Value *arguments, size_t argument_count) {
     (void)argument_count;
     frame_entered = checked_add(frame_entered, ONE_ELEMENT);
     frame_last_index = frame_entered;
-    if (arguments[RECORD_WORD].kind == KIND_FUNCTION) {
+    if (arguments[RECORD_WORD].kind != KIND_NODE) {
         frame_rejected = checked_add(frame_rejected, ONE_ELEMENT);
         return nothing_value();
     }
@@ -1776,7 +1792,7 @@ static Value offer_fb_record(Value *arguments, size_t argument_count) {
     frame_record_count = needed;
     frame_since_clear = checked_add(frame_since_clear, ONE_ELEMENT);
     frame_accepted = checked_add(frame_accepted, ONE_ELEMENT);
-    return count_word(frame_record_count - ONE_ELEMENT);
+    return arguments[RECORD_WORD];
 }
 
 static Value offer_fb_events(Value *arguments, size_t argument_count) {
@@ -1784,11 +1800,7 @@ static Value offer_fb_events(Value *arguments, size_t argument_count) {
     (void)argument_count;
     Value *records = allocate_zeroed(frame_record_count, sizeof *records);
     for (size_t index = FIRST_INDEX; index < frame_record_count; index = checked_add(index, ONE_ELEMENT)) {
-        Value *fields = allocate_zeroed(ARITY_THREE, sizeof *fields);
-        fields[RECORD_WORD] = frame_records[index].word;
-        fields[RECORD_PATH] = text_value(frame_records[index].path, frame_records[index].path_length);
-        fields[RECORD_POSITION] = integer_value(frame_records[index].position);
-        records[index] = list_from(fields, ARITY_THREE);
+        records[index] = frame_records[index].word;
     }
     return list_from(records, frame_record_count);
 }
@@ -2071,6 +2083,8 @@ static void register_builtin_operations(void) {
     register_operation("host_file_write_text", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_file_write_text);
     register_operation("file_size", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_file_size);
     register_operation("host_file_read_text", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_file_read_text);
+    register_operation("read_file", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_file_read_text);
+    register_operation("host_cwd", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_cwd);
     register_operation("read_file_slice", ARITY_THREE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_read_file_slice);
     register_operation("terminal_cols", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_terminal_cols);
     register_operation("shm_receive", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_shm_receive);
@@ -2209,7 +2223,8 @@ static int find_value_binding(const char *bytes, size_t length, Value *out) {
 static Value lookup_value_binding(const char *bytes, size_t length) {
     Value found;
     if (find_value_binding(bytes, length, &found)) return found;
-    if (find_function_text(bytes, length) != NULL) fail("a function is offered by calling it");
+    Binding *function = find_function_text(bytes, length);
+    if (function != NULL) return function->value;
     fail(message_with_name(UNBOUND_PREFIX, bytes, length));
     return nothing_value();
 }
@@ -2952,6 +2967,17 @@ static Form *read_bml_number(void) {
             source_offset = checked_add(source_offset, ONE_ELEMENT);
         }
     }
+    if (source_offset < source_length && (source_bytes[source_offset] == EXPONENT_LOWER || source_bytes[source_offset] == EXPONENT_UPPER)) {
+        source_offset = checked_add(source_offset, ONE_ELEMENT);
+        if (source_offset < source_length && (source_bytes[source_offset] == SIGN_PLUS || source_bytes[source_offset] == SIGN_MINUS)) {
+            source_offset = checked_add(source_offset, ONE_ELEMENT);
+        }
+        size_t digits = source_offset;
+        while (source_offset < source_length && is_digit_char(source_bytes[source_offset])) {
+            source_offset = checked_add(source_offset, ONE_ELEMENT);
+        }
+        if (source_offset == digits) fail_at(start, "a numeric exponent needs digits");
+    }
     size_t length = source_offset - start;
     char *text = copy_bytes(source_bytes + start, length);
     Form *form = new_form(FORM_SYMBOL, start);
@@ -3372,8 +3398,33 @@ static int form_is_wildcard(Form *form) {
 }
 
 static Form *parse_bml_match(size_t opening) {
+    skip_bml();
+    /* Keywords remain ordinary names unless the complete control shape starts.
+     * The Form grammar owns this choice; this bootstrap mirrors its fallback. */
+    if (source_offset >= source_length || strchr(",;)]}=?:><+*/%&|", source_bytes[source_offset]) != NULL) {
+        source_offset = opening;
+        return NULL;
+    }
+    if (take_keyword("then") || take_keyword("else")) {
+        source_offset = opening;
+        return NULL;
+    }
+    jmp_buf subject_choice;
+    jmp_buf *outer_choice = parser_choice;
+    parser_choice = &subject_choice;
+    if (setjmp(subject_choice)) {
+        parser_choice = outer_choice;
+        source_offset = opening;
+        return NULL;
+    }
     Form *subject = parse_bml_expression();
-    expect_character(SECTION_OPEN, "a match is missing its arms");
+    parser_choice = outer_choice;
+    skip_bml();
+    if (source_offset >= source_length || source_bytes[source_offset] != SECTION_OPEN) {
+        source_offset = opening;
+        return NULL;
+    }
+    source_offset = checked_add(source_offset, ONE_ELEMENT);
     Form *name = match_subject_name(opening);
     Form *chain = form_symbol(NAME_NOTHING, opening);
     Form **arms = NULL;
@@ -3454,18 +3505,25 @@ static Form *parse_bml_expression(void) {
     skip_bml();
     size_t opening = source_offset;
     if (take_keyword("if")) return parse_bml_conditional(opening);
-    if (take_keyword("match")) return parse_bml_match(opening);
+    if (take_keyword("match")) {
+        Form *matched = parse_bml_match(opening);
+        if (matched != NULL) return matched;
+    }
     if (take_keyword("choice")) {
-        expect_character(SECTION_OPEN, "a choice was not opened");
-        Form **options = NULL;
-        size_t option_count = EMPTY_COUNT;
-        size_t option_capacity = EMPTY_COUNT;
-        parse_bml_statements(&options, &option_count, &option_capacity);
-        return form_call("choice", options, option_count, opening);
+        skip_bml();
+        if (source_offset < source_length && source_bytes[source_offset] == SECTION_OPEN) {
+            source_offset = checked_add(source_offset, ONE_ELEMENT);
+            Form **options = NULL;
+            size_t option_count = EMPTY_COUNT;
+            size_t option_capacity = EMPTY_COUNT;
+            parse_bml_statements(&options, &option_count, &option_capacity);
+            return form_call("choice", options, option_count, opening);
+        }
+        source_offset = opening;
     }
     if (take_keyword(TRY_WORD)) {
         Form *body = parse_bml_expression();
-        if (!take_keyword("catch")) fail_at(source_offset, "a try is missing catch");
+        if (!take_keyword("catch") && !take_keyword("else")) fail_at(source_offset, "a try is missing catch or else");
         Form *handler = parse_bml_expression();
         Form *try_arguments[] = {body, handler};
         return form_call(TRY_WORD, try_arguments, ARITY_TWO, opening);
@@ -3589,6 +3647,10 @@ static Form *parse_bml_definition(void) {
         size_t statement_capacity = EMPTY_COUNT;
         parse_bml_statements(&statements, &statement_count, &statement_capacity);
         body = form_call("do", statements, statement_count, name->offset);
+        skip_bml();
+        if (source_offset < source_length && source_bytes[source_offset] == STATEMENT_END) {
+            source_offset = checked_add(source_offset, ONE_ELEMENT);
+        }
     } else {
         expect_character(NAME_MARK, "a definition is missing its body");
         body = parse_bml_expression();
