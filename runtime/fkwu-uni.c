@@ -7,17 +7,21 @@
  */
 
 #include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <float.h>
 #include <limits.h>
 #include <math.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <signal.h>
 #include <stdint.h>
 #include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
@@ -425,6 +429,7 @@ struct Cell {
 };
 
 struct Record {
+    Value blueprint;
     Value *keys;
     Value *values;
     size_t count;
@@ -540,6 +545,21 @@ static size_t shared_mapped_bytes;
 static int shared_unavailable;
 static size_t shared_maps;
 static size_t shared_bytes;
+
+typedef struct {
+    Value blueprint;
+    char *name;
+    size_t name_length;
+    Value function;
+} MethodDefinition;
+
+static MethodDefinition *method_definitions;
+static size_t method_definition_count;
+static size_t method_definition_capacity;
+
+static int *socket_descriptors;
+static size_t socket_descriptor_count;
+static size_t socket_descriptor_capacity;
 
 static void note_stack(void) {
     size_t shown = EMPTY_COUNT;
@@ -710,6 +730,8 @@ static void expect_kind(Value value, ValueKind kind, const char *reason);
 static Value list_from(Value *items, size_t item_count);
 static const char *kind_name(ValueKind kind);
 static Value boolean_word(int predicate);
+static int unwind_to_recovery(void);
+static Value invoke_function_value(Value function, Value *arguments, size_t argument_count);
 
 static const uint64_t VALUE_HASH_OFFSET = 14695981039346656037ULL;
 static const uint64_t VALUE_HASH_PRIME = 1099511628211ULL;
@@ -936,6 +958,12 @@ static Value offer_node_inst(Value *arguments, size_t argument_count) {
     return node_field(arguments[SOLE_OPERAND], NODE_FIELD_INSTANCE, "node_inst expects a node");
 }
 
+static Value offer_bp(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    if (arguments[SOLE_OPERAND].kind == KIND_NODE) return arguments[SOLE_OPERAND];
+    return node_value(WORD_FALSE);
+}
+
 static Value offer_intern_trivial_string(Value *arguments, size_t argument_count) {
     (void)argument_count;
     expect_kind(arguments[SOLE_OPERAND], KIND_TEXT, "intern_trivial_string expects text");
@@ -1068,6 +1096,76 @@ static void expect_kind(Value value, ValueKind kind, const char *reason) {
     if (value.kind != kind) fail(reason);
 }
 
+static int text_matches(Value value, const char *literal) {
+    return value.kind == KIND_TEXT && bytes_equal(value.text, value.text_length, literal, strlen(literal));
+}
+
+static int byte_from_value(Value value, unsigned char *out) {
+    if (value.kind != KIND_INTEGER || value.integer < WORD_FALSE || value.integer > UCHAR_MAX) return 0;
+    *out = (unsigned char)value.integer;
+    return 1;
+}
+
+static int list_to_bytes(Value list, unsigned char **bytes, size_t *length) {
+    if (list.kind == KIND_NOTHING) {
+        *bytes = NULL;
+        *length = EMPTY_COUNT;
+        return 1;
+    }
+    if (list.kind != KIND_LIST) return 0;
+    *length = list.item_count;
+    *bytes = allocate_zeroed(list.item_count == EMPTY_COUNT ? ONE_ELEMENT : list.item_count, sizeof **bytes);
+    List *cursor = list.list;
+    for (size_t index = FIRST_INDEX; index < list.item_count; index = checked_add(index, ONE_ELEMENT)) {
+        unsigned char byte = 0;
+        if (cursor == NULL || !byte_from_value(cursor->head, &byte)) return 0;
+        (*bytes)[index] = byte;
+        cursor = cursor->tail;
+    }
+    return 1;
+}
+
+static Value bytes_to_list(const unsigned char *bytes, size_t length) {
+    Value *items = allocate_zeroed(length, sizeof *items);
+    for (size_t index = FIRST_INDEX; index < length; index = checked_add(index, ONE_ELEMENT)) {
+        items[index] = integer_value((long long)bytes[index]);
+    }
+    return list_from(items, length);
+}
+
+static int path_exists(const char *path) {
+    struct stat info;
+    return stat(path, &info) == SYSTEM_CALL_OK;
+}
+
+static int path_is_dir(const char *path) {
+    struct stat info;
+    if (stat(path, &info) != SYSTEM_CALL_OK) return 0;
+    return S_ISDIR(info.st_mode) ? 1 : 0;
+}
+
+static int socket_put(int descriptor) {
+    size_t needed = checked_add(socket_descriptor_count, ONE_ELEMENT);
+    socket_descriptors = grow_list(socket_descriptors, &socket_descriptor_capacity, sizeof *socket_descriptors, needed);
+    socket_descriptors[socket_descriptor_count] = descriptor;
+    socket_descriptor_count = needed;
+    return (int)socket_descriptor_count;
+}
+
+static int socket_fetch(long long handle) {
+    if (handle <= WORD_FALSE) return INVALID_DESCRIPTOR;
+    if ((unsigned long long)handle > socket_descriptor_count) return INVALID_DESCRIPTOR;
+    int descriptor = socket_descriptors[handle - ONE_ELEMENT];
+    return descriptor;
+}
+
+static int socket_release(long long handle) {
+    if (handle <= WORD_FALSE) return 0;
+    if ((unsigned long long)handle > socket_descriptor_count) return 0;
+    socket_descriptors[handle - ONE_ELEMENT] = INVALID_DESCRIPTOR;
+    return 1;
+}
+
 static int is_number(Value value) {
     return value.kind == KIND_INTEGER || value.kind == KIND_REAL;
 }
@@ -1164,6 +1262,13 @@ static void skip_bml(void) {
         unsigned char character = (unsigned char)source_bytes[source_offset];
         if (isspace(character)) {
             source_offset = checked_add(source_offset, ONE_ELEMENT);
+            continue;
+        }
+        if (source_bytes[source_offset] == COMMENT_INTRODUCER) {
+            source_offset = checked_add(source_offset, ONE_ELEMENT);
+            while (source_offset < source_length && source_bytes[source_offset] != NEWLINE) {
+                source_offset = checked_add(source_offset, ONE_ELEMENT);
+            }
             continue;
         }
         if (source_bytes[source_offset] != LINE_COMMENT_MARK) return;
@@ -1511,6 +1616,31 @@ static Value offer_eq(Value *arguments, size_t argument_count) {
     return boolean_word(values_equal(arguments[LEFT_OPERAND], arguments[RIGHT_OPERAND]));
 }
 
+static Value offer_get(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    Value carrier = arguments[LEFT_OPERAND];
+    Value key = arguments[RIGHT_OPERAND];
+    if (carrier.kind == KIND_LIST) {
+        if (carrier.item_count >= ONE_ELEMENT && text_matches(carrier.list->head, "__dict__") && key.kind == KIND_TEXT) {
+            List *cursor = carrier.list->tail;
+            while (cursor != NULL && cursor->tail != NULL) {
+                if (cursor->head.kind == KIND_TEXT && bytes_equal(cursor->head.text, cursor->head.text_length, key.text, key.text_length)) {
+                    return cursor->tail->head;
+                }
+                cursor = cursor->tail->tail;
+            }
+            return integer_value(WORD_FALSE);
+        }
+        if (key.kind != KIND_INTEGER) return integer_value(WORD_FALSE);
+        if (carrier.item_count == EMPTY_COUNT) return integer_value(WORD_FALSE);
+        if (key.integer < WORD_FALSE) return carrier.list->head;
+        size_t index = (size_t)key.integer;
+        if (index >= carrier.item_count) return integer_value(WORD_FALSE);
+        return list_at(carrier, index);
+    }
+    return integer_value(WORD_FALSE);
+}
+
 static Value offer_lt(Value *arguments, size_t argument_count) {
     (void)argument_count;
     Value left = arguments[LEFT_OPERAND];
@@ -1795,12 +1925,18 @@ static Value record_value(Record *record) {
 static Value offer_record_set(Value *arguments, size_t argument_count);
 
 static Value offer_record_new(Value *arguments, size_t argument_count) {
-    if (argument_count == EMPTY_COUNT) fail("record_new expects a size");
-    expect_kind(arguments[FIRST_INDEX], KIND_INTEGER, "record_new expects an integer size");
-    size_t fields = argument_count - ONE_ELEMENT;
+    if (argument_count == EMPTY_COUNT) fail("record_new expects a blueprint or a size");
+    size_t field_start = ONE_ELEMENT;
+    Record *record = allocate_zeroed(ONE_ELEMENT, sizeof *record);
+    if (arguments[FIRST_INDEX].kind == KIND_INTEGER && argument_count == ONE_ELEMENT) {
+        record->blueprint = nothing_value();
+        return record_value(record);
+    }
+    record->blueprint = arguments[FIRST_INDEX];
+    size_t fields = argument_count - field_start;
     if ((fields % ARITY_TWO) != EMPTY_COUNT) fail("record_new expects key and value pairs");
-    Value created = record_value(allocate_zeroed(ONE_ELEMENT, sizeof(Record)));
-    for (size_t index = ONE_ELEMENT; index < argument_count; index = checked_add(index, ARITY_TWO)) {
+    Value created = record_value(record);
+    for (size_t index = field_start; index < argument_count; index = checked_add(index, ARITY_TWO)) {
         Value triple[] = {created, arguments[index], arguments[checked_add(index, ONE_ELEMENT)]};
         created = offer_record_set(triple, ARITY_THREE);
     }
@@ -1843,6 +1979,90 @@ static Value offer_record_set(Value *arguments, size_t argument_count) {
     record->values[record->count] = stored;
     record->count = needed;
     return arguments[LEFT_OPERAND];
+}
+
+static Value offer_record_type(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    return boolean_word(arguments[SOLE_OPERAND].kind == KIND_RECORD);
+}
+
+static Value offer_record_blueprint(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[SOLE_OPERAND], KIND_RECORD, "record_blueprint expects a record");
+    return arguments[SOLE_OPERAND].record->blueprint;
+}
+
+static Value offer_record_keys(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[SOLE_OPERAND], KIND_RECORD, "record_keys expects a record");
+    Record *record = arguments[SOLE_OPERAND].record;
+    Value *keys = allocate_zeroed(record->count, sizeof *keys);
+    for (size_t index = FIRST_INDEX; index < record->count; index = checked_add(index, ONE_ELEMENT)) {
+        keys[index] = record->keys[index];
+    }
+    return list_from(keys, record->count);
+}
+
+static ssize_t find_method(Value blueprint, Value name) {
+    if (name.kind != KIND_TEXT) return -1;
+    for (size_t index = FIRST_INDEX; index < method_definition_count; index = checked_add(index, ONE_ELEMENT)) {
+        MethodDefinition *method = method_definitions + index;
+        if (!values_equal(method->blueprint, blueprint)) continue;
+        if (!bytes_equal(method->name, method->name_length, name.text, name.text_length)) continue;
+        return (ssize_t)index;
+    }
+    return -1;
+}
+
+static Value receiver_blueprint(Value receiver) {
+    if (receiver.kind == KIND_RECORD) return receiver.record->blueprint;
+    return receiver;
+}
+
+static Value offer_method_define(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[RIGHT_OPERAND], KIND_TEXT, "method_define expects a method name");
+    expect_kind(arguments[SLICE_END], KIND_FUNCTION, "method_define expects a function value");
+    Value blueprint = arguments[LEFT_OPERAND];
+    Value name = arguments[RIGHT_OPERAND];
+    ssize_t existing = find_method(blueprint, name);
+    if (existing >= 0) {
+        method_definitions[existing].function = arguments[SLICE_END];
+        return blueprint;
+    }
+    size_t needed = checked_add(method_definition_count, ONE_ELEMENT);
+    method_definitions = grow_list(method_definitions, &method_definition_capacity, sizeof *method_definitions, needed);
+    MethodDefinition *entry = method_definitions + method_definition_count;
+    entry->blueprint = blueprint;
+    entry->name = copy_bytes(name.text, name.text_length);
+    entry->name_length = name.text_length;
+    entry->function = arguments[SLICE_END];
+    method_definition_count = needed;
+    return blueprint;
+}
+
+static Value offer_method_has(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    Value blueprint = receiver_blueprint(arguments[LEFT_OPERAND]);
+    return boolean_word(find_method(blueprint, arguments[RIGHT_OPERAND]) >= 0);
+}
+
+static Value offer_method_invoke(Value *arguments, size_t argument_count) {
+    if (argument_count < ARITY_TWO) fail("method_invoke expects at least a receiver and name");
+    Value receiver = arguments[FIRST_INDEX];
+    Value name = arguments[ONE_ELEMENT];
+    if (receiver.kind != KIND_RECORD) fail("method_invoke expects a record receiver");
+    expect_kind(name, KIND_TEXT, "method_invoke expects a method name");
+    ssize_t index = find_method(receiver.record->blueprint, name);
+    if (index < 0) fail("method_invoke could not find a method under that name");
+    MethodDefinition *method = method_definitions + index;
+    size_t invoke_count = checked_add(argument_count - ONE_ELEMENT, ONE_ELEMENT);
+    Value *invoke_arguments = allocate_zeroed(invoke_count, sizeof *invoke_arguments);
+    invoke_arguments[FIRST_INDEX] = receiver;
+    for (size_t argument = ARITY_TWO; argument < argument_count; argument = checked_add(argument, ONE_ELEMENT)) {
+        invoke_arguments[argument - ONE_ELEMENT] = arguments[argument];
+    }
+    return invoke_function_value(method->function, invoke_arguments, invoke_count);
 }
 
 static Value offer_range(Value *arguments, size_t argument_count) {
@@ -1978,6 +2198,127 @@ static Value offer_str_to_int(Value *arguments, size_t argument_count) {
         value = value * 10 + (byte - '0');
     }
     return integer_value(negative ? -value : value);
+}
+
+static Value offer_str_to_float(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    if (arguments[SOLE_OPERAND].kind == KIND_NOTHING) return nothing_value();
+    expect_kind(arguments[SOLE_OPERAND], KIND_TEXT, "str_to_float expects text");
+    char *text = copy_bytes(arguments[SOLE_OPERAND].text, arguments[SOLE_OPERAND].text_length);
+    char *end = NULL;
+    errno = 0;
+    double value = strtod(text, &end);
+    if (end == text || errno == ERANGE) {
+        free(text);
+        return real_value(REAL_ZERO);
+    }
+    free(text);
+    return real_value(value);
+}
+
+static Value offer_float_to_int(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    if (arguments[SOLE_OPERAND].kind == KIND_INTEGER) return arguments[SOLE_OPERAND];
+    if (arguments[SOLE_OPERAND].kind == KIND_NOTHING) return nothing_value();
+    expect_kind(arguments[SOLE_OPERAND], KIND_REAL, "float_to_int expects a float");
+    double value = arguments[SOLE_OPERAND].real;
+    if (!isfinite(value) || value > (double)LLONG_MAX || value < (double)LLONG_MIN) fail("float_to_int is outside the native integer range");
+    return integer_value((long long)value);
+}
+
+static Value offer_make_float32(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    if (!is_number(arguments[SOLE_OPERAND])) fail("make_float32 expects a number");
+    float narrowed = (float)number_as_real(arguments[SOLE_OPERAND]);
+    return real_value((double)narrowed);
+}
+
+static Value offer_make_float64(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    if (!is_number(arguments[SOLE_OPERAND])) fail("make_float64 expects a number");
+    return real_value(number_as_real(arguments[SOLE_OPERAND]));
+}
+
+static Value offer_float_value(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    if (arguments[SOLE_OPERAND].kind == KIND_REAL) return arguments[SOLE_OPERAND];
+    if (arguments[SOLE_OPERAND].kind == KIND_INTEGER) return real_value((double)arguments[SOLE_OPERAND].integer);
+    if (arguments[SOLE_OPERAND].kind == KIND_NODE && arguments[SOLE_OPERAND].cell != NULL && arguments[SOLE_OPERAND].cell->kind == CELL_INTEGER) {
+        return real_value((double)arguments[SOLE_OPERAND].cell->integer);
+    }
+    return nothing_value();
+}
+
+static Value offer_intern_trivial_float(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    if (arguments[SOLE_OPERAND].kind == KIND_TEXT) {
+        char *text = copy_bytes(arguments[SOLE_OPERAND].text, arguments[SOLE_OPERAND].text_length);
+        char *end = NULL;
+        double value = strtod(text, &end);
+        free(text);
+        if (end == text) return nothing_value();
+        return real_value(value);
+    }
+    if (is_number(arguments[SOLE_OPERAND])) return real_value(number_as_real(arguments[SOLE_OPERAND]));
+    return nothing_value();
+}
+
+static Value offer_float_leaf(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[LEFT_OPERAND], KIND_INTEGER, "float_leaf expects a mode");
+    long long mode = arguments[LEFT_OPERAND].integer;
+    if (mode == WORD_FALSE) {
+        Value value = arguments[RIGHT_OPERAND];
+        if (value.kind == KIND_REAL) return value;
+        if (value.kind == KIND_INTEGER) return real_value((double)value.integer);
+        return nothing_value();
+    }
+    if (mode == WORD_TRUE) return offer_make_float32(arguments + RIGHT_OPERAND, ARITY_ONE);
+    if (mode == ARITY_TWO) return offer_make_float64(arguments + RIGHT_OPERAND, ARITY_ONE);
+    if (mode == ARITY_THREE) return real_value(3.14159265358979323846);
+    return nothing_value();
+}
+
+static Value offer_math_pi(Value *arguments, size_t argument_count) {
+    (void)arguments;
+    (void)argument_count;
+    return real_value(3.14159265358979323846);
+}
+
+static Value offer_math_sqrt(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    if (!is_number(arguments[SOLE_OPERAND])) fail("math_sqrt expects a number");
+    return real_value(sqrt(number_as_real(arguments[SOLE_OPERAND])));
+}
+
+static Value offer_math_exp(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    if (!is_number(arguments[SOLE_OPERAND])) fail("math_exp expects a number");
+    return real_value(exp(number_as_real(arguments[SOLE_OPERAND])));
+}
+
+static Value offer_math_log(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    if (!is_number(arguments[SOLE_OPERAND])) fail("math_log expects a number");
+    return real_value(log(number_as_real(arguments[SOLE_OPERAND])));
+}
+
+static Value offer_math_pow(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    if (!is_number(arguments[LEFT_OPERAND]) || !is_number(arguments[RIGHT_OPERAND])) fail("math_pow expects numbers");
+    return real_value(pow(number_as_real(arguments[LEFT_OPERAND]), number_as_real(arguments[RIGHT_OPERAND])));
+}
+
+static Value offer_round_ndigits(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    if (!is_number(arguments[LEFT_OPERAND])) fail("round_ndigits expects a number");
+    expect_kind(arguments[RIGHT_OPERAND], KIND_INTEGER, "round_ndigits expects an integer precision");
+    double value = number_as_real(arguments[LEFT_OPERAND]);
+    long long digits = arguments[RIGHT_OPERAND].integer;
+    if (digits == WORD_FALSE) return real_value(nearbyint(value));
+    double factor = pow(10.0, (double)digits);
+    if (!isfinite(factor) || factor == REAL_ZERO) return real_value(value);
+    return real_value(nearbyint(value * factor) / factor);
 }
 
 static Value offer_str_len(Value *arguments, size_t argument_count) {
@@ -2785,6 +3126,305 @@ static Value offer_file_append_bytes(Value *arguments, size_t argument_count) {
     return integer_value((long long)written);
 }
 
+static Value offer_write_file(Value *arguments, size_t argument_count) {
+    return offer_host_file_write_text(arguments, argument_count);
+}
+
+static Value offer_write_file_text(Value *arguments, size_t argument_count) {
+    return offer_host_file_write_text(arguments, argument_count);
+}
+
+static Value offer_write_file_bytes(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[LEFT_OPERAND], KIND_TEXT, "write_file_bytes expects a path");
+    unsigned char *bytes = NULL;
+    size_t length = EMPTY_COUNT;
+    if (!list_to_bytes(arguments[RIGHT_OPERAND], &bytes, &length)) fail("write_file_bytes expects a byte list");
+    char *path = copy_bytes(arguments[LEFT_OPERAND].text, arguments[LEFT_OPERAND].text_length);
+    int descriptor = open(path, O_WRONLY | O_CREAT | O_TRUNC, TEXT_FILE_MODE);
+    free(path);
+    if (descriptor < SYSTEM_CALL_OK) {
+        free(bytes);
+        return integer_value(-WORD_TRUE);
+    }
+    size_t written = EMPTY_COUNT;
+    while (written < length) {
+        ssize_t step = write(descriptor, bytes + written, length - written);
+        if (step < SYSTEM_CALL_OK) {
+            if (errno == EINTR) continue;
+            close(descriptor);
+            free(bytes);
+            return integer_value(-WORD_TRUE);
+        }
+        written = checked_add(written, (size_t)step);
+    }
+    free(bytes);
+    if (close(descriptor) != SYSTEM_CALL_OK) return integer_value(-WORD_TRUE);
+    return integer_value((long long)written);
+}
+
+static Value offer_read_file_bytes(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[SOLE_OPERAND], KIND_TEXT, "read_file_bytes expects a path");
+    char *path = copy_bytes(arguments[SOLE_OPERAND].text, arguments[SOLE_OPERAND].text_length);
+    int descriptor = open(path, O_RDONLY);
+    free(path);
+    if (descriptor < SYSTEM_CALL_OK) return nothing_value();
+    size_t capacity = host_page_bytes();
+    unsigned char *bytes = allocate_zeroed(capacity, sizeof *bytes);
+    size_t filled = EMPTY_COUNT;
+    for (;;) {
+        if (filled == capacity) {
+            if (capacity > SIZE_MAX / GROWTH_FACTOR) fail("read_file_bytes exceeds addressable memory");
+            size_t grown = capacity * GROWTH_FACTOR;
+            unsigned char *next = allocate_zeroed(grown, sizeof *next);
+            memcpy(next, bytes, filled);
+            free(bytes);
+            bytes = next;
+            capacity = grown;
+        }
+        ssize_t step = read(descriptor, bytes + filled, capacity - filled);
+        if (step < SYSTEM_CALL_OK) {
+            if (errno == EINTR) continue;
+            close(descriptor);
+            free(bytes);
+            return nothing_value();
+        }
+        if (step == SYSTEM_CALL_OK) break;
+        filled = checked_add(filled, (size_t)step);
+    }
+    close(descriptor);
+    Value list = bytes_to_list(bytes, filled);
+    free(bytes);
+    return list;
+}
+
+static Value offer_host_file_read_text(Value *arguments, size_t argument_count);
+
+static Value offer_read_file(Value *arguments, size_t argument_count) {
+    return offer_host_file_read_text(arguments, argument_count);
+}
+
+typedef struct {
+    unsigned char *bytes;
+    size_t length;
+    size_t capacity;
+} ByteBuffer;
+
+static void buffer_push(ByteBuffer *buffer, const void *chunk, size_t length) {
+    if (length == EMPTY_COUNT) return;
+    size_t needed = checked_add(buffer->length, length);
+    if (needed > buffer->capacity) {
+        size_t grown = grown_capacity(buffer->capacity, needed);
+        unsigned char *next = allocate_zeroed(grown, sizeof *next);
+        if (buffer->length != EMPTY_COUNT) memcpy(next, buffer->bytes, buffer->length);
+        free(buffer->bytes);
+        buffer->bytes = next;
+        buffer->capacity = grown;
+    }
+    memcpy(buffer->bytes + buffer->length, chunk, length);
+    buffer->length = needed;
+}
+
+static void buffer_push_u8(ByteBuffer *buffer, unsigned char value) {
+    buffer_push(buffer, &value, sizeof value);
+}
+
+static void buffer_push_u32(ByteBuffer *buffer, uint32_t value) {
+    unsigned char bytes[4];
+    bytes[0] = (unsigned char)((value >> 24) & 0xffu);
+    bytes[1] = (unsigned char)((value >> 16) & 0xffu);
+    bytes[2] = (unsigned char)((value >> 8) & 0xffu);
+    bytes[3] = (unsigned char)(value & 0xffu);
+    buffer_push(buffer, bytes, sizeof bytes);
+}
+
+static void buffer_push_i64(ByteBuffer *buffer, int64_t value) {
+    unsigned char bytes[8];
+    for (size_t index = FIRST_INDEX; index < 8; index = checked_add(index, ONE_ELEMENT)) {
+        bytes[index] = (unsigned char)(((uint64_t)value >> (8 * index)) & 0xffu);
+    }
+    buffer_push(buffer, bytes, sizeof bytes);
+}
+
+static Cell *find_cell_by_category(fk_node_id category) {
+    for (size_t index = FIRST_INDEX; index < cell_count; index = checked_add(index, ONE_ELEMENT)) {
+        if (cells[index] != NULL && cells[index]->category == category) return cells[index];
+    }
+    return NULL;
+}
+
+static int serialize_value(ByteBuffer *buffer, Value value) {
+    if (value.kind == KIND_NOTHING) {
+        buffer_push_u8(buffer, 0);
+        return 1;
+    }
+    if (value.kind == KIND_INTEGER) {
+        buffer_push_u8(buffer, 1);
+        buffer_push_i64(buffer, (int64_t)value.integer);
+        return 1;
+    }
+    if (value.kind == KIND_REAL) {
+        buffer_push_u8(buffer, 2);
+        uint64_t bits = 0;
+        memcpy(&bits, &value.real, sizeof bits);
+        buffer_push_i64(buffer, (int64_t)bits);
+        return 1;
+    }
+    if (value.kind == KIND_TEXT) {
+        buffer_push_u8(buffer, 3);
+        if (value.text_length > UINT32_MAX) return 0;
+        buffer_push_u32(buffer, (uint32_t)value.text_length);
+        buffer_push(buffer, value.text, value.text_length);
+        return 1;
+    }
+    if (value.kind == KIND_LIST) {
+        buffer_push_u8(buffer, 4);
+        if (value.item_count > UINT32_MAX) return 0;
+        buffer_push_u32(buffer, (uint32_t)value.item_count);
+        List *cursor = value.list;
+        for (size_t index = FIRST_INDEX; index < value.item_count; index = checked_add(index, ONE_ELEMENT)) {
+            if (cursor == NULL || !serialize_value(buffer, cursor->head)) return 0;
+            cursor = cursor->tail;
+        }
+        return 1;
+    }
+    if (value.kind == KIND_NODE) {
+        buffer_push_u8(buffer, 5);
+        buffer_push_i64(buffer, (int64_t)node_word(value, "recipe_to_bytes expects nodes"));
+        return 1;
+    }
+    return 0;
+}
+
+static int read_u32(const unsigned char *bytes, size_t length, size_t *cursor, uint32_t *out) {
+    if (*cursor > length || length - *cursor < 4) return 0;
+    uint32_t value = ((uint32_t)bytes[*cursor] << 24)
+        | ((uint32_t)bytes[checked_add(*cursor, ONE_ELEMENT)] << 16)
+        | ((uint32_t)bytes[checked_add(*cursor, ARITY_TWO)] << 8)
+        | (uint32_t)bytes[checked_add(*cursor, ARITY_THREE)];
+    *cursor = checked_add(*cursor, 4);
+    *out = value;
+    return 1;
+}
+
+static int read_i64(const unsigned char *bytes, size_t length, size_t *cursor, int64_t *out) {
+    if (*cursor > length || length - *cursor < 8) return 0;
+    uint64_t value = 0;
+    for (size_t index = FIRST_INDEX; index < 8; index = checked_add(index, ONE_ELEMENT)) {
+        value |= ((uint64_t)bytes[checked_add(*cursor, index)]) << (8 * index);
+    }
+    *cursor = checked_add(*cursor, 8);
+    *out = (int64_t)value;
+    return 1;
+}
+
+static int deserialize_value(const unsigned char *bytes, size_t length, size_t *cursor, Value *out) {
+    if (*cursor >= length) return 0;
+    unsigned char tag = bytes[*cursor];
+    *cursor = checked_add(*cursor, ONE_ELEMENT);
+    if (tag == 0) {
+        *out = nothing_value();
+        return 1;
+    }
+    if (tag == 1) {
+        int64_t number = 0;
+        if (!read_i64(bytes, length, cursor, &number)) return 0;
+        *out = integer_value((long long)number);
+        return 1;
+    }
+    if (tag == 2) {
+        int64_t payload = 0;
+        if (!read_i64(bytes, length, cursor, &payload)) return 0;
+        uint64_t bits = (uint64_t)payload;
+        double real = REAL_ZERO;
+        memcpy(&real, &bits, sizeof real);
+        *out = real_value(real);
+        return 1;
+    }
+    if (tag == 3) {
+        uint32_t text_length = 0;
+        if (!read_u32(bytes, length, cursor, &text_length)) return 0;
+        if (*cursor > length || length - *cursor < text_length) return 0;
+        *out = text_value((const char *)(bytes + *cursor), text_length);
+        *cursor = checked_add(*cursor, text_length);
+        return 1;
+    }
+    if (tag == 4) {
+        uint32_t count = 0;
+        if (!read_u32(bytes, length, cursor, &count)) return 0;
+        Value *items = allocate_zeroed(count, sizeof *items);
+        for (uint32_t index = 0; index < count; index++) {
+            if (!deserialize_value(bytes, length, cursor, items + index)) return 0;
+        }
+        *out = list_from(items, count);
+        return 1;
+    }
+    if (tag == 5) {
+        int64_t identity = 0;
+        if (!read_i64(bytes, length, cursor, &identity)) return 0;
+        Cell *cell = find_cell_by_category((fk_node_id)identity);
+        *out = cell == NULL ? node_value((long long)identity) : node_from_cell(cell);
+        return 1;
+    }
+    return 0;
+}
+
+static Value offer_recipe_to_bytes(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    ByteBuffer buffer = {0};
+    const unsigned char header[4] = {'F', 'K', 'B', '2'};
+    buffer_push(&buffer, header, sizeof header);
+    if (!serialize_value(&buffer, arguments[SOLE_OPERAND])) {
+        free(buffer.bytes);
+        return nothing_value();
+    }
+    Value bytes = bytes_to_list(buffer.bytes, buffer.length);
+    free(buffer.bytes);
+    return bytes;
+}
+
+static Value offer_bytes_to_recipe(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    unsigned char *bytes = NULL;
+    size_t length = EMPTY_COUNT;
+    if (!list_to_bytes(arguments[SOLE_OPERAND], &bytes, &length)) return nothing_value();
+    if (length < 4 || memcmp(bytes, "FKB2", 4) != STRING_COMPARE_EQUAL) {
+        free(bytes);
+        return nothing_value();
+    }
+    size_t cursor = 4;
+    Value value = nothing_value();
+    int ok = deserialize_value(bytes, length, &cursor, &value);
+    free(bytes);
+    if (!ok || cursor != length) return nothing_value();
+    return value;
+}
+
+static Value offer_write_form_binary(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[LEFT_OPERAND], KIND_TEXT, "write_form_binary expects a path");
+    Value recipe_arguments[ARITY_ONE];
+    recipe_arguments[FIRST_INDEX] = arguments[RIGHT_OPERAND];
+    Value bytes = offer_recipe_to_bytes(recipe_arguments, ARITY_ONE);
+    if (bytes.kind == KIND_NOTHING) return integer_value(-WORD_TRUE);
+    Value write_arguments[ARITY_TWO];
+    write_arguments[LEFT_OPERAND] = arguments[LEFT_OPERAND];
+    write_arguments[RIGHT_OPERAND] = bytes;
+    return offer_write_file_bytes(write_arguments, ARITY_TWO);
+}
+
+static Value offer_read_form_binary(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    Value read_arguments[ARITY_ONE];
+    read_arguments[FIRST_INDEX] = arguments[SOLE_OPERAND];
+    Value bytes = offer_read_file_bytes(read_arguments, ARITY_ONE);
+    if (bytes.kind == KIND_NOTHING) return nothing_value();
+    Value decode_arguments[ARITY_ONE];
+    decode_arguments[FIRST_INDEX] = bytes;
+    return offer_bytes_to_recipe(decode_arguments, ARITY_ONE);
+}
+
 static Value offer_read_file_slice(Value *arguments, size_t argument_count) {
     (void)argument_count;
     expect_kind(arguments[LEFT_OPERAND], KIND_TEXT, "read_file_slice expects a path");
@@ -2808,6 +3448,10 @@ static Value offer_read_file_slice(Value *arguments, size_t argument_count) {
     Value text = text_value(bytes, (size_t)filled);
     free(bytes);
     return text;
+}
+
+static Value offer_host_file_read_slice(Value *arguments, size_t argument_count) {
+    return offer_read_file_slice(arguments, argument_count);
 }
 
 static Value offer_host_file_read_text(Value *arguments, size_t argument_count) {
@@ -2851,6 +3495,18 @@ static Value offer_file_size(Value *arguments, size_t argument_count) {
     free(path);
     if (found != SYSTEM_CALL_OK) return integer_value(-WORD_TRUE);
     return integer_value((long long)info.st_size);
+}
+
+static Value offer_host_file_size(Value *arguments, size_t argument_count) {
+    return offer_file_size(arguments, argument_count);
+}
+
+static Value offer_host_file_mtime(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[SOLE_OPERAND], KIND_TEXT, "host_file_mtime expects text");
+    struct stat info;
+    if (stat(arguments[SOLE_OPERAND].text, &info) != SYSTEM_CALL_OK) return integer_value(-WORD_TRUE);
+    return integer_value((long long)info.st_mtime);
 }
 
 static Value offer_host_pid(Value *arguments, size_t argument_count) {
@@ -2900,6 +3556,115 @@ static Value offer_host_dir_mkdir(Value *arguments, size_t argument_count) {
     return integer_value(made == 0 ? WORD_FALSE : -WORD_TRUE);
 }
 
+static int remove_tree(const char *path) {
+    DIR *directory = opendir(path);
+    if (directory == NULL) return -WORD_TRUE;
+    struct dirent *entry = NULL;
+    while ((entry = readdir(directory)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+        size_t length = strlen(path);
+        size_t name_length = strlen(entry->d_name);
+        char *child = allocate_zeroed(checked_add(checked_add(length, name_length), ARITY_TWO), sizeof *child);
+        memcpy(child, path, length);
+        child[length] = PATH_SEPARATOR;
+        memcpy(child + length + ONE_ELEMENT, entry->d_name, name_length);
+        struct stat info;
+        int found = stat(child, &info);
+        int removed = -WORD_TRUE;
+        if (found == SYSTEM_CALL_OK && S_ISDIR(info.st_mode)) removed = remove_tree(child);
+        else removed = unlink(child) == SYSTEM_CALL_OK ? WORD_FALSE : -WORD_TRUE;
+        free(child);
+        if (removed != WORD_FALSE) {
+            closedir(directory);
+            return -WORD_TRUE;
+        }
+    }
+    closedir(directory);
+    return rmdir(path) == SYSTEM_CALL_OK ? WORD_FALSE : -WORD_TRUE;
+}
+
+static Value offer_host_dir_rmdir(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[SOLE_OPERAND], KIND_TEXT, "host_dir_rmdir expects a path");
+    char *path = copy_bytes(arguments[SOLE_OPERAND].text, arguments[SOLE_OPERAND].text_length);
+    int removed = remove_tree(path);
+    free(path);
+    return integer_value(removed);
+}
+
+static Value offer_host_path_exists(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[SOLE_OPERAND], KIND_TEXT, "host_path_exists expects a path");
+    return boolean_word(path_exists(arguments[SOLE_OPERAND].text));
+}
+
+static Value offer_host_path_is_dir(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[SOLE_OPERAND], KIND_TEXT, "host_path_is_dir expects a path");
+    return boolean_word(path_is_dir(arguments[SOLE_OPERAND].text));
+}
+
+static Value offer_host_path_remove(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[SOLE_OPERAND], KIND_TEXT, "host_path_remove expects a path");
+    return integer_value(unlink(arguments[SOLE_OPERAND].text) == SYSTEM_CALL_OK ? WORD_FALSE : -WORD_TRUE);
+}
+
+static Value offer_host_path_rename(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[LEFT_OPERAND], KIND_TEXT, "host_path_rename expects a source path");
+    expect_kind(arguments[RIGHT_OPERAND], KIND_TEXT, "host_path_rename expects a target path");
+    return integer_value(rename(arguments[LEFT_OPERAND].text, arguments[RIGHT_OPERAND].text) == SYSTEM_CALL_OK ? WORD_FALSE : -WORD_TRUE);
+}
+
+static Value offer_host_dir_list(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[SOLE_OPERAND], KIND_TEXT, "host_dir_list expects a path");
+    DIR *directory = opendir(arguments[SOLE_OPERAND].text);
+    if (directory == NULL) return nothing_value();
+    Value *rows = NULL;
+    size_t count = EMPTY_COUNT;
+    size_t capacity = EMPTY_COUNT;
+    struct dirent *entry = NULL;
+    while ((entry = readdir(directory)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+        size_t needed = checked_add(count, ONE_ELEMENT);
+        rows = grow_list(rows, &capacity, sizeof *rows, needed);
+        rows[count] = text_value(entry->d_name, strlen(entry->d_name));
+        count = needed;
+    }
+    closedir(directory);
+    return list_from(rows, count);
+}
+
+static Value offer_fs_exists(Value *arguments, size_t argument_count) {
+    return offer_host_path_exists(arguments, argument_count);
+}
+
+static Value offer_fs_is_dir(Value *arguments, size_t argument_count) {
+    return offer_host_path_is_dir(arguments, argument_count);
+}
+
+static Value offer_fs_mkdir(Value *arguments, size_t argument_count) {
+    return offer_host_dir_mkdir(arguments, argument_count);
+}
+
+static Value offer_fs_rmdir(Value *arguments, size_t argument_count) {
+    return offer_host_dir_rmdir(arguments, argument_count);
+}
+
+static Value offer_fs_remove(Value *arguments, size_t argument_count) {
+    return offer_host_path_remove(arguments, argument_count);
+}
+
+static Value offer_fs_rename(Value *arguments, size_t argument_count) {
+    return offer_host_path_rename(arguments, argument_count);
+}
+
+static Value offer_fs_list(Value *arguments, size_t argument_count) {
+    return offer_host_dir_list(arguments, argument_count);
+}
+
 static Value offer_host_spawn_quiet(Value *arguments, size_t argument_count) {
     (void)argument_count;
     expect_kind(arguments[SOLE_OPERAND], KIND_LIST, "host_spawn_quiet expects a command list");
@@ -2925,6 +3690,52 @@ static Value offer_host_spawn_quiet(Value *arguments, size_t argument_count) {
     free(argv);
     if (started != SYSTEM_CALL_OK) fail("host_spawn_quiet could not start");
     return integer_value((long long)pid);
+}
+
+static char *read_descriptor(int descriptor, size_t *length);
+
+static Value offer_host_capture(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[SOLE_OPERAND], KIND_LIST, "host_capture expects an argv list");
+    Value command = arguments[SOLE_OPERAND];
+    if (command.item_count == EMPTY_COUNT) return nothing_value();
+    char **argv = allocate_zeroed(checked_add(command.item_count, ONE_ELEMENT), sizeof *argv);
+    List *cursor = command.list;
+    for (size_t index = FIRST_INDEX; index < command.item_count; index = checked_add(index, ONE_ELEMENT)) {
+        expect_kind(cursor->head, KIND_TEXT, "host_capture expects text arguments");
+        argv[index] = cursor->head.text;
+        cursor = cursor->tail;
+    }
+    int outbound[ARITY_TWO];
+    if (pipe(outbound) != SYSTEM_CALL_OK) {
+        free(argv);
+        return nothing_value();
+    }
+    pid_t pid = fork();
+    if (pid < SYSTEM_CALL_OK) {
+        free(argv);
+        close(outbound[FIRST_INDEX]);
+        close(outbound[ONE_ELEMENT]);
+        return nothing_value();
+    }
+    if (pid == SYSTEM_CALL_OK) {
+        dup2(outbound[ONE_ELEMENT], STDOUT_FILENO);
+        close(outbound[FIRST_INDEX]);
+        close(outbound[ONE_ELEMENT]);
+        execvp(argv[FIRST_INDEX], argv);
+        _exit(127);
+    }
+    free(argv);
+    close(outbound[ONE_ELEMENT]);
+    size_t length = EMPTY_COUNT;
+    char *output = read_descriptor(outbound[FIRST_INDEX], &length);
+    close(outbound[FIRST_INDEX]);
+    int status = 0;
+    waitpid(pid, &status, 0);
+    if (output == NULL) return nothing_value();
+    Value value = text_value(output, length);
+    free(output);
+    return value;
 }
 
 static char *read_descriptor(int descriptor, size_t *length) {
@@ -2953,6 +3764,92 @@ static char *read_descriptor(int descriptor, size_t *length) {
         }
         filled = checked_add(filled, (size_t)step);
     }
+}
+
+static size_t line_count_in_text(const char *bytes, size_t length) {
+    if (length == EMPTY_COUNT) return EMPTY_COUNT;
+    size_t lines = ONE_ELEMENT;
+    for (size_t index = FIRST_INDEX; index < length; index = checked_add(index, ONE_ELEMENT)) {
+        if (bytes[index] == NEWLINE) lines = checked_add(lines, ONE_ELEMENT);
+    }
+    return lines;
+}
+
+static void append_inventory_row(Value **rows, size_t *count, size_t *capacity, const char *relative, size_t relative_length, long long lines) {
+    Value pair[ARITY_TWO];
+    pair[FIRST_INDEX] = text_value(relative, relative_length);
+    pair[ONE_ELEMENT] = integer_value(lines);
+    size_t needed = checked_add(*count, ONE_ELEMENT);
+    *rows = grow_list(*rows, capacity, sizeof **rows, needed);
+    (*rows)[*count] = list_from(pair, ARITY_TWO);
+    *count = needed;
+}
+
+static void walk_inventory(const char *root, const char *relative, const char *suffix, Value **rows, size_t *count, size_t *capacity) {
+    size_t root_length = strlen(root);
+    size_t relative_length = strlen(relative);
+    char *path = allocate_zeroed(checked_add(checked_add(root_length, relative_length), ARITY_TWO), sizeof *path);
+    memcpy(path, root, root_length);
+    if (relative_length != EMPTY_COUNT) {
+        path[root_length] = PATH_SEPARATOR;
+        memcpy(path + root_length + ONE_ELEMENT, relative, relative_length);
+    }
+    DIR *directory = opendir(path);
+    if (directory == NULL) {
+        free(path);
+        return;
+    }
+    struct dirent *entry = NULL;
+    while ((entry = readdir(directory)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+        size_t name_length = strlen(entry->d_name);
+        size_t child_rel_length = relative_length == EMPTY_COUNT ? name_length : checked_add(checked_add(relative_length, ONE_ELEMENT), name_length);
+        char *child_rel = allocate_zeroed(checked_add(child_rel_length, ONE_ELEMENT), sizeof *child_rel);
+        if (relative_length != EMPTY_COUNT) {
+            memcpy(child_rel, relative, relative_length);
+            child_rel[relative_length] = PATH_SEPARATOR;
+            memcpy(child_rel + relative_length + ONE_ELEMENT, entry->d_name, name_length);
+        } else {
+            memcpy(child_rel, entry->d_name, name_length);
+        }
+        char *child_path = allocate_zeroed(checked_add(checked_add(root_length, child_rel_length), ARITY_TWO), sizeof *child_path);
+        memcpy(child_path, root, root_length);
+        child_path[root_length] = PATH_SEPARATOR;
+        memcpy(child_path + root_length + ONE_ELEMENT, child_rel, child_rel_length);
+        struct stat info;
+        if (stat(child_path, &info) == SYSTEM_CALL_OK) {
+            if (S_ISDIR(info.st_mode)) {
+                walk_inventory(root, child_rel, suffix, rows, count, capacity);
+            } else if (suffix == NULL || suffix[0] == TEXT_TERMINATOR
+                       || (name_length >= strlen(suffix) && strcmp(entry->d_name + name_length - strlen(suffix), suffix) == 0)) {
+                int descriptor = open(child_path, O_RDONLY);
+                if (descriptor >= SYSTEM_CALL_OK) {
+                    size_t length = EMPTY_COUNT;
+                    char *contents = read_descriptor(descriptor, &length);
+                    close(descriptor);
+                    if (contents != NULL) {
+                        append_inventory_row(rows, count, capacity, child_rel, child_rel_length, (long long)line_count_in_text(contents, length));
+                        free(contents);
+                    }
+                }
+            }
+        }
+        free(child_path);
+        free(child_rel);
+    }
+    closedir(directory);
+    free(path);
+}
+
+static Value offer_source_inventory(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[FIRST_INDEX], KIND_TEXT, "source_inventory expects a root path");
+    expect_kind(arguments[ONE_ELEMENT], KIND_TEXT, "source_inventory expects a suffix");
+    Value *rows = NULL;
+    size_t count = EMPTY_COUNT;
+    size_t capacity = EMPTY_COUNT;
+    walk_inventory(arguments[FIRST_INDEX].text, "", arguments[ONE_ELEMENT].text, &rows, &count, &capacity);
+    return list_from(rows, count);
 }
 
 static Value offer_host_exec(Value *arguments, size_t argument_count) {
@@ -3070,6 +3967,19 @@ static Value offer_nothing(Value *arguments, size_t argument_count) {
     return boolean_word(arguments[SOLE_OPERAND].kind == KIND_NOTHING);
 }
 
+static Value offer_form_error(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    const char *message = "form_error";
+    size_t length = strlen(message);
+    if (arguments[SOLE_OPERAND].kind == KIND_TEXT) {
+        message = arguments[SOLE_OPERAND].text;
+        length = arguments[SOLE_OPERAND].text_length;
+    }
+    if (unwind_to_recovery()) return nothing_value();
+    fprintf(stderr, "fkwu: form_error: %.*s\n", (int)length, message);
+    exit(EXIT_FAILURE);
+}
+
 static Value offer_read_line(Value *arguments, size_t argument_count) {
     (void)arguments;
     (void)argument_count;
@@ -3088,6 +3998,20 @@ static Value offer_read_line(Value *arguments, size_t argument_count) {
     Value value = text_value(line, length);
     free(line);
     return value;
+}
+
+static Value offer_input_byte(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[SOLE_OPERAND], KIND_INTEGER, "input_byte expects an index");
+    long long index = arguments[SOLE_OPERAND].integer;
+    if (index < WORD_FALSE) return integer_value(WORD_FALSE);
+    if ((unsigned long long)index >= source_length) return integer_value(WORD_FALSE);
+    return integer_value((unsigned char)source_bytes[(size_t)index]);
+}
+
+static Value offer_value_eq(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    return boolean_word(values_equal(arguments[LEFT_OPERAND], arguments[RIGHT_OPERAND]));
 }
 
 static Value offer_file_mtime(Value *arguments, size_t argument_count) {
@@ -3595,6 +4519,112 @@ static Value offer_metal_live(Value *arguments, size_t argument_count) {
     return list_from(NULL, EMPTY_COUNT);
 }
 
+static Value offer_socket_listen(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[SOLE_OPERAND], KIND_INTEGER, "socket_listen expects a port");
+    int descriptor = socket(AF_INET, SOCK_STREAM, 0);
+    if (descriptor < SYSTEM_CALL_OK) return integer_value(-WORD_TRUE);
+    int yes = 1;
+    setsockopt(descriptor, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes);
+    struct sockaddr_in address;
+    memset(&address, 0, sizeof address);
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = htons((uint16_t)arguments[SOLE_OPERAND].integer);
+    if (bind(descriptor, (struct sockaddr *)&address, sizeof address) != SYSTEM_CALL_OK
+        || listen(descriptor, 16) != SYSTEM_CALL_OK) {
+        close(descriptor);
+        return integer_value(-WORD_TRUE);
+    }
+    return integer_value((long long)socket_put(descriptor));
+}
+
+static Value offer_socket_port(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[SOLE_OPERAND], KIND_INTEGER, "socket_port expects a handle");
+    int descriptor = socket_fetch(arguments[SOLE_OPERAND].integer);
+    if (descriptor < SYSTEM_CALL_OK) return integer_value(-WORD_TRUE);
+    struct sockaddr_in address;
+    socklen_t length = sizeof address;
+    if (getsockname(descriptor, (struct sockaddr *)&address, &length) != SYSTEM_CALL_OK) return integer_value(-WORD_TRUE);
+    return integer_value((long long)ntohs(address.sin_port));
+}
+
+static Value offer_socket_accept(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[SOLE_OPERAND], KIND_INTEGER, "socket_accept expects a handle");
+    int descriptor = socket_fetch(arguments[SOLE_OPERAND].integer);
+    if (descriptor < SYSTEM_CALL_OK) return integer_value(-WORD_TRUE);
+    int accepted = accept(descriptor, NULL, NULL);
+    if (accepted < SYSTEM_CALL_OK) return integer_value(-WORD_TRUE);
+    return integer_value((long long)socket_put(accepted));
+}
+
+static Value offer_socket_connect(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[LEFT_OPERAND], KIND_TEXT, "socket_connect expects a host");
+    expect_kind(arguments[RIGHT_OPERAND], KIND_INTEGER, "socket_connect expects a port");
+    int descriptor = socket(AF_INET, SOCK_STREAM, 0);
+    if (descriptor < SYSTEM_CALL_OK) return integer_value(-WORD_TRUE);
+    struct sockaddr_in address;
+    memset(&address, 0, sizeof address);
+    address.sin_family = AF_INET;
+    address.sin_port = htons((uint16_t)arguments[RIGHT_OPERAND].integer);
+    if (inet_pton(AF_INET, arguments[LEFT_OPERAND].text, &address.sin_addr) != 1
+        || connect(descriptor, (struct sockaddr *)&address, sizeof address) != SYSTEM_CALL_OK) {
+        close(descriptor);
+        return integer_value(-WORD_TRUE);
+    }
+    return integer_value((long long)socket_put(descriptor));
+}
+
+static Value offer_socket_send(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[LEFT_OPERAND], KIND_INTEGER, "socket_send expects a handle");
+    int descriptor = socket_fetch(arguments[LEFT_OPERAND].integer);
+    if (descriptor < SYSTEM_CALL_OK) return integer_value(-WORD_TRUE);
+    if (arguments[RIGHT_OPERAND].kind == KIND_TEXT) {
+        ssize_t sent = send(descriptor, arguments[RIGHT_OPERAND].text, arguments[RIGHT_OPERAND].text_length, 0);
+        return integer_value(sent < SYSTEM_CALL_OK ? -WORD_TRUE : (long long)sent);
+    }
+    unsigned char *bytes = NULL;
+    size_t length = EMPTY_COUNT;
+    if (!list_to_bytes(arguments[RIGHT_OPERAND], &bytes, &length)) return integer_value(-WORD_TRUE);
+    ssize_t sent = send(descriptor, bytes, length, 0);
+    free(bytes);
+    return integer_value(sent < SYSTEM_CALL_OK ? -WORD_TRUE : (long long)sent);
+}
+
+static Value offer_socket_recv(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[LEFT_OPERAND], KIND_INTEGER, "socket_recv expects a handle");
+    expect_kind(arguments[RIGHT_OPERAND], KIND_INTEGER, "socket_recv expects a max byte count");
+    int descriptor = socket_fetch(arguments[LEFT_OPERAND].integer);
+    if (descriptor < SYSTEM_CALL_OK) return nothing_value();
+    long long max = arguments[RIGHT_OPERAND].integer;
+    if (max < WORD_FALSE) return nothing_value();
+    size_t budget = (size_t)max;
+    unsigned char *bytes = allocate_zeroed(budget == EMPTY_COUNT ? ONE_ELEMENT : budget, sizeof *bytes);
+    ssize_t got = recv(descriptor, bytes, budget, 0);
+    if (got < SYSTEM_CALL_OK) {
+        free(bytes);
+        return nothing_value();
+    }
+    Value value = text_value((char *)bytes, (size_t)got);
+    free(bytes);
+    return value;
+}
+
+static Value offer_socket_close(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[SOLE_OPERAND], KIND_INTEGER, "socket_close expects a handle");
+    int descriptor = socket_fetch(arguments[SOLE_OPERAND].integer);
+    if (descriptor < SYSTEM_CALL_OK) return integer_value(-WORD_TRUE);
+    int closed = close(descriptor);
+    socket_release(arguments[SOLE_OPERAND].integer);
+    return integer_value(closed == SYSTEM_CALL_OK ? WORD_FALSE : -WORD_TRUE);
+}
+
 static Value offer_list(Value *arguments, size_t argument_count) {
     return list_from(arguments, argument_count);
 }
@@ -3655,6 +4685,12 @@ static void register_builtin_operations(void) {
     register_operation("record_has", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_record_has);
     register_operation("record_get", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_record_get);
     register_operation("record_set", ARITY_THREE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_record_set);
+    register_operation("record?", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_record_type);
+    register_operation("record_blueprint", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_record_blueprint);
+    register_operation("record_keys", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_record_keys);
+    register_operation("method_define", ARITY_THREE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_method_define);
+    register_operation("method_has", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_method_has);
+    register_operation("method_invoke", ARITY_NONE, VARIADIC, EVALUATE_ARGUMENTS, OP_PRINT, offer_method_invoke);
     register_operation("byte_to_str", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_byte_to_str);
     register_operation("str_len", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_str_len);
     register_operation("substring", ARITY_THREE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_substring);
@@ -3665,8 +4701,24 @@ static void register_builtin_operations(void) {
     register_operation("str_find", ARITY_THREE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_str_find);
     operation_answers("str_find");
     register_operation("str_to_int", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_str_to_int);
+    register_operation("str_to_float", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_str_to_float);
+    register_operation("float_to_int", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_float_to_int);
+    register_operation("float_value", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_float_value);
+    register_operation("make_float32", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_make_float32);
+    register_operation("make_float64", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_make_float64);
+    register_operation("intern_trivial_float", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_intern_trivial_float);
+    register_operation("float_leaf", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_float_leaf);
+    register_operation("math_pi", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_math_pi);
+    register_operation("math_sqrt", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_math_sqrt);
+    register_operation("math_exp", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_math_exp);
+    register_operation("math_log", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_math_log);
+    register_operation("math_pow", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_math_pow);
+    register_operation("round_ndigits", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_round_ndigits);
     register_operation("str_byte_at", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_str_byte_at);
     register_operation("value_str", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_value_str);
+    register_operation("value_eq", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_value_eq);
+    register_operation("_get", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_get);
+    register_operation("bp", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_bp);
     register_operation("range", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_range);
     register_operation("host_sleep_ms", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_sleep_ms);
     register_operation("host_monotonic_ms", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_monotonic_ms);
@@ -3676,16 +4728,44 @@ static void register_builtin_operations(void) {
     register_operation("host_kill", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_kill);
     register_operation("host_wait", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_wait);
     register_operation("host_dir_mkdir", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_dir_mkdir);
+    register_operation("fs_mkdir", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_fs_mkdir);
+    register_operation("host_dir_rmdir", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_dir_rmdir);
+    register_operation("fs_rmdir", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_fs_rmdir);
+    register_operation("host_path_exists", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_path_exists);
+    register_operation("fs_exists", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_fs_exists);
+    register_operation("host_path_is_dir", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_path_is_dir);
+    register_operation("fs_is_dir", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_fs_is_dir);
+    register_operation("host_path_remove", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_path_remove);
+    register_operation("fs_remove", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_fs_remove);
+    register_operation("host_path_rename", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_path_rename);
+    register_operation("fs_rename", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_fs_rename);
+    register_operation("host_dir_list", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_dir_list);
+    register_operation("fs_list", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_fs_list);
     register_operation("host_pid", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_pid);
     register_operation("temp_dir", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_temp_dir);
     register_operation("host_temp_dir", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_temp_dir);
     register_operation("host_cwd", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_cwd);
     register_operation("host_file_write_text", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_file_write_text);
+    register_operation("write_file", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_write_file);
+    register_operation("write_file_text", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_write_file_text);
+    register_operation("write_file_bytes", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_write_file_bytes);
     register_operation("file_append_bytes", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_file_append_bytes);
     register_operation("host_file_append_bytes", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_file_append_bytes);
     register_operation("file_size", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_file_size);
+    register_operation("host_file_size", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_file_size);
+    register_operation("host_file_mtime", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_file_mtime);
     register_operation("host_file_read_text", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_file_read_text);
+    register_operation("read_file", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_read_file);
+    register_operation("read_file_bytes", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_read_file_bytes);
     register_operation("read_file_slice", ARITY_THREE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_read_file_slice);
+    register_operation("host_file_read_slice", ARITY_THREE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_file_read_slice);
+    register_operation("recipe_to_bytes", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_recipe_to_bytes);
+    register_operation("bytes_to_recipe", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_bytes_to_recipe);
+    register_operation("write_form_binary", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_write_form_binary);
+    register_operation("read_form_binary", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_read_form_binary);
+    register_operation("source_inventory", ARITY_THREE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_source_inventory);
+    register_operation("host_capture", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_capture);
+    register_operation("input_byte", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_input_byte);
     register_operation("terminal_cols", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_terminal_cols);
     register_operation("shm_offer", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_shm_offer);
     register_operation("shm_receive", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_shm_receive);
@@ -3710,6 +4790,14 @@ static void register_builtin_operations(void) {
     register_operation("node_children", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_node_children);
     register_operation("node_source", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_node_source);
     register_operation("host-exec", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_exec);
+    register_operation("form_error", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_form_error);
+    register_operation("socket_listen", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_socket_listen);
+    register_operation("socket_port", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_socket_port);
+    register_operation("socket_accept", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_socket_accept);
+    register_operation("socket_connect", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_socket_connect);
+    register_operation("socket_send", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_socket_send);
+    register_operation("socket_recv", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_socket_recv);
+    register_operation("socket_close", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_socket_close);
     register_operation("gift_roster_names", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_gift_roster_names);
     register_operation("gift_roster_register", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_gift_roster_register);
     register_operation("add_u32", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_add_u32);
@@ -4252,8 +5340,7 @@ static void step_try(size_t index) {
     fail("a try did not offer a result");
 }
 
-static void step_fail(size_t index) {
-    (void)index;
+static int unwind_to_recovery(void) {
     for (size_t cursor = frame_count; cursor > FIRST_INDEX; ) {
         cursor -= ONE_ELEMENT;
         if (frames[cursor].kind == FRAME_CHOICE) {
@@ -4261,15 +5348,21 @@ static void step_fail(size_t index) {
             frames[cursor].stage = checked_add(frames[cursor].stage, ONE_ELEMENT);
             local_count = frames[cursor].local_base;
             frame_count = checked_add(cursor, ONE_ELEMENT);
-            return;
+            return 1;
         }
         if (frames[cursor].kind != FRAME_TRY || frames[cursor].stage == TRY_STAGE_HANDLER) continue;
         frames[cursor].has_incoming = 0;
         frames[cursor].stage = TRY_STAGE_HANDLER;
         local_count = frames[cursor].local_base;
         frame_count = checked_add(cursor, ONE_ELEMENT);
-        return;
+        return 1;
     }
+    return 0;
+}
+
+static void step_fail(size_t index) {
+    (void)index;
+    if (unwind_to_recovery()) return;
     fail("a failure was not caught");
 }
 
@@ -4347,6 +5440,77 @@ static void drive(Form *program) {
         else fail("an evaluation frame has an unknown kind");
     }
     if (!result_ready) fail("the program produced no result");
+}
+
+static void drive_active_frames(void) {
+    while (frame_count != EMPTY_COUNT) {
+        size_t index = frame_count - ONE_ELEMENT;
+        FrameKind kind = frames[index].kind;
+        if (kind == FRAME_SEQUENCE) step_series(index, 0);
+        else if (kind == FRAME_DO) step_series(index, 1);
+        else if (kind == FRAME_AND) step_and(index);
+        else if (kind == FRAME_IF) step_if(index);
+        else if (kind == FRAME_OR) step_or(index);
+        else if (kind == FRAME_EAGER) step_eager(index);
+        else if (kind == FRAME_FUNCTION) step_function(index);
+        else if (kind == FRAME_LET) step_let(index);
+        else if (kind == FRAME_LAMBDA) step_lambda(index);
+        else if (kind == FRAME_COALESCE) step_coalesce(index);
+        else if (kind == FRAME_TRY) step_try(index);
+        else if (kind == FRAME_CHOICE) step_choice(index);
+        else if (kind == FRAME_FAIL) step_fail(index);
+        else if (kind == FRAME_APPLY) step_apply(index);
+        else fail("an evaluation frame has an unknown kind");
+    }
+}
+
+static Value invoke_function_value(Value function, Value *arguments, size_t argument_count) {
+    if (function.kind != KIND_FUNCTION) fail("method_invoke expects a function value");
+    if (argument_count != function.parameter_count) fail("a function received the wrong number of arguments");
+    Frame *saved_frames = frames;
+    size_t saved_frame_count = frame_count;
+    size_t saved_frame_capacity = frame_capacity;
+    Binding *saved_locals = locals;
+    size_t saved_local_count = local_count;
+    size_t saved_local_capacity = local_capacity;
+    Value saved_finished = finished;
+    int saved_result_ready = result_ready;
+
+    frames = NULL;
+    frame_count = EMPTY_COUNT;
+    frame_capacity = EMPTY_COUNT;
+    locals = NULL;
+    local_count = EMPTY_COUNT;
+    local_capacity = EMPTY_COUNT;
+    finished = nothing_value();
+    result_ready = 0;
+
+    Frame *frame = append_frame();
+    frame->kind = FRAME_FUNCTION;
+    frame->callee = function;
+    frame->local_base = EMPTY_COUNT;
+    for (size_t capture = FIRST_INDEX; capture < function.capture_count; capture = checked_add(capture, ONE_ELEMENT)) {
+        append_local(function.captures[capture].bytes, function.captures[capture].length, function.captures[capture].value);
+    }
+    for (size_t index = FIRST_INDEX; index < argument_count; index = checked_add(index, ONE_ELEMENT)) {
+        append_local(function.parameters[index].bytes, function.parameters[index].length, arguments[index]);
+    }
+    offer_form(function.body);
+    drive_active_frames();
+    if (!result_ready) fail("the function produced no result");
+    Value result = finished;
+
+    free(frames);
+    free(locals);
+    frames = saved_frames;
+    frame_count = saved_frame_count;
+    frame_capacity = saved_frame_capacity;
+    locals = saved_locals;
+    local_count = saved_local_count;
+    local_capacity = saved_local_capacity;
+    finished = saved_finished;
+    result_ready = saved_result_ready;
+    return result;
 }
 
 typedef struct {
@@ -5163,7 +6327,7 @@ static Form *parse_bml_expression(void) {
     }
     if (take_keyword(TRY_WORD)) {
         Form *body = parse_bml_expression();
-        if (!take_keyword("catch")) fail_at(source_offset, "a try is missing catch");
+        if (!take_keyword("catch") && !take_keyword("else")) fail_at(source_offset, "a try is missing catch");
         Form *handler = parse_bml_expression();
         Form *try_arguments[] = {body, handler};
         return form_call(TRY_WORD, try_arguments, ARITY_TWO, opening);
@@ -5290,7 +6454,10 @@ static Form *parse_bml_definition(void) {
     } else {
         expect_character(NAME_MARK, "a definition is missing its body");
         body = parse_bml_expression();
-        expect_character(STATEMENT_END, "a definition was not finished");
+        skip_bml();
+        if (source_offset < source_length && source_bytes[source_offset] == STATEMENT_END) {
+            source_offset = checked_add(source_offset, ONE_ELEMENT);
+        }
     }
     return definition_form(name, parameters, body);
 }
@@ -5299,7 +6466,10 @@ static Form *parse_pattern_binding(size_t opening) {
     Form *pattern = parse_bml_list();
     expect_character(NAME_MARK, "a binding is missing its value");
     Form *value = parse_bml_expression();
-    expect_character(STATEMENT_END, "a binding was not finished");
+    skip_bml();
+    if (source_offset < source_length && source_bytes[source_offset] == STATEMENT_END) {
+        source_offset = checked_add(source_offset, ONE_ELEMENT);
+    }
     Form *holder = match_subject_name(opening);
     Form **statements = NULL;
     size_t statement_count = EMPTY_COUNT;
@@ -5320,9 +6490,19 @@ static Form *parse_bml_binding(void) {
     skip_bml();
     if (source_offset < source_length && source_bytes[source_offset] == INDEX_OPEN) return parse_pattern_binding(source_offset);
     Form *name = read_bml_symbol();
+    skip_bml();
+    if (source_offset < source_length && source_bytes[source_offset] == PAIR_MARK) {
+        source_offset = checked_add(source_offset, ONE_ELEMENT);
+        skip_bml();
+        read_bml_symbol();
+        skip_type_arguments();
+    }
     expect_character(NAME_MARK, "a binding is missing its value");
     Form *value = parse_bml_expression();
-    expect_character(STATEMENT_END, "a binding was not finished");
+    skip_bml();
+    if (source_offset < source_length && source_bytes[source_offset] == STATEMENT_END) {
+        source_offset = checked_add(source_offset, ONE_ELEMENT);
+    }
     Form *arguments[] = {name, value};
     return form_call("let", arguments, ARITY_TWO, name->offset);
 }
@@ -5337,7 +6517,10 @@ static void parse_bml_statements(Form ***forms, size_t *count, size_t *capacity)
         }
         if (take_keyword("defer")) {
             Form *deferred = parse_bml_expression();
-            expect_character(STATEMENT_END, "a defer was not finished");
+            skip_bml();
+            if (source_offset < source_length && source_bytes[source_offset] == STATEMENT_END) {
+                source_offset = checked_add(source_offset, ONE_ELEMENT);
+            }
             Form **rest = NULL;
             size_t rest_count = EMPTY_COUNT;
             size_t rest_capacity = EMPTY_COUNT;
@@ -5471,7 +6654,10 @@ static Form **parse_bml_source(size_t *form_count) {
         if (source_offset >= source_length) break;
         if (take_keyword(IMPORT_WORD)) {
             char *relative = read_import_path();
-            expect_character(STATEMENT_END, "an import was not finished");
+            skip_bml();
+            if (source_offset < source_length && source_bytes[source_offset] == STATEMENT_END) {
+                source_offset = checked_add(source_offset, ONE_ELEMENT);
+            }
             load_unit(source_path, relative);
             free(relative);
             continue;

@@ -80,3 +80,40 @@ sixteen such rows). Read against the seed's working copy:
 
 Rented reading: this receipt was read and written by a rented mind (Anthropic claude-fable-5-1) through the
 native doors; no line of the seed was written by it.
+
+## Cursor lane update — 2026-11-06 17:xx WITA
+
+The rewrite lane committed its carried continuation first:
+
+```text
+git commit "The continuation in progress: interned cells, node gifts, string and time doors"
+-> 2c9a98115
+```
+
+Then the lane moved only `runtime/fkwu-uni.c`, adding registry spellings and
+semantics for the first missing doors (`read_file`, `fs_is_dir`,
+`host_capture`, `host_cwd` already stood), plus many of the listed 58 names:
+filesystem aliases, record/method rows, float/math rows, socket rows, and
+`source_inventory`; and the reader now accepts `let name: Type = …` and
+`try X else Y`.
+
+Observed now, on this rewritten runtime (`cc -O2 -o fkwu runtime/fkwu-uni.c`,
+exit 0, no warnings):
+
+```text
+./fkwu form/form-stdlib/tests/binary-freshness-band.fk  -> 31, exit 0
+```
+
+What still stops, and where:
+
+```text
+./fkwu form/form-stdlib/primitive-registry.fk      -> "an expression was not finished" at byte 4512, exit 1
+./fkwu form/form-stdlib/tests/door-options-band.bml -> "an index was not closed" at byte 1367 in form/form-stdlib/json-precise.bml, exit 1
+./fkwu gate/canonical-conformance-run.bml          -> "an expression was not finished" at byte 16325 in gate/lens-text.bml, exit 1
+./fkwu observe/door-link-health-run.bml            -> "an index was not closed" at byte 4203 in form/form-stdlib/bml/parse.bml, exit 1
+./fkwu observe/band-truth-run.bml                  -> "an index was not closed" at byte 27695 in form/form-stdlib/bml/band-truth.bml, exit 1
+```
+
+So the blocker has moved from unbound primitive names to reader coverage in
+the BML lane (index/form parsing at those bytes), and the next movement is in
+that parser seam.
