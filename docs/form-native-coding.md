@@ -597,9 +597,12 @@ included in total generated/injected IDs and observations. The journal and
 graph links use the existing checkpoint, with no separate graph store.
 
 The consultation key includes phase, pending work, plan/brief, exact current
-observation and failure evidence, selected source identities, caller corrections
-and helper request. Identical resumed context does not spend a second call;
-changed evidence can invite another within any explicit caller allowance. A retained
+observation and failure evidence, all retained source identities, caller corrections,
+completed effects and the graph/helper request. Identical resumed context does not
+spend a second call. An observed repeated successful full or ranged read of source supplied to a
+completed consultation reuses advice for the same work even when its care note
+changes. Reads of omitted source and unfinished advice remain eligible. Counters alone do not
+renew consultation; changed evidence can invite another within any explicit caller allowance. A retained
 pending consultation without observed release holds continuation rather than
 starting an overlapping model. `form-cli-code-bounded-note-band` exercises these
 contracts with scripted model ports; an actual model run separately establishes
