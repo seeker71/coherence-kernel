@@ -74,10 +74,19 @@ with. Music and nature reach the ear as passes that name only the room's sound
 (`[MUSIC]`, `(water running)`); the sensor keeps those over the last 30 s of
 frames and gives one `ear.room.named` row, which the view shows under its
 header (`room: [MUSIC] named 8x in the last 10 s`). A line heard with six or
-more of them in the 10 s before it is heard over the room's sound. A growing
-line from lanes that are no longer standing is not shown as growing. A newborn
-ear sensor reads the spool from its last 64 KiB (`ea-birth-mark`). Witness:
-`form/form-stdlib/tests/glass-transcripts-band.bml` (2047). Selection changes what is displayed, not
+more of them in the 10 s before it is heard over the room's sound. A line with
+two doubts about whether anyone said it (tongue, room, tag, let go) is
+`withheld`: the slot shows the doubt, not the words, and `i` still inspects
+them. A growing line is painted by what consecutive passes agree on
+(`ea-agree`): a word stands once two passes in a row agree on it and every word
+before it, a standing word is not taken back while the line is open, and the
+tentative rest of the newest pass paints dimmer; the close's reviewed line
+replaces the slot. A growing line whose live slot holds no words for 5 s is
+`let go unclosed`. A growing line from lanes that are no longer standing is not
+shown as growing. The ear gives every 40 ms while a line grows, 100 ms in a
+quiet room, 500 ms asleep. A newborn ear sensor reads the spool from its last
+64 KiB (`ea-birth-mark`). Witness:
+`form/form-stdlib/tests/glass-transcripts-band.bml` (32767). Selection changes what is displayed, not
 which translations the ear produces. Missing selected languages say they are
 unpublished. Selecting a language never opens a microphone or admits a model.
 The shared natural-language catalog is in `bml/transcript-languages.bml`.
