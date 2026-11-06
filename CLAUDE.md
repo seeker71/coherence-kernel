@@ -26,9 +26,9 @@ The kernel's orientation lives in [`MANIFEST.md`](MANIFEST.md); what stands toda
 (`AGENTS.md`, "The standing guide"). Every observation is an invitation to improve, reimagine, realign, dream
 bigger, shine light into forgotten dark spots and lift each part to its highest frequency. Dead tissue leaves;
 workarounds leave once the body carries the thing natively; an improved flow becomes the only flow; a dark spot met
-on the way is healed, not noted. Handle an issue here, in this context, while it is whole — never hand it to a new
-session or agent that must re-read and rebuild it. Code meets surprise as a live signal it backtracks on right away,
-not as a band read after the fact.
+on the way is healed, not noted. An issue is handled here, in this context, while it is whole: the repair stays in the
+active context that found it, and another chat, subagent or model session is no token-saving substitute (`AGENTS.md`,
+"The shared loop"). Code meets surprise as a live signal it backtracks on right away, not as a band read after the fact.
 
 **A surprise is a choice point, never a stopping point** (`AGENTS.md` item 6b). An issue or gap found mid-work —
 a red check, a band short of full, a missing file, a tool that stops — is a backtrack point: keep the first
@@ -58,11 +58,13 @@ line, never a stream.
 
 Work through the body's own tools and flows (Urs, 2026-09-28): the edit tool or the body's doors, `./fkwu` cells and BML,
 the native agent tools ([`docs/form-native-agent-tools.md`](docs/form-native-agent-tools.md)), and the body's own `awk`
-and `path`, which select, transform and compute over its recipes, blueprints and cells with Form's choice. Never the
-host's perl, python, sed or awk: a missing internal tool is written into the body in the same movement. The body's spawn
-doors refuse those tools with a named ending ([`spawn-guard.bml`](form/form-stdlib/bml/spawn-guard.bml)) and
-`observe/forbidden-tools-audit-run.bml` counts what agents ran in their own Bash calls; nothing refuses a Claude Code
-Bash call but your own compliance (no hook, by Urs's direction).
+and `path`, which select, transform and compute over its recipes, blueprints and cells with Form's choice. The host's
+perl, python, sed and awk stay outside the body: a missing internal tool is written into the body in the same movement
+(`AGENTS.md`, "Enrich the response with Form"). The body's spawn doors read each child before it begins and end a host
+tool's command with a named line saying what the body carries instead
+([`spawn-guard.bml`](form/form-stdlib/bml/spawn-guard.bml)); `observe/forbidden-tools-audit-run.bml` mirrors what agents
+ran in their own Bash calls, after the fact. No hook stands between a Claude Code Bash call and its run (Urs's direction):
+the mirror shows, the writer decides.
 
 Attune before writing: read a receipt or two and borrow the body's words
 ([`teachings/voice-attunement.md`](teachings/voice-attunement.md)); `observe/voice-frequency-run.fk` is a mirror,

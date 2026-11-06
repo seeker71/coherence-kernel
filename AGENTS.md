@@ -164,16 +164,18 @@ only kinds the body names (Form, the C seed, documents and data: `gate/structura
 any other file, a script of any language included, outside its declared carriers); perl, python, sed, awk and jq do not
 become implementation or analysis detours. The body holds this for sed, awk, perl and python at its own doors:
 every door that begins a child (the walk's `hch-run`, the control language's doors, the heal and findings doors)
-reads the argv or shell line first through `form/form-stdlib/bml/spawn-guard.bml`, and a command that runs one gets a
-named ending (`forbidden-tool <names>: not used here; <what to use>`) and is never begun. What an agent ran in its own
-Bash calls shows in its transcript: `./fkwu observe/forbidden-tools-audit-run.bml` reads the transcripts of this repo's
-checkouts and tallies the slips, and the land cadence prints the tally of its own window as a lens beside the gates each
-breath. The reading and what it cannot see: `form/form-stdlib/bml/command-words.bml`.
+reads the argv or shell line first through `form/form-stdlib/bml/spawn-guard.bml`, and a command that runs one ends with
+a named line (`host-tool <names>: not used here; the body carries its own awk and path, the edit door, read_file, ...`)
+and is never begun. What an agent ran in its own Bash calls shows in its transcript:
+`./fkwu observe/forbidden-tools-audit-run.bml` reads the transcripts of this repo's checkouts and mirrors the count, and
+the land cadence prints the count of its own window as a lens beside the gates each breath. The reading and what it
+cannot see: `form/form-stdlib/bml/command-words.bml`.
 
-**Said plainly, so no one leans on more than stands:** the rule is enforced at the body's spawn doors and observed in
-the audit lens. A Claude Code Bash or Monitor call is refused by nothing but the agent's own compliance: there is no
-hook, and none will be added; Urs chose that direction (no hook, no tool outside Form). A slip in an agent's own Bash
-call is counted afterward in its transcript, never stopped, so keeping it rests with whoever holds the call.
+**Said plainly, so no one leans on more than stands:** the body's own spawn doors read every child before it begins, and
+the audit lens mirrors afterward. A Claude Code Bash or Monitor call runs as the agent chose it: no hook stands between
+the call and its run, and none is planned; Urs chose that direction (no hook, no tool outside Form). What an agent's own
+Bash call ran is counted afterward in its transcript, so the boundary rests with whoever holds the call: the mirror
+shows, the writer decides.
 
 ### Enrich the response with Form
 

@@ -151,11 +151,13 @@ form-stdlib/tests/spawn-guard-band       -> 131071  (form-stdlib/bml/spawn-guard
                                             ["sed",..] by its first element, through the wrappers command-words knows, `sh -c` by the line it
                                             carries (sh, bash, zsh, dash, ksh, ash, csh, tcsh, fish), a shell given a script file by the file's
                                             text, a bare shell by its input, also behind a wrapper or by `-` and `-s` (`["env","bash"]` fed
-                                            `sed p f` is refused), pythonw as python; the census classes are read too: no file called `fixed`
-                                            holds a forbidden tool as a quoted command word. A refusal is a
-                                            named ending: hch-run-with answers [nothing(), "", "birth refused: forbidden-tool sed: not used
-                                            here; <way>"], the control language answers nothing=forbidden-tool:sed (use the edit door,
-                                            read_file, ./fkwu cells and BML), the pid natives -5, host_capture and host-exec nothing(). A warm
+                                            `sed p f` is read), pythonw as python; the census classes are read too: no file called `fixed`
+                                            holds a host tool as a quoted command word. A host tool's command is never begun and ends with a
+                                            named line: hch-run-with answers [nothing(), "", "birth refused: host-tool sed: not used
+                                            here; the body carries its own awk and path, the edit door, read_file, fs_list, ./fkwu cells and
+                                            BML ..."], the control language answers nothing=host-tool:sed (the body carries its own awk and
+                                            path, the edit door, read_file, ./fkwu cells and BML), the pid natives -5, host_capture and
+                                            host-exec nothing(). A warm
                                             argv reading is about 6 us (5000 in 32 ms), a `sh -c` line about 90 us (500 in 46 ms; 2026-10-04,
                                             this Mac). Doors that ask: host-child, form-token-verbs, form-cli-heal-native-io and -process,
                                             findings-requests, form-cli-code-circle, native-source-inventory, native-pipe-darwin, metal-ask,
@@ -169,10 +171,12 @@ form-stdlib/tests/spawn-guard-band       -> 131071  (form-stdlib/bml/spawn-guard
                                             agent the commands counted, the flagged ones and their first 160 bytes newest first, then a totals
                                             line and a note; the last line is the lens reading (flagged + 1). stdin
                                             `{"breath":1,"since_hours":N,"session":"<id>","scope":"all","top":N}`, every key optional and a
-                                            request that does not read refused by name (exit 1). `{"breath":1}` is the land cadence's lens: it
+                                            request that does not read ends by name (exit 1). `{"breath":1}` is the land cadence's lens: it
                                             reads the window from the stamp the last breath left (`.hearth/forbidden-breath`; the first breath
-                                            reads six hours), opening only files written inside it, and says `forbidden-tool commands since
-                                            last breath: N (<from> to <to>)`; 2 s a breath where the whole read costs 94 s and grows, and
+                                            reads six hours), opening only files written inside it, and says `host-tool commands (sed, awk,
+                                            perl, python) since last breath: N (<from> to <to>); the mirror shows, the writer decides: no hook
+                                            stands at a Bash call` (the count is a mirror, by Urs's direction: no hook refuses a Bash call);
+                                            2 s a breath where the whole read costs 94 s and grows, and
                                             deleting old transcripts does not move it; the total is `{}` on demand. Read in chunks by
                                             str_find over the bytes with the command string read in place (no row parsed into nodes); a tool_use
                                             id counts once across transcripts. 2026-10-04: this session's 130 MB transcript with its 44
@@ -182,7 +186,7 @@ form-stdlib/tests/spawn-guard-band       -> 131071  (form-stdlib/bml/spawn-guard
                                             with the note under it)
 form-stdlib/tests/forbidden-tools-audit-band -> 65535  (the breath window opened at a stamp or six hours back, files older than the window not
                                             opened, the door as a child with a scratch stamp (first breath, second breath, only a breath moves
-                                            it), refused requests that leave the stamp as it was; a synthetic tree of two projects, three sessions and one subagent: eleven
+                                            it), requests that do not read and leave the stamp as it was; a synthetic tree of two projects, three sessions and one subagent: eleven
                                             distinct commands, seven flagged, with a duplicated tool_use id counted once, the Read tool's row and a
                                             tool_result quoting a Bash call as escaped text adding nothing, a command whose key is not first, an
                                             escaped quote, a window on the row's own time, scope and session filters, 4096-byte and 100-byte
@@ -238,14 +242,14 @@ native-turn-ladder-band 1048575 · local-flow-reading-band 8388607  (a memory en
                                 tried approach and no option of the review; its checkpoint is the resume's target, with no failure text)
                                 (the review's phase fold is standing: every option whose lane output this host holds, in its own
                                 checkout or the walk's, is folded once into the ledger row with its nine phases, each one's share of
-                                the wall, its renewals and the prompt IDs they re-fed; a lane killed at its deadline writes no counts
+                                the wall, its renewals and the prompt IDs they re-fed; a lane stopped at its deadline writes no counts
                                 and its counts are folded from its stamps and said so; the day option reproduces to the ms)
 host-walk-band 9007199254740991  (a walk door that claims the checkout stamps its slot in `.hearth/walk.began` (one row per door:
                                 pid, unix ms, door) under the lock it holds; a later start of the same door that finds its own
                                 row under 25 minutes old (hw-slot-window-ms: the retry gap plus slack, far under the two-hour
                                 windows and the eight hours between slots) ends 0 with `[walk-lock] <door> already began at <hh:mm>
                                 (a retry slot finds the night begun; ...)` and claims nothing; the stamp marks began, not success, so a
-                                start killed before its claim leaves none and a walk that crashed after it is not retried inside the
+                                start stopped before its claim leaves none and a walk that crashed after it is not retried inside the
                                 window (the next slot's heal and yield carry it); the other door's row is another slot; a hand start
                                 inside the window is refused too and `{"again":1}` on the door's stdin starts it; claims `began`,
                                 `began-plants` (a begin that never stamps, one that compares the window with the wrong inequality,
@@ -1376,11 +1380,11 @@ What answered red, died, or was not witnessed today, so no one leans on it:
   explained; the retry job (above) survives one and keeps the evidence of the next in `.hearth/walk-retry.jsonl`, which is how it will be
   learned.
 
-- A Claude Code Bash or Monitor call is refused by nothing but the agent's own compliance. No hook stands
-  (Urs's direction: no hook, no non-Form tool). The rule is enforced at the body's own spawn doors
-  (`spawn-guard.bml`: every door of the body that begins a child asks it) and observed afterward in the audit
-  lens (`forbidden-tools-audit-run.bml`, the land cadence's fourth reading): a slip by an agent's own Bash call
-  is counted in its transcript, not stopped.
+- A Claude Code Bash or Monitor call runs as the agent chose it: no hook stands between the call and its run
+  (Urs's direction: no hook, no non-Form tool). The body's own spawn doors read every child before it begins
+  (`spawn-guard.bml`: every door of the body that begins a child asks it), and the audit lens mirrors afterward
+  (`forbidden-tools-audit-run.bml`, the land cadence's fourth reading) what an agent's own Bash calls ran, counted
+  in its transcript: the mirror shows, the writer decides.
 
 - The double-click and hot-key launcher of the live ear glass is gone. `Sema Ear Glass.command` was a
   shell file that opened a full-screen terminal on `observe/ear-glass-live.fk`, and a Shortcut could be bound
