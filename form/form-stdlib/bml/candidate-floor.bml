@@ -1,0 +1,83 @@
+// candidate-floor.bml — the resident reads a candidate kernel against the body's bands.
+// Enumeration and workload roots belong to band-sweep; pins belong to band-head.
+// Each candidate invocation crosses host-child by argv, with its own deadline.
+// Rows are [path, last-line-or-nothing, head-pin-or-nothing, exit-or-nothing, class].
+// An absent pin or a number above its pin cannot establish full or short: it is stop.
+// Child input/output/exit evidence stays under .hearth/candidate-floor/<pid>-<time>/.
+// preludes: form-stdlib/bml/band-sweep.bml form-stdlib/bml/host-fs.bml form-stdlib/bml/form-agent-pattern.bml
+section [form.bml] {
+ class CandidateFloor {
+  def cfl-spec() = [["fkwu", "str"], ["match", "str"], ["deadline_s", "int"]];
+  def cfl-doc(text) = dop-doc("candidate-floor", text, cfl-spec());
+  def cfl-refuse(why) = dop-refuse("candidate-floor", why);
+  def cfl-fkwu(doc) = json-string-value(json-object-get(doc, "fkwu"));
+  def cfl-seconds(doc) = json-object-has?(doc, "deadline_s") ? json-int-value(json-object-get(doc, "deadline_s")) : bsw-ceiling-s();
+  def cfl-match(doc) = json-object-has?(doc, "match") ? json-string-value(json-object-get(doc, "match")) : "";
+  // Reject non-files and files with no execute bit. Actual exec admission below also
+  // observes owner/group permissions and host policy; a mode alone cannot prove access.
+  def cfl-executable?(path) {
+   let mode = host_file_mode(path);
+   !nothing?(mode) && mode >= 0 && (mode / 4096) % 16 == 8
+    && (mode % 2 == 1 || (mode / 8) % 2 == 1 || (mode / 64) % 2 == 1);
+  }
+  def cfl-request-why(doc) = !json-object-has?(doc, "fkwu") ? "missing required key \"fkwu\""
+   : !cfl-executable?(cfl-fkwu(doc)) ? "fkwu is not an executable file: " ++ cfl-fkwu(doc)
+   : nothing?(cfl-seconds(doc)) || cfl-seconds(doc) <= 0 ? "deadline_s must be a positive integer"
+   : cfl-seconds(doc) * 1000 <= 0 || (cfl-seconds(doc) * 1000) / 1000 != cfl-seconds(doc) ? "deadline_s does not fit the millisecond clock"
+   : "";
+  // ERE matching on the real band path, in the sweep's order. Compile once per selection.
+  def cfl-select(all, pattern) {
+   let compiled = fap-compile-d(pattern, 1);
+   len(compiled[1]) > 0 ? cfl-refuse("match does not read: " ++ compiled[1])
+    : filter(w => fap-find(compiled[0], bsw-band-of(w), 0, 0)[0] >= 0, all);
+  }
+  def cfl-pin(path) {
+   let text = read_file(path);
+   nothing?(text) ? nothing() : parse-int(bh-pin(text));
+  }
+  def cfl-reading(text) {
+   let line = hch-tail-line(text);
+   len(line) == 0 ? nothing() : line;
+  }
+  def cfl-class(reading, pin, exit, why) {
+   let number = nothing?(reading) ? nothing() : parse-number(reading);
+   bsw-starts?(why, "deadline:") ? "deadline"
+    : nothing?(exit) || exit != 0 || nothing?(number) || nothing?(pin) ? "stop"
+    : number == pin ? "full" : number < pin ? "short" : "stop";
+  }
+  def cfl-row(path, pin, run) {
+   let reading = cfl-reading(run[1]);
+   [path, reading, pin, run[0], cfl-class(reading, pin, run[0], run[2])];
+  }
+  def cfl-leg(fkwu, workload, seconds, io, step) {
+   let path = bsw-band-of(workload);
+   let pin = cfl-pin(path);
+   let unit = bsw-unit(workload);
+   let run = hch-run-in(io, step, [fkwu, unit], "", hch-by(seconds * 1000));
+   run[2] == hch-birth-why(0 - 4) ? cfl-refuse("fkwu is not an executable file for this process: " ++ fkwu)
+    : cfl-row(path, pin, run);
+  }
+  def cfl-show(value) = nothing?(value) ? "nothing" : (String) value_kind(value) == "string" ? value : value_str(value);
+  def cfl-line(row) = row[0] ++ "\treading=" ++ cfl-show(row[1]) ++ "\tpin=" ++ cfl-show(row[2]) ++ "\texit=" ++ cfl-show(row[3]) ++ "\tclass=" ++ row[4];
+  def cfl-counts(counts, kind) = [counts[0] + (kind == "full" ? 1 : 0), counts[1] + (kind == "short" ? 1 : 0), counts[2] + (kind == "stop" ? 1 : 0), counts[3] + (kind == "deadline" ? 1 : 0)];
+  def cfl-run(fkwu, workloads, seconds, io, index, counts) = nil?(workloads) ? counts : {
+   let row = cfl-leg(fkwu, workloads[0], seconds, io, index.str());
+   let said = print_str(cfl-line(row));
+   cfl-run(fkwu, workloads[1:], seconds, io, index + 1, cfl-counts(counts, row[4]));
+  };
+  def cfl-summary(fkwu, bands, counts) = "candidate-floor fkwu=" ++ fkwu ++ " bands=" ++ bands.str() ++ " full=" ++ counts[0].str() ++ " short=" ++ counts[1].str() ++ " stop=" ++ counts[2].str() ++ " deadline=" ++ counts[3].str();
+  def cfl-selected(doc, workloads) = nil?(workloads) ? cfl-refuse("match selects no band: " ++ cfl-match(doc)) : {
+   let candidate = host_realpath(cfl-fkwu(doc));
+   nothing?(candidate) ? cfl-refuse("fkwu path does not resolve: " ++ cfl-fkwu(doc)) : {
+    let io = ".hearth/candidate-floor/" ++ host_pid().str() ++ "-" ++ now_unix_ms().str();
+    let counts = cfl-run(candidate, workloads, cfl-seconds(doc), io, 0, [0, 0, 0, 0]);
+    cfl-summary(cfl-fkwu(doc), len(workloads), counts);
+   };
+  };
+  // Return the summary as the door's value: the runtime prints it once, as its final line.
+  def cfl-request(doc) {
+   let why = cfl-request-why(doc);
+   len(why) > 0 ? cfl-refuse(why) : cfl-selected(doc, cfl-select(bsw-all(), cfl-match(doc)));
+  }
+ }
+}
