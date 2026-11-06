@@ -61,8 +61,17 @@ inspection does not create one. Silent microphone/awareness
 sources remain silent. Inspecting their views does not activate capture.
 
 The transcript view receives original recognition and local translations from
-the native ear's metric frame. It labels each kind and its source timestamp;
-translations can lag the original. Selection changes what is displayed, not
+the native ear's metric frame. Each slot header names the stage and what it
+cost (`hearing 60 ms` a pass, `heard 64 ms` the close, `translated 508 ms` from
+the line's end) and the age of its source frame; translations can lag the
+original. A row the ear's own frame puts in doubt is painted dimmer and its
+header says why: `tongue not offered` (heard outside the offered tongues),
+`untranslated copy of the line`, `same text in every tongue`, `its line is in
+doubt`. The doubt is a typed bitmask in the row (`etr-doubt`), never parsed from
+text; a doubted line stays visible. A growing line from lanes that are no
+longer standing is not shown as growing. A newborn ear sensor reads the spool
+from its last 64 KiB (`ea-birth-mark`). Witness:
+`form/form-stdlib/tests/glass-transcripts-band.bml` (127). Selection changes what is displayed, not
 which translations the ear produces. Missing selected languages say they are
 unpublished. Selecting a language never opens a microphone or admits a model.
 The shared natural-language catalog is in `bml/transcript-languages.bml`.
