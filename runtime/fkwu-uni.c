@@ -159,9 +159,11 @@ static const mode_t NULL_DEVICE_MODE = 0;
 static const long long SOURCE_LINE_STRIDE = 65536;
 static const long long SCAN_SPACE = 0;
 static const long long SCAN_DIGITS = 1;
+static const long long SCAN_ALPHA = 2;
 static const long long SCAN_NAME = 3;
-static const long long SCAN_STRING = 4;
+static const long long SCAN_NONQUOTE = 4;
 static const long long SCAN_LINE = 5;
+static const long long SCAN_JSONSAFE = 6;
 static const long long MILLISECONDS_PER_SECOND = 1000;
 static const long long MICROSECONDS_PER_SECOND = 1000000;
 static const long long NANOSECONDS_PER_MILLISECOND = 1000000;
@@ -313,6 +315,7 @@ enum {
     STAT_STACK = 7,
     STAT_FLOATS = 8,
     STAT_RECIPES = 43,
+    STAT_OWNER_CONSTRUCTION_CLOCK = 164,
     LIVE_PID = 1,
     LIVE_START_MS = 2,
     LIVE_SEQUENCE = 3,
@@ -538,6 +541,7 @@ static size_t frame_entered;
 static size_t frame_accepted;
 static size_t frame_rejected;
 static size_t frame_last_index;
+static size_t owner_construction_clock;
 
 static int shared_descriptor = INVALID_DESCRIPTOR;
 static uint64_t *shared_header;
@@ -726,6 +730,51 @@ static Value node_value(long long identity) {
 }
 
 static int values_equal(Value left, Value right);
+static int inside_function(void);
+static void append_local(const char *bytes, size_t length, Value value);
+
+static Value function_from_parameters(Form *parameters, Form *body, int capture_visible) {
+    if (parameters->kind != FORM_GROUP) fail_at(parameters->offset, "a parameter list must be a group");
+    Value function = nothing_value();
+    function.kind = KIND_FUNCTION;
+    function.body = body;
+    function.parameter_count = parameters->part_count;
+    function.parameters = allocate_zeroed(parameters->part_count, sizeof *function.parameters);
+    for (size_t index = FIRST_INDEX; index < parameters->part_count; index = checked_add(index, ONE_ELEMENT)) {
+        Form *parameter = parameters->parts[index];
+        if (parameter->kind != FORM_SYMBOL) fail_at(parameter->offset, "a parameter must be a symbol");
+        for (size_t earlier = FIRST_INDEX; earlier < index; earlier = checked_add(earlier, ONE_ELEMENT)) {
+            Form *previous = parameters->parts[earlier];
+            if (bytes_equal(previous->text, previous->text_length, parameter->text, parameter->text_length)) {
+                fail_at(parameter->offset, "a parameter name is repeated");
+            }
+        }
+        function.parameters[index].bytes = parameter->text;
+        function.parameters[index].length = parameter->text_length;
+    }
+    if (!capture_visible) return function;
+    size_t base = FIRST_INDEX;
+    Binding *outer = NULL;
+    size_t outer_count = EMPTY_COUNT;
+    for (size_t cursor = frame_count; cursor > FIRST_INDEX; ) {
+        cursor -= ONE_ELEMENT;
+        if (frames[cursor].kind != FRAME_FUNCTION) continue;
+        base = frames[cursor].local_base;
+        outer = frames[cursor].callee.captures;
+        outer_count = frames[cursor].callee.capture_count;
+        break;
+    }
+    if (base > local_count) fail("a function looked above its locals");
+    size_t visible = local_count - base;
+    size_t total = checked_add(outer_count, visible);
+    if (total == EMPTY_COUNT) return function;
+    Binding *captures = allocate_zeroed(total, sizeof *captures);
+    if (outer_count != EMPTY_COUNT) memcpy(captures, outer, outer_count * sizeof *captures);
+    if (visible != EMPTY_COUNT) memcpy(captures + outer_count, locals + base, visible * sizeof *captures);
+    function.captures = captures;
+    function.capture_count = total;
+    return function;
+}
 static void expect_kind(Value value, ValueKind kind, const char *reason);
 static Value list_from(Value *items, size_t item_count);
 static const char *kind_name(ValueKind kind);
@@ -837,6 +886,12 @@ static fk_node_id node_word(Value node, const char *reason) {
 
 static Value node_field(Value node, int field, const char *reason) {
     if (node.kind == KIND_NOTHING) return nothing_value();
+    if (node.kind == KIND_REAL) {
+        if (field == NODE_FIELD_PACKAGE) return integer_value(1);
+        if (field == NODE_FIELD_LEVEL) return integer_value(1);
+        if (field == NODE_FIELD_TYPE) return integer_value(7);
+        if (field == NODE_FIELD_INSTANCE) return integer_value(0);
+    }
     if (node.kind != KIND_NODE) {
         char detail[80];
         snprintf(detail, sizeof detail, "%s %lld", kind_name(node.kind), node.integer);
@@ -976,6 +1031,7 @@ static Value offer_intern_trivial_string(Value *arguments, size_t argument_count
         found->hash = text_cell_hash(found->text, found->text_length);
         cell_index(found);
     }
+    if (found->category == 0) found->category = fk_nid_make(1, 1, 2, 0);
     return node_from_cell(found);
 }
 
@@ -990,6 +1046,7 @@ static Value offer_intern_trivial_int(Value *arguments, size_t argument_count) {
         found->hash = integer_cell_hash(found->integer);
         cell_index(found);
     }
+    if (found->category == 0) found->category = fk_nid_make(1, 1, 1, 0);
     return node_from_cell(found);
 }
 
@@ -1000,6 +1057,7 @@ static Value offer_intern_node(Value *arguments, size_t argument_count) {
 
 static Value offer_node_children(Value *arguments, size_t argument_count) {
     (void)argument_count;
+    if (arguments[SOLE_OPERAND].kind == KIND_REAL) return list_from(NULL, EMPTY_COUNT);
     expect_kind(arguments[SOLE_OPERAND], KIND_NODE, "node_children expects a node");
     Cell *cell = arguments[SOLE_OPERAND].cell;
     if (cell == NULL || cell->child_count == EMPTY_COUNT) return list_from(NULL, EMPTY_COUNT);
@@ -1009,6 +1067,7 @@ static Value offer_node_children(Value *arguments, size_t argument_count) {
 static Value offer_node_category(Value *arguments, size_t argument_count) {
     (void)argument_count;
     if (arguments[SOLE_OPERAND].kind == KIND_NOTHING) return nothing_value();
+    if (arguments[SOLE_OPERAND].kind == KIND_REAL) return nothing_value();
     if (arguments[SOLE_OPERAND].kind != KIND_NODE) {
         fail(message_with_name("node_category expects a node, received ", kind_name(arguments[SOLE_OPERAND].kind), strlen(kind_name(arguments[SOLE_OPERAND].kind))));
     }
@@ -1019,6 +1078,7 @@ static Value offer_node_category(Value *arguments, size_t argument_count) {
 static Value offer_node_payload(Value *arguments, size_t argument_count) {
     (void)argument_count;
     if (arguments[SOLE_OPERAND].kind == KIND_NOTHING) return nothing_value();
+    if (arguments[SOLE_OPERAND].kind == KIND_REAL) return arguments[SOLE_OPERAND];
     expect_kind(arguments[SOLE_OPERAND], KIND_NODE, "node_value expects a node");
     Cell *cell = arguments[SOLE_OPERAND].cell;
     if (cell == NULL) return integer_value(arguments[SOLE_OPERAND].integer);
@@ -1031,6 +1091,7 @@ static Value offer_node_eq(Value *arguments, size_t argument_count) {
     (void)argument_count;
     Value left = arguments[LEFT_OPERAND];
     Value right = arguments[RIGHT_OPERAND];
+    if (left.kind == KIND_REAL && right.kind == KIND_REAL) return boolean_word(left.real == right.real);
     if (left.kind != KIND_NODE || right.kind != KIND_NODE) return boolean_word(0);
     if (left.cell != NULL && right.cell != NULL) return boolean_word(left.cell == right.cell);
     long long left_word = left.cell != NULL && left.cell->kind == CELL_COMPOSITE ? (long long)left.cell->category : left.integer;
@@ -1040,6 +1101,7 @@ static Value offer_node_eq(Value *arguments, size_t argument_count) {
 
 static Value offer_node_source(Value *arguments, size_t argument_count) {
     (void)argument_count;
+    if (arguments[SOLE_OPERAND].kind == KIND_REAL) return list_from(NULL, EMPTY_COUNT);
     if (arguments[SOLE_OPERAND].kind != KIND_NODE) {
         fail(message_with_name("node_source expects a node, received ", kind_name(arguments[SOLE_OPERAND].kind), strlen(kind_name(arguments[SOLE_OPERAND].kind))));
     }
@@ -1265,11 +1327,24 @@ static void skip_bml(void) {
             continue;
         }
         if (source_bytes[source_offset] == COMMENT_INTRODUCER) {
-            source_offset = checked_add(source_offset, ONE_ELEMENT);
-            while (source_offset < source_length && source_bytes[source_offset] != NEWLINE) {
-                source_offset = checked_add(source_offset, ONE_ELEMENT);
+            int at_line_start = 1;
+            size_t cursor = source_offset;
+            while (cursor > FIRST_INDEX) {
+                char previous = source_bytes[cursor - ONE_ELEMENT];
+                if (previous == NEWLINE) break;
+                if (!isspace((unsigned char)previous)) {
+                    at_line_start = 0;
+                    break;
+                }
+                cursor -= ONE_ELEMENT;
             }
-            continue;
+            if (at_line_start) {
+                source_offset = checked_add(source_offset, ONE_ELEMENT);
+                while (source_offset < source_length && source_bytes[source_offset] != NEWLINE) {
+                    source_offset = checked_add(source_offset, ONE_ELEMENT);
+                }
+                continue;
+            }
         }
         if (source_bytes[source_offset] != LINE_COMMENT_MARK) return;
         size_t next = checked_add(source_offset, ONE_ELEMENT);
@@ -1523,26 +1598,7 @@ static void bind_definition(Form *form) {
     if (reserved != NULL && reserved->evaluation == LEAVE_ARGUMENTS) {
         fail_at(name->offset, message_with_name("a definition uses a reserved operation name: ", name->text, name->text_length));
     }
-    if (parameters->kind != FORM_GROUP) fail_at(parameters->offset, "a parameter list must be a group");
-    for (size_t index = FIRST_INDEX; index < parameters->part_count; index = checked_add(index, ONE_ELEMENT)) {
-        Form *parameter = parameters->parts[index];
-        if (parameter->kind != FORM_SYMBOL) fail_at(parameter->offset, "a parameter must be a symbol");
-        for (size_t earlier = FIRST_INDEX; earlier < index; earlier = checked_add(earlier, ONE_ELEMENT)) {
-            Form *previous = parameters->parts[earlier];
-            if (bytes_equal(previous->text, previous->text_length, parameter->text, parameter->text_length)) {
-                fail_at(parameter->offset, "a parameter name is repeated");
-            }
-        }
-    }
-    Value function = nothing_value();
-    function.kind = KIND_FUNCTION;
-    function.body = form->parts[DEFN_BODY];
-    function.parameter_count = parameters->part_count;
-    function.parameters = allocate_zeroed(parameters->part_count, sizeof *function.parameters);
-    for (size_t index = FIRST_INDEX; index < parameters->part_count; index = checked_add(index, ONE_ELEMENT)) {
-        function.parameters[index].bytes = parameters->parts[index]->text;
-        function.parameters[index].length = parameters->parts[index]->text_length;
-    }
+    Value function = function_from_parameters(parameters, form->parts[DEFN_BODY], 0);
     Binding *existing = find_function_text(name->text, name->text_length);
     if (existing != NULL) {
         existing->value = function;
@@ -1556,6 +1612,34 @@ static void bind_definition(Form *form) {
     functions[function_count].value = function;
     function_count = needed;
     form->is_bound = 1;
+}
+
+static void bind_runtime_definition(Form *form) {
+    if (form->part_count != DEFN_PART_COUNT) fail_at(form->offset, "a definition needs a name, parameters, and a body");
+    Form *name = form->parts[DEFN_NAME];
+    Form *parameters = form->parts[DEFN_PARAMETERS];
+    if (name->kind != FORM_SYMBOL) fail_at(name->offset, "a definition name must be a symbol");
+    const Operation *reserved = find_operation_text(name->text, name->text_length);
+    if (reserved != NULL && reserved->evaluation == LEAVE_ARGUMENTS) {
+        fail_at(name->offset, message_with_name("a definition uses a reserved operation name: ", name->text, name->text_length));
+    }
+    Value function = function_from_parameters(parameters, form->parts[DEFN_BODY], inside_function());
+    if (inside_function()) append_local(name->text, name->text_length, function);
+    else {
+        Binding *existing = find_function_text(name->text, name->text_length);
+        if (existing != NULL) {
+            existing->value = function;
+            form->is_bound = 1;
+            return;
+        }
+        size_t needed = checked_add(function_count, ONE_ELEMENT);
+        functions = grow_list(functions, &function_capacity, sizeof *functions, needed);
+        functions[function_count].bytes = name->text;
+        functions[function_count].length = name->text_length;
+        functions[function_count].value = function;
+        function_count = needed;
+        form->is_bound = 1;
+    }
 }
 
 static void bind_definitions(Form **forms, size_t form_count) {
@@ -1926,6 +2010,7 @@ static Value offer_record_set(Value *arguments, size_t argument_count);
 
 static Value offer_record_new(Value *arguments, size_t argument_count) {
     if (argument_count == EMPTY_COUNT) fail("record_new expects a blueprint or a size");
+    owner_construction_clock = checked_add(owner_construction_clock, ONE_ELEMENT);
     size_t field_start = ONE_ELEMENT;
     Record *record = allocate_zeroed(ONE_ELEMENT, sizeof *record);
     if (arguments[FIRST_INDEX].kind == KIND_INTEGER && argument_count == ONE_ELEMENT) {
@@ -2095,7 +2180,11 @@ static Value offer_byte_to_str(Value *arguments, size_t argument_count) {
 static int scan_continues(unsigned char byte, long long mode) {
     if (mode == SCAN_SPACE) return byte == ' ' || byte == '\t' || byte == '\n' || byte == '\r';
     if (mode == SCAN_DIGITS) return byte >= '0' && byte <= '9';
+    if (mode == SCAN_ALPHA) return (byte >= 'A' && byte <= 'Z') || (byte >= 'a' && byte <= 'z');
     if (mode == SCAN_NAME) return (byte >= 'A' && byte <= 'Z') || (byte >= 'a' && byte <= 'z') || (byte >= '0' && byte <= '9') || byte == '_' || byte == '-';
+    if (mode == SCAN_NONQUOTE) return byte != '"' && byte != '\\';
+    if (mode == SCAN_LINE) return byte != '\n';
+    if (mode == SCAN_JSONSAFE) return byte >= 32 && byte != '"' && byte != '\\';
     return 0;
 }
 
@@ -2109,15 +2198,8 @@ static Value offer_scan_run(Value *arguments, size_t argument_count) {
     size_t length = arguments[SOLE_OPERAND].text_length;
     const char *text = arguments[SOLE_OPERAND].text;
     long long mode = arguments[SLICE_END].integer;
-    if (mode == SCAN_STRING) {
-        while (index < length && text[index] != '"' && text[index] != '\\') index = checked_add(index, ONE_ELEMENT);
-        return count_word(index);
-    }
-    if (mode == SCAN_LINE) {
-        while (index < length && text[index] != '\n') index = checked_add(index, ONE_ELEMENT);
-        return count_word(index);
-    }
-    if (mode != SCAN_SPACE && mode != SCAN_DIGITS && mode != SCAN_NAME) return nothing_value();
+    if (mode != SCAN_SPACE && mode != SCAN_DIGITS && mode != SCAN_ALPHA && mode != SCAN_NAME
+        && mode != SCAN_NONQUOTE && mode != SCAN_LINE && mode != SCAN_JSONSAFE) return nothing_value();
     while (index < length && scan_continues((unsigned char)text[index], mode)) index = checked_add(index, ONE_ELEMENT);
     return count_word(index);
 }
@@ -3486,6 +3568,30 @@ static Value offer_host_file_read_text(Value *arguments, size_t argument_count) 
     return text;
 }
 
+static Value offer_file_read(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[LEFT_OPERAND], KIND_INTEGER, "file_read expects a descriptor");
+    expect_kind(arguments[RIGHT_OPERAND], KIND_INTEGER, "file_read expects a length");
+    long long descriptor = arguments[LEFT_OPERAND].integer;
+    long long requested = arguments[RIGHT_OPERAND].integer;
+    if (descriptor < WORD_FALSE || requested <= WORD_FALSE) return text_value("", EMPTY_COUNT);
+    size_t length = (size_t)requested;
+    char *buffer = allocate_zeroed(checked_add(length, ONE_ELEMENT), sizeof *buffer);
+    ssize_t got = SYSTEM_CALL_OK;
+    while (1) {
+        got = read((int)descriptor, buffer, length);
+        if (got < SYSTEM_CALL_OK && errno == EINTR) continue;
+        break;
+    }
+    if (got < SYSTEM_CALL_OK) {
+        free(buffer);
+        return nothing_value();
+    }
+    Value text = text_value(buffer, (size_t)got);
+    free(buffer);
+    return text;
+}
+
 static Value offer_file_size(Value *arguments, size_t argument_count) {
     (void)argument_count;
     expect_kind(arguments[SOLE_OPERAND], KIND_TEXT, "file_size expects a path");
@@ -3547,13 +3653,15 @@ static Value offer_host_dir_mkdir(Value *arguments, size_t argument_count) {
     (void)argument_count;
     expect_kind(arguments[SOLE_OPERAND], KIND_TEXT, "host_dir_mkdir expects a path");
     char *path = copy_bytes(arguments[SOLE_OPERAND].text, arguments[SOLE_OPERAND].text_length);
-    int made = mkdir(path, DIRECTORY_MODE);
-    if (made != 0 && errno == EEXIST) {
+    int started = mkdir(path, DIRECTORY_MODE);
+    int created = 0;
+    if (started == SYSTEM_CALL_OK) created = 1;
+    else if (errno == EEXIST) {
         struct stat info;
-        if (stat(path, &info) == 0 && S_ISDIR(info.st_mode)) made = 0;
+        if (stat(path, &info) == 0 && S_ISDIR(info.st_mode)) created = 0;
     }
     free(path);
-    return integer_value(made == 0 ? WORD_FALSE : -WORD_TRUE);
+    return integer_value((long long)created);
 }
 
 static int remove_tree(const char *path) {
@@ -3690,6 +3798,52 @@ static Value offer_host_spawn_quiet(Value *arguments, size_t argument_count) {
     free(argv);
     if (started != SYSTEM_CALL_OK) fail("host_spawn_quiet could not start");
     return integer_value((long long)pid);
+}
+
+static Value offer_host_spawn_at(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[LEFT_OPERAND], KIND_LIST, "host_spawn_at expects a command list");
+    expect_kind(arguments[RIGHT_OPERAND], KIND_LIST, "host_spawn_at expects [stdin, stdout, stderr]");
+    Value command = arguments[LEFT_OPERAND];
+    Value redirects = arguments[RIGHT_OPERAND];
+    if (command.item_count == EMPTY_COUNT || redirects.item_count < ARITY_THREE) return integer_value(-WORD_TRUE);
+
+    char **argv = allocate_zeroed(checked_add(command.item_count, ONE_ELEMENT), sizeof *argv);
+    List *cursor = command.list;
+    for (size_t index = FIRST_INDEX; index < command.item_count; index = checked_add(index, ONE_ELEMENT)) {
+        expect_kind(cursor->head, KIND_TEXT, "host_spawn_at expects text arguments");
+        argv[index] = cursor->head.text;
+        cursor = cursor->tail;
+    }
+
+    Value stdin_path = list_at(redirects, FIRST_INDEX);
+    Value stdout_path = list_at(redirects, ONE_ELEMENT);
+    Value stderr_path = list_at(redirects, ARITY_TWO);
+    expect_kind(stdin_path, KIND_TEXT, "host_spawn_at stdin path must be text");
+    expect_kind(stdout_path, KIND_TEXT, "host_spawn_at stdout path must be text");
+    expect_kind(stderr_path, KIND_TEXT, "host_spawn_at stderr path must be text");
+    const char *in_path = stdin_path.text_length == EMPTY_COUNT ? NULL_DEVICE : stdin_path.text;
+    const char *out_path = stdout_path.text_length == EMPTY_COUNT ? NULL_DEVICE : stdout_path.text;
+    const char *err_path = stderr_path.text_length == EMPTY_COUNT ? NULL_DEVICE : stderr_path.text;
+
+    posix_spawn_file_actions_t actions;
+    if (posix_spawn_file_actions_init(&actions) != SYSTEM_CALL_OK) {
+        free(argv);
+        return integer_value(-WORD_TRUE);
+    }
+    if (posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, in_path, O_RDONLY, NULL_DEVICE_MODE) != SYSTEM_CALL_OK
+        || posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, out_path, O_WRONLY | O_CREAT | O_TRUNC, TEXT_FILE_MODE) != SYSTEM_CALL_OK
+        || posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, err_path, O_WRONLY | O_CREAT | O_TRUNC, TEXT_FILE_MODE) != SYSTEM_CALL_OK) {
+        posix_spawn_file_actions_destroy(&actions);
+        free(argv);
+        return integer_value(-WORD_TRUE);
+    }
+
+    pid_t pid = 0;
+    int started = posix_spawnp(&pid, argv[FIRST_INDEX], &actions, NULL, argv, environ);
+    posix_spawn_file_actions_destroy(&actions);
+    free(argv);
+    return integer_value(started == SYSTEM_CALL_OK ? (long long)pid : -WORD_TRUE);
 }
 
 static char *read_descriptor(int descriptor, size_t *length);
@@ -4030,7 +4184,8 @@ static Value offer_cell_path(Value *arguments, size_t argument_count) {
 
 static Value offer_intern_bool(Value *arguments, size_t argument_count) {
     (void)argument_count;
-    return node_value(integer_is_nonzero(arguments[SOLE_OPERAND]) ? BOOLEAN_NODE_TRUE : BOOLEAN_NODE_FALSE);
+    fk_node_id identity = fk_nid_make(1, 1, 3, integer_is_nonzero(arguments[SOLE_OPERAND]) ? WORD_TRUE : WORD_FALSE);
+    return node_value((long long)identity);
 }
 
 static Value count_word(size_t count) {
@@ -4468,6 +4623,7 @@ static Value offer_kernel_stat(Value *arguments, size_t argument_count) {
     if (key == STAT_CONS || key == STAT_FLOATS || key == STAT_JIT_BOXES || key == STAT_JIT_UNBOXES || key == STAT_JIT_NATIVE || key == STAT_JIT_CRYSTALLIZED || key == STAT_JIT_UNROLL || key == STAT_JIT_LOOP_ITERATIONS || key == STAT_FLOAT_CAPACITY || key == STAT_FIELD_FLOATS || key == STAT_NODES_WATER || key == STAT_NODES_ICE || key == STAT_NODE_LOGICAL_BYTES) return integer_value(WORD_FALSE);
     if (key == STAT_STACK) return count_word(frame_count);
     if (key == STAT_RECIPES) return count_word(function_count);
+    if (key == STAT_OWNER_CONSTRUCTION_CLOCK) return count_word(owner_construction_clock);
     if (key == STAT_NODE_PRIVATE_BYTES) return count_word(node_private_bytes());
     return nothing_value();
 }
@@ -4759,6 +4915,7 @@ static void register_builtin_operations(void) {
     register_operation("read_file_bytes", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_read_file_bytes);
     register_operation("read_file_slice", ARITY_THREE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_read_file_slice);
     register_operation("host_file_read_slice", ARITY_THREE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_file_read_slice);
+    register_operation("file_read", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_file_read);
     register_operation("recipe_to_bytes", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_recipe_to_bytes);
     register_operation("bytes_to_recipe", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_bytes_to_recipe);
     register_operation("write_form_binary", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_write_form_binary);
@@ -4812,6 +4969,7 @@ static void register_builtin_operations(void) {
     register_operation("metal_status", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_metal_status);
     register_operation("metal_live", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_metal_live);
     register_operation("host_spawn_quiet", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_spawn_quiet);
+    register_operation("host_spawn_at", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_spawn_at);
     register_operation(COALESCE_WORD, ARITY_TWO, FIXED_ARITY, LEAVE_ARGUMENTS, OP_COALESCE, NULL);
     register_operation(TRY_WORD, ARITY_TWO, FIXED_ARITY, LEAVE_ARGUMENTS, OP_TRY, NULL);
     register_operation(FAIL_NAME, ARITY_NONE, FIXED_ARITY, LEAVE_ARGUMENTS, OP_FAIL, NULL);
@@ -5010,11 +5168,10 @@ static void begin_call(Form *form) {
         return;
     }
     if (form_is_symbol(head, NAME_DEFN)) {
-        if (form->is_bound) {
-            deliver(nothing_value());
-            return;
-        }
-        fail_at(form->offset, "a definition inside a function is not offered");
+        if (inside_function()) bind_runtime_definition(form);
+        else if (!form->is_bound) bind_definition(form);
+        deliver(nothing_value());
+        return;
     }
     size_t argument_count = call_argument_count(form);
     Value bound;
@@ -5030,7 +5187,9 @@ static void begin_call(Form *form) {
         return;
     }
     if (operation != NULL) {
-        if (operation->arity_policy == FIXED_ARITY && argument_count != operation->arity) {
+        if (operation->id == OP_LET) {
+            if (argument_count < ARITY_TWO) fail_at(form->offset, "let expects a name and a value");
+        } else if (operation->arity_policy == FIXED_ARITY && argument_count != operation->arity) {
             fail_at(form->offset, "an operation received the wrong number of arguments");
         }
         Frame *frame = append_frame();
@@ -5392,10 +5551,31 @@ static void step_apply(size_t index) {
 
 static void step_let(size_t index) {
     Frame frame = frames[index];
-    if (call_argument_count(frame.form) != ARITY_TWO) fail_at(frame.form->offset, "let expects a name and a value");
+    size_t argument_count = call_argument_count(frame.form);
+    if (argument_count < ARITY_TWO) fail_at(frame.form->offset, "let expects a name and a value");
     if (!frame.has_incoming) {
+        if (frame.stage == IF_STAGE_BRANCH) {
+            if (frame.next_part >= argument_count) {
+                Value result = frame.has_accumulator ? frame.accumulator : nothing_value();
+                pop_frame();
+                deliver(result);
+                return;
+            }
+            Form *child = call_argument(frame.form, frame.next_part);
+            frames[index] = frame;
+            offer_form(child);
+            return;
+        }
         frames[index] = frame;
         offer_form(call_argument(frame.form, RIGHT_OPERAND));
+        return;
+    }
+    if (frame.stage == IF_STAGE_BRANCH) {
+        frame.accumulator = frame.incoming;
+        frame.has_accumulator = 1;
+        frame.has_incoming = 0;
+        frame.next_part = checked_add(frame.next_part, ONE_ELEMENT);
+        frames[index] = frame;
         return;
     }
     Form *name = call_argument(frame.form, LEFT_OPERAND);
@@ -5403,8 +5583,17 @@ static void step_let(size_t index) {
     if (inside_function()) append_local(name->text, name->text_length, frame.incoming);
     else bind_global(name->text, name->text_length, frame.incoming);
     Value value = frame.incoming;
-    pop_frame();
-    deliver(value);
+    if (argument_count == ARITY_TWO) {
+        pop_frame();
+        deliver(value);
+        return;
+    }
+    frame.stage = IF_STAGE_BRANCH;
+    frame.next_part = ARITY_TWO;
+    frame.accumulator = value;
+    frame.has_accumulator = 1;
+    frame.has_incoming = 0;
+    frames[index] = frame;
 }
 
 static void step_function(size_t index) {
@@ -6451,6 +6640,10 @@ static Form *parse_bml_definition(void) {
         size_t statement_capacity = EMPTY_COUNT;
         parse_bml_statements(&statements, &statement_count, &statement_capacity);
         body = form_call("do", statements, statement_count, name->offset);
+        skip_bml();
+        if (source_offset < source_length && source_bytes[source_offset] == STATEMENT_END) {
+            source_offset = checked_add(source_offset, ONE_ELEMENT);
+        }
     } else {
         expect_character(NAME_MARK, "a definition is missing its body");
         body = parse_bml_expression();
