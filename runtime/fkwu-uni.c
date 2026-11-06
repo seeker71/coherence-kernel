@@ -8,27 +8,41 @@
 
 #include <ctype.h>
 #include <dirent.h>
+#include <dlfcn.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <float.h>
 #include <limits.h>
 #include <math.h>
-#include <arpa/inet.h>
-#include <netinet/in.h>
+#include <setjmp.h>
 #include <signal.h>
 #include <stdint.h>
 #include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <sys/ioctl.h>
+#include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <libproc.h>
+#include <mach/mach.h>
+#include <mach/mach_time.h>
+#include <mach-o/dyld.h>
+#include <sys/event.h>
+#include <sys/sysctl.h>
+#elif defined(__linux__)
+#include <poll.h>
+#include <sys/syscall.h>
+#endif
 
 static void fk_die(const char *message) {
     fprintf(stderr, "%s\n", message);
@@ -52,11 +66,7 @@ static const int SOURCE_PATH_ARGUMENT = 1;
 static const long long WORD_FALSE = 0;
 static const long long WORD_TRUE = 1;
 static const double REAL_ZERO = 0.0;
-static const uint64_t BUS_MAGIC = 0x4642555332ULL;
-static const uint64_t BUS_LAYOUT_VERSION = 1;
 static const uint64_t NANOSECONDS_PER_SECOND = 1000000000ULL;
-static const mode_t SHARED_OBJECT_MODE = 0600;
-static const char *const BUS_FILE_PATH = "/tmp/fg-bus2";
 
 typedef uint64_t NodeIdentity;
 
@@ -86,8 +96,8 @@ static const char *const KIND_NAME_INTEGER = "int";
 static const char *const KIND_NAME_REAL = "float";
 static const char *const KIND_NAME_TEXT = "string";
 static const char *const KIND_NAME_LIST = "list";
-static const char *const KIND_NAME_FUNCTION = "function";
-static const char *const KIND_NAME_NODE = "node";
+static const char *const KIND_NAME_FUNCTION = "closure";
+static const char *const KIND_NAME_NODE = "node_id";
 static const char *const KIND_NAME_RECORD = "record";
 static const char *const LIST_OPEN = "[";
 static const char *const LIST_SEPARATOR = ", ";
@@ -122,7 +132,6 @@ static const char *const SECTION_WORD = "section";
 static const char *const DEF_WORD = "def";
 static const char *const IMPORT_WORD = "import";
 static const char *const FORM_BML_SECTION = "form.bml";
-static const char *const SECTION_TAG = "section [";
 static const char *const UNBOUND_PREFIX = "an unbound name was offered: ";
 static const char *const COALESCE_WORD = "??";
 static const char *const FAIL_NAME = "fail";
@@ -143,7 +152,7 @@ static const uint64_t ROSTER_MAGIC = 0x46524F5354455231ULL;
 static const uint64_t NODE_GIFT_MAGIC = 0x4E4F444547494654ULL;
 static const size_t NODE_REFERENCE_BYTES = 64;
 static const char *const TEMP_DIRECTORY = "/tmp";
-static const char *const METAL_ABSENT_STATUS = "metal=not-up\n";
+static const char *const METAL_ABSENT_STATUS = "metal=not-up\nmetal_owner=fkwu-form-cli\nmetal_carrier=dynamic\nmetal_loaded=false\nmetal_door=handle\n";
 static const char *const SHELL_PATH = "/bin/sh";
 static const char *const SHELL_COMMAND = "-c";
 static const size_t ROSTER_SEQUENCE = 0;
@@ -161,9 +170,9 @@ static const long long SCAN_SPACE = 0;
 static const long long SCAN_DIGITS = 1;
 static const long long SCAN_ALPHA = 2;
 static const long long SCAN_NAME = 3;
-static const long long SCAN_NONQUOTE = 4;
+static const long long SCAN_STRING = 4;
 static const long long SCAN_LINE = 5;
-static const long long SCAN_JSONSAFE = 6;
+static const long long SCAN_JSON_SAFE = 6;
 static const long long MILLISECONDS_PER_SECOND = 1000;
 static const long long MICROSECONDS_PER_SECOND = 1000000;
 static const long long NANOSECONDS_PER_MILLISECOND = 1000000;
@@ -211,14 +220,12 @@ typedef enum {
     OP_READ_LINE,
     OP_FILE_MTIME,
     OP_CELL_PATH,
+    OP_METHOD_INVOKE,
     OP_INTERN_BOOL,
     OP_KERNEL_STAT,
     OP_FB_RECORD,
     OP_FB_EVENTS,
     OP_FB_CLEAR,
-    OP_BUS_OPEN,
-    OP_BUS_CLOSE,
-    OP_BUS_READ,
     OP_GT,
     OP_LE,
     OP_NTH,
@@ -238,6 +245,7 @@ typedef enum {
     OP_COALESCE,
     OP_TRY,
     OP_ATTEMPT,
+    OP_FORM_ERROR,
     OP_FAIL,
     OP_CHOICE
 } OperationId;
@@ -277,11 +285,6 @@ enum {
     RECORD_WORD = 0,
     RECORD_PATH = 1,
     RECORD_POSITION = 2,
-    BUS_STAGE = 0,
-    BUS_KEY = 1,
-    BUS_INDEX = 0,
-    BUS_OUTCOME = 1,
-    BUS_CURSOR = 0,
     STAT_ROOTS_SINCE_CLEAR = 9,
     STAT_REJECTED = 11,
     STAT_ENTERED = 12,
@@ -316,7 +319,6 @@ enum {
     STAT_STACK = 7,
     STAT_FLOATS = 8,
     STAT_RECIPES = 43,
-    STAT_OWNER_CONSTRUCTION_CLOCK = 164,
     LIVE_PID = 1,
     LIVE_START_MS = 2,
     LIVE_SEQUENCE = 3,
@@ -360,14 +362,6 @@ enum {
     GIFT_ROOT_LEVEL = 1,
     GIFT_ROOT_TYPE = 2,
     GIFT_ROOT_INSTANCE = 1,
-    BUS_HEADER_MAGIC = 0,
-    BUS_HEADER_LAYOUT = 1,
-    BUS_HEADER_COUNT = 2,
-    BUS_HEADER_END = 3,
-    BUS_HEADER_WORDS = 4,
-    BUS_PHASE_OPEN = 1,
-    BUS_PHASE_CLOSE = 2,
-    BUS_RECORD_FIELDS = 6,
     INVALID_DESCRIPTOR = -1
 };
 
@@ -409,18 +403,21 @@ struct Value {
 struct List {
     Value head;
     List *tail;
+    Value *dotted_tail;
     Value *flat;
     size_t flat_count;
     List *indexed;
     size_t lead;
 };
 
-typedef enum { CELL_TEXT, CELL_INTEGER, CELL_COMPOSITE } CellKind;
+typedef enum { CELL_TEXT, CELL_INTEGER, CELL_COMPOSITE, CELL_REAL } CellKind;
 
 struct Cell {
     fk_node_id category;
+    Value category_value;
     CellKind kind;
     long long integer;
+    double real;
     char *text;
     size_t text_length;
     Value *children;
@@ -443,10 +440,12 @@ struct Record {
 struct Form {
     FormKind kind;
     size_t offset;
+    const char *path;
     long long integer;
     double real;
     char *text;
     size_t text_length;
+    Form *annotation;
     Form **parts;
     size_t part_count;
     size_t part_capacity;
@@ -461,7 +460,6 @@ struct Binding {
 
 struct Operation {
     const char *spelling;
-    size_t spelling_length;
     size_t arity;
     ArityPolicy arity_policy;
     EvaluationPolicy evaluation;
@@ -483,7 +481,6 @@ typedef enum {
     FRAME_LAMBDA,
     FRAME_COALESCE,
     FRAME_TRY,
-    FRAME_ATTEMPT,
     FRAME_FAIL,
     FRAME_APPLY,
     FRAME_CHOICE
@@ -503,9 +500,14 @@ struct Frame {
     const Operation *operation;
     Value callee;
     size_t local_base;
+    const char *prior_failure;
+    int prior_failure_reported;
+    size_t stage_base;
 };
 
 static const char *source_bytes;
+static const char *entry_source_bytes;
+static size_t entry_source_length;
 static size_t source_length;
 static size_t source_offset;
 static const char *source_path;
@@ -525,11 +527,12 @@ static size_t global_capacity;
 
 static Frame *frames;
 static size_t frame_count;
+static const char *failure_message;
+static int failure_reported;
+static jmp_buf *evaluation_recovery;
 static size_t frame_capacity;
 static Value finished;
 static int result_ready;
-static Value active_cell_input;
-static int active_cell_input_set;
 
 typedef struct {
     Value word;
@@ -546,15 +549,12 @@ static size_t frame_entered;
 static size_t frame_accepted;
 static size_t frame_rejected;
 static size_t frame_last_index;
-static size_t owner_construction_clock;
 
-static int shared_descriptor = INVALID_DESCRIPTOR;
-static uint64_t *shared_header;
-static size_t shared_mapped_bytes;
-static int shared_unavailable;
-static size_t shared_maps;
-static size_t shared_bytes;
-
+static size_t stage_depth;
+static void stage_unwind(size_t depth, long long phase, const char *why);
+static Value stage_door(long long mode, Value value);
+static Value offer_kernel_live(Value *arguments, size_t argument_count);
+static jmp_buf *parser_choice;
 typedef struct {
     Value blueprint;
     char *name;
@@ -565,7 +565,6 @@ typedef struct {
 static MethodDefinition *method_definitions;
 static size_t method_definition_count;
 static size_t method_definition_capacity;
-
 static int *socket_descriptors;
 static size_t socket_descriptor_count;
 static size_t socket_descriptor_capacity;
@@ -578,18 +577,27 @@ static void note_stack(void) {
         if (form == NULL || form->kind != FORM_GROUP || form->part_count == EMPTY_COUNT) continue;
         Form *head = form->parts[CALL_HEAD];
         if (head->kind != FORM_SYMBOL || head->text == NULL) continue;
-        fprintf(stderr, "  %.*s at byte %zu\n", (int)head->text_length, head->text, form->offset);
+        fprintf(stderr, "  %.*s at byte %zu in %s\n", (int)head->text_length, head->text, form->offset, form->path != NULL ? form->path : "<native>");
         shown += ONE_ELEMENT;
     }
 }
 
 static void fail(const char *reason) {
+    if (evaluation_recovery != NULL) {
+        failure_message = strdup(reason);
+        if (failure_message == NULL) { fputs("fkwu: out of memory retaining failure\n", stderr); exit(EXIT_FAILURE); }
+        failure_reported = 1;
+        fprintf(stderr, ERROR_BARE, reason);
+        longjmp(*evaluation_recovery, 1);
+    }
     fprintf(stderr, ERROR_BARE, reason);
     note_stack();
     exit(EXIT_FAILURE);
 }
 
 static void fail_at(size_t offset, const char *reason) {
+    if (parser_choice != NULL) longjmp(*parser_choice, 1);
+    if (evaluation_recovery != NULL) fail(reason);
     if (source_path != NULL) fprintf(stderr, ERROR_FORMAT_PATH, reason, offset, source_path);
     else fprintf(stderr, ERROR_FORMAT, reason, offset);
     note_stack();
@@ -735,57 +743,10 @@ static Value node_value(long long identity) {
 }
 
 static int values_equal(Value left, Value right);
-static int inside_function(void);
-static void append_local(const char *bytes, size_t length, Value value);
-
-static Value function_from_parameters(Form *parameters, Form *body, int capture_visible) {
-    if (parameters->kind != FORM_GROUP) fail_at(parameters->offset, "a parameter list must be a group");
-    Value function = nothing_value();
-    function.kind = KIND_FUNCTION;
-    function.body = body;
-    function.parameter_count = parameters->part_count;
-    function.parameters = allocate_zeroed(parameters->part_count, sizeof *function.parameters);
-    for (size_t index = FIRST_INDEX; index < parameters->part_count; index = checked_add(index, ONE_ELEMENT)) {
-        Form *parameter = parameters->parts[index];
-        if (parameter->kind != FORM_SYMBOL) fail_at(parameter->offset, "a parameter must be a symbol");
-        for (size_t earlier = FIRST_INDEX; earlier < index; earlier = checked_add(earlier, ONE_ELEMENT)) {
-            Form *previous = parameters->parts[earlier];
-            if (bytes_equal(previous->text, previous->text_length, parameter->text, parameter->text_length)) {
-                fail_at(parameter->offset, "a parameter name is repeated");
-            }
-        }
-        function.parameters[index].bytes = parameter->text;
-        function.parameters[index].length = parameter->text_length;
-    }
-    if (!capture_visible) return function;
-    size_t base = FIRST_INDEX;
-    Binding *outer = NULL;
-    size_t outer_count = EMPTY_COUNT;
-    for (size_t cursor = frame_count; cursor > FIRST_INDEX; ) {
-        cursor -= ONE_ELEMENT;
-        if (frames[cursor].kind != FRAME_FUNCTION) continue;
-        base = frames[cursor].local_base;
-        outer = frames[cursor].callee.captures;
-        outer_count = frames[cursor].callee.capture_count;
-        break;
-    }
-    if (base > local_count) fail("a function looked above its locals");
-    size_t visible = local_count - base;
-    size_t total = checked_add(outer_count, visible);
-    if (total == EMPTY_COUNT) return function;
-    Binding *captures = allocate_zeroed(total, sizeof *captures);
-    if (outer_count != EMPTY_COUNT) memcpy(captures, outer, outer_count * sizeof *captures);
-    if (visible != EMPTY_COUNT) memcpy(captures + outer_count, locals + base, visible * sizeof *captures);
-    function.captures = captures;
-    function.capture_count = total;
-    return function;
-}
 static void expect_kind(Value value, ValueKind kind, const char *reason);
 static Value list_from(Value *items, size_t item_count);
 static const char *kind_name(ValueKind kind);
 static Value boolean_word(int predicate);
-static int unwind_to_recovery(void);
-static Value invoke_function_value(Value function, Value *arguments, size_t argument_count);
 
 static const uint64_t VALUE_HASH_OFFSET = 14695981039346656037ULL;
 static const uint64_t VALUE_HASH_PRIME = 1099511628211ULL;
@@ -818,7 +779,6 @@ static uint64_t hash_bytes(uint64_t hash, const char *bytes, size_t length) {
 static uint64_t hash_value(Value value) {
     uint64_t hash = hash_mix(VALUE_HASH_OFFSET, (uint64_t)value.kind);
     if (value.kind == KIND_INTEGER || value.kind == KIND_NODE) hash = hash_mix(hash, (uint64_t)value.integer);
-    if (value.kind == KIND_NODE) hash = hash_mix(hash, (uint64_t)(uintptr_t)value.cell);
     if (value.kind == KIND_TEXT) hash = hash_bytes(hash, value.text, value.text_length);
     if (value.kind == KIND_REAL) {
         uint64_t bits = 0;
@@ -891,12 +851,6 @@ static fk_node_id node_word(Value node, const char *reason) {
 
 static Value node_field(Value node, int field, const char *reason) {
     if (node.kind == KIND_NOTHING) return nothing_value();
-    if (node.kind == KIND_REAL) {
-        if (field == NODE_FIELD_PACKAGE) return integer_value(1);
-        if (field == NODE_FIELD_LEVEL) return integer_value(1);
-        if (field == NODE_FIELD_TYPE) return integer_value(7);
-        if (field == NODE_FIELD_INSTANCE) return integer_value(0);
-    }
     if (node.kind != KIND_NODE) {
         char detail[80];
         snprintf(detail, sizeof detail, "%s %lld", kind_name(node.kind), node.integer);
@@ -914,8 +868,8 @@ static uint64_t integer_cell_hash(long long integer) {
     return hash_mix(hash_mix(VALUE_HASH_OFFSET, (uint64_t)CELL_INTEGER), (uint64_t)integer);
 }
 
-static uint64_t composite_hash(fk_node_id category, Value *children, size_t count) {
-    uint64_t hash = hash_mix(hash_mix(VALUE_HASH_OFFSET, (uint64_t)CELL_COMPOSITE), category);
+static uint64_t composite_hash(Value category, Value *children, size_t count) {
+    uint64_t hash = hash_mix(hash_mix(VALUE_HASH_OFFSET, (uint64_t)CELL_COMPOSITE), hash_value(category));
     hash = hash_mix(hash, (uint64_t)count);
     for (size_t index = FIRST_INDEX; index < count; index = checked_add(index, ONE_ELEMENT)) {
         hash = hash_mix(hash, hash_value(children[index]));
@@ -946,10 +900,10 @@ static Cell *find_integer_cell(long long integer) {
     return NULL;
 }
 
-static Cell *find_composite(fk_node_id category, Value *children, size_t count, uint64_t hash) {
+static Cell *find_composite(Value category, Value *children, size_t count, uint64_t hash) {
     for (CellBucket *slot = cell_chain(hash); slot != NULL; slot = slot->next) {
         Cell *cell = slot->cell;
-        if (cell->hash != hash || cell->kind != CELL_COMPOSITE || cell->category != category || cell->child_count != count) continue;
+        if (cell->hash != hash || cell->kind != CELL_COMPOSITE || !values_equal(cell->category_value, category) || cell->child_count != count) continue;
         int same = 1;
         for (size_t child = FIRST_INDEX; child < count; child = checked_add(child, ONE_ELEMENT)) {
             if (!values_equal(cell->children[child], children[child])) same = 0;
@@ -962,7 +916,6 @@ static Cell *find_composite(fk_node_id category, Value *children, size_t count, 
 static Cell *composite_cell(Value category, Value children) {
     expect_kind(category, KIND_NODE, "intern_node expects a category");
     expect_kind(children, KIND_LIST, "intern_node expects children");
-    fk_node_id word = node_word(category, "intern_node expects a category");
     Value *flat = NULL;
     if (children.item_count != EMPTY_COUNT) {
         flat = allocate_zeroed(children.item_count, sizeof *flat);
@@ -972,15 +925,18 @@ static Cell *composite_cell(Value category, Value children) {
             cursor = cursor->tail;
         }
     }
-    uint64_t hash = composite_hash(word, flat, children.item_count);
-    Cell *found = find_composite(word, flat, children.item_count, hash);
+    uint64_t hash = composite_hash(category, flat, children.item_count);
+    Cell *found = find_composite(category, flat, children.item_count, hash);
     if (found != NULL) {
         free(flat);
         return found;
     }
     Cell *cell = cell_hold();
     cell->kind = CELL_COMPOSITE;
-    cell->category = word;
+    /* Category describes the composition; the value has its own storage
+     * coordinate. Memoization and node_at must never alias all of a category. */
+    cell->category = fk_nid_make(0, 2, 0, (long long)(cell_count - 1));
+    cell->category_value = category;
     cell->child_count = children.item_count;
     cell->children = flat;
     cell->hash = hash;
@@ -1018,10 +974,11 @@ static Value offer_node_inst(Value *arguments, size_t argument_count) {
     return node_field(arguments[SOLE_OPERAND], NODE_FIELD_INSTANCE, "node_inst expects a node");
 }
 
-static Value offer_bp(Value *arguments, size_t argument_count) {
+static Value offer_node_at(Value *arguments, size_t argument_count) {
     (void)argument_count;
-    if (arguments[SOLE_OPERAND].kind == KIND_NODE) return arguments[SOLE_OPERAND];
-    return node_value(WORD_FALSE);
+    Value index = arguments[0];
+    if (index.kind != KIND_INTEGER || index.integer < 0 || (unsigned long long)index.integer >= cell_count) return nothing_value();
+    return node_from_cell(cells[(size_t)index.integer]);
 }
 
 static Value offer_intern_trivial_string(Value *arguments, size_t argument_count) {
@@ -1031,12 +988,12 @@ static Value offer_intern_trivial_string(Value *arguments, size_t argument_count
     if (found == NULL) {
         found = cell_hold();
         found->kind = CELL_TEXT;
+        found->category = fk_nid_make(1, 1, 2, (long long)(cell_count - 1));
         found->text = copy_bytes(arguments[SOLE_OPERAND].text, arguments[SOLE_OPERAND].text_length);
         found->text_length = arguments[SOLE_OPERAND].text_length;
         found->hash = text_cell_hash(found->text, found->text_length);
         cell_index(found);
     }
-    if (found->category == 0) found->category = fk_nid_make(1, 1, 2, 0);
     return node_from_cell(found);
 }
 
@@ -1048,11 +1005,109 @@ static Value offer_intern_trivial_int(Value *arguments, size_t argument_count) {
         found = cell_hold();
         found->kind = CELL_INTEGER;
         found->integer = arguments[SOLE_OPERAND].integer;
+        found->category = fk_nid_fits(1, 1, 1, found->integer)
+            ? fk_nid_make(1, 1, 1, found->integer)
+            : fk_nid_make(1, 1, 5, (long long)(cell_count - 1));
         found->hash = integer_cell_hash(found->integer);
         cell_index(found);
     }
-    if (found->category == 0) found->category = fk_nid_make(1, 1, 1, 0);
     return node_from_cell(found);
+}
+
+static Value intern_real(double number, int width) {
+    if (width == 32) {
+        float narrow = (float)number;
+        uint32_t bits;
+        memcpy(&bits, &narrow, sizeof bits);
+        return node_value((long long)fk_nid_make(1, 1, 6, bits));
+    }
+    uint64_t bits;
+    memcpy(&bits, &number, sizeof bits);
+    uint64_t hash = hash_mix(hash_mix(hash_mix(VALUE_HASH_OFFSET, CELL_REAL), (uint64_t)width), bits);
+    for (CellBucket *slot = cell_chain(hash); slot != NULL; slot = slot->next) {
+        Cell *cell = slot->cell;
+        if (cell->kind == CELL_REAL && cell->hash == hash && memcmp(&cell->real, &number, sizeof number) == 0 &&
+            fk_nid_get(cell->category, 2) == (width == 32 ? 6 : 7)) return node_from_cell(cell);
+    }
+    Cell *cell = cell_hold();
+    cell->kind = CELL_REAL;
+    cell->real = number;
+    cell->category = fk_nid_make(1, 1, width == 32 ? 6 : 7, (long long)(cell_count - 1));
+    cell->hash = hash;
+    cell_index(cell);
+    return node_from_cell(cell);
+}
+
+static double decimal_prefix(Value text) {
+    if (text.kind != KIND_TEXT) return 0.0;
+    size_t i = 0;
+    while (i < text.text_length && isspace((unsigned char)text.text[i])) ++i;
+    size_t start = i;
+    if (i < text.text_length && (text.text[i] == '+' || text.text[i] == '-')) ++i;
+    size_t digits = 0;
+    while (i < text.text_length && isdigit((unsigned char)text.text[i])) { ++i; ++digits; }
+    if (i < text.text_length && text.text[i] == '.') {
+        ++i;
+        while (i < text.text_length && isdigit((unsigned char)text.text[i])) { ++i; ++digits; }
+    }
+    if (digits == 0) return 0.0;
+    if (i < text.text_length && (text.text[i] == 'e' || text.text[i] == 'E')) {
+        size_t exponent = i++;
+        if (i < text.text_length && (text.text[i] == '+' || text.text[i] == '-')) ++i;
+        size_t exponent_digits = i;
+        while (i < text.text_length && isdigit((unsigned char)text.text[i])) ++i;
+        if (i == exponent_digits) i = exponent;
+    }
+    char *number = copy_bytes(text.text + start, i - start);
+    double result = strtod(number, NULL);
+    free(number);
+    return result;
+}
+
+static Value offer_str_to_float(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    return real_value(decimal_prefix(arguments[0]));
+}
+
+static Value offer_intern_trivial_float(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[0], KIND_TEXT, "intern_trivial_float expects source text");
+    return intern_real(decimal_prefix(arguments[0]), 64);
+}
+
+static Value offer_make_float64(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    if (arguments[0].kind == KIND_REAL) return intern_real(arguments[0].real, 64);
+    expect_kind(arguments[0], KIND_INTEGER, "make_float64 expects a number");
+    return intern_real((double)arguments[0].integer, 64);
+}
+
+static Value offer_make_float32(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    if (arguments[0].kind == KIND_REAL) return intern_real(arguments[0].real, 32);
+    expect_kind(arguments[0], KIND_INTEGER, "make_float32 expects a number");
+    return intern_real((double)arguments[0].integer, 32);
+}
+
+static Value offer_float_value(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    if (arguments[0].kind == KIND_NODE && fk_nid_get((fk_node_id)arguments[0].integer, 1) == 1 && fk_nid_get((fk_node_id)arguments[0].integer, 2) == 6) {
+        uint32_t bits = (uint32_t)fk_nid_get((fk_node_id)arguments[0].integer, 3);
+        float value;
+        memcpy(&value, &bits, sizeof value);
+        return real_value((double)value);
+    }
+    return arguments[0].kind == KIND_NODE && arguments[0].cell != NULL && arguments[0].cell->kind == CELL_REAL
+        ? real_value(arguments[0].cell->real) : nothing_value();
+}
+
+static Value offer_float_to_int(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    if (arguments[0].kind == KIND_INTEGER) return arguments[0];
+    expect_kind(arguments[0], KIND_REAL, "float_to_int expects a number");
+    double number = arguments[0].real;
+    if (!isfinite(number) || number < (double)LLONG_MIN || number >= -(double)LLONG_MIN) fail("float_to_int is outside the native signed integer range");
+    return integer_value((long long)number);
 }
 
 static Value offer_intern_node(Value *arguments, size_t argument_count) {
@@ -1062,7 +1117,6 @@ static Value offer_intern_node(Value *arguments, size_t argument_count) {
 
 static Value offer_node_children(Value *arguments, size_t argument_count) {
     (void)argument_count;
-    if (arguments[SOLE_OPERAND].kind == KIND_REAL) return list_from(NULL, EMPTY_COUNT);
     expect_kind(arguments[SOLE_OPERAND], KIND_NODE, "node_children expects a node");
     Cell *cell = arguments[SOLE_OPERAND].cell;
     if (cell == NULL || cell->child_count == EMPTY_COUNT) return list_from(NULL, EMPTY_COUNT);
@@ -1072,23 +1126,28 @@ static Value offer_node_children(Value *arguments, size_t argument_count) {
 static Value offer_node_category(Value *arguments, size_t argument_count) {
     (void)argument_count;
     if (arguments[SOLE_OPERAND].kind == KIND_NOTHING) return nothing_value();
-    if (arguments[SOLE_OPERAND].kind == KIND_REAL) return nothing_value();
     if (arguments[SOLE_OPERAND].kind != KIND_NODE) {
         fail(message_with_name("node_category expects a node, received ", kind_name(arguments[SOLE_OPERAND].kind), strlen(kind_name(arguments[SOLE_OPERAND].kind))));
     }
     if (arguments[SOLE_OPERAND].cell == NULL || arguments[SOLE_OPERAND].cell->kind != CELL_COMPOSITE) return arguments[SOLE_OPERAND];
-    return node_value((long long)arguments[SOLE_OPERAND].cell->category);
+    return arguments[SOLE_OPERAND].cell->category_value;
 }
 
 static Value offer_node_payload(Value *arguments, size_t argument_count) {
     (void)argument_count;
     if (arguments[SOLE_OPERAND].kind == KIND_NOTHING) return nothing_value();
-    if (arguments[SOLE_OPERAND].kind == KIND_REAL) return arguments[SOLE_OPERAND];
     expect_kind(arguments[SOLE_OPERAND], KIND_NODE, "node_value expects a node");
     Cell *cell = arguments[SOLE_OPERAND].cell;
-    if (cell == NULL) return integer_value(arguments[SOLE_OPERAND].integer);
+    if (cell == NULL) {
+        fk_node_id coordinate = (fk_node_id)arguments[SOLE_OPERAND].integer;
+        if (fk_nid_get(coordinate, 0) == 1 && fk_nid_get(coordinate, 1) == 1 &&
+            (fk_nid_get(coordinate, 2) == 1 || fk_nid_get(coordinate, 2) == 3)) return integer_value(fk_nid_get(coordinate, 2) == 1 ? (int32_t)fk_nid_get(coordinate, 3) : fk_nid_get(coordinate, 3));
+        if (fk_nid_get(coordinate, 1) == 1 && fk_nid_get(coordinate, 2) == 6) return offer_float_value(arguments, 1);
+        return nothing_value();
+    }
     if (cell->kind == CELL_TEXT) return text_value(cell->text, cell->text_length);
     if (cell->kind == CELL_INTEGER) return integer_value(cell->integer);
+    if (cell->kind == CELL_REAL) return real_value(cell->real);
     return nothing_value();
 }
 
@@ -1096,17 +1155,12 @@ static Value offer_node_eq(Value *arguments, size_t argument_count) {
     (void)argument_count;
     Value left = arguments[LEFT_OPERAND];
     Value right = arguments[RIGHT_OPERAND];
-    if (left.kind == KIND_REAL && right.kind == KIND_REAL) return boolean_word(left.real == right.real);
     if (left.kind != KIND_NODE || right.kind != KIND_NODE) return boolean_word(0);
-    if (left.cell != NULL && right.cell != NULL) return boolean_word(left.cell == right.cell);
-    long long left_word = left.cell != NULL && left.cell->kind == CELL_COMPOSITE ? (long long)left.cell->category : left.integer;
-    long long right_word = right.cell != NULL && right.cell->kind == CELL_COMPOSITE ? (long long)right.cell->category : right.integer;
-    return boolean_word(left_word == right_word);
+    return boolean_word(values_equal(left, right));
 }
 
 static Value offer_node_source(Value *arguments, size_t argument_count) {
     (void)argument_count;
-    if (arguments[SOLE_OPERAND].kind == KIND_REAL) return list_from(NULL, EMPTY_COUNT);
     if (arguments[SOLE_OPERAND].kind != KIND_NODE) {
         fail(message_with_name("node_source expects a node, received ", kind_name(arguments[SOLE_OPERAND].kind), strlen(kind_name(arguments[SOLE_OPERAND].kind))));
     }
@@ -1139,7 +1193,8 @@ static Value boolean_word(int predicate) {
 }
 
 static int integer_is_nonzero(Value value) {
-    return value.kind == KIND_INTEGER && value.integer != WORD_FALSE;
+    if (value.kind != KIND_INTEGER) fail("a branch expects a present integer truth value");
+    return value.integer != WORD_FALSE;
 }
 
 static int is_digit_char(char character) {
@@ -1161,76 +1216,6 @@ static const char *kind_name(ValueKind kind) {
 
 static void expect_kind(Value value, ValueKind kind, const char *reason) {
     if (value.kind != kind) fail(reason);
-}
-
-static int text_matches(Value value, const char *literal) {
-    return value.kind == KIND_TEXT && bytes_equal(value.text, value.text_length, literal, strlen(literal));
-}
-
-static int byte_from_value(Value value, unsigned char *out) {
-    if (value.kind != KIND_INTEGER || value.integer < WORD_FALSE || value.integer > UCHAR_MAX) return 0;
-    *out = (unsigned char)value.integer;
-    return 1;
-}
-
-static int list_to_bytes(Value list, unsigned char **bytes, size_t *length) {
-    if (list.kind == KIND_NOTHING) {
-        *bytes = NULL;
-        *length = EMPTY_COUNT;
-        return 1;
-    }
-    if (list.kind != KIND_LIST) return 0;
-    *length = list.item_count;
-    *bytes = allocate_zeroed(list.item_count == EMPTY_COUNT ? ONE_ELEMENT : list.item_count, sizeof **bytes);
-    List *cursor = list.list;
-    for (size_t index = FIRST_INDEX; index < list.item_count; index = checked_add(index, ONE_ELEMENT)) {
-        unsigned char byte = 0;
-        if (cursor == NULL || !byte_from_value(cursor->head, &byte)) return 0;
-        (*bytes)[index] = byte;
-        cursor = cursor->tail;
-    }
-    return 1;
-}
-
-static Value bytes_to_list(const unsigned char *bytes, size_t length) {
-    Value *items = allocate_zeroed(length, sizeof *items);
-    for (size_t index = FIRST_INDEX; index < length; index = checked_add(index, ONE_ELEMENT)) {
-        items[index] = integer_value((long long)bytes[index]);
-    }
-    return list_from(items, length);
-}
-
-static int path_exists(const char *path) {
-    struct stat info;
-    return stat(path, &info) == SYSTEM_CALL_OK;
-}
-
-static int path_is_dir(const char *path) {
-    struct stat info;
-    if (stat(path, &info) != SYSTEM_CALL_OK) return 0;
-    return S_ISDIR(info.st_mode) ? 1 : 0;
-}
-
-static int socket_put(int descriptor) {
-    size_t needed = checked_add(socket_descriptor_count, ONE_ELEMENT);
-    socket_descriptors = grow_list(socket_descriptors, &socket_descriptor_capacity, sizeof *socket_descriptors, needed);
-    socket_descriptors[socket_descriptor_count] = descriptor;
-    socket_descriptor_count = needed;
-    return (int)socket_descriptor_count;
-}
-
-static int socket_fetch(long long handle) {
-    if (handle <= WORD_FALSE) return INVALID_DESCRIPTOR;
-    if ((unsigned long long)handle > socket_descriptor_count) return INVALID_DESCRIPTOR;
-    int descriptor = socket_descriptors[handle - ONE_ELEMENT];
-    return descriptor;
-}
-
-static int socket_release(long long handle) {
-    if (handle <= WORD_FALSE) return 0;
-    if ((unsigned long long)handle > socket_descriptor_count) return 0;
-    socket_descriptors[handle - ONE_ELEMENT] = INVALID_DESCRIPTOR;
-    return 1;
 }
 
 static int is_number(Value value) {
@@ -1276,6 +1261,7 @@ static Form *new_form(FormKind kind, size_t offset) {
     Form *form = allocate_zeroed(ONE_ELEMENT, sizeof *form);
     form->kind = kind;
     form->offset = offset;
+    form->path = source_path;
     return form;
 }
 
@@ -1287,7 +1273,7 @@ static void group_add(Form *group, Form *child) {
 }
 
 static int form_is_symbol(Form *form, const char *spelling) {
-    return form->kind == FORM_SYMBOL && bytes_equal_cstr(form->text, form->text_length, spelling);
+    return form != NULL && form->kind == FORM_SYMBOL && bytes_equal_cstr(form->text, form->text_length, spelling);
 }
 
 static size_t call_argument_count(Form *call) {
@@ -1331,28 +1317,25 @@ static void skip_bml(void) {
             source_offset = checked_add(source_offset, ONE_ELEMENT);
             continue;
         }
-        if (source_bytes[source_offset] == COMMENT_INTRODUCER) {
-            int at_line_start = 1;
-            size_t cursor = source_offset;
-            while (cursor > FIRST_INDEX) {
-                char previous = source_bytes[cursor - ONE_ELEMENT];
-                if (previous == NEWLINE) break;
-                if (!isspace((unsigned char)previous)) {
-                    at_line_start = 0;
-                    break;
-                }
-                cursor -= ONE_ELEMENT;
-            }
-            if (at_line_start) {
-                source_offset = checked_add(source_offset, ONE_ELEMENT);
-                while (source_offset < source_length && source_bytes[source_offset] != NEWLINE) {
-                    source_offset = checked_add(source_offset, ONE_ELEMENT);
-                }
+        if (character == ';') {
+            size_t line = source_offset;
+            while (line > 0 && source_bytes[line - 1] != '\n' && isspace((unsigned char)source_bytes[line - 1])) --line;
+            if (line == 0 || source_bytes[line - 1] == '\n') {
+                while (source_offset < source_length && source_bytes[source_offset] != '\n') ++source_offset;
                 continue;
             }
         }
         if (source_bytes[source_offset] != LINE_COMMENT_MARK) return;
         size_t next = checked_add(source_offset, ONE_ELEMENT);
+        if (next < source_length && source_bytes[next] == '*') {
+            size_t opening = source_offset;
+            source_offset = next + ONE_ELEMENT;
+            while (source_offset + ONE_ELEMENT < source_length &&
+                   !(source_bytes[source_offset] == '*' && source_bytes[source_offset + ONE_ELEMENT] == '/')) ++source_offset;
+            if (source_offset + ONE_ELEMENT >= source_length) fail_at(opening, "a block comment was not closed");
+            source_offset += ARITY_TWO;
+            continue;
+        }
         if (next >= source_length || source_bytes[next] != LINE_COMMENT_MARK) return;
         source_offset = checked_add(next, ONE_ELEMENT);
         while (source_offset < source_length && source_bytes[source_offset] != NEWLINE) {
@@ -1470,7 +1453,10 @@ static Form *parse_atom(void) {
     return form;
 }
 
-static Form **parse_source(size_t *form_count) {
+static int at_source_section(void);
+static Form *parse_source_section(void);
+
+static Form **parse_source_span(size_t *form_count, int one) {
     typedef struct {
         Form *group;
         size_t open_offset;
@@ -1482,6 +1468,7 @@ static Form **parse_source(size_t *form_count) {
     size_t top_count = EMPTY_COUNT;
     size_t top_capacity = EMPTY_COUNT;
     while (1) {
+        if (one && open_count == 0 && top_count != 0) break;
         skip_space_and_comments();
         if (source_offset >= source_length) {
             if (open_count != EMPTY_COUNT) fail_at(open_groups[open_count - ONE_ELEMENT].open_offset, "a call was not closed");
@@ -1513,7 +1500,7 @@ static Form **parse_source(size_t *form_count) {
             open_count = needed;
             continue;
         }
-        Form *atom = character == TEXT_DELIMITER ? parse_text() : parse_atom();
+        Form *atom = at_source_section() ? parse_source_section() : character == TEXT_DELIMITER ? parse_text() : parse_atom();
         if (open_count == EMPTY_COUNT) {
             size_t needed = checked_add(top_count, ONE_ELEMENT);
             top_forms = grow_list(top_forms, &top_capacity, sizeof *top_forms, needed);
@@ -1524,7 +1511,12 @@ static Form **parse_source(size_t *form_count) {
         }
     }
     *form_count = top_count;
+    free(open_groups);
     return top_forms;
+}
+
+static Form **parse_source(size_t *form_count) {
+    return parse_source_span(form_count, 0);
 }
 
 static char *read_source(const char *path, size_t *length) {
@@ -1559,12 +1551,60 @@ static char *read_source(const char *path, size_t *length) {
     return text;
 }
 
+typedef struct {
+    const char *bytes;
+    size_t length, entry;
+    uint64_t hash;
+} NameSlot;
+
+typedef struct {
+    NameSlot *slots;
+    size_t capacity, count;
+} NameIndex;
+
+static NameIndex operation_names, function_names, global_names;
+
+static size_t name_index_find(NameIndex *index, const char *bytes, size_t length) {
+    if (index->capacity == 0) return SIZE_MAX;
+    uint64_t hash = hash_bytes(VALUE_HASH_OFFSET, bytes, length);
+    size_t slot = (size_t)hash & (index->capacity - 1);
+    while (index->slots[slot].entry != 0) {
+        NameSlot row = index->slots[slot];
+        if (row.hash == hash && bytes_equal(row.bytes, row.length, bytes, length)) return row.entry - 1;
+        slot = (slot + 1) & (index->capacity - 1);
+    }
+    return SIZE_MAX;
+}
+
+static void name_index_set(NameIndex *index, const char *bytes, size_t length, size_t entry) {
+    if (index->count >= index->capacity / 2) {
+        size_t capacity = index->capacity == 0 ? 2 : checked_add(index->capacity, index->capacity);
+        NameSlot *slots = allocate_zeroed(capacity, sizeof *slots);
+        for (size_t i = 0; i < index->capacity; ++i) if (index->slots[i].entry != 0) {
+            size_t slot = (size_t)index->slots[i].hash & (capacity - 1);
+            while (slots[slot].entry != 0) slot = (slot + 1) & (capacity - 1);
+            slots[slot] = index->slots[i];
+        }
+        free(index->slots);
+        index->slots = slots;
+        index->capacity = capacity;
+    }
+    uint64_t hash = hash_bytes(VALUE_HASH_OFFSET, bytes, length);
+    size_t slot = (size_t)hash & (index->capacity - 1);
+    while (index->slots[slot].entry != 0) {
+        NameSlot row = index->slots[slot];
+        if (row.hash == hash && bytes_equal(row.bytes, row.length, bytes, length)) break;
+        slot = (slot + 1) & (index->capacity - 1);
+    }
+    if (index->slots[slot].entry == 0) ++index->count;
+    index->slots[slot] = (NameSlot){bytes, length, checked_add(entry, 1), hash};
+}
+
 static void register_operation(const char *spelling, size_t arity, ArityPolicy arity_policy,
                                EvaluationPolicy evaluation, OperationId id, OperationOffer offer) {
     size_t needed = checked_add(operation_count, ONE_ELEMENT);
     operations = grow_list(operations, &operation_capacity, sizeof *operations, needed);
     operations[operation_count].spelling = spelling;
-    operations[operation_count].spelling_length = strlen(spelling);
     operations[operation_count].arity = arity;
     operations[operation_count].arity_policy = arity_policy;
     operations[operation_count].evaluation = evaluation;
@@ -1572,28 +1612,23 @@ static void register_operation(const char *spelling, size_t arity, ArityPolicy a
     operations[operation_count].offer = offer;
     operations[operation_count].calls = EMPTY_COUNT;
     operations[operation_count].answers = 0;
+    name_index_set(&operation_names, spelling, strlen(spelling), operation_count);
     operation_count = needed;
 }
 
 static void operation_answers(const char *spelling) {
-    size_t spelling_length = strlen(spelling);
-    for (size_t index = FIRST_INDEX; index < operation_count; index = checked_add(index, ONE_ELEMENT)) {
-        if (bytes_equal(spelling, spelling_length, operations[index].spelling, operations[index].spelling_length)) operations[index].answers = 1;
-    }
+    size_t index = name_index_find(&operation_names, spelling, strlen(spelling));
+    if (index != SIZE_MAX) operations[index].answers = 1;
 }
 
 static const Operation *find_operation_text(const char *bytes, size_t length) {
-    for (size_t index = FIRST_INDEX; index < operation_count; index = checked_add(index, ONE_ELEMENT)) {
-        if (bytes_equal(bytes, length, operations[index].spelling, operations[index].spelling_length)) return &operations[index];
-    }
-    return NULL;
+    size_t index = name_index_find(&operation_names, bytes, length);
+    return index == SIZE_MAX ? NULL : &operations[index];
 }
 
 static Binding *find_function_text(const char *bytes, size_t length) {
-    for (size_t index = FIRST_INDEX; index < function_count; index = checked_add(index, ONE_ELEMENT)) {
-        if (bytes_equal(functions[index].bytes, functions[index].length, bytes, length)) return &functions[index];
-    }
-    return NULL;
+    size_t index = name_index_find(&function_names, bytes, length);
+    return index == SIZE_MAX ? NULL : &functions[index];
 }
 
 static void bind_definition(Form *form) {
@@ -1605,7 +1640,26 @@ static void bind_definition(Form *form) {
     if (reserved != NULL && reserved->evaluation == LEAVE_ARGUMENTS) {
         fail_at(name->offset, message_with_name("a definition uses a reserved operation name: ", name->text, name->text_length));
     }
-    Value function = function_from_parameters(parameters, form->parts[DEFN_BODY], 0);
+    if (parameters->kind != FORM_GROUP) fail_at(parameters->offset, "a parameter list must be a group");
+    for (size_t index = FIRST_INDEX; index < parameters->part_count; index = checked_add(index, ONE_ELEMENT)) {
+        Form *parameter = parameters->parts[index];
+        if (parameter->kind != FORM_SYMBOL) fail_at(parameter->offset, "a parameter must be a symbol");
+        for (size_t earlier = FIRST_INDEX; earlier < index; earlier = checked_add(earlier, ONE_ELEMENT)) {
+            Form *previous = parameters->parts[earlier];
+            if (bytes_equal(previous->text, previous->text_length, parameter->text, parameter->text_length)) {
+                fail_at(parameter->offset, "a parameter name is repeated");
+            }
+        }
+    }
+    Value function = nothing_value();
+    function.kind = KIND_FUNCTION;
+    function.body = form->parts[DEFN_BODY];
+    function.parameter_count = parameters->part_count;
+    function.parameters = allocate_zeroed(parameters->part_count, sizeof *function.parameters);
+    for (size_t index = FIRST_INDEX; index < parameters->part_count; index = checked_add(index, ONE_ELEMENT)) {
+        function.parameters[index].bytes = parameters->parts[index]->text;
+        function.parameters[index].length = parameters->parts[index]->text_length;
+    }
     Binding *existing = find_function_text(name->text, name->text_length);
     if (existing != NULL) {
         existing->value = function;
@@ -1617,36 +1671,9 @@ static void bind_definition(Form *form) {
     functions[function_count].bytes = name->text;
     functions[function_count].length = name->text_length;
     functions[function_count].value = function;
+    name_index_set(&function_names, name->text, name->text_length, function_count);
     function_count = needed;
     form->is_bound = 1;
-}
-
-static void bind_runtime_definition(Form *form) {
-    if (form->part_count != DEFN_PART_COUNT) fail_at(form->offset, "a definition needs a name, parameters, and a body");
-    Form *name = form->parts[DEFN_NAME];
-    Form *parameters = form->parts[DEFN_PARAMETERS];
-    if (name->kind != FORM_SYMBOL) fail_at(name->offset, "a definition name must be a symbol");
-    const Operation *reserved = find_operation_text(name->text, name->text_length);
-    if (reserved != NULL && reserved->evaluation == LEAVE_ARGUMENTS) {
-        fail_at(name->offset, message_with_name("a definition uses a reserved operation name: ", name->text, name->text_length));
-    }
-    Value function = function_from_parameters(parameters, form->parts[DEFN_BODY], inside_function());
-    if (inside_function()) append_local(name->text, name->text_length, function);
-    else {
-        Binding *existing = find_function_text(name->text, name->text_length);
-        if (existing != NULL) {
-            existing->value = function;
-            form->is_bound = 1;
-            return;
-        }
-        size_t needed = checked_add(function_count, ONE_ELEMENT);
-        functions = grow_list(functions, &function_capacity, sizeof *functions, needed);
-        functions[function_count].bytes = name->text;
-        functions[function_count].length = name->text_length;
-        functions[function_count].value = function;
-        function_count = needed;
-        form->is_bound = 1;
-    }
 }
 
 static void bind_definitions(Form **forms, size_t form_count) {
@@ -1704,32 +1731,39 @@ static Value offer_sub(Value *arguments, size_t argument_count) {
 
 static Value offer_eq(Value *arguments, size_t argument_count) {
     (void)argument_count;
+    Value left = arguments[0], right = arguments[1];
+    if (is_number(left) && is_number(right) && left.kind != right.kind) {
+        Value integer = left.kind == KIND_INTEGER ? left : right;
+        double real = left.kind == KIND_REAL ? left.real : right.real;
+        return boolean_word(isfinite(real) && real >= (double)LLONG_MIN && real < -(double)LLONG_MIN &&
+            trunc(real) == real && (long long)real == integer.integer);
+    }
     return boolean_word(values_equal(arguments[LEFT_OPERAND], arguments[RIGHT_OPERAND]));
 }
 
-static Value offer_get(Value *arguments, size_t argument_count) {
+static Value offer_value_eq(Value *arguments, size_t argument_count) {
     (void)argument_count;
-    Value carrier = arguments[LEFT_OPERAND];
-    Value key = arguments[RIGHT_OPERAND];
-    if (carrier.kind == KIND_LIST) {
-        if (carrier.item_count >= ONE_ELEMENT && text_matches(carrier.list->head, "__dict__") && key.kind == KIND_TEXT) {
-            List *cursor = carrier.list->tail;
-            while (cursor != NULL && cursor->tail != NULL) {
-                if (cursor->head.kind == KIND_TEXT && bytes_equal(cursor->head.text, cursor->head.text_length, key.text, key.text_length)) {
-                    return cursor->tail->head;
-                }
-                cursor = cursor->tail->tail;
-            }
-            return integer_value(WORD_FALSE);
-        }
-        if (key.kind != KIND_INTEGER) return integer_value(WORD_FALSE);
-        if (carrier.item_count == EMPTY_COUNT) return integer_value(WORD_FALSE);
-        if (key.integer < WORD_FALSE) return carrier.list->head;
-        size_t index = (size_t)key.integer;
-        if (index >= carrier.item_count) return integer_value(WORD_FALSE);
-        return list_at(carrier, index);
-    }
-    return integer_value(WORD_FALSE);
+    return boolean_word(values_equal(arguments[0], arguments[1]));
+}
+
+static Value offer_math_sqrt(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    return real_value(sqrt(number_as_real(arguments[0])));
+}
+
+static Value offer_math_exp(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    return real_value(exp(number_as_real(arguments[0])));
+}
+
+static Value offer_math_log(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    return real_value(log(number_as_real(arguments[0])));
+}
+
+static Value offer_math_pow(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    return real_value(pow(number_as_real(arguments[0]), number_as_real(arguments[1])));
 }
 
 static Value offer_lt(Value *arguments, size_t argument_count) {
@@ -1849,6 +1883,7 @@ static Value offer_len(Value *arguments, size_t argument_count) {
     Value value = arguments[SOLE_OPERAND];
     if (value.kind == KIND_LIST) return count_word(value.item_count);
     if (value.kind == KIND_TEXT) return count_word(value.text_length);
+    if (value.kind == KIND_NOTHING) fail("nothing has no length");
     fail("len expects a list or text");
     return nothing_value();
 }
@@ -1887,14 +1922,11 @@ static Value integer_text(long long integer) {
     return value;
 }
 
+static Value offer_value_str(Value *arguments, size_t argument_count);
+static void print_value_to(Value root, FILE *output);
+
 static Value offer_str(Value *arguments, size_t argument_count) {
-    (void)argument_count;
-    Value value = arguments[SOLE_OPERAND];
-    if (value.kind == KIND_TEXT) return value;
-    if (value.kind == KIND_INTEGER) return integer_text(value.integer);
-    if (value.kind == KIND_NOTHING) return text_value("nothing", strlen("nothing"));
-    fail("str expects text, an integer, or nothing");
-    return nothing_value();
+    return offer_value_str(arguments, argument_count);
 }
 
 static Value offer_print_str(Value *arguments, size_t argument_count) {
@@ -1904,7 +1936,8 @@ static Value offer_print_str(Value *arguments, size_t argument_count) {
         fwrite(arguments[SOLE_OPERAND].text, sizeof(char), arguments[SOLE_OPERAND].text_length, stdout);
     }
     fputc(NEWLINE, stdout);
-    return integer_value(WORD_FALSE);
+    fflush(stdout);
+    return nothing_value();
 }
 
 static void print_value(Value root);
@@ -1973,6 +2006,7 @@ static Value offer_tail(Value *arguments, size_t argument_count) {
     if (arguments[SOLE_OPERAND].kind != KIND_LIST) fail(message_with_name("tail expects a list, received ", kind_name(arguments[SOLE_OPERAND].kind), strlen(kind_name(arguments[SOLE_OPERAND].kind))));
     if (arguments[SOLE_OPERAND].item_count == EMPTY_COUNT) return list_from(NULL, EMPTY_COUNT);
     Value tail = arguments[SOLE_OPERAND];
+    if (tail.list->dotted_tail != NULL) return *tail.list->dotted_tail;
     tail.list = tail.list->tail;
     tail.item_count -= ONE_ELEMENT;
     return tail;
@@ -1980,7 +2014,12 @@ static Value offer_tail(Value *arguments, size_t argument_count) {
 
 static Value offer_cons(Value *arguments, size_t argument_count) {
     (void)argument_count;
-    expect_kind(arguments[RIGHT_OPERAND], KIND_LIST, "cons expects a list");
+    if (arguments[RIGHT_OPERAND].kind != KIND_LIST) {
+        Value pair = list_from(arguments, 1);
+        pair.list->dotted_tail = allocate_zeroed(1, sizeof(Value));
+        *pair.list->dotted_tail = arguments[RIGHT_OPERAND];
+        return pair;
+    }
     List *cell = allocate_zeroed(ONE_ELEMENT, sizeof *cell);
     cell->head = arguments[LEFT_OPERAND];
     cell->tail = arguments[RIGHT_OPERAND].list;
@@ -2016,20 +2055,20 @@ static Value record_value(Record *record) {
 
 static Value offer_record_set(Value *arguments, size_t argument_count);
 
+static Value offer_record_keys(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[0], KIND_RECORD, "record_keys expects a record");
+    Record *record = arguments[0].record;
+    return list_from(record->keys, record->count);
+}
+
 static Value offer_record_new(Value *arguments, size_t argument_count) {
     if (argument_count == EMPTY_COUNT) fail("record_new expects a blueprint or a size");
-    owner_construction_clock = checked_add(owner_construction_clock, ONE_ELEMENT);
-    size_t field_start = ONE_ELEMENT;
-    Record *record = allocate_zeroed(ONE_ELEMENT, sizeof *record);
-    if (arguments[FIRST_INDEX].kind == KIND_INTEGER && argument_count == ONE_ELEMENT) {
-        record->blueprint = nothing_value();
-        return record_value(record);
-    }
-    record->blueprint = arguments[FIRST_INDEX];
-    size_t fields = argument_count - field_start;
+    size_t fields = argument_count - ONE_ELEMENT;
     if ((fields % ARITY_TWO) != EMPTY_COUNT) fail("record_new expects key and value pairs");
-    Value created = record_value(record);
-    for (size_t index = field_start; index < argument_count; index = checked_add(index, ARITY_TWO)) {
+    Value created = record_value(allocate_zeroed(ONE_ELEMENT, sizeof(Record)));
+    created.record->blueprint = argument_count == 1 && arguments[0].kind == KIND_INTEGER ? nothing_value() : arguments[0];
+    for (size_t index = ONE_ELEMENT; index < argument_count; index = checked_add(index, ARITY_TWO)) {
         Value triple[] = {created, arguments[index], arguments[checked_add(index, ONE_ELEMENT)]};
         created = offer_record_set(triple, ARITY_THREE);
     }
@@ -2072,28 +2111,6 @@ static Value offer_record_set(Value *arguments, size_t argument_count) {
     record->values[record->count] = stored;
     record->count = needed;
     return arguments[LEFT_OPERAND];
-}
-
-static Value offer_record_type(Value *arguments, size_t argument_count) {
-    (void)argument_count;
-    return boolean_word(arguments[SOLE_OPERAND].kind == KIND_RECORD);
-}
-
-static Value offer_record_blueprint(Value *arguments, size_t argument_count) {
-    (void)argument_count;
-    expect_kind(arguments[SOLE_OPERAND], KIND_RECORD, "record_blueprint expects a record");
-    return arguments[SOLE_OPERAND].record->blueprint;
-}
-
-static Value offer_record_keys(Value *arguments, size_t argument_count) {
-    (void)argument_count;
-    expect_kind(arguments[SOLE_OPERAND], KIND_RECORD, "record_keys expects a record");
-    Record *record = arguments[SOLE_OPERAND].record;
-    Value *keys = allocate_zeroed(record->count, sizeof *keys);
-    for (size_t index = FIRST_INDEX; index < record->count; index = checked_add(index, ONE_ELEMENT)) {
-        keys[index] = record->keys[index];
-    }
-    return list_from(keys, record->count);
 }
 
 static ssize_t find_method(Value blueprint, Value name) {
@@ -2140,22 +2157,15 @@ static Value offer_method_has(Value *arguments, size_t argument_count) {
     return boolean_word(find_method(blueprint, arguments[RIGHT_OPERAND]) >= 0);
 }
 
-static Value offer_method_invoke(Value *arguments, size_t argument_count) {
-    if (argument_count < ARITY_TWO) fail("method_invoke expects at least a receiver and name");
-    Value receiver = arguments[FIRST_INDEX];
-    Value name = arguments[ONE_ELEMENT];
-    if (receiver.kind != KIND_RECORD) fail("method_invoke expects a record receiver");
-    expect_kind(name, KIND_TEXT, "method_invoke expects a method name");
-    ssize_t index = find_method(receiver.record->blueprint, name);
-    if (index < 0) fail("method_invoke could not find a method under that name");
-    MethodDefinition *method = method_definitions + index;
-    size_t invoke_count = argument_count - ONE_ELEMENT;
-    Value *invoke_arguments = allocate_zeroed(invoke_count, sizeof *invoke_arguments);
-    invoke_arguments[FIRST_INDEX] = receiver;
-    for (size_t argument = ARITY_TWO; argument < argument_count; argument = checked_add(argument, ONE_ELEMENT)) {
-        invoke_arguments[argument - ONE_ELEMENT] = arguments[argument];
-    }
-    return invoke_function_value(method->function, invoke_arguments, invoke_count);
+static Value offer_record_type(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    return boolean_word(arguments[0].kind == KIND_RECORD);
+}
+
+static Value offer_record_blueprint(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[0], KIND_RECORD, "record_blueprint expects a record");
+    return arguments[0].record->blueprint;
 }
 
 static Value offer_range(Value *arguments, size_t argument_count) {
@@ -2190,24 +2200,21 @@ static int scan_continues(unsigned char byte, long long mode) {
     if (mode == SCAN_DIGITS) return byte >= '0' && byte <= '9';
     if (mode == SCAN_ALPHA) return (byte >= 'A' && byte <= 'Z') || (byte >= 'a' && byte <= 'z');
     if (mode == SCAN_NAME) return (byte >= 'A' && byte <= 'Z') || (byte >= 'a' && byte <= 'z') || (byte >= '0' && byte <= '9') || byte == '_' || byte == '-';
-    if (mode == SCAN_NONQUOTE) return byte != '"' && byte != '\\';
+    if (mode == SCAN_STRING) return byte != '"' && byte != '\\';
     if (mode == SCAN_LINE) return byte != '\n';
-    if (mode == SCAN_JSONSAFE) return byte >= 32 && byte != '"' && byte != '\\';
+    if (mode == SCAN_JSON_SAFE) return byte >= ' ' && byte != '"' && byte != '\\';
     return 0;
 }
 
 static Value offer_scan_run(Value *arguments, size_t argument_count) {
     (void)argument_count;
-    expect_kind(arguments[SOLE_OPERAND], KIND_TEXT, "scan_run expects text");
     expect_kind(arguments[RIGHT_OPERAND], KIND_INTEGER, "scan_run expects a start");
     expect_kind(arguments[SLICE_END], KIND_INTEGER, "scan_run expects a mode");
-    if (arguments[RIGHT_OPERAND].integer < WORD_FALSE) return nothing_value();
-    size_t index = (size_t)arguments[RIGHT_OPERAND].integer;
+    size_t index = arguments[RIGHT_OPERAND].integer < 0 ? 0 : (size_t)arguments[RIGHT_OPERAND].integer;
+    if (arguments[SOLE_OPERAND].kind != KIND_TEXT) return count_word(index);
     size_t length = arguments[SOLE_OPERAND].text_length;
     const char *text = arguments[SOLE_OPERAND].text;
     long long mode = arguments[SLICE_END].integer;
-    if (mode != SCAN_SPACE && mode != SCAN_DIGITS && mode != SCAN_ALPHA && mode != SCAN_NAME
-        && mode != SCAN_NONQUOTE && mode != SCAN_LINE && mode != SCAN_JSONSAFE) return nothing_value();
     while (index < length && scan_continues((unsigned char)text[index], mode)) index = checked_add(index, ONE_ELEMENT);
     return count_word(index);
 }
@@ -2259,7 +2266,6 @@ static Value offer_str_find(Value *arguments, size_t argument_count) {
     size_t start = (size_t)requested;
     size_t haystack = arguments[SOLE_OPERAND].text_length;
     size_t needle = arguments[RIGHT_OPERAND].text_length;
-    if (needle == EMPTY_COUNT) return integer_value(-WORD_TRUE);
     if (start > haystack || needle > haystack - start) return integer_value(-WORD_TRUE);
     for (size_t index = start; index <= haystack - needle; index = checked_add(index, ONE_ELEMENT)) {
         if (bytes_equal(arguments[SOLE_OPERAND].text + index, needle, arguments[RIGHT_OPERAND].text, needle)) return count_word(index);
@@ -2291,135 +2297,6 @@ static Value offer_str_to_int(Value *arguments, size_t argument_count) {
     return integer_value(negative ? -value : value);
 }
 
-static Value offer_str_to_float(Value *arguments, size_t argument_count) {
-    (void)argument_count;
-    if (arguments[SOLE_OPERAND].kind == KIND_NOTHING) return nothing_value();
-    expect_kind(arguments[SOLE_OPERAND], KIND_TEXT, "str_to_float expects text");
-    char *text = copy_bytes(arguments[SOLE_OPERAND].text, arguments[SOLE_OPERAND].text_length);
-    char *end = NULL;
-    errno = 0;
-    double value = strtod(text, &end);
-    if (end == text || errno == ERANGE) {
-        free(text);
-        return real_value(REAL_ZERO);
-    }
-    free(text);
-    return real_value(value);
-}
-
-static Value offer_float_to_int(Value *arguments, size_t argument_count) {
-    (void)argument_count;
-    if (arguments[SOLE_OPERAND].kind == KIND_INTEGER) return arguments[SOLE_OPERAND];
-    if (arguments[SOLE_OPERAND].kind == KIND_NOTHING) return nothing_value();
-    expect_kind(arguments[SOLE_OPERAND], KIND_REAL, "float_to_int expects a float");
-    double value = arguments[SOLE_OPERAND].real;
-    if (!isfinite(value) || value > (double)LLONG_MAX || value < (double)LLONG_MIN) fail("float_to_int is outside the native integer range");
-    return integer_value((long long)value);
-}
-
-static Value offer_make_float32(Value *arguments, size_t argument_count) {
-    (void)argument_count;
-    if (!is_number(arguments[SOLE_OPERAND])) fail("make_float32 expects a number");
-    float narrowed = (float)number_as_real(arguments[SOLE_OPERAND]);
-    return real_value((double)narrowed);
-}
-
-static Value offer_make_float64(Value *arguments, size_t argument_count) {
-    (void)argument_count;
-    if (!is_number(arguments[SOLE_OPERAND])) fail("make_float64 expects a number");
-    return real_value(number_as_real(arguments[SOLE_OPERAND]));
-}
-
-static Value offer_float_value(Value *arguments, size_t argument_count) {
-    (void)argument_count;
-    if (arguments[SOLE_OPERAND].kind == KIND_REAL) return arguments[SOLE_OPERAND];
-    if (arguments[SOLE_OPERAND].kind == KIND_INTEGER) return real_value((double)arguments[SOLE_OPERAND].integer);
-    if (arguments[SOLE_OPERAND].kind == KIND_NODE && arguments[SOLE_OPERAND].cell != NULL && arguments[SOLE_OPERAND].cell->kind == CELL_INTEGER) {
-        return real_value((double)arguments[SOLE_OPERAND].cell->integer);
-    }
-    return nothing_value();
-}
-
-static Value offer_intern_trivial_float(Value *arguments, size_t argument_count) {
-    (void)argument_count;
-    if (arguments[SOLE_OPERAND].kind == KIND_TEXT) {
-        char *text = copy_bytes(arguments[SOLE_OPERAND].text, arguments[SOLE_OPERAND].text_length);
-        char *end = NULL;
-        double value = strtod(text, &end);
-        free(text);
-        if (end == text) return nothing_value();
-        return real_value(value);
-    }
-    if (is_number(arguments[SOLE_OPERAND])) return real_value(number_as_real(arguments[SOLE_OPERAND]));
-    return nothing_value();
-}
-
-static Value offer_float_leaf(Value *arguments, size_t argument_count) {
-    (void)argument_count;
-    expect_kind(arguments[LEFT_OPERAND], KIND_INTEGER, "float_leaf expects a mode");
-    long long mode = arguments[LEFT_OPERAND].integer;
-    if (mode == WORD_FALSE) {
-        Value value = arguments[RIGHT_OPERAND];
-        if (value.kind == KIND_REAL) return value;
-        if (value.kind == KIND_INTEGER) return real_value((double)value.integer);
-        return nothing_value();
-    }
-    if (mode == WORD_TRUE) return offer_make_float32(arguments + RIGHT_OPERAND, ARITY_ONE);
-    if (mode == ARITY_TWO) return offer_make_float64(arguments + RIGHT_OPERAND, ARITY_ONE);
-    if (mode == ARITY_THREE) return real_value(3.14159265358979323846);
-    return nothing_value();
-}
-
-static Value offer_math_pi(Value *arguments, size_t argument_count) {
-    (void)arguments;
-    (void)argument_count;
-    return real_value(3.14159265358979323846);
-}
-
-static Value offer_math_sqrt(Value *arguments, size_t argument_count) {
-    (void)argument_count;
-    if (!is_number(arguments[SOLE_OPERAND])) fail("math_sqrt expects a number");
-    return real_value(sqrt(number_as_real(arguments[SOLE_OPERAND])));
-}
-
-static Value offer_math_exp(Value *arguments, size_t argument_count) {
-    (void)argument_count;
-    if (!is_number(arguments[SOLE_OPERAND])) fail("math_exp expects a number");
-    return real_value(exp(number_as_real(arguments[SOLE_OPERAND])));
-}
-
-static Value offer_math_log(Value *arguments, size_t argument_count) {
-    (void)argument_count;
-    if (!is_number(arguments[SOLE_OPERAND])) fail("math_log expects a number");
-    return real_value(log(number_as_real(arguments[SOLE_OPERAND])));
-}
-
-static Value offer_math_pow(Value *arguments, size_t argument_count) {
-    (void)argument_count;
-    if (!is_number(arguments[LEFT_OPERAND]) || !is_number(arguments[RIGHT_OPERAND])) fail("math_pow expects numbers");
-    return real_value(pow(number_as_real(arguments[LEFT_OPERAND]), number_as_real(arguments[RIGHT_OPERAND])));
-}
-
-static Value offer_round_ndigits(Value *arguments, size_t argument_count) {
-    (void)argument_count;
-    if (!is_number(arguments[LEFT_OPERAND])) fail("round_ndigits expects a number");
-    expect_kind(arguments[RIGHT_OPERAND], KIND_INTEGER, "round_ndigits expects an integer precision");
-    double value = number_as_real(arguments[LEFT_OPERAND]);
-    long long digits = arguments[RIGHT_OPERAND].integer;
-    if (digits == WORD_FALSE) return real_value(nearbyint(value));
-    double factor = pow(10.0, (double)digits);
-    if (!isfinite(factor) || factor == REAL_ZERO) return real_value(value);
-    return real_value(nearbyint(value * factor) / factor);
-}
-
-static Value offer_round(Value *arguments, size_t argument_count) {
-    (void)argument_count;
-    if (!is_number(arguments[SOLE_OPERAND])) fail("round expects a number");
-    double rounded = round(number_as_real(arguments[SOLE_OPERAND]));
-    if (!isfinite(rounded) || rounded > (double)LLONG_MAX || rounded < (double)LLONG_MIN) fail("round is outside the native integer range");
-    return integer_value((long long)rounded);
-}
-
 static Value offer_str_len(Value *arguments, size_t argument_count) {
     (void)argument_count;
     expect_kind(arguments[SOLE_OPERAND], KIND_TEXT, "str_len expects text");
@@ -2430,81 +2307,26 @@ static Value offer_str_byte_at(Value *arguments, size_t argument_count) {
     (void)argument_count;
     expect_kind(arguments[LEFT_OPERAND], KIND_TEXT, "str_byte_at expects text");
     expect_kind(arguments[RIGHT_OPERAND], KIND_INTEGER, "str_byte_at expects an integer index");
-    if (arguments[RIGHT_OPERAND].integer < WORD_FALSE) return integer_value(-WORD_TRUE);
+    if (arguments[RIGHT_OPERAND].integer < WORD_FALSE) return integer_value(-1);
     size_t index = (size_t)arguments[RIGHT_OPERAND].integer;
-    if (index >= arguments[LEFT_OPERAND].text_length) return integer_value(-WORD_TRUE);
+    if (index >= arguments[LEFT_OPERAND].text_length) return integer_value(-1);
     return integer_value((unsigned char)arguments[LEFT_OPERAND].text[index]);
-}
-
-typedef struct {
-    char *bytes;
-    size_t length;
-    size_t capacity;
-} TextBuilder;
-
-static void text_builder_append(TextBuilder *builder, const char *bytes, size_t length) {
-    if (length == EMPTY_COUNT) return;
-    size_t needed = checked_add(builder->length, length);
-    if (needed > builder->capacity) {
-        size_t next = grown_capacity(builder->capacity, needed);
-        if (next > SIZE_MAX - TEXT_TERMINATOR_SIZE) fail("text exceeds addressable memory");
-        builder->bytes = grow_list(builder->bytes, &builder->capacity, sizeof *builder->bytes, next);
-    }
-    memcpy(builder->bytes + builder->length, bytes, length);
-    builder->length = needed;
-}
-
-static void render_value_text(TextBuilder *builder, Value value, int nested) {
-    if (value.kind == KIND_NOTHING) {
-        if (nested) text_builder_append(builder, KIND_NAME_NOTHING, strlen(KIND_NAME_NOTHING));
-        return;
-    }
-    if (value.kind == KIND_INTEGER) {
-        Value text = integer_text(value.integer);
-        text_builder_append(builder, text.text, text.text_length);
-        free((char *)text.text);
-        return;
-    }
-    if (value.kind == KIND_REAL) {
-        char buffer[64];
-        int count = snprintf(buffer, sizeof buffer, REAL_FORMAT, DBL_DECIMAL_DIG, value.real);
-        if (count < 0) fail("a real could not be rendered");
-        if ((size_t)count < sizeof buffer) {
-            text_builder_append(builder, buffer, (size_t)count);
-            return;
-        }
-        char *exact = allocate_zeroed((size_t)count + ONE_ELEMENT, sizeof *exact);
-        int wrote = snprintf(exact, (size_t)count + ONE_ELEMENT, REAL_FORMAT, DBL_DECIMAL_DIG, value.real);
-        if (wrote < 0) fail("a real could not be rendered");
-        text_builder_append(builder, exact, (size_t)wrote);
-        free(exact);
-        return;
-    }
-    if (value.kind == KIND_TEXT) {
-        text_builder_append(builder, value.text, value.text_length);
-        return;
-    }
-    if (value.kind == KIND_LIST) {
-        text_builder_append(builder, LIST_OPEN, strlen(LIST_OPEN));
-        List *cursor = value.list;
-        for (size_t index = FIRST_INDEX; index < value.item_count; index = checked_add(index, ONE_ELEMENT)) {
-            if (index > FIRST_INDEX) text_builder_append(builder, LIST_SEPARATOR, strlen(LIST_SEPARATOR));
-            render_value_text(builder, cursor->head, 1);
-            cursor = cursor->tail;
-        }
-        text_builder_append(builder, LIST_CLOSE, strlen(LIST_CLOSE));
-        return;
-    }
-    const char *name = kind_name(value.kind);
-    text_builder_append(builder, name, strlen(name));
 }
 
 static Value offer_value_str(Value *arguments, size_t argument_count) {
     (void)argument_count;
-    TextBuilder builder = {0};
-    render_value_text(&builder, arguments[SOLE_OPERAND], 0);
-    Value text = text_value(builder.bytes == NULL ? "" : builder.bytes, builder.length);
-    free(builder.bytes);
+    Value value = arguments[SOLE_OPERAND];
+    if (value.kind == KIND_TEXT) return value;
+    if (value.kind == KIND_INTEGER) return integer_text(value.integer);
+    if (value.kind == KIND_NOTHING) return text_value("nothing", 7);
+    char *bytes = NULL;
+    size_t length = 0;
+    FILE *output = open_memstream(&bytes, &length);
+    if (output == NULL) return nothing_value();
+    print_value_to(value, output);
+    if (fclose(output) != 0) { free(bytes); return nothing_value(); }
+    Value text = text_value(bytes, length);
+    free(bytes);
     return text;
 }
 
@@ -2581,34 +2403,103 @@ static Value offer_host_getenv(Value *arguments, size_t argument_count) {
 }
 
 static pid_t integer_pid(Value value, const char *reason) {
-    expect_kind(value, KIND_INTEGER, reason);
-    if (value.integer <= WORD_FALSE) return 0;
+    (void)reason;
+    if (value.kind != KIND_INTEGER || value.integer <= 0 || value.integer > INT_MAX) return 0;
     return (pid_t)value.integer;
 }
+
+#ifdef __APPLE__
+static int process_table_row(pid_t pid, struct kinfo_proc *row) {
+    int mib[] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, pid};
+    size_t length = sizeof *row;
+    return sysctl(mib, 4, row, &length, NULL, 0) == 0 && length == sizeof *row;
+}
+#endif
 
 static Value offer_host_alive(Value *arguments, size_t argument_count) {
     (void)argument_count;
     pid_t pid = integer_pid(arguments[SOLE_OPERAND], "host_alive expects a process");
-    if (pid == 0) return integer_value(WORD_FALSE);
-    return boolean_word(kill(pid, 0) == SYSTEM_CALL_OK);
+    if (pid == 0) return integer_value(-1);
+#ifdef __APPLE__
+    struct kinfo_proc row;
+    if (process_table_row(pid, &row) && row.kp_proc.p_stat == SZOMB) return integer_value(0);
+#endif
+    return boolean_word(kill(pid, 0) == SYSTEM_CALL_OK || errno == EPERM);
 }
 
 static Value offer_host_kill(Value *arguments, size_t argument_count) {
     (void)argument_count;
     pid_t pid = integer_pid(arguments[SOLE_OPERAND], "host_kill expects a process");
-    if (pid == 0) return integer_value(WORD_FALSE);
-    if (kill(pid, SIGTERM) == SYSTEM_CALL_OK || errno == ESRCH) return integer_value(WORD_FALSE);
+    if (pid == 0) return integer_value(-1);
+    if (kill(pid, SIGTERM) == SYSTEM_CALL_OK) return integer_value(WORD_FALSE);
     return integer_value(-WORD_TRUE);
+}
+
+static Value offer_host_signal(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    pid_t pid = integer_pid(arguments[0], "host_signal expects a process");
+    if (pid == 0 || arguments[1].kind != KIND_INTEGER || arguments[1].integer < 1 || arguments[1].integer > 31) return integer_value(-2);
+    return integer_value(kill(pid, (int)arguments[1].integer) == 0 ? 0 : -1);
+}
+
+static long long monotonic_milliseconds(void);
+
+static Value process_exit_value(int status) {
+    return integer_value(WIFEXITED(status) ? WEXITSTATUS(status) : WIFSIGNALED(status) ? 128 + WTERMSIG(status) : -1);
 }
 
 static Value offer_host_wait(Value *arguments, size_t argument_count) {
     (void)argument_count;
-    pid_t pid = integer_pid(arguments[SOLE_OPERAND], "host_wait expects a process");
-    if (pid == 0) return integer_value(WORD_FALSE);
+    Value request = arguments[0];
+    int timed = request.kind == KIND_LIST;
+    Value duration = timed ? list_at(request, 1) : nothing_value();
+    if (timed && (request.item_count != 2 || duration.kind != KIND_INTEGER)) return integer_value(-1);
+    pid_t pid = integer_pid(timed ? list_at(request, 0) : request, "host_wait expects a process");
+    if (pid == 0) return integer_value(-1);
     int status = 0;
-    if (waitpid(pid, &status, 0) < SYSTEM_CALL_OK) return integer_value(-WORD_TRUE);
-    if (WIFEXITED(status)) return integer_value(WEXITSTATUS(status));
-    return integer_value(WORD_FALSE);
+    pid_t waited;
+    do { waited = waitpid(pid, &status, timed ? WNOHANG : 0); } while (waited < 0 && errno == EINTR);
+    if (waited == pid) return process_exit_value(status);
+    if (waited < 0) return integer_value(-1);
+    if (duration.integer <= 0) return nothing_value();
+    long long start = monotonic_milliseconds();
+    long long end = duration.integer > LLONG_MAX - start ? LLONG_MAX : start + duration.integer;
+    int event_fd;
+#ifdef __APPLE__
+    event_fd = kqueue();
+    if (event_fd < 0) return integer_value(-2);
+    struct kevent event;
+    EV_SET(&event, (uintptr_t)pid, EVFILT_PROC, EV_ADD | EV_ENABLE | EV_ONESHOT, NOTE_EXIT, 0, NULL);
+    if (kevent(event_fd, &event, 1, NULL, 0, NULL) < 0) {
+        close(event_fd);
+        do { waited = waitpid(pid, &status, WNOHANG); } while (waited < 0 && errno == EINTR);
+        return waited == pid ? process_exit_value(status) : integer_value(waited < 0 ? -1 : -2);
+    }
+#elif defined(__linux__) && defined(SYS_pidfd_open)
+    event_fd = (int)syscall(SYS_pidfd_open, pid, 0);
+    if (event_fd < 0) return integer_value(errno == ESRCH ? -1 : -2);
+#else
+    return integer_value(-2);
+#endif
+#if defined(__APPLE__) || (defined(__linux__) && defined(SYS_pidfd_open))
+    Value result = nothing_value();
+    for (;;) {
+        do { waited = waitpid(pid, &status, WNOHANG); } while (waited < 0 && errno == EINTR);
+        if (waited != 0) { result = waited == pid ? process_exit_value(status) : integer_value(-1); break; }
+        long long remaining = end - monotonic_milliseconds();
+        if (remaining <= 0) break;
+#ifdef __APPLE__
+        struct timespec timeout = {(time_t)(remaining / 1000), (long)(remaining % 1000) * 1000000};
+        int ready = kevent(event_fd, NULL, 0, &event, 1, &timeout);
+#else
+        struct pollfd event = {event_fd, POLLIN, 0};
+        int ready = poll(&event, 1, remaining > INT_MAX ? INT_MAX : (int)remaining);
+#endif
+        if (ready < 0 && errno != EINTR) { result = integer_value(-2); break; }
+    }
+    close(event_fd);
+    return result;
+#endif
 }
 
 static Value terminal_extent(int axis) {
@@ -3282,310 +3173,17 @@ static Value offer_file_append_bytes(Value *arguments, size_t argument_count) {
         }
         written = checked_add(written, (size_t)step);
     }
-    off_t total = lseek(descriptor, 0, SEEK_END);
-    free(bytes);
-    if (close(descriptor) != SYSTEM_CALL_OK) return integer_value(-WORD_TRUE);
-    if (total < (off_t)SYSTEM_CALL_OK) return integer_value(-WORD_TRUE);
-    return integer_value((long long)total);
-}
-
-static Value offer_write_file(Value *arguments, size_t argument_count) {
-    return offer_host_file_write_text(arguments, argument_count);
-}
-
-static Value offer_write_file_text(Value *arguments, size_t argument_count) {
-    return offer_host_file_write_text(arguments, argument_count);
-}
-
-static Value offer_write_file_bytes(Value *arguments, size_t argument_count) {
-    (void)argument_count;
-    expect_kind(arguments[LEFT_OPERAND], KIND_TEXT, "write_file_bytes expects a path");
-    unsigned char *bytes = NULL;
-    size_t length = EMPTY_COUNT;
-    if (!list_to_bytes(arguments[RIGHT_OPERAND], &bytes, &length)) fail("write_file_bytes expects a byte list");
-    char *path = copy_bytes(arguments[LEFT_OPERAND].text, arguments[LEFT_OPERAND].text_length);
-    int descriptor = open(path, O_WRONLY | O_CREAT | O_TRUNC, TEXT_FILE_MODE);
-    free(path);
-    if (descriptor < SYSTEM_CALL_OK) {
-        free(bytes);
-        return integer_value(-WORD_TRUE);
-    }
-    size_t written = EMPTY_COUNT;
-    while (written < length) {
-        ssize_t step = write(descriptor, bytes + written, length - written);
-        if (step < SYSTEM_CALL_OK) {
-            if (errno == EINTR) continue;
-            close(descriptor);
-            free(bytes);
-            return integer_value(-WORD_TRUE);
-        }
-        written = checked_add(written, (size_t)step);
-    }
     free(bytes);
     if (close(descriptor) != SYSTEM_CALL_OK) return integer_value(-WORD_TRUE);
     return integer_value((long long)written);
 }
 
-static Value offer_read_file_bytes(Value *arguments, size_t argument_count) {
+static Value offer_file_mtime(Value *arguments, size_t argument_count) {
     (void)argument_count;
-    expect_kind(arguments[SOLE_OPERAND], KIND_TEXT, "read_file_bytes expects a path");
-    char *path = copy_bytes(arguments[SOLE_OPERAND].text, arguments[SOLE_OPERAND].text_length);
-    int descriptor = open(path, O_RDONLY);
-    free(path);
-    if (descriptor < SYSTEM_CALL_OK) return nothing_value();
-    size_t capacity = host_page_bytes();
-    unsigned char *bytes = allocate_zeroed(capacity, sizeof *bytes);
-    size_t filled = EMPTY_COUNT;
-    for (;;) {
-        if (filled == capacity) {
-            if (capacity > SIZE_MAX / GROWTH_FACTOR) fail("read_file_bytes exceeds addressable memory");
-            size_t grown = capacity * GROWTH_FACTOR;
-            unsigned char *next = allocate_zeroed(grown, sizeof *next);
-            memcpy(next, bytes, filled);
-            free(bytes);
-            bytes = next;
-            capacity = grown;
-        }
-        ssize_t step = read(descriptor, bytes + filled, capacity - filled);
-        if (step < SYSTEM_CALL_OK) {
-            if (errno == EINTR) continue;
-            close(descriptor);
-            free(bytes);
-            return nothing_value();
-        }
-        if (step == SYSTEM_CALL_OK) break;
-        filled = checked_add(filled, (size_t)step);
-    }
-    close(descriptor);
-    Value list = bytes_to_list(bytes, filled);
-    free(bytes);
-    return list;
-}
-
-static Value offer_host_file_read_text(Value *arguments, size_t argument_count);
-
-static Value offer_read_file(Value *arguments, size_t argument_count) {
-    return offer_host_file_read_text(arguments, argument_count);
-}
-
-typedef struct {
-    unsigned char *bytes;
-    size_t length;
-    size_t capacity;
-} ByteBuffer;
-
-static void buffer_push(ByteBuffer *buffer, const void *chunk, size_t length) {
-    if (length == EMPTY_COUNT) return;
-    size_t needed = checked_add(buffer->length, length);
-    if (needed > buffer->capacity) {
-        size_t grown = grown_capacity(buffer->capacity, needed);
-        unsigned char *next = allocate_zeroed(grown, sizeof *next);
-        if (buffer->length != EMPTY_COUNT) memcpy(next, buffer->bytes, buffer->length);
-        free(buffer->bytes);
-        buffer->bytes = next;
-        buffer->capacity = grown;
-    }
-    memcpy(buffer->bytes + buffer->length, chunk, length);
-    buffer->length = needed;
-}
-
-static void buffer_push_u8(ByteBuffer *buffer, unsigned char value) {
-    buffer_push(buffer, &value, sizeof value);
-}
-
-static void buffer_push_u32(ByteBuffer *buffer, uint32_t value) {
-    unsigned char bytes[4];
-    bytes[0] = (unsigned char)((value >> 24) & 0xffu);
-    bytes[1] = (unsigned char)((value >> 16) & 0xffu);
-    bytes[2] = (unsigned char)((value >> 8) & 0xffu);
-    bytes[3] = (unsigned char)(value & 0xffu);
-    buffer_push(buffer, bytes, sizeof bytes);
-}
-
-static void buffer_push_i64(ByteBuffer *buffer, int64_t value) {
-    unsigned char bytes[8];
-    for (size_t index = FIRST_INDEX; index < 8; index = checked_add(index, ONE_ELEMENT)) {
-        bytes[index] = (unsigned char)(((uint64_t)value >> (8 * index)) & 0xffu);
-    }
-    buffer_push(buffer, bytes, sizeof bytes);
-}
-
-static Cell *find_cell_by_category(fk_node_id category) {
-    for (size_t index = FIRST_INDEX; index < cell_count; index = checked_add(index, ONE_ELEMENT)) {
-        if (cells[index] != NULL && cells[index]->category == category) return cells[index];
-    }
-    return NULL;
-}
-
-static int serialize_value(ByteBuffer *buffer, Value value) {
-    if (value.kind == KIND_NOTHING) {
-        buffer_push_u8(buffer, 0);
-        return 1;
-    }
-    if (value.kind == KIND_INTEGER) {
-        buffer_push_u8(buffer, 1);
-        buffer_push_i64(buffer, (int64_t)value.integer);
-        return 1;
-    }
-    if (value.kind == KIND_REAL) {
-        buffer_push_u8(buffer, 2);
-        uint64_t bits = 0;
-        memcpy(&bits, &value.real, sizeof bits);
-        buffer_push_i64(buffer, (int64_t)bits);
-        return 1;
-    }
-    if (value.kind == KIND_TEXT) {
-        buffer_push_u8(buffer, 3);
-        if (value.text_length > UINT32_MAX) return 0;
-        buffer_push_u32(buffer, (uint32_t)value.text_length);
-        buffer_push(buffer, value.text, value.text_length);
-        return 1;
-    }
-    if (value.kind == KIND_LIST) {
-        buffer_push_u8(buffer, 4);
-        if (value.item_count > UINT32_MAX) return 0;
-        buffer_push_u32(buffer, (uint32_t)value.item_count);
-        List *cursor = value.list;
-        for (size_t index = FIRST_INDEX; index < value.item_count; index = checked_add(index, ONE_ELEMENT)) {
-            if (cursor == NULL || !serialize_value(buffer, cursor->head)) return 0;
-            cursor = cursor->tail;
-        }
-        return 1;
-    }
-    if (value.kind == KIND_NODE) {
-        buffer_push_u8(buffer, 5);
-        buffer_push_i64(buffer, (int64_t)node_word(value, "recipe_to_bytes expects nodes"));
-        return 1;
-    }
-    return 0;
-}
-
-static int read_u32(const unsigned char *bytes, size_t length, size_t *cursor, uint32_t *out) {
-    if (*cursor > length || length - *cursor < 4) return 0;
-    uint32_t value = ((uint32_t)bytes[*cursor] << 24)
-        | ((uint32_t)bytes[checked_add(*cursor, ONE_ELEMENT)] << 16)
-        | ((uint32_t)bytes[checked_add(*cursor, ARITY_TWO)] << 8)
-        | (uint32_t)bytes[checked_add(*cursor, ARITY_THREE)];
-    *cursor = checked_add(*cursor, 4);
-    *out = value;
-    return 1;
-}
-
-static int read_i64(const unsigned char *bytes, size_t length, size_t *cursor, int64_t *out) {
-    if (*cursor > length || length - *cursor < 8) return 0;
-    uint64_t value = 0;
-    for (size_t index = FIRST_INDEX; index < 8; index = checked_add(index, ONE_ELEMENT)) {
-        value |= ((uint64_t)bytes[checked_add(*cursor, index)]) << (8 * index);
-    }
-    *cursor = checked_add(*cursor, 8);
-    *out = (int64_t)value;
-    return 1;
-}
-
-static int deserialize_value(const unsigned char *bytes, size_t length, size_t *cursor, Value *out) {
-    if (*cursor >= length) return 0;
-    unsigned char tag = bytes[*cursor];
-    *cursor = checked_add(*cursor, ONE_ELEMENT);
-    if (tag == 0) {
-        *out = nothing_value();
-        return 1;
-    }
-    if (tag == 1) {
-        int64_t number = 0;
-        if (!read_i64(bytes, length, cursor, &number)) return 0;
-        *out = integer_value((long long)number);
-        return 1;
-    }
-    if (tag == 2) {
-        int64_t payload = 0;
-        if (!read_i64(bytes, length, cursor, &payload)) return 0;
-        uint64_t bits = (uint64_t)payload;
-        double real = REAL_ZERO;
-        memcpy(&real, &bits, sizeof real);
-        *out = real_value(real);
-        return 1;
-    }
-    if (tag == 3) {
-        uint32_t text_length = 0;
-        if (!read_u32(bytes, length, cursor, &text_length)) return 0;
-        if (*cursor > length || length - *cursor < text_length) return 0;
-        *out = text_value((const char *)(bytes + *cursor), text_length);
-        *cursor = checked_add(*cursor, text_length);
-        return 1;
-    }
-    if (tag == 4) {
-        uint32_t count = 0;
-        if (!read_u32(bytes, length, cursor, &count)) return 0;
-        Value *items = allocate_zeroed(count, sizeof *items);
-        for (uint32_t index = 0; index < count; index++) {
-            if (!deserialize_value(bytes, length, cursor, items + index)) return 0;
-        }
-        *out = list_from(items, count);
-        return 1;
-    }
-    if (tag == 5) {
-        int64_t identity = 0;
-        if (!read_i64(bytes, length, cursor, &identity)) return 0;
-        Cell *cell = find_cell_by_category((fk_node_id)identity);
-        *out = cell == NULL ? node_value((long long)identity) : node_from_cell(cell);
-        return 1;
-    }
-    return 0;
-}
-
-static Value offer_recipe_to_bytes(Value *arguments, size_t argument_count) {
-    (void)argument_count;
-    ByteBuffer buffer = {0};
-    const unsigned char header[4] = {'F', 'K', 'B', '2'};
-    buffer_push(&buffer, header, sizeof header);
-    if (!serialize_value(&buffer, arguments[SOLE_OPERAND])) {
-        free(buffer.bytes);
-        return nothing_value();
-    }
-    Value bytes = bytes_to_list(buffer.bytes, buffer.length);
-    free(buffer.bytes);
-    return bytes;
-}
-
-static Value offer_bytes_to_recipe(Value *arguments, size_t argument_count) {
-    (void)argument_count;
-    unsigned char *bytes = NULL;
-    size_t length = EMPTY_COUNT;
-    if (!list_to_bytes(arguments[SOLE_OPERAND], &bytes, &length)) return nothing_value();
-    if (length < 4 || memcmp(bytes, "FKB2", 4) != STRING_COMPARE_EQUAL) {
-        free(bytes);
-        return nothing_value();
-    }
-    size_t cursor = 4;
-    Value value = nothing_value();
-    int ok = deserialize_value(bytes, length, &cursor, &value);
-    free(bytes);
-    if (!ok || cursor != length) return nothing_value();
-    return value;
-}
-
-static Value offer_write_form_binary(Value *arguments, size_t argument_count) {
-    (void)argument_count;
-    expect_kind(arguments[LEFT_OPERAND], KIND_TEXT, "write_form_binary expects a path");
-    Value recipe_arguments[ARITY_ONE];
-    recipe_arguments[FIRST_INDEX] = arguments[RIGHT_OPERAND];
-    Value bytes = offer_recipe_to_bytes(recipe_arguments, ARITY_ONE);
-    if (bytes.kind == KIND_NOTHING) return integer_value(-WORD_TRUE);
-    Value write_arguments[ARITY_TWO];
-    write_arguments[LEFT_OPERAND] = arguments[LEFT_OPERAND];
-    write_arguments[RIGHT_OPERAND] = bytes;
-    return offer_write_file_bytes(write_arguments, ARITY_TWO);
-}
-
-static Value offer_read_form_binary(Value *arguments, size_t argument_count) {
-    (void)argument_count;
-    Value read_arguments[ARITY_ONE];
-    read_arguments[FIRST_INDEX] = arguments[SOLE_OPERAND];
-    Value bytes = offer_read_file_bytes(read_arguments, ARITY_ONE);
-    if (bytes.kind == KIND_NOTHING) return nothing_value();
-    Value decode_arguments[ARITY_ONE];
-    decode_arguments[FIRST_INDEX] = bytes;
-    return offer_bytes_to_recipe(decode_arguments, ARITY_ONE);
+    Value path = arguments[0];
+    if (path.kind != KIND_TEXT || memchr(path.text, 0, path.text_length) != NULL) return integer_value(-1);
+    struct stat observed;
+    return stat(path.text, &observed) == 0 ? integer_value((long long)observed.st_mtime) : integer_value(-1);
 }
 
 static Value offer_read_file_slice(Value *arguments, size_t argument_count) {
@@ -3611,10 +3209,6 @@ static Value offer_read_file_slice(Value *arguments, size_t argument_count) {
     Value text = text_value(bytes, (size_t)filled);
     free(bytes);
     return text;
-}
-
-static Value offer_host_file_read_slice(Value *arguments, size_t argument_count) {
-    return offer_read_file_slice(arguments, argument_count);
 }
 
 static Value offer_host_file_read_text(Value *arguments, size_t argument_count) {
@@ -3649,30 +3243,6 @@ static Value offer_host_file_read_text(Value *arguments, size_t argument_count) 
     return text;
 }
 
-static Value offer_file_read(Value *arguments, size_t argument_count) {
-    (void)argument_count;
-    expect_kind(arguments[LEFT_OPERAND], KIND_INTEGER, "file_read expects a descriptor");
-    expect_kind(arguments[RIGHT_OPERAND], KIND_INTEGER, "file_read expects a length");
-    long long descriptor = arguments[LEFT_OPERAND].integer;
-    long long requested = arguments[RIGHT_OPERAND].integer;
-    if (descriptor < WORD_FALSE || requested <= WORD_FALSE) return text_value("", EMPTY_COUNT);
-    size_t length = (size_t)requested;
-    char *buffer = allocate_zeroed(checked_add(length, ONE_ELEMENT), sizeof *buffer);
-    ssize_t got = SYSTEM_CALL_OK;
-    while (1) {
-        got = read((int)descriptor, buffer, length);
-        if (got < SYSTEM_CALL_OK && errno == EINTR) continue;
-        break;
-    }
-    if (got < SYSTEM_CALL_OK) {
-        free(buffer);
-        return nothing_value();
-    }
-    Value text = text_value(buffer, (size_t)got);
-    free(buffer);
-    return text;
-}
-
 static Value offer_file_size(Value *arguments, size_t argument_count) {
     (void)argument_count;
     expect_kind(arguments[SOLE_OPERAND], KIND_TEXT, "file_size expects a path");
@@ -3684,16 +3254,453 @@ static Value offer_file_size(Value *arguments, size_t argument_count) {
     return integer_value((long long)info.st_size);
 }
 
-static Value offer_host_file_size(Value *arguments, size_t argument_count) {
-    return offer_file_size(arguments, argument_count);
+static Value offer_path_is_dir(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[0], KIND_TEXT, "host_path_is_dir expects a path");
+    struct stat info;
+    return boolean_word(stat(arguments[0].text, &info) == 0 && S_ISDIR(info.st_mode));
 }
 
-static Value offer_host_file_mtime(Value *arguments, size_t argument_count) {
+static Value offer_path_exists(Value *arguments, size_t argument_count) {
     (void)argument_count;
-    expect_kind(arguments[SOLE_OPERAND], KIND_TEXT, "host_file_mtime expects text");
+    if (arguments[0].kind != KIND_TEXT || memchr(arguments[0].text, 0, arguments[0].text_length) != NULL) return integer_value(0);
+    int fd = open(arguments[0].text, O_RDONLY | O_NONBLOCK);
+    if (fd < 0) return integer_value(0);
+    close(fd);
+    return integer_value(1);
+}
+
+static Value offer_file_identity(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    if (arguments[0].kind != KIND_TEXT || arguments[0].text_length == 0 || memchr(arguments[0].text, 0, arguments[0].text_length) != NULL) return integer_value(-2);
     struct stat info;
-    if (stat(arguments[SOLE_OPERAND].text, &info) != SYSTEM_CALL_OK) return integer_value(-WORD_TRUE);
-    return integer_value((long long)info.st_mtime);
+    if (stat(arguments[0].text, &info) != 0) return errno == ENAMETOOLONG ? integer_value(-2) : nothing_value();
+#ifdef __APPLE__
+    long long modified = (long long)info.st_mtimespec.tv_sec * 1000 + info.st_mtimespec.tv_nsec / 1000000;
+    long long born = (long long)info.st_birthtimespec.tv_sec * 1000 + info.st_birthtimespec.tv_nsec / 1000000;
+#else
+    long long modified = (long long)info.st_mtim.tv_sec * 1000 + info.st_mtim.tv_nsec / 1000000;
+    long long born = 0;
+#endif
+    Value fields[] = {integer_value(info.st_size), integer_value(modified), integer_value(info.st_ino), integer_value(born)};
+    return list_from(fields, 4);
+}
+
+static int compare_path_names(const void *left, const void *right) {
+    return strcmp(((const Value *)left)->text, ((const Value *)right)->text);
+}
+
+static Value offer_dir_list(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    expect_kind(arguments[0], KIND_TEXT, "host_dir_list expects a path");
+    DIR *dir = opendir(arguments[0].text);
+    if (dir == NULL) return nothing_value();
+    Value *names = NULL;
+    size_t count = 0, capacity = 0;
+    struct dirent *entry;
+    int error = 0;
+    for (;;) {
+        errno = 0;
+        entry = readdir(dir);
+        if (entry == NULL) { error = errno; break; }
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+        names = grow_list(names, &capacity, sizeof *names, checked_add(count, 1));
+        names[count++] = text_value(entry->d_name, strlen(entry->d_name));
+    }
+    closedir(dir);
+    if (error != 0) { free(names); return nothing_value(); }
+    if (count > 1) qsort(names, count, sizeof *names, compare_path_names);
+    Value result = list_from(names, count);
+    free(names);
+    return result;
+}
+
+static Value offer_mkdir_mode(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    if (arguments[0].kind != KIND_TEXT || arguments[1].kind != KIND_INTEGER ||
+        memchr(arguments[0].text, 0, arguments[0].text_length) != NULL ||
+        arguments[1].integer < 0 || arguments[1].integer > 07777) return integer_value(-2);
+    if (mkdir(arguments[0].text, (mode_t)arguments[1].integer) != 0) return integer_value(0);
+    chmod(arguments[0].text, (mode_t)arguments[1].integer);
+    return integer_value(1);
+}
+
+static int remove_tree_at(int parent, const char *name) {
+    struct stat info;
+    if (fstatat(parent, name, &info, AT_SYMLINK_NOFOLLOW) != 0) return errno == ENOENT ? 0 : -1;
+    if (!S_ISDIR(info.st_mode)) return unlinkat(parent, name, 0);
+    int fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    if (fd < 0) return -1;
+    DIR *dir = fdopendir(fd);
+    if (dir == NULL) { close(fd); return -1; }
+    Value *names = NULL;
+    size_t count = 0, capacity = 0;
+    int error = 0;
+    for (;;) {
+        errno = 0;
+        struct dirent *entry = readdir(dir);
+        if (entry == NULL) { error = errno; break; }
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+        names = grow_list(names, &capacity, sizeof *names, checked_add(count, 1));
+        names[count++] = text_value(entry->d_name, strlen(entry->d_name));
+    }
+    for (size_t i = 0; i < count; ++i) if (remove_tree_at(fd, names[i].text) != 0) error = 1;
+    free(names);
+    closedir(dir);
+    return error != 0 ? -1 : unlinkat(parent, name, AT_REMOVEDIR);
+}
+
+static Value offer_dir_rmdir(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    if (arguments[0].kind != KIND_TEXT || memchr(arguments[0].text, 0, arguments[0].text_length) != NULL) return integer_value(-1);
+    struct stat info;
+    if (lstat(arguments[0].text, &info) != 0 || !S_ISDIR(info.st_mode)) return integer_value(-1);
+    return integer_value(remove_tree_at(AT_FDCWD, arguments[0].text));
+}
+
+static Value offer_path_remove(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    if (arguments[0].kind != KIND_TEXT || memchr(arguments[0].text, 0, arguments[0].text_length) != NULL) return integer_value(-1);
+    return integer_value(unlink(arguments[0].text));
+}
+
+typedef struct {
+    int published, matched, released, error;
+    const char *reason;
+} Publication;
+
+static int publication_parent(const char *path, const char **name) {
+    size_t end = strlen(path);
+    while (end > 1 && path[end - 1] == '/') --end;
+    size_t cut = end;
+    while (cut > 0 && path[cut - 1] != '/') --cut;
+    char *parent = cut == 0 ? copy_bytes(".", 1) : copy_bytes(path, cut == 1 ? 1 : cut - 1);
+    *name = path + cut;
+#ifdef O_SEARCH
+    int fd = open(parent, O_SEARCH | O_NONBLOCK);
+#else
+    int fd = open(parent, O_RDONLY | O_DIRECTORY | O_NONBLOCK);
+#endif
+    free(parent);
+    return fd;
+}
+
+static int publication_matches(int parent, const char *name, Value expected, int *released) {
+    int fd = openat(parent, name, O_RDONLY | O_NONBLOCK);
+    if (fd < 0) return -1;
+    struct stat info;
+    int stated = fstat(fd, &info), saved = errno;
+    if (stated != 0 || !S_ISREG(info.st_mode)) {
+        int closed = close(fd);
+        if (closed != 0) *released = 0;
+        if (stated != 0 && closed == 0) errno = saved;
+        return stated != 0 || closed != 0 ? -1 : -2;
+    }
+    char bytes[16384];
+    size_t at = 0;
+    int match;
+    for (;;) {
+        ssize_t got = read(fd, bytes, sizeof bytes);
+        if (got < 0 && errno == EINTR) continue;
+        if (got < 0) { match = -1; break; }
+        if (got == 0) { match = at == expected.text_length; break; }
+        if ((size_t)got > expected.text_length - at || memcmp(bytes, expected.text + at, (size_t)got) != 0) { match = 0; break; }
+        at += (size_t)got;
+    }
+    saved = errno;
+    if (close(fd) != 0) { *released = 0; return -1; }
+    errno = saved;
+    return match;
+}
+
+static Publication publish_path(const char *from, const char *to, Value expected) {
+    Publication result = {0, 0, 1, 0, "publication-unavailable"};
+    const char *from_name, *to_name;
+    int lock = publication_parent(to, &to_name);
+    if (lock < 0) { result.reason = "publication-directory-unavailable"; result.error = errno; return result; }
+    int source = publication_parent(from, &from_name);
+    if (source < 0) {
+        result.reason = "publication-stage-directory-unavailable"; result.error = errno;
+        result.released = close(lock) == 0; return result;
+    }
+    int locked;
+    do { locked = flock(lock, LOCK_EX); } while (locked != 0 && errno == EINTR);
+    if (locked != 0) {
+        result.reason = "publication-lock-unavailable"; result.error = errno;
+        int a = close(source), b = close(lock);
+        result.released = a == 0 && b == 0; return result;
+    }
+    int comparison_released = 1, match;
+    if (expected.kind == KIND_NOTHING) {
+        struct stat info;
+        int present = fstatat(lock, to_name, &info, AT_SYMLINK_NOFOLLOW);
+        match = present == 0 ? 0 : errno == ENOENT ? 1 : -1;
+    } else match = publication_matches(lock, to_name, expected, &comparison_released);
+    result.matched = match == 1;
+    if (match == -2) result.reason = "destination-not-regular";
+    else if (match < 0) { result.reason = "destination-read-failed"; result.error = errno; }
+    else if (match == 0) result.reason = "destination-changed";
+    else {
+        result.published = renameat(source, from_name, lock, to_name) == 0;
+        result.error = result.published ? 0 : errno;
+        result.reason = result.published ? "published" : "rename-failed";
+    }
+    int comparison_error = result.error;
+    flock(lock, LOCK_UN);
+    int source_closed = close(source), source_error = errno;
+    int closed = close(lock);
+    result.released = comparison_released && source_closed == 0 && closed == 0;
+    if (!result.released) {
+        result.error = closed != 0 ? errno : source_closed != 0 ? source_error : comparison_error;
+        result.reason = "publication-release-unconfirmed";
+    }
+    return result;
+}
+
+static Value offer_path_rename(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    Value from = arguments[0], target = arguments[1], expected = nothing_value();
+    int guarded = target.kind == KIND_RECORD;
+    if (guarded) {
+        Value get[] = {target, text_value("expected", 8)};
+        if (!offer_record_has(get, 2).integer) return nothing_value();
+        expected = offer_record_get(get, 2);
+        if (expected.kind != KIND_NOTHING && expected.kind != KIND_TEXT) return nothing_value();
+        get[1] = text_value("path", 4);
+        target = offer_record_get(get, 2);
+    }
+    if (from.kind != KIND_TEXT || target.kind != KIND_TEXT || from.text_length == 0 || target.text_length == 0 ||
+        memchr(from.text, 0, from.text_length) != NULL || memchr(target.text, 0, target.text_length) != NULL) return nothing_value();
+    if (!guarded) return integer_value(rename(from.text, target.text) == 0 ? 0 : -1);
+    Publication result = publish_path(from.text, target.text, expected);
+    Value fields[] = {integer_value(0), text_value("published", 9), integer_value(result.published),
+        text_value("matched", 7), integer_value(result.matched), text_value("released", 8), integer_value(result.released),
+        text_value("os_error", 8), integer_value(result.error), text_value("reason", 6), text_value(result.reason, strlen(result.reason))};
+    return offer_record_new(fields, sizeof fields / sizeof *fields);
+}
+
+#ifdef __APPLE__
+/* libproc sizes are observations, not a fixed process/descriptor allowance. */
+static void *process_rows(int pid, int *bytes) {
+    int needed = pid == 0 ? proc_listpids(PROC_ALL_PIDS, 0, NULL, 0)
+                          : proc_pidinfo(pid, PROC_PIDLISTFDS, 0, NULL, 0);
+    if (needed <= 0) return NULL;
+    void *rows = NULL;
+    for (;;) {
+        rows = realloc(rows, (size_t)needed);
+        if (rows == NULL) fail("out of memory reading process ownership");
+        int got = pid == 0 ? proc_listpids(PROC_ALL_PIDS, 0, rows, needed)
+                          : proc_pidinfo(pid, PROC_PIDLISTFDS, 0, rows, needed);
+        if (got <= 0) { free(rows); return NULL; }
+        if (got < needed) { *bytes = got; return rows; }
+        if (needed > INT_MAX / 2) { free(rows); return NULL; }
+        needed *= 2;
+    }
+}
+
+static int compare_pid_values(const void *left, const void *right) {
+    long long a = ((const Value *)left)->integer, b = ((const Value *)right)->integer;
+    return (a > b) - (a < b);
+}
+#endif
+
+static Value offer_file_holders(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    if (arguments[0].kind != KIND_TEXT || arguments[0].text_length == 0 || memchr(arguments[0].text, 0, arguments[0].text_length) != NULL) return integer_value(-2);
+#ifdef __APPLE__
+    struct stat info;
+    if (stat(arguments[0].text, &info) != 0) return errno == ENAMETOOLONG ? integer_value(-2) : nothing_value();
+    int bytes = 0;
+    int *pids = process_rows(0, &bytes);
+    if (pids == NULL) return nothing_value();
+    Value *holders = NULL;
+    size_t count = 0, capacity = 0;
+    for (size_t i = 0; i < (size_t)bytes / sizeof *pids; ++i) {
+        if (pids[i] <= 0) continue;
+        int fd_bytes = 0;
+        struct proc_fdinfo *fds = process_rows(pids[i], &fd_bytes);
+        if (fds == NULL) continue;
+        int held = 0;
+        for (size_t j = 0; !held && j < (size_t)fd_bytes / sizeof *fds; ++j) {
+            if (fds[j].proc_fdtype != PROX_FDTYPE_VNODE) continue;
+            struct vnode_fdinfowithpath vnode;
+            int got = proc_pidfdinfo(pids[i], fds[j].proc_fd, PROC_PIDFDVNODEPATHINFO, &vnode, sizeof vnode);
+            if (got != sizeof vnode) continue;
+            held = vnode.pvip.vip_vi.vi_stat.vst_dev == (uint32_t)info.st_dev &&
+                   vnode.pvip.vip_vi.vi_stat.vst_ino == (uint64_t)info.st_ino;
+        }
+        free(fds);
+        if (!held) continue;
+        holders = grow_list(holders, &capacity, sizeof *holders, checked_add(count, 1));
+        holders[count++] = integer_value(pids[i]);
+    }
+    free(pids);
+    if (count > 1) qsort(holders, count, sizeof *holders, compare_pid_values);
+    Value result = list_from(holders, count);
+    free(holders);
+    return result;
+#else
+    return nothing_value();
+#endif
+}
+
+static Value offer_vm_stat(Value *arguments, size_t argument_count) {
+    (void)arguments;
+    (void)argument_count;
+#ifdef __APPLE__
+    vm_statistics64_data_t vm;
+    mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
+    mach_port_t host = mach_host_self();
+    kern_return_t status = host_statistics64(host, HOST_VM_INFO64, (host_info64_t)&vm, &count);
+    mach_port_deallocate(mach_task_self(), host);
+    uint64_t memory = 0;
+    size_t size = sizeof memory;
+    long page = sysconf(_SC_PAGESIZE);
+    if (status != KERN_SUCCESS || page <= 0 || sysctlbyname("hw.memsize", &memory, &size, NULL, 0) != 0) return list_from(NULL, 0);
+    uint64_t readings[] = {(uint64_t)page, memory, vm.free_count, vm.active_count, vm.inactive_count,
+        vm.wire_count, vm.speculative_count, vm.purgeable_count, vm.compressor_page_count,
+        vm.pageins, vm.pageouts, vm.compressions, vm.decompressions, vm.swapins, vm.swapouts,
+        vm.external_page_count, vm.internal_page_count, vm.total_uncompressed_pages_in_compressor};
+    Value values[sizeof readings / sizeof *readings];
+    for (size_t i = 0; i < sizeof readings / sizeof *readings; ++i) values[i] = integer_value((long long)readings[i]);
+    return list_from(values, sizeof values / sizeof *values);
+#else
+    return list_from(NULL, 0);
+#endif
+}
+
+static Value offer_host_process(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    if (arguments[0].kind != KIND_INTEGER || arguments[0].integer <= 0 || arguments[0].integer > INT_MAX) return integer_value(-1);
+    pid_t pid = (pid_t)arguments[0].integer;
+    Value row[] = {integer_value(pid), integer_value(0), text_value("", 0), text_value("", 0), list_from(NULL, 0), integer_value(0), integer_value(7), integer_value(0)};
+#ifdef __APPLE__
+    struct proc_bsdinfo info;
+    int got = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof info);
+    if (got != sizeof info) {
+        if (kill(pid, 0) != 0 && errno != EPERM) return integer_value(-1);
+        struct kinfo_proc process;
+        if (process_table_row(pid, &process)) {
+            row[1] = integer_value(process.kp_eproc.e_ppid);
+            row[5] = integer_value((long long)process.kp_proc.p_starttime.tv_sec * 1000 + process.kp_proc.p_starttime.tv_usec / 1000);
+            row[7] = integer_value(process.kp_proc.p_stat == SZOMB ? 3 : process.kp_proc.p_stat == SSTOP ? 2 : 1);
+        }
+    } else {
+        row[1] = integer_value(info.pbi_ppid);
+        row[5] = integer_value((long long)info.pbi_start_tvsec * 1000 + info.pbi_start_tvusec / 1000);
+        row[7] = integer_value(info.pbi_status == SZOMB ? 3 : info.pbi_status == SSTOP ? 2 : 1);
+    }
+    char path[PROC_PIDPATHINFO_MAXSIZE];
+    if (proc_pidpath(pid, path, sizeof path) > 0) { row[2] = text_value(path, strlen(path)); row[6].integer &= ~1; }
+    struct proc_vnodepathinfo vnode;
+    if (proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &vnode, sizeof vnode) == sizeof vnode) {
+        row[3] = text_value(vnode.pvi_cdir.vip_path, strlen(vnode.pvi_cdir.vip_path)); row[6].integer &= ~2;
+    }
+    int mib[] = {CTL_KERN, KERN_PROCARGS2, pid};
+    size_t length = 0;
+    if (sysctl(mib, 3, NULL, &length, NULL, 0) == 0 && length >= sizeof(int)) {
+        char *bytes = allocate_zeroed(length, 1);
+        if (sysctl(mib, 3, bytes, &length, NULL, 0) == 0 && length >= sizeof(int)) {
+            int argc;
+            memcpy(&argc, bytes, sizeof argc);
+            size_t at = sizeof argc;
+            while (at < length && bytes[at] != 0) ++at;
+            while (at < length && bytes[at] == 0) ++at;
+            Value *argv = NULL;
+            size_t count = 0, capacity = 0;
+            while (argc > 0 && count < (size_t)argc && at < length) {
+                size_t start = at;
+                while (at < length && bytes[at] != 0) ++at;
+                if (at == length) break;
+                argv = grow_list(argv, &capacity, sizeof *argv, checked_add(count, 1));
+                argv[count++] = text_value(bytes + start, at - start);
+                ++at;
+            }
+            if (argc >= 0 && count == (size_t)argc) { row[4] = list_from(argv, count); row[6].integer &= ~4; }
+            free(argv);
+        }
+        free(bytes);
+    }
+#else
+    if (kill(pid, 0) != 0 && errno != EPERM) return integer_value(-1);
+#endif
+    return list_from(row, sizeof row / sizeof *row);
+}
+
+static long long cpu_microseconds(void);
+
+static Value offer_host_processes(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    Value name = arguments[0];
+    if (name.kind != KIND_TEXT || memchr(name.text, 0, name.text_length) != NULL) return nothing_value();
+    size_t length = name.text_length;
+    int prefix = length > 0 && name.text[length - 1] == '*';
+    if (prefix) --length;
+    if (length == 0) return list_from(NULL, 0);
+#ifdef __APPLE__
+    int bytes = 0;
+    int *pids = process_rows(0, &bytes);
+    if (pids == NULL) return prefix ? nothing_value() : list_from(NULL, 0);
+    Value *rows = NULL;
+    size_t count = 0, capacity = 0;
+    mach_timebase_info_data_t timebase;
+    if (mach_timebase_info(&timebase) != KERN_SUCCESS || timebase.denom == 0) { free(pids); return nothing_value(); }
+    time_t now = time(NULL);
+    for (size_t i = 0; i < (size_t)bytes / sizeof *pids; ++i) {
+        pid_t pid = pids[i];
+        if (pid <= 0) continue;
+        struct kinfo_proc process;
+        int have_process = 0;
+        char command[PROC_PIDPATHINFO_MAXSIZE] = {0};
+        if (proc_name(pid, command, sizeof command) <= 0) {
+            if (!prefix) continue;
+            have_process = process_table_row(pid, &process);
+            if (!have_process) {
+                if (kill(pid, 0) != 0 && errno == ESRCH) continue;
+                Value identifier = integer_value(pid);
+                rows = grow_list(rows, &capacity, sizeof *rows, checked_add(count, 1));
+                rows[count++] = list_from(&identifier, 1);
+                continue;
+            }
+            if (process.kp_eproc.e_ucred.cr_uid != getuid()) continue;
+            snprintf(command, sizeof command, "%s", process.kp_proc.p_comm);
+        }
+        size_t command_length = strlen(command);
+        if (command_length < length || memcmp(command, name.text, length) != 0 || (!prefix && command_length != length)) continue;
+        Value row[] = {integer_value(pid), nothing_value(), nothing_value(), nothing_value(), nothing_value(), nothing_value()};
+        struct proc_taskinfo task;
+        if (proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &task, sizeof task) == sizeof task) {
+            if (task.pti_resident_size <= LLONG_MAX) row[1] = integer_value((long long)task.pti_resident_size);
+            __uint128_t micros = ((__uint128_t)task.pti_total_user + task.pti_total_system) * timebase.numer / timebase.denom / 1000;
+            if (micros <= LLONG_MAX) row[2] = integer_value((long long)micros);
+        } else if (!prefix) continue;
+        struct proc_bsdinfo info;
+        long long started = 0;
+        if (proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof info) == sizeof info) {
+            started = (long long)info.pbi_start_tvsec;
+            row[4] = integer_value(info.pbi_nice);
+            row[5] = integer_value(info.pbi_ppid);
+        } else if (prefix && (have_process || process_table_row(pid, &process))) {
+            started = process.kp_proc.p_starttime.tv_sec;
+            row[4] = integer_value(process.kp_proc.p_nice);
+            row[5] = integer_value(process.kp_eproc.e_ppid);
+        }
+        if (started > 0 && now >= started) row[3] = integer_value(now - started);
+        rows = grow_list(rows, &capacity, sizeof *rows, checked_add(count, 1));
+        rows[count++] = list_from(row, sizeof row / sizeof *row);
+    }
+    free(pids);
+    Value result = list_from(rows, count);
+    free(rows);
+    return result;
+#else
+    return nothing_value();
+#endif
+}
+
+static Value offer_host_cpu_us(Value *arguments, size_t argument_count) {
+    (void)arguments; (void)argument_count;
+    return integer_value(cpu_microseconds());
 }
 
 static Value offer_host_pid(Value *arguments, size_t argument_count) {
@@ -3734,124 +3741,59 @@ static Value offer_host_dir_mkdir(Value *arguments, size_t argument_count) {
     (void)argument_count;
     expect_kind(arguments[SOLE_OPERAND], KIND_TEXT, "host_dir_mkdir expects a path");
     char *path = copy_bytes(arguments[SOLE_OPERAND].text, arguments[SOLE_OPERAND].text_length);
-    int started = mkdir(path, DIRECTORY_MODE);
-    int created = 0;
-    if (started == SYSTEM_CALL_OK) created = 1;
-    else if (errno == EEXIST) {
-        struct stat info;
-        if (stat(path, &info) == 0 && S_ISDIR(info.st_mode)) created = 0;
-    }
+    int made = mkdir(path, DIRECTORY_MODE);
     free(path);
-    return integer_value((long long)created);
+    return boolean_word(made == 0);
 }
 
-static int remove_tree(const char *path) {
-    DIR *directory = opendir(path);
-    if (directory == NULL) return -WORD_TRUE;
-    struct dirent *entry = NULL;
-    while ((entry = readdir(directory)) != NULL) {
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
-        size_t length = strlen(path);
-        size_t name_length = strlen(entry->d_name);
-        char *child = allocate_zeroed(checked_add(checked_add(length, name_length), ARITY_TWO), sizeof *child);
-        memcpy(child, path, length);
-        child[length] = PATH_SEPARATOR;
-        memcpy(child + length + ONE_ELEMENT, entry->d_name, name_length);
-        struct stat info;
-        int found = stat(child, &info);
-        int removed = -WORD_TRUE;
-        if (found == SYSTEM_CALL_OK && S_ISDIR(info.st_mode)) removed = remove_tree(child);
-        else removed = unlink(child) == SYSTEM_CALL_OK ? WORD_FALSE : -WORD_TRUE;
-        free(child);
-        if (removed != WORD_FALSE) {
-            closedir(directory);
-            return -WORD_TRUE;
-        }
+static Value offer_host_spawn_at(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    Value command = arguments[0], redirects = arguments[1];
+    if (command.kind != KIND_LIST || command.item_count == 0 || redirects.kind != KIND_LIST) return integer_value(-1);
+    char **argv = allocate_zeroed(checked_add(command.item_count, 1), sizeof *argv);
+    for (size_t i = 0; i < command.item_count; ++i) {
+        Value word = list_at(command, i);
+        if (word.kind != KIND_TEXT || memchr(word.text, 0, word.text_length) != NULL || (i == 0 && word.text_length == 0)) { free(argv); return integer_value(-1); }
+        argv[i] = word.text;
     }
-    closedir(directory);
-    return rmdir(path) == SYSTEM_CALL_OK ? WORD_FALSE : -WORD_TRUE;
-}
-
-static Value offer_host_dir_rmdir(Value *arguments, size_t argument_count) {
-    (void)argument_count;
-    expect_kind(arguments[SOLE_OPERAND], KIND_TEXT, "host_dir_rmdir expects a path");
-    char *path = copy_bytes(arguments[SOLE_OPERAND].text, arguments[SOLE_OPERAND].text_length);
-    int removed = remove_tree(path);
-    free(path);
-    return integer_value(removed);
-}
-
-static Value offer_host_path_exists(Value *arguments, size_t argument_count) {
-    (void)argument_count;
-    expect_kind(arguments[SOLE_OPERAND], KIND_TEXT, "host_path_exists expects a path");
-    return boolean_word(path_exists(arguments[SOLE_OPERAND].text));
-}
-
-static Value offer_host_path_is_dir(Value *arguments, size_t argument_count) {
-    (void)argument_count;
-    expect_kind(arguments[SOLE_OPERAND], KIND_TEXT, "host_path_is_dir expects a path");
-    return boolean_word(path_is_dir(arguments[SOLE_OPERAND].text));
-}
-
-static Value offer_host_path_remove(Value *arguments, size_t argument_count) {
-    (void)argument_count;
-    expect_kind(arguments[SOLE_OPERAND], KIND_TEXT, "host_path_remove expects a path");
-    return integer_value(unlink(arguments[SOLE_OPERAND].text) == SYSTEM_CALL_OK ? WORD_FALSE : -WORD_TRUE);
-}
-
-static Value offer_host_path_rename(Value *arguments, size_t argument_count) {
-    (void)argument_count;
-    expect_kind(arguments[LEFT_OPERAND], KIND_TEXT, "host_path_rename expects a source path");
-    expect_kind(arguments[RIGHT_OPERAND], KIND_TEXT, "host_path_rename expects a target path");
-    return integer_value(rename(arguments[LEFT_OPERAND].text, arguments[RIGHT_OPERAND].text) == SYSTEM_CALL_OK ? WORD_FALSE : -WORD_TRUE);
-}
-
-static Value offer_host_dir_list(Value *arguments, size_t argument_count) {
-    (void)argument_count;
-    expect_kind(arguments[SOLE_OPERAND], KIND_TEXT, "host_dir_list expects a path");
-    DIR *directory = opendir(arguments[SOLE_OPERAND].text);
-    if (directory == NULL) return nothing_value();
-    Value *rows = NULL;
-    size_t count = EMPTY_COUNT;
-    size_t capacity = EMPTY_COUNT;
-    struct dirent *entry = NULL;
-    while ((entry = readdir(directory)) != NULL) {
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
-        size_t needed = checked_add(count, ONE_ELEMENT);
-        rows = grow_list(rows, &capacity, sizeof *rows, needed);
-        rows[count] = text_value(entry->d_name, strlen(entry->d_name));
-        count = needed;
+    const char *paths[4] = {NULL, NULL, NULL, NULL};
+    for (size_t i = 0; i < 4 && i < redirects.item_count; ++i) {
+        Value path = list_at(redirects, i);
+        if (path.kind == KIND_NOTHING) continue;
+        if (path.kind != KIND_TEXT || memchr(path.text, 0, path.text_length) != NULL) { free(argv); return integer_value(-1); }
+        if (path.text_length != 0) paths[i] = path.text;
     }
-    closedir(directory);
-    return list_from(rows, count);
-}
-
-static Value offer_fs_exists(Value *arguments, size_t argument_count) {
-    return offer_host_path_exists(arguments, argument_count);
-}
-
-static Value offer_fs_is_dir(Value *arguments, size_t argument_count) {
-    return offer_host_path_is_dir(arguments, argument_count);
-}
-
-static Value offer_fs_mkdir(Value *arguments, size_t argument_count) {
-    return offer_host_dir_mkdir(arguments, argument_count);
-}
-
-static Value offer_fs_rmdir(Value *arguments, size_t argument_count) {
-    return offer_host_dir_rmdir(arguments, argument_count);
-}
-
-static Value offer_fs_remove(Value *arguments, size_t argument_count) {
-    return offer_host_path_remove(arguments, argument_count);
-}
-
-static Value offer_fs_rename(Value *arguments, size_t argument_count) {
-    return offer_host_path_rename(arguments, argument_count);
-}
-
-static Value offer_fs_list(Value *arguments, size_t argument_count) {
-    return offer_host_dir_list(arguments, argument_count);
+    int descriptors[3] = {-1, -1, -1};
+    int result = -2;
+    for (size_t i = 0; i < 3; ++i) {
+        if (paths[i] == NULL) continue;
+        if (i == 2 && paths[1] != NULL && strcmp(paths[1], paths[2]) == 0) descriptors[2] = descriptors[1];
+        else descriptors[i] = open(paths[i], i == 0 ? O_RDONLY : O_WRONLY | O_CREAT | O_APPEND, 0666);
+        if (descriptors[i] < 0) goto cleanup;
+    }
+    posix_spawn_file_actions_t actions;
+    result = -3;
+    if (posix_spawn_file_actions_init(&actions) != 0) goto cleanup;
+    int error = 0;
+    for (size_t i = 0; i < 3 && error == 0; ++i) if (descriptors[i] >= 0) error = posix_spawn_file_actions_adddup2(&actions, descriptors[i], (int)i);
+    for (size_t i = 0; i < 3 && error == 0; ++i) if (descriptors[i] > STDERR_FILENO && !(i == 2 && descriptors[2] == descriptors[1])) error = posix_spawn_file_actions_addclose(&actions, descriptors[i]);
+    if (error == 0 && paths[3] != NULL) {
+#if defined(__APPLE__) && __MAC_OS_X_VERSION_MIN_REQUIRED >= 260000
+        error = posix_spawn_file_actions_addchdir(&actions, paths[3]);
+#else
+        error = posix_spawn_file_actions_addchdir_np(&actions, paths[3]);
+#endif
+    }
+    pid_t pid = 0;
+    if (error == 0) {
+        error = posix_spawnp(&pid, argv[0], &actions, NULL, argv, environ);
+        result = error == 0 ? (int)pid : (error == EAGAIN || error == ENOMEM ? -3 : -4);
+    }
+    posix_spawn_file_actions_destroy(&actions);
+cleanup:
+    for (size_t i = 0; i < 3; ++i) if (descriptors[i] >= 0 && !(i == 2 && descriptors[2] == descriptors[1])) close(descriptors[i]);
+    free(argv);
+    return integer_value(result);
 }
 
 static Value offer_host_spawn_quiet(Value *arguments, size_t argument_count) {
@@ -3881,98 +3823,6 @@ static Value offer_host_spawn_quiet(Value *arguments, size_t argument_count) {
     return integer_value((long long)pid);
 }
 
-static Value offer_host_spawn_at(Value *arguments, size_t argument_count) {
-    (void)argument_count;
-    expect_kind(arguments[LEFT_OPERAND], KIND_LIST, "host_spawn_at expects a command list");
-    expect_kind(arguments[RIGHT_OPERAND], KIND_LIST, "host_spawn_at expects [stdin, stdout, stderr]");
-    Value command = arguments[LEFT_OPERAND];
-    Value redirects = arguments[RIGHT_OPERAND];
-    if (command.item_count == EMPTY_COUNT || redirects.item_count < ARITY_THREE) return integer_value(-WORD_TRUE);
-
-    char **argv = allocate_zeroed(checked_add(command.item_count, ONE_ELEMENT), sizeof *argv);
-    List *cursor = command.list;
-    for (size_t index = FIRST_INDEX; index < command.item_count; index = checked_add(index, ONE_ELEMENT)) {
-        expect_kind(cursor->head, KIND_TEXT, "host_spawn_at expects text arguments");
-        argv[index] = cursor->head.text;
-        cursor = cursor->tail;
-    }
-
-    Value stdin_path = list_at(redirects, FIRST_INDEX);
-    Value stdout_path = list_at(redirects, ONE_ELEMENT);
-    Value stderr_path = list_at(redirects, ARITY_TWO);
-    expect_kind(stdin_path, KIND_TEXT, "host_spawn_at stdin path must be text");
-    expect_kind(stdout_path, KIND_TEXT, "host_spawn_at stdout path must be text");
-    expect_kind(stderr_path, KIND_TEXT, "host_spawn_at stderr path must be text");
-    const char *in_path = stdin_path.text_length == EMPTY_COUNT ? NULL_DEVICE : stdin_path.text;
-    const char *out_path = stdout_path.text_length == EMPTY_COUNT ? NULL_DEVICE : stdout_path.text;
-    const char *err_path = stderr_path.text_length == EMPTY_COUNT ? NULL_DEVICE : stderr_path.text;
-
-    posix_spawn_file_actions_t actions;
-    if (posix_spawn_file_actions_init(&actions) != SYSTEM_CALL_OK) {
-        free(argv);
-        return integer_value(-WORD_TRUE);
-    }
-    if (posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, in_path, O_RDONLY, NULL_DEVICE_MODE) != SYSTEM_CALL_OK
-        || posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, out_path, O_WRONLY | O_CREAT | O_TRUNC, TEXT_FILE_MODE) != SYSTEM_CALL_OK
-        || posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, err_path, O_WRONLY | O_CREAT | O_TRUNC, TEXT_FILE_MODE) != SYSTEM_CALL_OK) {
-        posix_spawn_file_actions_destroy(&actions);
-        free(argv);
-        return integer_value(-WORD_TRUE);
-    }
-
-    pid_t pid = 0;
-    int started = posix_spawnp(&pid, argv[FIRST_INDEX], &actions, NULL, argv, environ);
-    posix_spawn_file_actions_destroy(&actions);
-    free(argv);
-    return integer_value(started == SYSTEM_CALL_OK ? (long long)pid : -WORD_TRUE);
-}
-
-static char *read_descriptor(int descriptor, size_t *length);
-
-static Value offer_host_capture(Value *arguments, size_t argument_count) {
-    (void)argument_count;
-    expect_kind(arguments[SOLE_OPERAND], KIND_LIST, "host_capture expects an argv list");
-    Value command = arguments[SOLE_OPERAND];
-    if (command.item_count == EMPTY_COUNT) return nothing_value();
-    char **argv = allocate_zeroed(checked_add(command.item_count, ONE_ELEMENT), sizeof *argv);
-    List *cursor = command.list;
-    for (size_t index = FIRST_INDEX; index < command.item_count; index = checked_add(index, ONE_ELEMENT)) {
-        expect_kind(cursor->head, KIND_TEXT, "host_capture expects text arguments");
-        argv[index] = cursor->head.text;
-        cursor = cursor->tail;
-    }
-    int outbound[ARITY_TWO];
-    if (pipe(outbound) != SYSTEM_CALL_OK) {
-        free(argv);
-        return nothing_value();
-    }
-    pid_t pid = fork();
-    if (pid < SYSTEM_CALL_OK) {
-        free(argv);
-        close(outbound[FIRST_INDEX]);
-        close(outbound[ONE_ELEMENT]);
-        return nothing_value();
-    }
-    if (pid == SYSTEM_CALL_OK) {
-        dup2(outbound[ONE_ELEMENT], STDOUT_FILENO);
-        close(outbound[FIRST_INDEX]);
-        close(outbound[ONE_ELEMENT]);
-        execvp(argv[FIRST_INDEX], argv);
-        _exit(127);
-    }
-    free(argv);
-    close(outbound[ONE_ELEMENT]);
-    size_t length = EMPTY_COUNT;
-    char *output = read_descriptor(outbound[FIRST_INDEX], &length);
-    close(outbound[FIRST_INDEX]);
-    int status = 0;
-    waitpid(pid, &status, 0);
-    if (output == NULL) return nothing_value();
-    Value value = text_value(output, length);
-    free(output);
-    return value;
-}
-
 static char *read_descriptor(int descriptor, size_t *length) {
     size_t capacity = host_page_bytes();
     char *buffer = allocate_zeroed(capacity, sizeof *buffer);
@@ -3999,92 +3849,6 @@ static char *read_descriptor(int descriptor, size_t *length) {
         }
         filled = checked_add(filled, (size_t)step);
     }
-}
-
-static size_t line_count_in_text(const char *bytes, size_t length) {
-    if (length == EMPTY_COUNT) return EMPTY_COUNT;
-    size_t lines = ONE_ELEMENT;
-    for (size_t index = FIRST_INDEX; index < length; index = checked_add(index, ONE_ELEMENT)) {
-        if (bytes[index] == NEWLINE) lines = checked_add(lines, ONE_ELEMENT);
-    }
-    return lines;
-}
-
-static void append_inventory_row(Value **rows, size_t *count, size_t *capacity, const char *relative, size_t relative_length, long long lines) {
-    Value pair[ARITY_TWO];
-    pair[FIRST_INDEX] = text_value(relative, relative_length);
-    pair[ONE_ELEMENT] = integer_value(lines);
-    size_t needed = checked_add(*count, ONE_ELEMENT);
-    *rows = grow_list(*rows, capacity, sizeof **rows, needed);
-    (*rows)[*count] = list_from(pair, ARITY_TWO);
-    *count = needed;
-}
-
-static void walk_inventory(const char *root, const char *relative, const char *suffix, Value **rows, size_t *count, size_t *capacity) {
-    size_t root_length = strlen(root);
-    size_t relative_length = strlen(relative);
-    char *path = allocate_zeroed(checked_add(checked_add(root_length, relative_length), ARITY_TWO), sizeof *path);
-    memcpy(path, root, root_length);
-    if (relative_length != EMPTY_COUNT) {
-        path[root_length] = PATH_SEPARATOR;
-        memcpy(path + root_length + ONE_ELEMENT, relative, relative_length);
-    }
-    DIR *directory = opendir(path);
-    if (directory == NULL) {
-        free(path);
-        return;
-    }
-    struct dirent *entry = NULL;
-    while ((entry = readdir(directory)) != NULL) {
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
-        size_t name_length = strlen(entry->d_name);
-        size_t child_rel_length = relative_length == EMPTY_COUNT ? name_length : checked_add(checked_add(relative_length, ONE_ELEMENT), name_length);
-        char *child_rel = allocate_zeroed(checked_add(child_rel_length, ONE_ELEMENT), sizeof *child_rel);
-        if (relative_length != EMPTY_COUNT) {
-            memcpy(child_rel, relative, relative_length);
-            child_rel[relative_length] = PATH_SEPARATOR;
-            memcpy(child_rel + relative_length + ONE_ELEMENT, entry->d_name, name_length);
-        } else {
-            memcpy(child_rel, entry->d_name, name_length);
-        }
-        char *child_path = allocate_zeroed(checked_add(checked_add(root_length, child_rel_length), ARITY_TWO), sizeof *child_path);
-        memcpy(child_path, root, root_length);
-        child_path[root_length] = PATH_SEPARATOR;
-        memcpy(child_path + root_length + ONE_ELEMENT, child_rel, child_rel_length);
-        struct stat info;
-        if (stat(child_path, &info) == SYSTEM_CALL_OK) {
-            if (S_ISDIR(info.st_mode)) {
-                walk_inventory(root, child_rel, suffix, rows, count, capacity);
-            } else if (suffix == NULL || suffix[0] == TEXT_TERMINATOR
-                       || (name_length >= strlen(suffix) && strcmp(entry->d_name + name_length - strlen(suffix), suffix) == 0)) {
-                int descriptor = open(child_path, O_RDONLY);
-                if (descriptor >= SYSTEM_CALL_OK) {
-                    size_t length = EMPTY_COUNT;
-                    char *contents = read_descriptor(descriptor, &length);
-                    close(descriptor);
-                    if (contents != NULL) {
-                        append_inventory_row(rows, count, capacity, child_rel, child_rel_length, (long long)line_count_in_text(contents, length));
-                        free(contents);
-                    }
-                }
-            }
-        }
-        free(child_path);
-        free(child_rel);
-    }
-    closedir(directory);
-    free(path);
-}
-
-static Value offer_source_inventory(Value *arguments, size_t argument_count) {
-    (void)argument_count;
-    expect_kind(arguments[FIRST_INDEX], KIND_TEXT, "source_inventory expects a root path");
-    expect_kind(arguments[ONE_ELEMENT], KIND_TEXT, "source_inventory expects a suffix");
-    Value *rows = NULL;
-    size_t count = EMPTY_COUNT;
-    size_t capacity = EMPTY_COUNT;
-    walk_inventory(arguments[FIRST_INDEX].text, "", arguments[ONE_ELEMENT].text, &rows, &count, &capacity);
-    return list_from(rows, count);
 }
 
 static Value offer_host_exec(Value *arguments, size_t argument_count) {
@@ -4191,6 +3955,48 @@ static Value offer_value_kind(Value *arguments, size_t argument_count) {
     return text_value(name, strlen(name));
 }
 
+/* Form owns FORMBIN framing and node traversal. These two scalar modes only
+ * transport representation bits; no C serializer or second wire authority. */
+static Value offer_float_leaf(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    if (arguments[0].kind != KIND_INTEGER) return nothing_value();
+    long long mode = arguments[0].integer;
+    Value value = arguments[1];
+    if (mode >= 29 && mode <= 32) return stage_door(mode, value);
+    if (mode == 0) return offer_float_value(&value, 1);
+    if (mode == 1) return offer_make_float32(&value, 1);
+    if (mode == 2) return offer_make_float64(&value, 1);
+    if (mode == 3) return real_value(3.14159265358979323846264338327950288);
+    if (mode == 4) return offer_value_kind(&value, 1);
+    if ((mode != 34 && mode != 35) || value.kind != KIND_LIST || value.item_count != 2) return nothing_value();
+    Value tag = list_at(value, 0), payload = list_at(value, 1);
+    if (tag.kind != KIND_INTEGER || (tag.integer != 2 && tag.integer != 3)) return nothing_value();
+    uint64_t bits = 0;
+    if (mode == 34) {
+        if (tag.integer == 3) {
+            if (payload.kind != KIND_INTEGER) return nothing_value();
+            memcpy(&bits, &payload.integer, sizeof bits);
+        } else {
+            if (payload.kind != KIND_REAL) return nothing_value();
+            memcpy(&bits, &payload.real, sizeof bits);
+        }
+        char bytes[8];
+        for (size_t i = 0; i < 8; ++i) bytes[i] = (char)(bits >> (i * 8));
+        return text_value(bytes, 8);
+    }
+    if (payload.kind != KIND_TEXT || payload.text_length != 8) return nothing_value();
+    for (size_t i = 0; i < 8; ++i) bits |= (uint64_t)(unsigned char)payload.text[i] << (i * 8);
+    if (tag.integer == 3) {
+        long long number;
+        memcpy(&number, &bits, sizeof number);
+        Value scalar = integer_value(number);
+        return offer_intern_trivial_int(&scalar, 1);
+    }
+    double number;
+    memcpy(&number, &bits, sizeof number);
+    return intern_real(number, 64);
+}
+
 static Value offer_nothing_value(Value *arguments, size_t argument_count) {
     (void)arguments;
     (void)argument_count;
@@ -4202,17 +4008,32 @@ static Value offer_nothing(Value *arguments, size_t argument_count) {
     return boolean_word(arguments[SOLE_OPERAND].kind == KIND_NOTHING);
 }
 
-static Value offer_form_error(Value *arguments, size_t argument_count) {
+static Value offer_file_open(Value *arguments, size_t argument_count) {
     (void)argument_count;
-    const char *message = "form_error";
-    size_t length = strlen(message);
-    if (arguments[SOLE_OPERAND].kind == KIND_TEXT) {
-        message = arguments[SOLE_OPERAND].text;
-        length = arguments[SOLE_OPERAND].text_length;
-    }
-    if (unwind_to_recovery()) return nothing_value();
-    fprintf(stderr, "fkwu: form_error: %.*s\n", (int)length, message);
-    exit(EXIT_FAILURE);
+    Value path = arguments[0];
+    if (path.kind != KIND_TEXT || memchr(path.text, 0, path.text_length) != NULL) return integer_value(-1);
+    return integer_value(open(path.text, O_RDONLY));
+}
+
+static Value offer_file_read(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    if (arguments[0].kind != KIND_INTEGER || arguments[0].integer < 0 || arguments[0].integer > INT_MAX ||
+        arguments[1].kind != KIND_INTEGER || arguments[1].integer <= 0) return text_value("", 0);
+    size_t count = (size_t)arguments[1].integer;
+    if (count > SSIZE_MAX) return text_value("", 0);
+    char *bytes = allocate_zeroed(count, 1);
+    ssize_t got;
+    do { got = read((int)arguments[0].integer, bytes, count); } while (got < 0 && errno == EINTR);
+    Value result = text_value(bytes, got > 0 ? (size_t)got : 0);
+    free(bytes);
+    return result;
+}
+
+static Value offer_file_close(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    Value descriptor = arguments[0];
+    if (descriptor.kind != KIND_INTEGER || descriptor.integer < 0 || descriptor.integer > INT_MAX) return integer_value(-1);
+    return integer_value(close((int)descriptor.integer));
 }
 
 static Value offer_read_line(Value *arguments, size_t argument_count) {
@@ -4235,32 +4056,18 @@ static Value offer_read_line(Value *arguments, size_t argument_count) {
     return value;
 }
 
-static Value offer_input_byte(Value *arguments, size_t argument_count) {
+static Value offer_fs_truncate(Value *arguments, size_t argument_count) {
     (void)argument_count;
-    expect_kind(arguments[SOLE_OPERAND], KIND_INTEGER, "input_byte expects an index");
-    long long index = arguments[SOLE_OPERAND].integer;
-    if (index < WORD_FALSE) return integer_value(WORD_FALSE);
-    if ((unsigned long long)index >= source_length) return integer_value(WORD_FALSE);
-    return integer_value((unsigned char)source_bytes[(size_t)index]);
+    Value path = arguments[0], length = arguments[1];
+    if (path.kind != KIND_TEXT || memchr(path.text, 0, path.text_length) != NULL ||
+        length.kind != KIND_INTEGER || length.integer < 0 || (long long)(off_t)length.integer != length.integer) return nothing_value();
+    int fd = open(path.text, O_WRONLY | O_CREAT, 0666);
+    if (fd < 0) return nothing_value();
+    int changed = ftruncate(fd, (off_t)length.integer);
+    off_t extent = changed == 0 ? lseek(fd, 0, SEEK_END) : -1;
+    int released = close(fd);
+    return extent >= 0 && released == 0 ? integer_value((long long)extent) : nothing_value();
 }
-
-static Value offer_value_eq(Value *arguments, size_t argument_count) {
-    (void)argument_count;
-    return boolean_word(values_equal(arguments[LEFT_OPERAND], arguments[RIGHT_OPERAND]));
-}
-
-static Value offer_file_mtime(Value *arguments, size_t argument_count) {
-    (void)argument_count;
-    expect_kind(arguments[SOLE_OPERAND], KIND_TEXT, "file_mtime expects text");
-    struct stat info;
-    if (stat(arguments[SOLE_OPERAND].text, &info) != SYSTEM_CALL_OK) return nothing_value();
-    return integer_value((long long)info.st_mtime);
-}
-
-static void load_preludes(const char *bytes, size_t length, const char *from_file);
-static Form **parse_current_source(size_t *form_count);
-static void drive_forms(Form **forms, size_t form_count);
-static void remember_unit(char *path);
 
 static Value offer_cell_path(Value *arguments, size_t argument_count) {
     (void)arguments;
@@ -4268,99 +4075,25 @@ static Value offer_cell_path(Value *arguments, size_t argument_count) {
     return text_value(source_path, strlen(source_path));
 }
 
-static Value record_kv4(const char *k0, Value v0, const char *k1, Value v1, const char *k2, Value v2, const char *k3, Value v3) {
-    Record *record = allocate_zeroed(ONE_ELEMENT, sizeof *record);
-    record->blueprint = integer_value(WORD_FALSE);
-    record->count = 4;
-    record->capacity = 4;
-    record->keys = allocate_zeroed(record->count, sizeof *record->keys);
-    record->values = allocate_zeroed(record->count, sizeof *record->values);
-    record->keys[0] = text_value(k0, strlen(k0));
-    record->values[0] = v0;
-    record->keys[1] = text_value(k1, strlen(k1));
-    record->values[1] = v1;
-    record->keys[2] = text_value(k2, strlen(k2));
-    record->values[2] = v2;
-    record->keys[3] = text_value(k3, strlen(k3));
-    record->values[3] = v3;
-    Value value = nothing_value();
-    value.kind = KIND_RECORD;
-    value.record = record;
-    return value;
+static Value offer_self_source(Value *arguments, size_t argument_count) {
+    (void)arguments; (void)argument_count;
+    return text_value(entry_source_bytes != NULL ? entry_source_bytes : "", entry_source_length);
 }
 
-static Value offer_cell_input(Value *arguments, size_t argument_count) {
-    (void)arguments;
+static Value offer_realpath(Value *arguments, size_t argument_count) {
     (void)argument_count;
-    return active_cell_input_set ? active_cell_input : nothing_value();
-}
-
-static Value offer_cell_run(Value *arguments, size_t argument_count) {
-    (void)argument_count;
-    if (arguments[LEFT_OPERAND].kind != KIND_TEXT) return nothing_value();
-    expect_kind(arguments[RIGHT_OPERAND], KIND_INTEGER, "cell_run expects an integer mode");
-    char *path = copy_bytes(arguments[LEFT_OPERAND].text, arguments[LEFT_OPERAND].text_length);
-
-    const char *saved_source_bytes = source_bytes;
-    size_t saved_source_length = source_length;
-    size_t saved_source_offset = source_offset;
-    const char *saved_source_path = source_path;
-    Frame *saved_frames = frames;
-    size_t saved_frame_count = frame_count;
-    size_t saved_frame_capacity = frame_capacity;
-    Binding *saved_locals = locals;
-    size_t saved_local_count = local_count;
-    size_t saved_local_capacity = local_capacity;
-    Value saved_finished = finished;
-    int saved_result_ready = result_ready;
-    Value saved_cell_input = active_cell_input;
-    int saved_cell_input_set = active_cell_input_set;
-
-    active_cell_input = arguments[3];
-    active_cell_input_set = 1;
-    source_path = path;
-    source_bytes = read_source(path, &source_length);
-    source_offset = FIRST_INDEX;
-    frames = NULL;
-    frame_count = EMPTY_COUNT;
-    frame_capacity = EMPTY_COUNT;
-    locals = NULL;
-    local_count = EMPTY_COUNT;
-    local_capacity = EMPTY_COUNT;
-    finished = nothing_value();
-    result_ready = 0;
-    remember_unit(copy_bytes(source_path, strlen(source_path)));
-    load_preludes(source_bytes, source_length, source_path);
-    size_t form_count = EMPTY_COUNT;
-    Form **forms = parse_current_source(&form_count);
-    bind_definitions(forms, form_count);
-    drive_forms(forms, form_count);
-    Value answer = finished;
-    free(frames);
-    free(locals);
-
-    source_bytes = saved_source_bytes;
-    source_length = saved_source_length;
-    source_offset = saved_source_offset;
-    source_path = saved_source_path;
-    frames = saved_frames;
-    frame_count = saved_frame_count;
-    frame_capacity = saved_frame_capacity;
-    locals = saved_locals;
-    local_count = saved_local_count;
-    local_capacity = saved_local_capacity;
-    finished = saved_finished;
-    result_ready = saved_result_ready;
-    active_cell_input = saved_cell_input;
-    active_cell_input_set = saved_cell_input_set;
-    free(path);
-    return record_kv4("value", answer, "out", text_value("", EMPTY_COUNT), "errors", integer_value(WORD_FALSE), "stopped", nothing_value());
+    Value path = arguments[0];
+    if (path.kind != KIND_TEXT || memchr(path.text, 0, path.text_length) != NULL) return nothing_value();
+    char *resolved = realpath(path.text, NULL);
+    if (resolved == NULL) return nothing_value();
+    Value result = text_value(resolved, strlen(resolved));
+    free(resolved);
+    return result;
 }
 
 static Value offer_intern_bool(Value *arguments, size_t argument_count) {
     (void)argument_count;
-    fk_node_id identity = fk_nid_make(1, 1, 3, integer_is_nonzero(arguments[SOLE_OPERAND]) ? WORD_TRUE : WORD_FALSE);
-    return node_value((long long)identity);
+    return node_value((long long)fk_nid_make(1, 1, 3, integer_is_nonzero(arguments[SOLE_OPERAND]) ? 1 : 0));
 }
 
 static Value count_word(size_t count) {
@@ -4388,7 +4121,7 @@ static Value offer_fb_record(Value *arguments, size_t argument_count) {
     (void)argument_count;
     frame_entered = checked_add(frame_entered, ONE_ELEMENT);
     frame_last_index = frame_entered;
-    if (arguments[RECORD_WORD].kind != KIND_NODE || arguments[RECORD_WORD].cell == NULL) {
+    if (arguments[RECORD_WORD].kind != KIND_NODE) {
         frame_rejected = checked_add(frame_rejected, ONE_ELEMENT);
         return arguments[RECORD_WORD];
     }
@@ -4404,7 +4137,7 @@ static Value offer_fb_record(Value *arguments, size_t argument_count) {
     frame_since_clear = checked_add(frame_since_clear, ONE_ELEMENT);
     frame_accepted = checked_add(frame_accepted, ONE_ELEMENT);
     Cell *cell = arguments[RECORD_WORD].cell;
-    if (cell->source == NULL) {
+    if (cell != NULL && cell->source == NULL) {
         cell->source = copy_bytes(arguments[RECORD_PATH].text, arguments[RECORD_PATH].text_length);
         cell->source_length = arguments[RECORD_PATH].text_length;
         cell->source_line = arguments[RECORD_POSITION].integer / SOURCE_LINE_STRIDE;
@@ -4456,157 +4189,177 @@ static size_t cover_pages(size_t bytes) {
     return rounded - (rounded % page_bytes);
 }
 
-static void shared_remap(size_t bytes) {
-    size_t mapped_bytes = cover_pages(bytes);
-    if (shared_header != NULL && munmap(shared_header, shared_mapped_bytes) != SYSTEM_CALL_OK) {
-        fail("a shared mapping could not be released");
+/* Existing /fg-bus1 stage protocol. Nesting grows with actual opens; the ring
+ * and name table are the shared versioned layout, with cursors for continuation. */
+#define STAGE_SLOTS 65536LL
+#define STAGE_NAMES 16384LL
+#define STAGE_NAME_OFFSET (4096 + (8LL << 20))
+#define STAGE_BYTES (STAGE_NAME_OFFSET + (2LL << 20))
+#define STAGE_WORD(k) (((long long *)stage_bus)[2 + (k)])
+static char *stage_bus;
+static int stage_tried;
+static long long stage_pid, stage_body;
+typedef struct { long long index, stage, key, time; } StageOpen;
+static StageOpen *stage_stack;
+static size_t stage_capacity;
+static long long *stage_row(long long index) { return (long long *)(stage_bus + 4096) + (index & (STAGE_SLOTS - 1)) * 16; }
+static long long *stage_name_entry(long long id, long long probe) { return (long long *)(stage_bus + STAGE_NAME_OFFSET) + ((id + probe) & (STAGE_NAMES - 1)) * 16; }
+static long long stage_us(void) { return (long long)(monotonic_ns() / 1000); }
+static long long stage_name(const char *bytes, size_t length) {
+    long long id = (long long)(hash_bytes(VALUE_HASH_OFFSET, bytes, length) & ((1ULL << 62) - 1));
+    if (id == 0) id = 1;
+    for (long long probe = 0; probe < 32; ++probe) {
+        long long *entry = stage_name_entry(id, probe), expected = 0;
+        if (__atomic_compare_exchange_n(entry, &expected, id, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            memcpy(entry + 2, bytes, length < 112 ? length : 112);
+            __atomic_store_n(entry + 1, (long long)length | (1LL << 61) | (length > 112 ? 1LL << 62 : 0), __ATOMIC_RELEASE);
+            __atomic_fetch_add(&STAGE_WORD(5), 1, __ATOMIC_RELAXED);
+            return id;
+        }
+        if (expected == id) return id;
     }
-    if (ftruncate(shared_descriptor, (off_t)mapped_bytes) != SYSTEM_CALL_OK) fail("a shared object could not grow");
-    void *mapped = mmap(NULL, mapped_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, shared_descriptor, 0);
-    if (mapped == MAP_FAILED) fail("a shared object could not be mapped");
-    shared_header = mapped;
-    shared_mapped_bytes = mapped_bytes;
-    shared_bytes = mapped_bytes;
+    __atomic_fetch_add(&STAGE_WORD(8), 1, __ATOMIC_RELAXED);
+    return id;
 }
-
-static int shared_ready(void) {
-    if (shared_header != NULL) return 1;
-    if (shared_unavailable) return 0;
-    int descriptor = open(BUS_FILE_PATH, O_CREAT | O_RDWR, SHARED_OBJECT_MODE);
-    if (descriptor < SYSTEM_CALL_OK) {
-        shared_unavailable = 1;
-        return 0;
-    }
+static void stage_exit(void) { stage_unwind(0, 3, "exit"); }
+static int stage_ready(void) {
+    if (stage_tried) return stage_bus != NULL;
+    stage_tried = 1;
+    int fd = shm_open("/fg-bus1", O_RDWR | O_CREAT, 0600);
+    if (fd < 0) return 0;
     struct stat info;
-    if (fstat(descriptor, &info) != SYSTEM_CALL_OK) {
-        close(descriptor);
-        shared_unavailable = 1;
-        return 0;
+    if (fstat(fd, &info) != 0 || (info.st_size < STAGE_BYTES && ftruncate(fd, STAGE_BYTES) != 0)) { close(fd); return 0; }
+    void *mapped = mmap(NULL, STAGE_BYTES, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    int closed = close(fd);
+    if (mapped == MAP_FAILED) return 0;
+    if (closed != 0) { munmap(mapped, STAGE_BYTES); return 0; }
+    stage_bus = mapped;
+    long long zero = 0;
+    if (__atomic_load_n(&STAGE_WORD(0), __ATOMIC_ACQUIRE) == 0) {
+        STAGE_WORD(1) = 1; STAGE_WORD(2) = STAGE_SLOTS; STAGE_WORD(4) = STAGE_NAMES; STAGE_WORD(7) = 1;
+        __atomic_compare_exchange_n(&STAGE_WORD(6), &zero, stage_us(), 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+        zero = 0;
+        __atomic_compare_exchange_n(&STAGE_WORD(0), &zero, 0x4642555331LL, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
     }
-    shared_descriptor = descriptor;
-    size_t header_bytes = BUS_HEADER_WORDS * sizeof(uint64_t);
-    size_t size = (size_t)info.st_size;
-    if (size < header_bytes) size = header_bytes;
-    shared_remap(size);
-    if (shared_header[BUS_HEADER_MAGIC] == 0) {
-        shared_header[BUS_HEADER_MAGIC] = BUS_MAGIC;
-        shared_header[BUS_HEADER_LAYOUT] = BUS_LAYOUT_VERSION;
-        shared_header[BUS_HEADER_COUNT] = 0;
-        shared_header[BUS_HEADER_END] = header_bytes;
-    } else if (shared_header[BUS_HEADER_MAGIC] != BUS_MAGIC || shared_header[BUS_HEADER_LAYOUT] != BUS_LAYOUT_VERSION) {
-        munmap(shared_header, shared_mapped_bytes);
-        close(shared_descriptor);
-        shared_header = NULL;
-        shared_descriptor = INVALID_DESCRIPTOR;
-        shared_unavailable = 1;
-        return 0;
+    if (__atomic_load_n(&STAGE_WORD(0), __ATOMIC_ACQUIRE) != 0x4642555331LL ||
+        STAGE_WORD(1) != 1 || STAGE_WORD(2) != STAGE_SLOTS || STAGE_WORD(4) != STAGE_NAMES) {
+        munmap(stage_bus, STAGE_BYTES); stage_bus = NULL; return 0;
     }
-    shared_maps = ONE_ELEMENT;
+    stage_pid = getpid();
+    char *cwd = getcwd(NULL, 0);
+    stage_body = cwd != NULL ? stage_name(cwd, strlen(cwd)) : 0;
+    free(cwd);
+    Value owner = integer_value(stage_pid);
+    offer_kernel_live(&owner, 1);
+    atexit(stage_exit);
     return 1;
 }
-
-static size_t shared_record_span(const unsigned char *record, size_t available) {
-    size_t fields = BUS_RECORD_FIELDS * sizeof(uint64_t);
-    if (available < fields) fail("a shared record is truncated");
-    uint64_t stage_length = 0;
-    uint64_t key_length = 0;
-    memcpy(&stage_length, record + (BUS_RECORD_FIELDS - 2) * sizeof(uint64_t), sizeof stage_length);
-    memcpy(&key_length, record + (BUS_RECORD_FIELDS - 1) * sizeof(uint64_t), sizeof key_length);
-    if (stage_length > SIZE_MAX || key_length > SIZE_MAX) fail("a shared record exceeds addressable memory");
-    return align_to_word(checked_add(fields, checked_add((size_t)stage_length, (size_t)key_length)));
+static long long stage_put(long long *row) {
+    long long index = __atomic_fetch_add(&STAGE_WORD(3), 1, __ATOMIC_ACQ_REL);
+    long long *slot = stage_row(index);
+    __atomic_store_n(slot, 0, __ATOMIC_RELAXED);
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    if (row[1] == 0) { row[1] = stage_pid; row[10] = stage_body; }
+    for (size_t i = 1; i < 12; ++i) slot[i] = row[i];
+    __atomic_store_n(slot, index + 1, __ATOMIC_RELEASE);
+    __atomic_fetch_add((long long *)stage_bus, 2, __ATOMIC_RELEASE);
+    return index;
 }
-
-static Value offer_bus_open(Value *arguments, size_t argument_count) {
-    (void)argument_count;
-    if (!shared_ready()) return nothing_value();
-    expect_kind(arguments[BUS_STAGE], KIND_TEXT, "bus_open expects text");
-    expect_kind(arguments[BUS_KEY], KIND_TEXT, "bus_open expects text");
-    size_t fields = BUS_RECORD_FIELDS * sizeof(uint64_t);
-    size_t span = align_to_word(checked_add(fields, checked_add(arguments[BUS_STAGE].text_length, arguments[BUS_KEY].text_length)));
-    size_t header_bytes = BUS_HEADER_WORDS * sizeof(uint64_t);
-    size_t start = (size_t)shared_header[BUS_HEADER_END];
-    if (start < header_bytes) start = header_bytes;
-    size_t end = checked_add(start, span);
-    if (end > shared_mapped_bytes) shared_remap(grown_capacity(shared_mapped_bytes, end));
-    unsigned char *record = (unsigned char *)shared_header + start;
-    uint64_t fields_out[BUS_RECORD_FIELDS];
-    fields_out[0] = BUS_PHASE_OPEN;
-    fields_out[1] = (uint64_t)getpid();
-    fields_out[2] = monotonic_ns();
-    fields_out[3] = 0;
-    fields_out[4] = arguments[BUS_STAGE].text_length;
-    fields_out[5] = arguments[BUS_KEY].text_length;
-    memcpy(record, fields_out, fields);
-    if (arguments[BUS_STAGE].text_length != EMPTY_COUNT) memcpy(record + fields, arguments[BUS_STAGE].text, arguments[BUS_STAGE].text_length);
-    if (arguments[BUS_KEY].text_length != EMPTY_COUNT) {
-        memcpy(record + fields + arguments[BUS_STAGE].text_length, arguments[BUS_KEY].text, arguments[BUS_KEY].text_length);
+static long long stage_close_at(size_t depth, long long phase, long long outcome, long long amount, long long digest) {
+    long long row[12] = {0};
+    StageOpen open = stage_stack[depth];
+    row[2] = stage_us(); row[3] = open.stage; row[4] = open.key; row[5] = phase | ((long long)depth << 8);
+    row[6] = open.index; row[7] = row[2] - open.time; row[8] = outcome; row[9] = amount; row[11] = digest;
+    stage_depth = depth;
+    return stage_put(row);
+}
+static void stage_unwind(size_t depth, long long phase, const char *why) {
+    if (stage_bus == NULL || stage_depth <= depth) return;
+    long long outcome = why != NULL ? stage_name(why, strlen(why)) : 0;
+    while (stage_depth > depth) stage_close_at(stage_depth - 1, phase, outcome, 0, 0);
+}
+static void stage_lastbreath(long long pid) {
+    if (!stage_ready()) return;
+    long long head = __atomic_load_n(&STAGE_WORD(3), __ATOMIC_ACQUIRE), pending = 0, outcome = 0;
+    for (long long i = head; i > 0 && i > head - STAGE_SLOTS; ) {
+        long long index = --i, *slot = stage_row(index);
+        if (__atomic_load_n(slot, __ATOMIC_ACQUIRE) != index + 1 || slot[1] != pid) continue;
+        if ((slot[5] & 255) != 1 || pending > 0) { pending += (slot[5] & 255) != 1 ? 1 : -1; continue; }
+        long long row[12] = {0, pid, stage_us(), slot[3], slot[4], 4 | (slot[5] & ~255LL), index, 0, 0, 0, slot[10], 0};
+        row[7] = row[2] - slot[2];
+        row[8] = outcome != 0 ? outcome : (outcome = stage_name("lastbreath", 10));
+        stage_put(row);
     }
-    uint64_t count = shared_header[BUS_HEADER_COUNT];
-    __atomic_store_n(&shared_header[BUS_HEADER_END], (uint64_t)end, __ATOMIC_RELEASE);
-    __atomic_store_n(&shared_header[BUS_HEADER_COUNT], count + 1, __ATOMIC_RELEASE);
-    return count_word((size_t)count);
 }
-
-static Value offer_bus_close(Value *arguments, size_t argument_count) {
-    (void)argument_count;
-    if (!shared_ready()) return nothing_value();
-    expect_kind(arguments[BUS_INDEX], KIND_INTEGER, "bus_close expects an index");
-    expect_kind(arguments[BUS_OUTCOME], KIND_TEXT, "bus_close expects text");
-    if (arguments[BUS_INDEX].integer < WORD_FALSE) fail("bus_close index is outside the log");
-    size_t fields = BUS_RECORD_FIELDS * sizeof(uint64_t);
-    size_t span = align_to_word(checked_add(fields, arguments[BUS_OUTCOME].text_length));
-    size_t header_bytes = BUS_HEADER_WORDS * sizeof(uint64_t);
-    size_t start = (size_t)shared_header[BUS_HEADER_END];
-    if (start < header_bytes) start = header_bytes;
-    size_t end = checked_add(start, span);
-    if (end > shared_mapped_bytes) shared_remap(grown_capacity(shared_mapped_bytes, end));
-    unsigned char *record = (unsigned char *)shared_header + start;
-    uint64_t fields_out[BUS_RECORD_FIELDS];
-    fields_out[0] = BUS_PHASE_CLOSE;
-    fields_out[1] = (uint64_t)getpid();
-    fields_out[2] = monotonic_ns();
-    fields_out[3] = (uint64_t)arguments[BUS_INDEX].integer;
-    fields_out[4] = arguments[BUS_OUTCOME].text_length;
-    fields_out[5] = 0;
-    memcpy(record, fields_out, fields);
-    if (arguments[BUS_OUTCOME].text_length != EMPTY_COUNT) memcpy(record + fields, arguments[BUS_OUTCOME].text, arguments[BUS_OUTCOME].text_length);
-    uint64_t count = shared_header[BUS_HEADER_COUNT];
-    __atomic_store_n(&shared_header[BUS_HEADER_END], (uint64_t)end, __ATOMIC_RELEASE);
-    __atomic_store_n(&shared_header[BUS_HEADER_COUNT], count + 1, __ATOMIC_RELEASE);
-    return count_word((size_t)count);
+static int stage_value_word(Value value, int named, long long *out) {
+    if (value.kind == KIND_INTEGER) { *out = value.integer; return 1; }
+    if (value.kind != KIND_TEXT) return 0;
+    *out = named ? stage_name(value.text, value.text_length) : (long long)(hash_bytes(VALUE_HASH_OFFSET, value.text, value.text_length) & ((1ULL << 62) - 1));
+    return 1;
 }
-
-static Value offer_bus_read(Value *arguments, size_t argument_count) {
-    (void)argument_count;
-    if (!shared_ready()) return nothing_value();
-    expect_kind(arguments[BUS_CURSOR], KIND_INTEGER, "bus_read expects an index");
-    if (arguments[BUS_CURSOR].integer < WORD_FALSE) return list_from(NULL, EMPTY_COUNT);
-    size_t cursor = (size_t)arguments[BUS_CURSOR].integer;
-    size_t header_bytes = BUS_HEADER_WORDS * sizeof(uint64_t);
-    size_t end = (size_t)__atomic_load_n(&shared_header[BUS_HEADER_END], __ATOMIC_ACQUIRE);
-    size_t count = (size_t)__atomic_load_n(&shared_header[BUS_HEADER_COUNT], __ATOMIC_ACQUIRE);
-    Value *rows = allocate_zeroed(count > cursor ? count - cursor : EMPTY_COUNT, sizeof *rows);
-    size_t row_count = EMPTY_COUNT;
-    size_t offset = header_bytes;
-    for (size_t index = FIRST_INDEX; index < count; index = checked_add(index, ONE_ELEMENT)) {
-        if (offset >= end || offset > shared_mapped_bytes) break;
-        size_t available = shared_mapped_bytes - offset;
-        size_t span = shared_record_span((unsigned char *)shared_header + offset, available);
-        if (index >= cursor) {
-            uint64_t phase = 0;
-            uint64_t time_ns = 0;
-            memcpy(&phase, (unsigned char *)shared_header + offset, sizeof phase);
-            memcpy(&time_ns, (unsigned char *)shared_header + offset + 2 * sizeof(uint64_t), sizeof time_ns);
-            Value *fields = allocate_zeroed(ARITY_THREE, sizeof *fields);
-            fields[0] = count_word(index);
-            fields[1] = count_word((size_t)phase);
-            fields[2] = integer_value((long long)time_ns);
-            rows[row_count] = list_from(fields, ARITY_THREE);
-            row_count = checked_add(row_count, ONE_ELEMENT);
+static Value stage_door(long long mode, Value value) {
+    if (!stage_ready()) return nothing_value();
+    if (mode == 32) {
+        if (value.kind != KIND_INTEGER) return nothing_value();
+        for (long long probe = 0; probe < 32; ++probe) {
+            long long *entry = stage_name_entry(value.integer, probe);
+            long long id = __atomic_load_n(entry, __ATOMIC_ACQUIRE), flags = __atomic_load_n(entry + 1, __ATOMIC_ACQUIRE);
+            if (id == 0 || (id == value.integer && flags == 0)) break;
+            size_t length = (size_t)(flags & ((1LL << 61) - 1));
+            if (id == value.integer) return text_value((char *)(entry + 2), length < 112 ? length : 112);
         }
-        offset = checked_add(offset, span);
+        return nothing_value();
     }
-    return list_from(rows, row_count);
+    if (value.kind != KIND_LIST || value.item_count == 0) return nothing_value();
+    Value head = offer_head(&value, 1), tail = offer_tail(&value, 1);
+    long long row[12] = {0};
+    if (mode == 29) {
+        if (head.kind != KIND_TEXT || !stage_value_word(head, 1, &row[3]) || !stage_value_word(tail, 1, &row[4])) return nothing_value();
+        row[2] = stage_us(); row[5] = 1 | ((long long)stage_depth << 8); row[6] = stage_depth != 0 ? stage_stack[stage_depth - 1].index : -1;
+        stage_stack = grow_list(stage_stack, &stage_capacity, sizeof *stage_stack, checked_add(stage_depth, 1));
+        long long index = stage_put(row);
+        stage_stack[stage_depth++] = (StageOpen){index, row[3], row[4], row[2]};
+        return integer_value(index);
+    }
+    if (mode == 30) {
+        Value outcome = tail, amount = integer_value(0), digest = integer_value(0);
+        if (tail.kind == KIND_LIST) {
+            if (tail.item_count != 3) return nothing_value();
+            outcome = list_at(tail, 0); amount = list_at(tail, 1); digest = list_at(tail, 2);
+        }
+        size_t depth = stage_depth;
+        while (depth > 0 && stage_stack[depth - 1].index != head.integer) --depth;
+        if (head.kind != KIND_INTEGER || depth == 0 || outcome.kind != KIND_TEXT || amount.kind != KIND_INTEGER ||
+            !stage_value_word(outcome, 1, &row[8]) || !stage_value_word(digest, 0, &row[11])) return nothing_value();
+        stage_unwind(depth, 3, NULL);
+        return integer_value(stage_close_at(depth - 1, 2, row[8], amount.integer, row[11]));
+    }
+    if (mode != 31 || head.kind != KIND_INTEGER || tail.kind != KIND_INTEGER) return nothing_value();
+    long long next = __atomic_load_n(&STAGE_WORD(3), __ATOMIC_ACQUIRE), now = stage_us(), index = head.integer, lapped = 0, holes = 0;
+    if (index < 0) index = next;
+    else if (index < next - STAGE_SLOTS) { lapped = next - STAGE_SLOTS - index; index = next - STAGE_SLOTS; }
+    Value *rows = NULL;
+    size_t count = 4, capacity = 0;
+    rows = grow_list(rows, &capacity, sizeof *rows, count);
+    while (index < next && count - 4 < 4096) {
+        long long *slot = stage_row(index), sequence = __atomic_load_n(slot, __ATOMIC_ACQUIRE);
+        for (size_t i = 1; i < 12; ++i) row[i] = slot[i];
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        if (sequence == index + 1 && __atomic_load_n(slot, __ATOMIC_RELAXED) == sequence) {
+            long long fields[] = {index, row[1], row[2], row[3], row[4], row[5] & 255, row[5] >> 8, row[6], row[7], row[8], row[9], row[10], row[11]};
+            Value values[13];
+            for (size_t i = 0; i < 13; ++i) values[i] = integer_value(fields[i]);
+            rows = grow_list(rows, &capacity, sizeof *rows, count + 1);
+            rows[count++] = list_from(values, 13);
+        } else if (sequence >= index + 1 || index + STAGE_SLOTS < __atomic_load_n(&STAGE_WORD(3), __ATOMIC_ACQUIRE)) ++lapped;
+        else if (index <= tail.integer || next - index > 1024) ++holes;
+        else break;
+        ++index;
+    }
+    rows[0] = integer_value(index); rows[1] = integer_value(lapped); rows[2] = integer_value(holes); rows[3] = integer_value(now);
+    Value result = list_from(rows, count);
+    free(rows);
+    return result;
 }
 
 typedef struct DispatchCensus {
@@ -4772,6 +4525,10 @@ static Value offer_kernel_stat(Value *arguments, size_t argument_count) {
     (void)argument_count;
     expect_kind(arguments[SOLE_OPERAND], KIND_INTEGER, "kernel_stat expects an integer key");
     long long key = arguments[SOLE_OPERAND].integer;
+    if (key == 164) {
+        const Operation *constructor = find_operation_text("record_new", 10);
+        return constructor == NULL ? nothing_value() : count_word(constructor->calls);
+    }
     if (key == STAT_ROOTS_SINCE_CLEAR) return count_word(frame_since_clear);
     if (key == STAT_REJECTED) return count_word(frame_rejected);
     if (key == STAT_ENTERED) return count_word(frame_entered);
@@ -4798,7 +4555,6 @@ static Value offer_kernel_stat(Value *arguments, size_t argument_count) {
     if (key == STAT_CONS || key == STAT_FLOATS || key == STAT_JIT_BOXES || key == STAT_JIT_UNBOXES || key == STAT_JIT_NATIVE || key == STAT_JIT_CRYSTALLIZED || key == STAT_JIT_UNROLL || key == STAT_JIT_LOOP_ITERATIONS || key == STAT_FLOAT_CAPACITY || key == STAT_FIELD_FLOATS || key == STAT_NODES_WATER || key == STAT_NODES_ICE || key == STAT_NODE_LOGICAL_BYTES) return integer_value(WORD_FALSE);
     if (key == STAT_STACK) return count_word(frame_count);
     if (key == STAT_RECIPES) return count_word(function_count);
-    if (key == STAT_OWNER_CONSTRUCTION_CLOCK) return count_word(owner_construction_clock);
     if (key == STAT_NODE_PRIVATE_BYTES) return count_word(node_private_bytes());
     return nothing_value();
 }
@@ -4832,27 +4588,276 @@ static Value offer_kernel_page_hot(Value *arguments, size_t argument_count) {
     return list_from(NULL, EMPTY_COUNT);
 }
 
+static int kernel_page_state(Value pid) {
+    if (pid.kind != KIND_INTEGER || pid.integer <= 0 || pid.integer > INT_MAX) return 0;
+    char name[LIVE_NAME_ROOM];
+    if (!live_page_name(name, sizeof name, pid.integer)) return 0;
+    int fd = shm_open(name, O_RDONLY, GIFT_OPEN_MODE);
+    if (fd < 0) return errno == ENOENT ? 0 : -1;
+    long long seen = unix_milliseconds();
+    int gone = offer_host_alive(&pid, 1).integer == 0;
+    int64_t words[LIVE_PAGE_WORDS];
+    struct stat extent;
+    if (fstat(fd, &extent) != 0) { close(fd); return -1; }
+    size_t got = extent.st_size < (off_t)sizeof words ? 0 : sizeof words;
+    if (got != 0) {
+        void *mapped = mmap(NULL, sizeof words, PROT_READ, MAP_SHARED, fd, 0);
+        if (mapped == MAP_FAILED) { close(fd); return -1; }
+        memcpy(words, mapped, sizeof words);
+        if (munmap(mapped, sizeof words) != 0) { close(fd); return -1; }
+    }
+    int released = close(fd) == 0;
+    if (!released) return -1;
+    if (gone && (got < sizeof words ||
+        (words[LIVE_PID] == pid.integer && (words[LIVE_ALIVE] == 0 || words[LIVE_START_MS] < seen))) &&
+        offer_host_alive(&pid, 1).integer == 0) return 1;
+    fd = shm_open(name, O_RDONLY, GIFT_OPEN_MODE);
+    if (fd < 0) return errno == ENOENT ? 0 : -1;
+    return close(fd) == 0 ? 2 : -1;
+}
+
+static Value offer_kernel_page_ended(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    return integer_value(kernel_page_state(arguments[0]));
+}
+
+static Value offer_kernel_page_bury(Value *arguments, size_t argument_count) {
+    (void)argument_count;
+    Value pid = arguments[0];
+    if (kernel_page_state(pid) != 1) return integer_value(0);
+    char name[LIVE_NAME_ROOM];
+    if (!live_page_name(name, sizeof name, pid.integer)) return integer_value(0);
+    int first = shm_open(name, O_RDONLY, GIFT_OPEN_MODE);
+    if (first < 0) return integer_value(0);
+    struct stat original, current;
+    int observed = fstat(first, &original) == 0 && kernel_page_state(pid) == 1;
+    int latest = observed ? shm_open(name, O_RDONLY, GIFT_OPEN_MODE) : -1;
+    int same = latest >= 0 && fstat(latest, &current) == 0 && original.st_dev == current.st_dev && original.st_ino == current.st_ino;
+    int buried = same && offer_host_alive(&pid, 1).integer == 0 && shm_unlink(name) == 0;
+    int released_latest = latest < 0 || close(latest) == 0;
+    int released_first = close(first) == 0;
+    if (buried) stage_lastbreath(pid.integer);
+    return integer_value(buried && released_latest && released_first);
+}
+
 static Value offer_kernel_rows_absent(Value *arguments, size_t argument_count) {
     (void)argument_count;
     expect_kind(arguments[SOLE_OPERAND], KIND_INTEGER, "a hot-row count is an integer");
     return list_from(NULL, EMPTY_COUNT);
 }
 
+/* The carrier owns GPU objects; this bootstrap bridge only transports Values.
+ * Form's metal-carrier.bml / metal-jit.bml own admission and execution policy. */
+static struct {
+    void *handle;
+    long long (*pipeline)(const char *, long long, const char *, long long);
+    long long (*buf_alloc)(long long);
+    long long (*buf_from_file)(const char *, long long, long long, long long);
+    long long (*buf_write)(long long, long long, const char *, long long);
+    long long (*buf_fill)(long long, long long, const char *, long long, long long, long long);
+    long long (*enqueue)(long long, const char *, long long, long long);
+    long long (*sync)(void);
+    long long (*buf_read)(long long, long long, long long, char *, long long);
+    long long (*status)(char *, long long);
+    long long (*batch_concurrent)(void);
+    long long (*buf_free)(long long);
+    long long (*submit)(void);
+    long long (*live)(long long *);
+    long long (*fence_wait)(long long);
+    long long (*deadline)(long long);
+} metal;
+
+static const char *runtime_executable;
+
+static int metal_ready(void) {
+    if (metal.handle != NULL) return 1;
+    const char *selected = getenv("FKWU_METAL_CARRIER");
+    char *path = NULL;
+    if (selected == NULL || *selected == 0) {
+        char *executable = NULL;
+#ifdef __APPLE__
+        uint32_t size = 0;
+        _NSGetExecutablePath(NULL, &size);
+        executable = allocate_zeroed(size, 1);
+        if (_NSGetExecutablePath(executable, &size) != 0) { free(executable); return 0; }
+#else
+        executable = realpath(runtime_executable, NULL);
+        if (executable == NULL) return 0;
+#endif
+        char *slash = strrchr(executable, '/');
+        size_t prefix = slash == NULL ? 0 : (size_t)(slash - executable) + 1;
+        const char *suffix = "form/native/metal/fk-metal-carrier.dylib";
+        path = allocate_zeroed(checked_add(checked_add(prefix, strlen(suffix)), 1), 1);
+        memcpy(path, executable, prefix);
+        memcpy(path + prefix, suffix, strlen(suffix));
+        free(executable);
+        selected = path;
+    }
+    void *handle = dlopen(selected, RTLD_NOW | RTLD_LOCAL);
+    free(path);
+    if (handle == NULL) return 0;
+#define LOAD_METAL(name) do { metal.name = (__typeof__(metal.name))dlsym(handle, "fk_metal_" #name "_external"); if (metal.name == NULL) { dlclose(handle); return 0; } } while (0)
+    LOAD_METAL(pipeline); LOAD_METAL(buf_alloc); LOAD_METAL(buf_from_file);
+    LOAD_METAL(buf_write); LOAD_METAL(enqueue); LOAD_METAL(sync); LOAD_METAL(buf_read);
+    LOAD_METAL(status); LOAD_METAL(batch_concurrent); LOAD_METAL(buf_free);
+    LOAD_METAL(submit); LOAD_METAL(live); LOAD_METAL(fence_wait); LOAD_METAL(deadline);
+#undef LOAD_METAL
+    metal.buf_fill = (__typeof__(metal.buf_fill))dlsym(handle, "fk_metal_buf_fill_external");
+    metal.handle = handle;
+    return 1;
+}
+
+static Value metal_count(long long count) { return integer_value(count < 0 ? 0 : count); }
+
+static Value offer_metal_pipeline(Value *a, size_t n) {
+    (void)n;
+    if (a[0].kind != KIND_TEXT || a[1].kind != KIND_TEXT || !metal_ready()) return integer_value(0);
+    return metal_count(metal.pipeline(a[0].text, (long long)a[0].text_length, a[1].text, (long long)a[1].text_length));
+}
+
+static Value offer_metal_buf_alloc(Value *a, size_t n) {
+    (void)n;
+    return a[0].kind == KIND_INTEGER && metal_ready() ? metal_count(metal.buf_alloc(a[0].integer)) : integer_value(0);
+}
+
+static Value offer_metal_buf_from_file(Value *a, size_t n) {
+    (void)n;
+    if (a[0].kind != KIND_TEXT || a[1].kind != KIND_INTEGER || a[2].kind != KIND_INTEGER || !metal_ready()) return integer_value(0);
+    return metal_count(metal.buf_from_file(a[0].text, (long long)a[0].text_length, a[1].integer, a[2].integer));
+}
+
+static Value offer_metal_buf_write(Value *a, size_t n) {
+    (void)n;
+    if (a[0].kind != KIND_INTEGER || a[1].kind != KIND_INTEGER) return integer_value(0);
+    char *packed = NULL;
+    const char *bytes;
+    size_t length;
+    if (a[2].kind == KIND_TEXT) { bytes = a[2].text; length = a[2].text_length; }
+    else if (a[2].kind == KIND_LIST) {
+        if (a[2].item_count > SIZE_MAX / sizeof(uint32_t)) return integer_value(0);
+        length = a[2].item_count * sizeof(uint32_t);
+        packed = allocate_zeroed(length, 1);
+        for (size_t i = 0; i < a[2].item_count; ++i) {
+            Value value = list_at(a[2], i);
+            uint32_t word;
+            if (value.kind == KIND_INTEGER) word = (uint32_t)value.integer;
+            else if (value.kind == KIND_REAL) { float number = (float)value.real; memcpy(&word, &number, sizeof word); }
+            else { free(packed); return integer_value(0); }
+            for (size_t byte = 0; byte < sizeof word; ++byte) packed[i * sizeof word + byte] = (char)(word >> (8 * byte));
+        }
+        bytes = packed;
+    } else return integer_value(0);
+    long long written = metal_ready() ? metal.buf_write(a[0].integer, a[1].integer, bytes, (long long)length) : 0;
+    free(packed);
+    return metal_count(written);
+}
+
+static Value offer_metal_buf_fill(Value *a, size_t n) {
+    (void)n;
+    if (a[0].kind != KIND_INTEGER || a[1].kind != KIND_INTEGER || a[2].kind != KIND_LIST || a[2].item_count != 3 || !metal_ready() || metal.buf_fill == NULL) return integer_value(-1);
+    Value path = list_at(a[2], 0), offset = list_at(a[2], 1), length = list_at(a[2], 2);
+    if (path.kind != KIND_TEXT || offset.kind != KIND_INTEGER || length.kind != KIND_INTEGER) return integer_value(-1);
+    return integer_value(metal.buf_fill(a[0].integer, a[1].integer, path.text, (long long)path.text_length, offset.integer, length.integer));
+}
+
+static Value offer_metal_enqueue(Value *a, size_t n) {
+    (void)n;
+    if (a[0].kind != KIND_INTEGER || a[1].kind != KIND_TEXT || a[2].kind != KIND_INTEGER || !metal_ready()) return integer_value(0);
+    return metal_count(metal.enqueue(a[0].integer, a[1].text, (long long)a[1].text_length, a[2].integer));
+}
+
+static Value offer_metal_buf_read(Value *a, size_t n) {
+    (void)n;
+    if (a[0].kind != KIND_INTEGER || a[1].kind != KIND_INTEGER || a[2].kind != KIND_INTEGER || a[2].integer < 0 || !metal_ready()) return text_value("", 0);
+    size_t length = (size_t)a[2].integer;
+    char *bytes = allocate_zeroed(checked_add(length, 1), 1);
+    long long got = metal.buf_read(a[0].integer, a[1].integer, a[2].integer, bytes, a[2].integer);
+    Value result = got == a[2].integer ? text_value(bytes, length) : text_value("", 0);
+    free(bytes);
+    return result;
+}
+
+static Value offer_metal_sync(Value *a, size_t n) { (void)a; (void)n; return metal_ready() ? metal_count(metal.sync()) : integer_value(0); }
+static Value offer_metal_batch_concurrent(Value *a, size_t n) { (void)a; (void)n; return metal_ready() ? metal_count(metal.batch_concurrent()) : integer_value(0); }
+static Value offer_metal_submit(Value *a, size_t n) { (void)a; (void)n; return metal_ready() ? metal_count(metal.submit()) : integer_value(0); }
+static Value offer_metal_buf_free(Value *a, size_t n) { (void)n; return a[0].kind == KIND_INTEGER && metal_ready() ? metal_count(metal.buf_free(a[0].integer)) : integer_value(0); }
+static Value offer_metal_fence_wait(Value *a, size_t n) { (void)n; return a[0].kind != KIND_INTEGER ? integer_value(-1) : metal_ready() ? integer_value(metal.fence_wait(a[0].integer)) : integer_value(0); }
+static Value offer_metal_deadline(Value *a, size_t n) { (void)n; return a[0].kind == KIND_INTEGER && metal_ready() ? integer_value(metal.deadline(a[0].integer)) : integer_value(-2); }
+
 static Value offer_metal_status(Value *arguments, size_t argument_count) {
     (void)arguments;
     (void)argument_count;
-    return text_value(METAL_ABSENT_STATUS, strlen(METAL_ABSENT_STATUS));
+    if (!metal_ready()) return text_value(METAL_ABSENT_STATUS, strlen(METAL_ABSENT_STATUS));
+    size_t capacity = host_page_bytes();
+    for (;;) {
+        char *bytes = allocate_zeroed(capacity, 1);
+        long long got = metal.status(bytes, (long long)capacity);
+        if (got >= 0 && (size_t)got < capacity) {
+            Value result = text_value(bytes, (size_t)got);
+            free(bytes); return result;
+        }
+        free(bytes);
+        if (got < 0) return text_value("", 0);
+        capacity = checked_add(capacity, capacity);
+    }
 }
 
 static Value offer_metal_live(Value *arguments, size_t argument_count) {
     (void)arguments;
     (void)argument_count;
-    return list_from(NULL, EMPTY_COUNT);
+    if (!metal_ready()) return list_from(NULL, 0);
+    long long readings[20] = {0};
+    if (metal.live(readings) <= 0) return list_from(NULL, 0);
+    Value values[20];
+    for (size_t i = 0; i < 20; ++i) values[i] = integer_value(readings[i]);
+    return list_from(values, 20);
 }
 
+static Value offer_list(Value *arguments, size_t argument_count) {
+    return list_from(arguments, argument_count);
+}
+
+static int list_to_bytes(Value list, unsigned char **bytes, size_t *length) {
+    if (list.kind == KIND_NOTHING) { *bytes = NULL; *length = 0; return 1; }
+    if (list.kind != KIND_LIST) return 0;
+    *length = list.item_count;
+    *bytes = allocate_zeroed(*length == 0 ? 1 : *length, 1);
+    List *cursor = list.list;
+    for (size_t i = 0; i < *length; ++i) {
+        if (cursor == NULL || cursor->head.kind != KIND_INTEGER || cursor->head.integer < 0 || cursor->head.integer > 255) {
+            free(*bytes); *bytes = NULL; return 0;
+        }
+        (*bytes)[i] = (unsigned char)cursor->head.integer;
+        cursor = cursor->tail;
+    }
+    return 1;
+}
+
+static int socket_put(int descriptor) {
+    size_t needed = checked_add(socket_descriptor_count, ONE_ELEMENT);
+    socket_descriptors = grow_list(socket_descriptors, &socket_descriptor_capacity, sizeof *socket_descriptors, needed);
+    socket_descriptors[socket_descriptor_count] = descriptor;
+    socket_descriptor_count = needed;
+    return (int)socket_descriptor_count;
+}
+
+static int socket_fetch(long long handle) {
+    if (handle <= WORD_FALSE) return INVALID_DESCRIPTOR;
+    if ((unsigned long long)handle > socket_descriptor_count) return INVALID_DESCRIPTOR;
+    int descriptor = socket_descriptors[handle - ONE_ELEMENT];
+    return descriptor;
+}
+
+static int socket_release(long long handle) {
+    if (handle <= WORD_FALSE) return 0;
+    if ((unsigned long long)handle > socket_descriptor_count) return 0;
+    socket_descriptors[handle - ONE_ELEMENT] = INVALID_DESCRIPTOR;
+    return 1;
+}
 static Value offer_socket_listen(Value *arguments, size_t argument_count) {
     (void)argument_count;
     expect_kind(arguments[SOLE_OPERAND], KIND_INTEGER, "socket_listen expects a port");
+    if (arguments[0].integer < 0 || arguments[0].integer > 65535) return integer_value(-1);
     int descriptor = socket(AF_INET, SOCK_STREAM, 0);
     if (descriptor < SYSTEM_CALL_OK) return integer_value(-WORD_TRUE);
     int yes = 1;
@@ -4895,6 +4900,7 @@ static Value offer_socket_connect(Value *arguments, size_t argument_count) {
     (void)argument_count;
     expect_kind(arguments[LEFT_OPERAND], KIND_TEXT, "socket_connect expects a host");
     expect_kind(arguments[RIGHT_OPERAND], KIND_INTEGER, "socket_connect expects a port");
+    if (arguments[1].integer < 0 || arguments[1].integer > 65535 || memchr(arguments[0].text, 0, arguments[0].text_length) != NULL) return integer_value(-1);
     int descriptor = socket(AF_INET, SOCK_STREAM, 0);
     if (descriptor < SYSTEM_CALL_OK) return integer_value(-WORD_TRUE);
     struct sockaddr_in address;
@@ -4956,11 +4962,14 @@ static Value offer_socket_close(Value *arguments, size_t argument_count) {
     return integer_value(closed == SYSTEM_CALL_OK ? WORD_FALSE : -WORD_TRUE);
 }
 
-static Value offer_list(Value *arguments, size_t argument_count) {
-    return list_from(arguments, argument_count);
-}
-
 static void register_builtin_operations(void) {
+    register_operation("socket_listen", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_socket_listen);
+    register_operation("socket_port", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_socket_port);
+    register_operation("socket_accept", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_socket_accept);
+    register_operation("socket_connect", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_socket_connect);
+    register_operation("socket_send", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_socket_send);
+    register_operation("socket_recv", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_socket_recv);
+    register_operation("socket_close", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_socket_close);
     register_operation("if", ARITY_THREE, FIXED_ARITY, LEAVE_ARGUMENTS, OP_IF, NULL);
     register_operation("do", ARITY_NONE, VARIADIC, LEAVE_ARGUMENTS, OP_DO, NULL);
     register_operation("and", ARITY_NONE, VARIADIC, LEAVE_ARGUMENTS, OP_AND, NULL);
@@ -4968,38 +4977,45 @@ static void register_builtin_operations(void) {
     register_operation("add", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_ADD, offer_add);
     register_operation("sub", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_SUB, offer_sub);
     register_operation("eq", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_EQ, offer_eq);
+    register_operation("value_eq", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_EQ, offer_value_eq);
+    register_operation("math_sqrt", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_math_sqrt);
+    register_operation("math_exp", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_math_exp);
+    register_operation("math_log", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_math_log);
+    register_operation("math_pow", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_math_pow);
     register_operation("lt", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_LT, offer_lt);
     register_operation("ge", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_GE, offer_ge);
     register_operation("str_eq", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_STR_EQ, offer_str_eq);
     register_operation("str_concat", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_STR_CONCAT, offer_str_concat);
     register_operation("value_kind", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_VALUE_KIND, offer_value_kind);
+    register_operation("float_leaf", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_float_leaf);
+    register_operation("make_float32", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_make_float32);
     register_operation("nothing?", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_NOTHING, offer_nothing);
     register_operation(NAME_NOTHING, ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_NOTHING, offer_nothing_value);
     register_operation("read_line", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_READ_LINE, offer_read_line);
     register_operation("file_mtime", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_FILE_MTIME, offer_file_mtime);
     register_operation("cell_path", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_CELL_PATH, offer_cell_path);
-    register_operation("cell_input", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_cell_input);
-    register_operation("cell_run", ARITY_FOUR, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_cell_run);
+    register_operation("self_source", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_self_source);
+    register_operation("host_realpath", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_realpath);
+    register_operation("fs_truncate", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_fs_truncate);
     register_operation("intern_trivial_bool", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_INTERN_BOOL, offer_intern_bool);
     register_operation("kernel_stat", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_KERNEL_STAT, offer_kernel_stat);
     register_operation("kernel_live_pids", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_KERNEL_STAT, offer_kernel_live_pids);
     register_operation("kernel_live", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_KERNEL_STAT, offer_kernel_live);
+    register_operation("kernel_page_ended", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_kernel_page_ended);
+    register_operation("kernel_page_bury", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_kernel_page_bury);
     register_operation("kernel_page_hot", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_KERNEL_STAT, offer_kernel_page_hot);
     register_operation("kernel_hot_rows", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_KERNEL_STAT, offer_kernel_rows_absent);
     register_operation("kernel_box_rows", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_KERNEL_STAT, offer_kernel_rows_absent);
     register_operation("fb_record", ARITY_THREE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_FB_RECORD, offer_fb_record);
     register_operation("framebuffer-events", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_FB_EVENTS, offer_fb_events);
     register_operation("framebuffer-clear", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_FB_CLEAR, offer_fb_clear);
-    register_operation("bus_open", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_BUS_OPEN, offer_bus_open);
-    register_operation("bus_close", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_BUS_CLOSE, offer_bus_close);
-    register_operation("bus_read", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_BUS_READ, offer_bus_read);
     register_operation("gt", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_GT, offer_gt);
     register_operation("le", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_LE, offer_le);
     register_operation("nth", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_NTH, offer_nth);
     operation_answers("nth");
     register_operation("slice", ARITY_NONE, VARIADIC, EVALUATE_ARGUMENTS, OP_SLICE, offer_slice);
     register_operation("+", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PLUS, offer_plus);
-    register_operation("let", ARITY_TWO, FIXED_ARITY, LEAVE_ARGUMENTS, OP_LET, NULL);
+    register_operation("let", ARITY_TWO, VARIADIC, LEAVE_ARGUMENTS, OP_LET, NULL);
     register_operation("len", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PLUS, offer_len);
     register_operation("empty", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PLUS, offer_empty);
     register_operation("str", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PLUS, offer_str);
@@ -5018,12 +5034,12 @@ static void register_builtin_operations(void) {
     register_operation("record_has", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_record_has);
     register_operation("record_get", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_record_get);
     register_operation("record_set", ARITY_THREE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_record_set);
+    register_operation("record_keys", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_record_keys);
     register_operation("record?", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_record_type);
     register_operation("record_blueprint", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_record_blueprint);
-    register_operation("record_keys", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_record_keys);
     register_operation("method_define", ARITY_THREE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_method_define);
     register_operation("method_has", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_method_has);
-    register_operation("method_invoke", ARITY_NONE, VARIADIC, EVALUATE_ARGUMENTS, OP_PRINT, offer_method_invoke);
+    register_operation("method_invoke", ARITY_TWO, VARIADIC, EVALUATE_ARGUMENTS, OP_METHOD_INVOKE, NULL);
     register_operation("byte_to_str", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_byte_to_str);
     register_operation("str_len", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_str_len);
     register_operation("substring", ARITY_THREE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_substring);
@@ -5034,25 +5050,8 @@ static void register_builtin_operations(void) {
     register_operation("str_find", ARITY_THREE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_str_find);
     operation_answers("str_find");
     register_operation("str_to_int", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_str_to_int);
-    register_operation("str_to_float", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_str_to_float);
-    register_operation("float_to_int", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_float_to_int);
-    register_operation("float_value", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_float_value);
-    register_operation("make_float32", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_make_float32);
-    register_operation("make_float64", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_make_float64);
-    register_operation("intern_trivial_float", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_intern_trivial_float);
-    register_operation("float_leaf", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_float_leaf);
-    register_operation("math_pi", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_math_pi);
-    register_operation("math_sqrt", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_math_sqrt);
-    register_operation("math_exp", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_math_exp);
-    register_operation("math_log", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_math_log);
-    register_operation("math_pow", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_math_pow);
-    register_operation("round_ndigits", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_round_ndigits);
-    register_operation("round", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_round);
     register_operation("str_byte_at", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_str_byte_at);
     register_operation("value_str", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_value_str);
-    register_operation("value_eq", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_value_eq);
-    register_operation("_get", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_get);
-    register_operation("bp", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_bp);
     register_operation("range", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_range);
     register_operation("host_sleep_ms", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_sleep_ms);
     register_operation("host_monotonic_ms", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_monotonic_ms);
@@ -5061,46 +5060,48 @@ static void register_builtin_operations(void) {
     register_operation("host_alive", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_alive);
     register_operation("host_kill", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_kill);
     register_operation("host_wait", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_wait);
+    register_operation("host_signal", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_signal);
     register_operation("host_dir_mkdir", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_dir_mkdir);
-    register_operation("fs_mkdir", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_fs_mkdir);
-    register_operation("host_dir_rmdir", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_dir_rmdir);
-    register_operation("fs_rmdir", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_fs_rmdir);
-    register_operation("host_path_exists", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_path_exists);
-    register_operation("fs_exists", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_fs_exists);
-    register_operation("host_path_is_dir", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_path_is_dir);
-    register_operation("fs_is_dir", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_fs_is_dir);
-    register_operation("host_path_remove", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_path_remove);
-    register_operation("fs_remove", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_fs_remove);
-    register_operation("host_path_rename", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_path_rename);
-    register_operation("fs_rename", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_fs_rename);
-    register_operation("host_dir_list", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_dir_list);
-    register_operation("fs_list", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_fs_list);
+    register_operation("fs_mkdir", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_dir_mkdir);
+    register_operation("host_dir_rmdir", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_dir_rmdir);
+    register_operation("fs_rmdir", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_dir_rmdir);
+    register_operation("host_path_remove", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_path_remove);
+    register_operation("fs_remove", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_path_remove);
+    register_operation("host_path_rename", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_path_rename);
+    register_operation("fs_rename", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_path_rename);
+    register_operation("host_mkdir_mode", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_mkdir_mode);
+    register_operation("host_dir_list", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_dir_list);
+    register_operation("fs_list", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_dir_list);
+    register_operation("host_file_holders", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_file_holders);
+    register_operation("host_file_identity", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_file_identity);
+    register_operation("host_vm_stat", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_vm_stat);
+    register_operation("host_process", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_process);
+    register_operation("host_processes", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_processes);
+    register_operation("host_cpu_us", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_cpu_us);
     register_operation("host_pid", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_pid);
     register_operation("temp_dir", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_temp_dir);
     register_operation("host_temp_dir", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_temp_dir);
     register_operation("host_cwd", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_cwd);
     register_operation("host_file_write_text", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_file_write_text);
-    register_operation("write_file", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_write_file);
-    register_operation("write_file_text", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_write_file_text);
-    register_operation("write_file_bytes", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_write_file_bytes);
+    register_operation("write_file_text", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_file_write_text);
+    register_operation("write_file", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_file_write_text);
     register_operation("file_append_bytes", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_file_append_bytes);
     register_operation("host_file_append_bytes", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_file_append_bytes);
     register_operation("file_size", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_file_size);
-    register_operation("host_file_size", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_file_size);
-    register_operation("host_file_mtime", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_file_mtime);
+    register_operation("host_file_size", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_file_size);
+    register_operation("host_file_mtime", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_file_mtime);
+    register_operation("file_mtime", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_file_mtime);
+    register_operation("host_path_is_dir", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_path_is_dir);
+    register_operation("fs_is_dir", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_path_is_dir);
+    register_operation("host_path_exists", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_path_exists);
+    register_operation("fs_exists", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_path_exists);
     register_operation("host_file_read_text", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_file_read_text);
-    register_operation("read_file", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_read_file);
-    register_operation("read_file_bytes", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_read_file_bytes);
-    register_operation("read_file_slice", ARITY_THREE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_read_file_slice);
-    register_operation("host_file_read_slice", ARITY_THREE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_file_read_slice);
+    register_operation("read_file", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_file_read_text);
+    register_operation("file_open", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_file_open);
     register_operation("file_read", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_file_read);
-    register_operation("recipe_to_bytes", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_recipe_to_bytes);
-    register_operation("bytes_to_recipe", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_bytes_to_recipe);
-    register_operation("write_form_binary", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_write_form_binary);
-    register_operation("read_form_binary", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_read_form_binary);
-    register_operation("source_inventory", ARITY_THREE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_source_inventory);
-    register_operation("host_capture", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_capture);
-    register_operation("input_byte", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_input_byte);
+    register_operation("file_close", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_file_close);
+    register_operation("read_file_slice", ARITY_THREE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_read_file_slice);
+    register_operation("host_file_read_slice", ARITY_THREE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_read_file_slice);
     register_operation("terminal_cols", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_terminal_cols);
     register_operation("shm_offer", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_shm_offer);
     register_operation("shm_receive", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_shm_receive);
@@ -5119,20 +5120,21 @@ static void register_builtin_operations(void) {
     register_operation("node_type", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_node_type);
     register_operation("node_inst", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_node_inst);
     register_operation("intern_trivial_string", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_intern_trivial_string);
+    /* bp carries a symbolic category; fol-bp resolves the admitted coordinate registry. */
+    register_operation("bp", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_intern_trivial_string);
+    operation_answers("bp");
     register_operation("intern_trivial_int", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_intern_trivial_int);
+    register_operation("intern_trivial_float", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_intern_trivial_float);
+    register_operation("make_float64", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_make_float64);
+    register_operation("float_value", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_float_value);
+    register_operation("float_to_int", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_float_to_int);
+    register_operation("str_to_float", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_str_to_float);
     register_operation("intern_node", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_intern_node);
     register_operation("intern_node_at", ARITY_FIVE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_intern_node_at);
     register_operation("node_children", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_node_children);
+    register_operation("node_at", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_node_at);
     register_operation("node_source", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_node_source);
     register_operation("host-exec", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_exec);
-    register_operation("form_error", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_form_error);
-    register_operation("socket_listen", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_socket_listen);
-    register_operation("socket_port", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_socket_port);
-    register_operation("socket_accept", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_socket_accept);
-    register_operation("socket_connect", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_socket_connect);
-    register_operation("socket_send", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_socket_send);
-    register_operation("socket_recv", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_socket_recv);
-    register_operation("socket_close", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_socket_close);
     register_operation("gift_roster_names", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_gift_roster_names);
     register_operation("gift_roster_register", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_gift_roster_register);
     register_operation("add_u32", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_add_u32);
@@ -5146,11 +5148,25 @@ static void register_builtin_operations(void) {
     register_operation("terminal_lines", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_terminal_lines);
     register_operation("metal_status", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_metal_status);
     register_operation("metal_live", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_metal_live);
+    register_operation("metal_pipeline", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_metal_pipeline);
+    register_operation("metal_buf_alloc", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_metal_buf_alloc);
+    register_operation("metal_buf_from_file", ARITY_THREE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_metal_buf_from_file);
+    register_operation("metal_buf_write", ARITY_THREE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_metal_buf_write);
+    register_operation("metal_buf_fill", ARITY_THREE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_metal_buf_fill);
+    register_operation("metal_enqueue", ARITY_THREE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_metal_enqueue);
+    register_operation("metal_buf_read", ARITY_THREE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_metal_buf_read);
+    register_operation("metal_sync", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_metal_sync);
+    register_operation("metal_batch_concurrent", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_metal_batch_concurrent);
+    register_operation("metal_submit", ARITY_NONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_metal_submit);
+    register_operation("metal_buf_free", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_metal_buf_free);
+    register_operation("metal_fence_wait", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_metal_fence_wait);
+    register_operation("metal_deadline", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_metal_deadline);
     register_operation("host_spawn_quiet", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_spawn_quiet);
     register_operation("host_spawn_at", ARITY_TWO, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_PRINT, offer_host_spawn_at);
     register_operation(COALESCE_WORD, ARITY_TWO, FIXED_ARITY, LEAVE_ARGUMENTS, OP_COALESCE, NULL);
     register_operation(TRY_WORD, ARITY_TWO, FIXED_ARITY, LEAVE_ARGUMENTS, OP_TRY, NULL);
     register_operation("attempt", ARITY_ONE, FIXED_ARITY, LEAVE_ARGUMENTS, OP_ATTEMPT, NULL);
+    register_operation("form_error", ARITY_ONE, FIXED_ARITY, EVALUATE_ARGUMENTS, OP_FORM_ERROR, NULL);
     register_operation(FAIL_NAME, ARITY_NONE, FIXED_ARITY, LEAVE_ARGUMENTS, OP_FAIL, NULL);
     register_operation("choice", ARITY_NONE, VARIADIC, LEAVE_ARGUMENTS, OP_CHOICE, NULL);
 }
@@ -5169,23 +5185,68 @@ static int atom_equal(Value left, Value right) {
     if (left.kind != right.kind) return 0;
     if (left.kind == KIND_NOTHING) return 1;
     if (left.kind == KIND_INTEGER) return left.integer == right.integer;
-    if (left.kind == KIND_NODE) return left.cell == right.cell && left.integer == right.integer;
+    if (left.kind == KIND_NODE) return left.integer == right.integer;
     if (left.kind == KIND_REAL) return left.real == right.real;
     if (left.kind == KIND_TEXT) return bytes_equal(left.text, left.text_length, right.text, right.text_length);
     return 0;
 }
 
 static int values_equal(Value left, Value right) {
-    if (left.kind != KIND_LIST || right.kind != KIND_LIST) return atom_equal(left, right);
-    if (left.item_count != right.item_count) return 0;
-    List *left_cursor = left.list;
-    List *right_cursor = right.list;
-    for (size_t index = FIRST_INDEX; index < left.item_count; index = checked_add(index, ONE_ELEMENT)) {
-        if (!values_equal(left_cursor->head, right_cursor->head)) return 0;
-        left_cursor = left_cursor->tail;
-        right_cursor = right_cursor->tail;
+    EqualPair *pairs = NULL;
+    size_t pair_count = EMPTY_COUNT;
+    size_t pair_capacity = EMPTY_COUNT;
+    size_t needed = checked_add(pair_count, ONE_ELEMENT);
+    pairs = grow_list(pairs, &pair_capacity, sizeof *pairs, needed);
+    pairs[pair_count].left = left;
+    pairs[pair_count].right = right;
+    pairs[pair_count].left_cursor = NULL;
+    pairs[pair_count].right_cursor = NULL;
+    pairs[pair_count].index = FIRST_INDEX;
+    pairs[pair_count].entered = 0;
+    pair_count = needed;
+    int same = 1;
+    while (pair_count != EMPTY_COUNT) {
+        EqualPair pair = pairs[pair_count - ONE_ELEMENT];
+        if (pair.left.kind == KIND_LIST || pair.right.kind == KIND_LIST) {
+            if (pair.left.kind != KIND_LIST || pair.right.kind != KIND_LIST || pair.left.item_count != pair.right.item_count) {
+                same = 0;
+                break;
+            }
+            if (!pair.entered) {
+                pair.entered = 1;
+                pair.index = FIRST_INDEX;
+                pair.left_cursor = pair.left.list;
+                pair.right_cursor = pair.right.list;
+            }
+            if (pair.index == pair.left.item_count) {
+                pair_count -= ONE_ELEMENT;
+                continue;
+            }
+            Value child_left = pair.left_cursor->head;
+            Value child_right = pair.right_cursor->head;
+            pair.left_cursor = pair.left_cursor->tail;
+            pair.right_cursor = pair.right_cursor->tail;
+            pair.index = checked_add(pair.index, ONE_ELEMENT);
+            pairs[pair_count - ONE_ELEMENT] = pair;
+            needed = checked_add(pair_count, ONE_ELEMENT);
+            pairs = grow_list(pairs, &pair_capacity, sizeof *pairs, needed);
+            pairs[pair_count].left = child_left;
+            pairs[pair_count].right = child_right;
+            pairs[pair_count].left_cursor = NULL;
+            pairs[pair_count].right_cursor = NULL;
+            pairs[pair_count].index = FIRST_INDEX;
+            pairs[pair_count].entered = 0;
+            pair_count = needed;
+            continue;
+        }
+        if (!atom_equal(pair.left, pair.right)) {
+            same = 0;
+            break;
+        }
+        pair_count -= ONE_ELEMENT;
     }
-    return 1;
+    free(pairs);
+    return same;
 }
 
 static void deliver(Value value) {
@@ -5202,12 +5263,14 @@ static Frame *append_frame(void) {
     size_t needed = checked_add(frame_count, ONE_ELEMENT);
     frames = grow_list(frames, &frame_capacity, sizeof *frames, needed);
     frames[frame_count] = (Frame){0};
+    frames[frame_count].stage_base = stage_depth;
     frame_count = needed;
     return &frames[frame_count - ONE_ELEMENT];
 }
 
 static void pop_frame(void) {
     Frame *frame = &frames[frame_count - ONE_ELEMENT];
+    if (frame->kind == FRAME_LET && frame->stage == 1) local_count = frame->local_base;
     free(frame->arguments);
     frame->arguments = NULL;
     frame_count -= ONE_ELEMENT;
@@ -5242,26 +5305,22 @@ static int find_value_binding(const char *bytes, size_t length, Value *out) {
         }
         break;
     }
-    if (bytes_equal(bytes, length, NAME_TRUE, strlen(NAME_TRUE))) {
+    if (bytes_equal_cstr(bytes, length, NAME_TRUE)) {
         *out = integer_value(WORD_TRUE);
         return 1;
     }
-    if (bytes_equal(bytes, length, NAME_FALSE, strlen(NAME_FALSE))) {
+    if (bytes_equal_cstr(bytes, length, NAME_FALSE)) {
         *out = integer_value(WORD_FALSE);
         return 1;
     }
-    if (bytes_equal(bytes, length, NAME_NOTHING, strlen(NAME_NOTHING))
-        || bytes_equal(bytes, length, FAIL_NAME, strlen(FAIL_NAME))
-        || bytes_equal(bytes, length, STOP_NAME, strlen(STOP_NAME))) {
+    if (bytes_equal_cstr(bytes, length, NAME_NOTHING) || bytes_equal_cstr(bytes, length, FAIL_NAME) || bytes_equal_cstr(bytes, length, STOP_NAME)) {
         *out = nothing_value();
         return 1;
     }
-    for (size_t index = global_count; index > FIRST_INDEX; ) {
-        index -= ONE_ELEMENT;
-        if (bytes_equal(globals[index].bytes, globals[index].length, bytes, length)) {
-            *out = globals[index].value;
-            return 1;
-        }
+    size_t global = name_index_find(&global_names, bytes, length);
+    if (global != SIZE_MAX) {
+        *out = globals[global].value;
+        return 1;
     }
     return 0;
 }
@@ -5282,6 +5341,8 @@ static Value value_from_atom(Form *form) {
 }
 
 static void offer_form(Form *form);
+static void append_local(const char *bytes, size_t length, Value value);
+static Value closure_value(Form *parameters, Form *body, size_t offset);
 
 static void begin_function_call(Form *form, Value callee) {
     size_t argument_count = call_argument_count(form);
@@ -5304,9 +5365,22 @@ static void begin_call(Form *form) {
         return;
     }
     if (form_is_symbol(head, NAME_DEFN)) {
-        if (inside_function()) bind_runtime_definition(form);
-        else if (!form->is_bound) bind_definition(form);
-        deliver(nothing_value());
+        if (form->is_bound) {
+            deliver(nothing_value());
+            return;
+        }
+        if (form->part_count != DEFN_PART_COUNT || form->parts[DEFN_NAME]->kind != FORM_SYMBOL) fail_at(form->offset, "a local definition needs a name, parameters, and a body");
+        Form *name = form->parts[DEFN_NAME];
+        Value function = closure_value(form->parts[DEFN_PARAMETERS], form->parts[DEFN_BODY], form->offset);
+        size_t captured = function.capture_count;
+        Binding *captures = allocate_zeroed(checked_add(captured, 1), sizeof *captures);
+        if (captured != 0) memcpy(captures, function.captures, captured * sizeof *captures);
+        free(function.captures);
+        function.captures = captures;
+        function.capture_count = captured + 1;
+        captures[captured] = (Binding){name->text, name->text_length, function};
+        append_local(name->text, name->text_length, function);
+        deliver(function);
         return;
     }
     size_t argument_count = call_argument_count(form);
@@ -5323,9 +5397,7 @@ static void begin_call(Form *form) {
         return;
     }
     if (operation != NULL) {
-        if (operation->id == OP_LET) {
-            if (argument_count < ARITY_TWO) fail_at(form->offset, "let expects a name and a value");
-        } else if (operation->arity_policy == FIXED_ARITY && argument_count != operation->arity) {
+        if (operation->arity_policy == FIXED_ARITY && argument_count != operation->arity) {
             fail_at(form->offset, "an operation received the wrong number of arguments");
         }
         Frame *frame = append_frame();
@@ -5339,8 +5411,7 @@ static void begin_call(Form *form) {
         else if (operation->id == OP_OR) frame->kind = FRAME_OR;
         else if (operation->id == OP_LAMBDA) frame->kind = FRAME_LAMBDA;
         else if (operation->id == OP_COALESCE) frame->kind = FRAME_COALESCE;
-        else if (operation->id == OP_TRY) frame->kind = FRAME_TRY;
-        else if (operation->id == OP_ATTEMPT) frame->kind = FRAME_ATTEMPT;
+        else if (operation->id == OP_TRY || operation->id == OP_ATTEMPT) frame->kind = FRAME_TRY;
         else if (operation->id == OP_FAIL) frame->kind = FRAME_FAIL;
         else if (operation->id == OP_CHOICE) frame->kind = FRAME_CHOICE;
         else {
@@ -5452,6 +5523,8 @@ static void run_function_body(size_t index) {
     offer_form(frame.callee.body);
 }
 
+static void step_fail(size_t index);
+
 static void step_eager(size_t index) {
     Frame frame = frames[index];
     if (frame.has_incoming) {
@@ -5467,6 +5540,27 @@ static void step_eager(size_t index) {
             return;
         }
         operations[(size_t)(frame.operation - operations)].calls = checked_add(frame.operation->calls, ONE_ELEMENT);
+        if (frame.operation->id == OP_METHOD_INVOKE) {
+            if (frame.argument_count < 2) fail("method_invoke expects a receiver and name");
+            expect_kind(frame.arguments[0], KIND_RECORD, "method_invoke expects a record receiver");
+            ssize_t method = find_method(frame.arguments[0].record->blueprint, frame.arguments[1]);
+            if (method < 0) fail("method_invoke could not find a method under that name");
+            frame.callee = method_definitions[method].function;
+            frame.argument_count -= 1;
+            if (frame.argument_count != frame.callee.parameter_count) fail("a function received the wrong number of arguments");
+            memmove(frame.arguments + 1, frame.arguments + 2, (frame.argument_count - 1) * sizeof *frame.arguments);
+            frame.operation = NULL;
+            frames[index] = frame;
+            run_function_body(index);
+            return;
+        }
+        if (frame.operation->id == OP_FORM_ERROR) {
+            expect_kind(frame.arguments[0], KIND_TEXT, "form_error expects a message");
+            failure_message = copy_bytes(frame.arguments[0].text, frame.arguments[0].text_length);
+            failure_reported = 0;
+            step_fail(index);
+            return;
+        }
         Value result = frame.operation->offer(frame.arguments, frame.argument_count);
         pop_frame();
         deliver(result);
@@ -5483,6 +5577,7 @@ static void bind_global(const char *bytes, size_t length, Value value) {
     globals[global_count].bytes = bytes;
     globals[global_count].length = length;
     globals[global_count].value = value;
+    name_index_set(&global_names, bytes, length, global_count);
     global_count = needed;
 }
 
@@ -5518,11 +5613,7 @@ static void step_or(size_t index) {
     offer_form(child);
 }
 
-static void step_lambda(size_t index) {
-    Frame frame = frames[index];
-    if (call_argument_count(frame.form) != ARITY_TWO) fail_at(frame.form->offset, "a lambda names parameters and a body");
-    Form *parameters = call_argument(frame.form, LEFT_OPERAND);
-    Form *body = call_argument(frame.form, RIGHT_OPERAND);
+static Value closure_value(Form *parameters, Form *body, size_t offset) {
     if (parameters->kind != FORM_GROUP) fail_at(parameters->offset, "a lambda parameter list must be a group");
     Value function = nothing_value();
     function.kind = KIND_FUNCTION;
@@ -5532,6 +5623,10 @@ static void step_lambda(size_t index) {
     for (size_t parameter = FIRST_INDEX; parameter < parameters->part_count; parameter = checked_add(parameter, ONE_ELEMENT)) {
         Form *name = parameters->parts[parameter];
         if (name->kind != FORM_SYMBOL) fail_at(name->offset, "a lambda parameter must be a symbol");
+        for (size_t earlier = 0; earlier < parameter; ++earlier) {
+            Form *previous = parameters->parts[earlier];
+            if (bytes_equal(previous->text, previous->text_length, name->text, name->text_length)) fail_at(name->offset, "a parameter name is repeated");
+        }
         function.parameters[parameter].bytes = name->text;
         function.parameters[parameter].length = name->text_length;
     }
@@ -5546,7 +5641,7 @@ static void step_lambda(size_t index) {
         outer_count = frames[cursor].callee.capture_count;
         break;
     }
-    if (base > local_count) fail_at(frame.form->offset, "a lambda looked above its locals");
+    if (base > local_count) fail_at(offset, "a lambda looked above its locals");
     size_t visible = local_count - base;
     size_t total = checked_add(outer_count, visible);
     if (total != EMPTY_COUNT) {
@@ -5556,6 +5651,13 @@ static void step_lambda(size_t index) {
         function.captures = captures;
         function.capture_count = total;
     }
+    return function;
+}
+
+static void step_lambda(size_t index) {
+    Frame frame = frames[index];
+    if (call_argument_count(frame.form) != ARITY_TWO) fail_at(frame.form->offset, "a lambda names parameters and a body");
+    Value function = closure_value(call_argument(frame.form, LEFT_OPERAND), call_argument(frame.form, RIGHT_OPERAND), frame.form->offset);
     pop_frame();
     deliver(function);
 }
@@ -5586,6 +5688,8 @@ static void step_choice(size_t index) {
     Frame frame = frames[index];
     if (!frame.has_accumulator) {
         frame.local_base = local_count;
+        frame.prior_failure = failure_message;
+        frame.prior_failure_reported = failure_reported;
         frame.has_accumulator = 1;
         frames[index] = frame;
     }
@@ -5594,6 +5698,8 @@ static void step_choice(size_t index) {
         frame.has_incoming = 0;
         if (value.kind != KIND_NOTHING) {
             local_count = frame.local_base;
+            failure_message = frame.prior_failure;
+            failure_reported = frame.prior_failure_reported;
             pop_frame();
             deliver(value);
             return;
@@ -5603,11 +5709,15 @@ static void step_choice(size_t index) {
     }
     if (frame.stage >= call_argument_count(frame.form)) {
         local_count = frame.local_base;
+        failure_message = frame.prior_failure;
+        failure_reported = frame.prior_failure_reported;
         pop_frame();
         deliver(nothing_value());
         return;
     }
     Form *child = call_argument(frame.form, frame.stage);
+    failure_message = frame.prior_failure;
+    failure_reported = frame.prior_failure_reported;
     frames[index] = frame;
     offer_form(child);
 }
@@ -5616,6 +5726,8 @@ static void step_try(size_t index) {
     Frame frame = frames[index];
     if (frame.stage == IF_STAGE_TEST) {
         frame.local_base = local_count;
+        frame.prior_failure = failure_message;
+        frame.prior_failure_reported = failure_reported;
         frame.stage = TRY_STAGE_BODY;
         frames[index] = frame;
         offer_form(call_argument(frame.form, LEFT_OPERAND));
@@ -5624,11 +5736,21 @@ static void step_try(size_t index) {
     if (frame.has_incoming) {
         Value value = frame.incoming;
         local_count = frame.local_base;
+        failure_message = frame.prior_failure;
+        failure_reported = frame.prior_failure_reported;
         pop_frame();
         deliver(value);
         return;
     }
     if (frame.stage == TRY_STAGE_HANDLER) {
+        if (frame.operation != NULL && frame.operation->id == OP_ATTEMPT) {
+            local_count = frame.local_base;
+            failure_message = frame.prior_failure;
+            failure_reported = frame.prior_failure_reported;
+            pop_frame();
+            deliver(nothing_value());
+            return;
+        }
         frames[index] = frame;
         offer_form(call_argument(frame.form, RIGHT_OPERAND));
         return;
@@ -5636,62 +5758,33 @@ static void step_try(size_t index) {
     fail("a try did not offer a result");
 }
 
-static void step_attempt(size_t index) {
-    Frame frame = frames[index];
-    if (frame.stage == IF_STAGE_TEST) {
-        frame.local_base = local_count;
-        frame.stage = TRY_STAGE_BODY;
-        frames[index] = frame;
-        offer_form(call_argument(frame.form, LEFT_OPERAND));
-        return;
+static void step_fail(size_t index) {
+    (void)index;
+    if (failure_message != NULL && !failure_reported) {
+        fprintf(stderr, ERROR_BARE, failure_message);
+        failure_reported = 1;
     }
-    if (frame.has_incoming) {
-        Value value = frame.incoming;
-        local_count = frame.local_base;
-        pop_frame();
-        deliver(value);
-        return;
-    }
-    if (frame.stage == TRY_STAGE_HANDLER) {
-        local_count = frame.local_base;
-        pop_frame();
-        deliver(nothing_value());
-        return;
-    }
-    fail("an attempt did not offer a result");
-}
-
-static int unwind_to_recovery(void) {
     for (size_t cursor = frame_count; cursor > FIRST_INDEX; ) {
         cursor -= ONE_ELEMENT;
         if (frames[cursor].kind == FRAME_CHOICE) {
             frames[cursor].has_incoming = 0;
             frames[cursor].stage = checked_add(frames[cursor].stage, ONE_ELEMENT);
+            while (frame_count > cursor + 1) pop_frame();
             local_count = frames[cursor].local_base;
-            frame_count = checked_add(cursor, ONE_ELEMENT);
-            return 1;
-        }
-        if (frames[cursor].kind == FRAME_ATTEMPT && frames[cursor].stage != TRY_STAGE_HANDLER) {
-            frames[cursor].has_incoming = 0;
-            frames[cursor].stage = TRY_STAGE_HANDLER;
-            local_count = frames[cursor].local_base;
-            frame_count = checked_add(cursor, ONE_ELEMENT);
-            return 1;
+            stage_unwind(frames[cursor].stage_base, 3, failure_message);
+            return;
         }
         if (frames[cursor].kind != FRAME_TRY || frames[cursor].stage == TRY_STAGE_HANDLER) continue;
         frames[cursor].has_incoming = 0;
         frames[cursor].stage = TRY_STAGE_HANDLER;
+        while (frame_count > cursor + 1) pop_frame();
         local_count = frames[cursor].local_base;
-        frame_count = checked_add(cursor, ONE_ELEMENT);
-        return 1;
+        stage_unwind(frames[cursor].stage_base, 3, failure_message);
+        return;
     }
-    return 0;
-}
-
-static void step_fail(size_t index) {
-    (void)index;
-    if (unwind_to_recovery()) return;
-    fail("a failure was not caught");
+    evaluation_recovery = NULL;
+    if (failure_reported) { note_stack(); exit(EXIT_FAILURE); }
+    fail(failure_message != NULL ? failure_message : "a failure was not caught");
 }
 
 static void step_apply(size_t index) {
@@ -5720,49 +5813,42 @@ static void step_apply(size_t index) {
 
 static void step_let(size_t index) {
     Frame frame = frames[index];
-    size_t argument_count = call_argument_count(frame.form);
-    if (argument_count < ARITY_TWO) fail_at(frame.form->offset, "let expects a name and a value");
-    if (!frame.has_incoming) {
-        if (frame.stage == IF_STAGE_BRANCH) {
-            if (frame.next_part >= argument_count) {
-                Value result = frame.has_accumulator ? frame.accumulator : nothing_value();
-                pop_frame();
-                deliver(result);
-                return;
-            }
-            Form *child = call_argument(frame.form, frame.next_part);
+    size_t count = call_argument_count(frame.form);
+    if (count < ARITY_TWO) fail_at(frame.form->offset, "let expects a name, value and optional body");
+    if (frame.stage == 1 && frame.has_incoming) {
+        if (++frame.next_part < count) {
+            frame.has_incoming = 0;
             frames[index] = frame;
-            offer_form(child);
+            offer_form(call_argument(frame.form, frame.next_part));
             return;
         }
+        Value result = frame.incoming;
+        pop_frame();
+        deliver(result);
+        return;
+    }
+    if (!frame.has_incoming) {
         frames[index] = frame;
         offer_form(call_argument(frame.form, RIGHT_OPERAND));
         return;
     }
-    if (frame.stage == IF_STAGE_BRANCH) {
-        frame.accumulator = frame.incoming;
-        frame.has_accumulator = 1;
-        frame.has_incoming = 0;
-        frame.next_part = checked_add(frame.next_part, ONE_ELEMENT);
-        frames[index] = frame;
-        return;
-    }
     Form *name = call_argument(frame.form, LEFT_OPERAND);
     if (name->kind != FORM_SYMBOL) fail_at(name->offset, "a let name must be a symbol");
+    if (count > ARITY_TWO) {
+        frame.local_base = local_count;
+        append_local(name->text, name->text_length, frame.incoming);
+        frame.stage = 1;
+        frame.next_part = 2;
+        frame.has_incoming = 0;
+        frames[index] = frame;
+        offer_form(call_argument(frame.form, 2));
+        return;
+    }
     if (inside_function()) append_local(name->text, name->text_length, frame.incoming);
     else bind_global(name->text, name->text_length, frame.incoming);
     Value value = frame.incoming;
-    if (argument_count == ARITY_TWO) {
-        pop_frame();
-        deliver(value);
-        return;
-    }
-    frame.stage = IF_STAGE_BRANCH;
-    frame.next_part = ARITY_TWO;
-    frame.accumulator = value;
-    frame.has_accumulator = 1;
-    frame.has_incoming = 0;
-    frames[index] = frame;
+    pop_frame();
+    deliver(value);
 }
 
 static void step_function(size_t index) {
@@ -5775,9 +5861,16 @@ static void step_function(size_t index) {
 }
 
 static void drive(Form *program) {
+    jmp_buf recovery;
+    jmp_buf *previous_recovery = evaluation_recovery;
     Frame *frame = append_frame();
     frame->kind = FRAME_SEQUENCE;
     frame->form = program;
+    if (setjmp(recovery) != 0) {
+        evaluation_recovery = NULL;
+        step_fail(frame_count - 1);
+    }
+    evaluation_recovery = &recovery;
     while (frame_count != EMPTY_COUNT) {
         size_t index = frame_count - ONE_ELEMENT;
         FrameKind kind = frames[index].kind;
@@ -5792,85 +5885,13 @@ static void drive(Form *program) {
         else if (kind == FRAME_LAMBDA) step_lambda(index);
         else if (kind == FRAME_COALESCE) step_coalesce(index);
         else if (kind == FRAME_TRY) step_try(index);
-        else if (kind == FRAME_ATTEMPT) step_attempt(index);
         else if (kind == FRAME_CHOICE) step_choice(index);
         else if (kind == FRAME_FAIL) step_fail(index);
         else if (kind == FRAME_APPLY) step_apply(index);
         else fail("an evaluation frame has an unknown kind");
     }
     if (!result_ready) fail("the program produced no result");
-}
-
-static void drive_active_frames(void) {
-    while (frame_count != EMPTY_COUNT) {
-        size_t index = frame_count - ONE_ELEMENT;
-        FrameKind kind = frames[index].kind;
-        if (kind == FRAME_SEQUENCE) step_series(index, 0);
-        else if (kind == FRAME_DO) step_series(index, 1);
-        else if (kind == FRAME_AND) step_and(index);
-        else if (kind == FRAME_IF) step_if(index);
-        else if (kind == FRAME_OR) step_or(index);
-        else if (kind == FRAME_EAGER) step_eager(index);
-        else if (kind == FRAME_FUNCTION) step_function(index);
-        else if (kind == FRAME_LET) step_let(index);
-        else if (kind == FRAME_LAMBDA) step_lambda(index);
-        else if (kind == FRAME_COALESCE) step_coalesce(index);
-        else if (kind == FRAME_TRY) step_try(index);
-        else if (kind == FRAME_ATTEMPT) step_attempt(index);
-        else if (kind == FRAME_CHOICE) step_choice(index);
-        else if (kind == FRAME_FAIL) step_fail(index);
-        else if (kind == FRAME_APPLY) step_apply(index);
-        else fail("an evaluation frame has an unknown kind");
-    }
-}
-
-static Value invoke_function_value(Value function, Value *arguments, size_t argument_count) {
-    if (function.kind != KIND_FUNCTION) fail("method_invoke expects a function value");
-    if (argument_count != function.parameter_count) fail("a function received the wrong number of arguments");
-    Frame *saved_frames = frames;
-    size_t saved_frame_count = frame_count;
-    size_t saved_frame_capacity = frame_capacity;
-    Binding *saved_locals = locals;
-    size_t saved_local_count = local_count;
-    size_t saved_local_capacity = local_capacity;
-    Value saved_finished = finished;
-    int saved_result_ready = result_ready;
-
-    frames = NULL;
-    frame_count = EMPTY_COUNT;
-    frame_capacity = EMPTY_COUNT;
-    locals = NULL;
-    local_count = EMPTY_COUNT;
-    local_capacity = EMPTY_COUNT;
-    finished = nothing_value();
-    result_ready = 0;
-
-    Frame *frame = append_frame();
-    frame->kind = FRAME_FUNCTION;
-    frame->callee = function;
-    frame->local_base = EMPTY_COUNT;
-    for (size_t capture = FIRST_INDEX; capture < function.capture_count; capture = checked_add(capture, ONE_ELEMENT)) {
-        append_local(function.captures[capture].bytes, function.captures[capture].length, function.captures[capture].value);
-    }
-    for (size_t index = FIRST_INDEX; index < argument_count; index = checked_add(index, ONE_ELEMENT)) {
-        append_local(function.parameters[index].bytes, function.parameters[index].length, arguments[index]);
-    }
-    offer_form(function.body);
-    drive_active_frames();
-    if (!result_ready) fail("the function produced no result");
-    Value result = finished;
-
-    free(frames);
-    free(locals);
-    frames = saved_frames;
-    frame_count = saved_frame_count;
-    frame_capacity = saved_frame_capacity;
-    locals = saved_locals;
-    local_count = saved_local_count;
-    local_capacity = saved_local_capacity;
-    finished = saved_finished;
-    result_ready = saved_result_ready;
-    return result;
+    evaluation_recovery = previous_recovery;
 }
 
 typedef struct {
@@ -5879,23 +5900,29 @@ typedef struct {
     int opened;
 } PrintItem;
 
-static void print_atom(Value value) {
+static void print_atom(Value value, FILE *output) {
+    if (value.kind == KIND_NOTHING) { fputs("nothing", output); return; }
+    if (value.kind == KIND_NODE) {
+        fk_node_id id = node_word(value, "node rendering expects a node");
+        fprintf(output, "@%lld.%lld.%lld.%lld", fk_nid_get(id, 0), fk_nid_get(id, 1), fk_nid_get(id, 2), fk_nid_get(id, 3));
+        return;
+    }
     if (value.kind == KIND_INTEGER) {
-        printf(INTEGER_FORMAT, value.integer);
+        fprintf(output, INTEGER_FORMAT, value.integer);
         return;
     }
     if (value.kind == KIND_REAL) {
-        printf(REAL_FORMAT, DBL_DECIMAL_DIG, value.real);
+        fprintf(output, REAL_FORMAT, DBL_DECIMAL_DIG, value.real);
         return;
     }
     if (value.kind == KIND_TEXT) {
-        fwrite(value.text, sizeof *value.text, value.text_length, stdout);
+        fwrite(value.text, sizeof *value.text, value.text_length, output);
         return;
     }
-    fputs(kind_name(value.kind), stdout);
+    fputs(kind_name(value.kind), output);
 }
 
-static void print_value(Value root) {
+static void print_value_to(Value root, FILE *output) {
     PrintItem *items = NULL;
     size_t item_count = EMPTY_COUNT;
     size_t item_capacity = EMPTY_COUNT;
@@ -5908,27 +5935,27 @@ static void print_value(Value root) {
     while (item_count != EMPTY_COUNT) {
         PrintItem item = items[item_count - ONE_ELEMENT];
         if (item.value.kind != KIND_LIST) {
-            print_atom(item.value);
+            print_atom(item.value, output);
             item_count -= ONE_ELEMENT;
             continue;
         }
         if (!item.opened) {
-            fputs(LIST_OPEN, stdout);
+            fputs(LIST_OPEN, output);
             item.opened = 1;
             item.index = FIRST_INDEX;
             items[item_count - ONE_ELEMENT] = item;
             if (item.value.item_count == EMPTY_COUNT) {
-                fputs(LIST_CLOSE, stdout);
+                fputs(LIST_CLOSE, output);
                 item_count -= ONE_ELEMENT;
             }
             continue;
         }
         if (item.index == item.value.item_count) {
-            fputs(LIST_CLOSE, stdout);
+            fputs(LIST_CLOSE, output);
             item_count -= ONE_ELEMENT;
             continue;
         }
-        if (item.index > FIRST_INDEX) fputs(LIST_SEPARATOR, stdout);
+        if (item.index > FIRST_INDEX) fputs(LIST_SEPARATOR, output);
         Value child = list_at(item.value, item.index);
         item.index = checked_add(item.index, ONE_ELEMENT);
         items[item_count - ONE_ELEMENT] = item;
@@ -5939,6 +5966,11 @@ static void print_value(Value root) {
         items[item_count].opened = 0;
         item_count = needed;
     }
+    free(items);
+}
+
+static void print_value(Value root) {
+    print_value_to(root, stdout);
 }
 
 typedef struct {
@@ -6039,16 +6071,6 @@ static void remember_unit(char *path) {
     loaded_count = needed;
 }
 
-static int contains_text(const char *bytes, size_t length, const char *needle) {
-    size_t needle_length = strlen(needle);
-    if (needle_length > length) return 0;
-    size_t last = length - needle_length;
-    for (size_t index = FIRST_INDEX; index <= last; index = checked_add(index, ONE_ELEMENT)) {
-        if (memcmp(bytes + index, needle, needle_length) == STRING_COMPARE_EQUAL) return 1;
-    }
-    return 0;
-}
-
 static SourceCursor capture_source(void) {
     SourceCursor cursor;
     cursor.bytes = source_bytes;
@@ -6085,6 +6107,17 @@ static int take_keyword(const char *word) {
     return 1;
 }
 
+static int take_declaration_keyword(const char *word, int pattern) {
+    size_t saved = source_offset;
+    if (!take_keyword(word)) return 0;
+    skip_bml();
+    if (source_offset < source_length &&
+        ((is_symbol_char(source_bytes[source_offset]) && !is_digit_char(source_bytes[source_offset])) ||
+         (pattern && source_bytes[source_offset] == INDEX_OPEN))) return 1;
+    source_offset = saved;
+    return 0;
+}
+
 static void expect_character(char expected, const char *reason) {
     skip_bml();
     if (source_offset >= source_length || source_bytes[source_offset] != expected) fail_at(source_offset, reason);
@@ -6102,6 +6135,17 @@ static Form *form_symbol(const char *spelling, size_t offset) {
     form->text = copy_bytes(spelling, strlen(spelling));
     form->text_length = strlen(spelling);
     return form;
+}
+
+static Form *form_text(const char *bytes, size_t length, size_t offset) {
+    Form *form = new_form(FORM_TEXT, offset);
+    form->text = copy_bytes(bytes, length);
+    form->text_length = length;
+    return form;
+}
+
+static Form *symbol_text(Form *name) {
+    return form_text(name->text, name->text_length, name->offset);
 }
 
 static Form *form_call(const char *name, Form **arguments, size_t argument_count, size_t offset) {
@@ -6173,6 +6217,17 @@ static Form *read_bml_number(void) {
         while (source_offset < source_length && is_digit_char(source_bytes[source_offset])) {
             source_offset = checked_add(source_offset, ONE_ELEMENT);
         }
+    }
+    if (source_offset < source_length && (source_bytes[source_offset] == EXPONENT_LOWER || source_bytes[source_offset] == EXPONENT_UPPER)) {
+        source_offset = checked_add(source_offset, ONE_ELEMENT);
+        if (source_offset < source_length && (source_bytes[source_offset] == SIGN_PLUS || source_bytes[source_offset] == SIGN_MINUS)) {
+            source_offset = checked_add(source_offset, ONE_ELEMENT);
+        }
+        size_t digits = source_offset;
+        while (source_offset < source_length && is_digit_char(source_bytes[source_offset])) {
+            source_offset = checked_add(source_offset, ONE_ELEMENT);
+        }
+        if (source_offset == digits) fail_at(start, "a numeric exponent needs digits");
     }
     size_t length = source_offset - start;
     char *text = copy_bytes(source_bytes + start, length);
@@ -6277,6 +6332,63 @@ static Form *parse_bml_arguments(void) {
 static Form *parse_bml_postfix(void);
 static void skip_type_arguments(void);
 static int take_arrow(void);
+
+static Form *parse_bml_blueprint_type(void) {
+    Form *name = read_bml_symbol();
+    Form *types = form_call("list", NULL, 0, name->offset);
+    skip_bml();
+    if (source_offset < source_length && source_bytes[source_offset] == '<') {
+        ++source_offset;
+        skip_bml();
+        while (source_offset < source_length && source_bytes[source_offset] != '>') {
+            group_add(types, parse_bml_blueprint_type());
+            skip_bml();
+            if (source_offset < source_length && source_bytes[source_offset] == '>') break;
+            expect_character(ARGUMENT_SEPARATOR, "a blueprint type was not separated");
+        }
+        expect_character('>', "a blueprint type was not closed");
+    }
+    Form *args[] = {symbol_text(name), types};
+    return form_call("bl-ty", args, 2, name->offset);
+}
+
+static Form *parse_bml_blueprint_fields(int declaration) {
+    size_t opening = source_offset;
+    expect_character(SECTION_OPEN, "blueprint fields were not opened");
+    Form *fields = form_call("list", NULL, 0, opening);
+    skip_bml();
+    while (source_offset < source_length && source_bytes[source_offset] != SECTION_CLOSE) {
+        Form *field = read_bml_symbol();
+        expect_character(PAIR_MARK, "a blueprint field needs its value");
+        Form *value = declaration ? parse_bml_blueprint_type() : parse_bml_expression();
+        Form *pair[] = {symbol_text(field), value};
+        group_add(fields, form_call("list", pair, 2, field->offset));
+        skip_bml();
+        if (source_offset < source_length && source_bytes[source_offset] == SECTION_CLOSE) break;
+        expect_character(ARGUMENT_SEPARATOR, "a blueprint field was not separated");
+        skip_bml();
+    }
+    expect_character(SECTION_CLOSE, "blueprint fields were not closed");
+    return fields;
+}
+
+static int at_bml_blueprint_literal(void) {
+    size_t saved = source_offset;
+    skip_bml();
+    int present = 0;
+    if (source_offset < source_length && source_bytes[source_offset] == SECTION_OPEN) {
+        ++source_offset;
+        skip_bml();
+        if (source_offset < source_length && source_bytes[source_offset] == SECTION_CLOSE) present = 1;
+        else if (source_offset < source_length && is_symbol_char(source_bytes[source_offset]) && !is_digit_char(source_bytes[source_offset])) {
+            read_bml_symbol();
+            skip_bml();
+            present = source_offset < source_length && source_bytes[source_offset] == PAIR_MARK;
+        }
+    }
+    source_offset = saved;
+    return present;
+}
 
 static Form *parse_parenthesized_lambda(void) {
     size_t saved = source_offset;
@@ -6389,7 +6501,11 @@ static Form *parse_bml_primary(void) {
             skip_bml();
             if (source_offset < source_length && source_bytes[source_offset] == CALL_CLOSE && isupper((unsigned char)source_bytes[name_at])) {
                 source_offset = checked_add(source_offset, ONE_ELEMENT);
-                return parse_bml_postfix();
+                char *type_name = copy_bytes(source_bytes + name_at, name_length);
+                Form *inner = parse_bml_postfix();
+                inner->annotation = form_symbol(type_name, name_at);
+                free(type_name);
+                return inner;
             }
             (void)name_length;
         }
@@ -6399,7 +6515,12 @@ static Form *parse_bml_primary(void) {
         expect_character(CALL_CLOSE, "a group was not closed");
         return inner;
     }
-    if (is_symbol_char(character) && !is_digit_char(character)) return read_bml_symbol();
+    if (is_symbol_char(character) && !is_digit_char(character)) {
+        Form *name = read_bml_symbol();
+        if (!at_bml_blueprint_literal()) return name;
+        Form *args[] = {symbol_text(name), parse_bml_blueprint_fields(0)};
+        return form_call("bl-make", args, 2, name->offset);
+    }
     fail_at(source_offset, "an expression was not recognized");
     return NULL;
 }
@@ -6412,6 +6533,7 @@ static Form *parse_bml_postfix(void) {
         char character = source_bytes[source_offset];
         if (character == CALL_OPEN) {
             Form *arguments = parse_bml_arguments();
+            if (form_is_symbol(expression, "offer") && arguments->part_count == 2) expression = form_symbol("oac-offer", expression->offset);
             expression = form_call_head(expression, arguments->parts, arguments->part_count);
             continue;
         }
@@ -6431,32 +6553,38 @@ static Form *parse_bml_postfix(void) {
                     append_form(&arguments, &argument_count, &argument_capacity, rest->parts[index]);
                 }
             }
-            expression = form_call_head(method, arguments, argument_count);
+            expression = argument_count == 1 && form_is_symbol(method, "str")
+                ? form_call("value_str", arguments, argument_count, method->offset)
+                : argument_count == 2 && form_is_symbol(method, "join")
+                ? form_call("bml-value-join", arguments, argument_count, method->offset)
+                : form_call_head(method, arguments, argument_count);
             continue;
         }
         if (character != INDEX_OPEN) break;
         size_t opening = source_offset;
         source_offset = checked_add(source_offset, ONE_ELEMENT);
-        Form *start = parse_bml_expression();
+        skip_bml();
+        Form *start = source_offset < source_length && source_bytes[source_offset] == PAIR_MARK
+            ? form_integer(0, opening) : parse_bml_expression();
         skip_bml();
         if (source_offset < source_length && source_bytes[source_offset] == PAIR_MARK) {
             source_offset = checked_add(source_offset, ONE_ELEMENT);
             skip_bml();
             if (source_offset < source_length && source_bytes[source_offset] == INDEX_CLOSE) {
                 source_offset = checked_add(source_offset, ONE_ELEMENT);
-                Form *arguments[] = {expression, start};
-                expression = form_call("slice", arguments, ARITY_TWO, opening);
+                Form *arguments[] = {expression, start, form_call("nothing", NULL, 0, opening)};
+                expression = form_call("bml-value-slice", arguments, ARITY_THREE, opening);
                 continue;
             }
             Form *end = parse_bml_expression();
             expect_character(INDEX_CLOSE, "an index was not closed");
             Form *arguments[] = {expression, start, end};
-            expression = form_call("slice", arguments, ARITY_THREE, opening);
+            expression = form_call("bml-value-slice", arguments, ARITY_THREE, opening);
             continue;
         }
         expect_character(INDEX_CLOSE, "an index was not closed");
         Form *arguments[] = {expression, start};
-        expression = form_call("nth", arguments, ARITY_TWO, opening);
+        expression = form_call("bml-value-index", arguments, ARITY_TWO, opening);
     }
     return expression;
 }
@@ -6495,7 +6623,10 @@ static Form *parse_bml_sum(void) {
         }
         Form *right = parse_bml_product();
         Form *arguments[] = {expression, right};
+        Form *annotation = expression->annotation;
+        if (strcmp(operation, "+") == 0) operation = form_is_symbol(annotation, "String") ? "str_concat" : form_is_symbol(annotation, "Comparable") ? "add" : "bml-value-add";
         expression = form_call(operation, arguments, ARITY_TWO, expression->offset);
+        expression->annotation = annotation;
     }
     return expression;
 }
@@ -6528,7 +6659,8 @@ static Form *parse_bml_comparison(void) {
             source_offset = checked_add(checked_add(source_offset, ONE_ELEMENT), ONE_ELEMENT);
             Form *right = parse_bml_range();
             Form *equal_arguments[] = {expression, right};
-            Form *equal = form_call("eq", equal_arguments, ARITY_TWO, expression->offset);
+            const char *equality = form_is_symbol(expression->annotation, "String") ? "str_eq" : form_is_symbol(expression->annotation, "Comparable") ? "eq" : form_is_symbol(expression->annotation, "Value") ? "value_eq" : "bml-value-equal";
+            Form *equal = form_call(equality, equal_arguments, ARITY_TWO, expression->offset);
             Form *negation[] = {equal};
             expression = form_call("not", negation, ARITY_ONE, expression->offset);
             continue;
@@ -6539,6 +6671,7 @@ static Form *parse_bml_comparison(void) {
             source_offset = saved;
             break;
         }
+        if (strcmp(operation, "eq") == 0) operation = form_is_symbol(expression->annotation, "String") ? "str_eq" : form_is_symbol(expression->annotation, "Comparable") ? "eq" : form_is_symbol(expression->annotation, "Value") ? "value_eq" : "bml-value-equal";
         Form *right = parse_bml_range();
         Form *arguments[] = {expression, right};
         expression = form_call(operation, arguments, ARITY_TWO, expression->offset);
@@ -6594,8 +6727,33 @@ static int form_is_wildcard(Form *form) {
 }
 
 static Form *parse_bml_match(size_t opening) {
+    skip_bml();
+    /* Keywords remain ordinary names unless the complete control shape starts.
+     * The Form grammar owns this choice; this bootstrap mirrors its fallback. */
+    if (source_offset >= source_length || strchr(",;)]}=?:><+*/%&|", source_bytes[source_offset]) != NULL) {
+        source_offset = opening;
+        return NULL;
+    }
+    if (take_keyword("then") || take_keyword("else")) {
+        source_offset = opening;
+        return NULL;
+    }
+    jmp_buf subject_choice;
+    jmp_buf *outer_choice = parser_choice;
+    parser_choice = &subject_choice;
+    if (setjmp(subject_choice)) {
+        parser_choice = outer_choice;
+        source_offset = opening;
+        return NULL;
+    }
     Form *subject = parse_bml_expression();
-    expect_character(SECTION_OPEN, "a match is missing its arms");
+    parser_choice = outer_choice;
+    skip_bml();
+    if (source_offset >= source_length || source_bytes[source_offset] != SECTION_OPEN) {
+        source_offset = opening;
+        return NULL;
+    }
+    source_offset = checked_add(source_offset, ONE_ELEMENT);
     Form *name = match_subject_name(opening);
     Form *chain = form_symbol(NAME_NOTHING, opening);
     Form **arms = NULL;
@@ -6676,18 +6834,25 @@ static Form *parse_bml_expression(void) {
     skip_bml();
     size_t opening = source_offset;
     if (take_keyword("if")) return parse_bml_conditional(opening);
-    if (take_keyword("match")) return parse_bml_match(opening);
+    if (take_keyword("match")) {
+        Form *matched = parse_bml_match(opening);
+        if (matched != NULL) return matched;
+    }
     if (take_keyword("choice")) {
-        expect_character(SECTION_OPEN, "a choice was not opened");
-        Form **options = NULL;
-        size_t option_count = EMPTY_COUNT;
-        size_t option_capacity = EMPTY_COUNT;
-        parse_bml_statements(&options, &option_count, &option_capacity);
-        return form_call("choice", options, option_count, opening);
+        skip_bml();
+        if (source_offset < source_length && source_bytes[source_offset] == SECTION_OPEN) {
+            source_offset = checked_add(source_offset, ONE_ELEMENT);
+            Form **options = NULL;
+            size_t option_count = EMPTY_COUNT;
+            size_t option_capacity = EMPTY_COUNT;
+            parse_bml_statements(&options, &option_count, &option_capacity);
+            return form_call("choice", options, option_count, opening);
+        }
+        source_offset = opening;
     }
     if (take_keyword(TRY_WORD)) {
         Form *body = parse_bml_expression();
-        if (!take_keyword("catch") && !take_keyword("else")) fail_at(source_offset, "a try is missing catch");
+        if (!take_keyword("catch") && !take_keyword("else")) fail_at(source_offset, "a try is missing catch or else");
         Form *handler = parse_bml_expression();
         Form *try_arguments[] = {body, handler};
         return form_call(TRY_WORD, try_arguments, ARITY_TWO, opening);
@@ -6751,6 +6916,43 @@ static void skip_type_arguments(void) {
     }
 }
 
+static Form *parse_bml_type(void) {
+    Form *name = read_bml_symbol();
+    skip_bml();
+    if (source_offset < source_length && source_bytes[source_offset] == '<') {
+        size_t start = name->offset;
+        skip_type_arguments();
+        return form_text(source_bytes + start, source_offset - start, start);
+    }
+    return symbol_text(name);
+}
+
+static void parse_bml_annotation(Form *name) {
+    skip_bml();
+    if (source_offset < source_length && source_bytes[source_offset] == PAIR_MARK) {
+        ++source_offset;
+        name->annotation = parse_bml_type();
+    }
+}
+
+static Form *parse_bml_type_list(void) {
+    Form *types = form_call("list", NULL, 0, source_offset);
+    skip_bml();
+    if (source_offset >= source_length || source_bytes[source_offset] != '<') return types;
+    ++source_offset;
+    for (;;) {
+        group_add(types, parse_bml_type());
+        skip_bml();
+        if (source_offset < source_length && source_bytes[source_offset] == '>') { ++source_offset; return types; }
+        expect_character(ARGUMENT_SEPARATOR, "a type argument was not separated");
+    }
+}
+
+static void parse_bml_attributes(void) {
+    skip_bml();
+    if (source_offset < source_length && source_bytes[source_offset] == INDEX_OPEN) parse_bml_list();
+}
+
 static void skip_member(void) {
     size_t depth = EMPTY_COUNT;
     while (source_offset < source_length) {
@@ -6781,15 +6983,9 @@ static Form *parse_bml_parameters(void) {
         return group;
     }
     while (1) {
-        group_add(group, read_bml_symbol());
-        skip_bml();
-        if (source_offset < source_length && source_bytes[source_offset] == PAIR_MARK) {
-            source_offset = checked_add(source_offset, ONE_ELEMENT);
-            skip_bml();
-            read_bml_symbol();
-            skip_type_arguments();
-            skip_bml();
-        }
+        Form *parameter = read_bml_symbol();
+        parse_bml_annotation(parameter);
+        group_add(group, parameter);
         if (source_offset < source_length && source_bytes[source_offset] == CALL_CLOSE) {
             source_offset = checked_add(source_offset, ONE_ELEMENT);
             break;
@@ -6802,6 +6998,7 @@ static Form *parse_bml_parameters(void) {
 static Form *parse_bml_definition(void) {
     Form *name = read_bml_symbol();
     Form *parameters = parse_bml_parameters();
+    parse_bml_annotation(name);
     skip_bml();
     Form *body;
     if (source_offset < source_length && source_bytes[source_offset] == SECTION_OPEN) {
@@ -6819,9 +7016,7 @@ static Form *parse_bml_definition(void) {
         expect_character(NAME_MARK, "a definition is missing its body");
         body = parse_bml_expression();
         skip_bml();
-        if (source_offset < source_length && source_bytes[source_offset] == STATEMENT_END) {
-            source_offset = checked_add(source_offset, ONE_ELEMENT);
-        }
+        if (source_offset < source_length && source_bytes[source_offset] == STATEMENT_END) ++source_offset;
     }
     return definition_form(name, parameters, body);
 }
@@ -6831,9 +7026,7 @@ static Form *parse_pattern_binding(size_t opening) {
     expect_character(NAME_MARK, "a binding is missing its value");
     Form *value = parse_bml_expression();
     skip_bml();
-    if (source_offset < source_length && source_bytes[source_offset] == STATEMENT_END) {
-        source_offset = checked_add(source_offset, ONE_ELEMENT);
-    }
+    if (source_offset < source_length && source_bytes[source_offset] == STATEMENT_END) ++source_offset;
     Form *holder = match_subject_name(opening);
     Form **statements = NULL;
     size_t statement_count = EMPTY_COUNT;
@@ -6854,21 +7047,101 @@ static Form *parse_bml_binding(void) {
     skip_bml();
     if (source_offset < source_length && source_bytes[source_offset] == INDEX_OPEN) return parse_pattern_binding(source_offset);
     Form *name = read_bml_symbol();
-    skip_bml();
-    if (source_offset < source_length && source_bytes[source_offset] == PAIR_MARK) {
-        source_offset = checked_add(source_offset, ONE_ELEMENT);
-        skip_bml();
-        read_bml_symbol();
-        skip_type_arguments();
-    }
+    parse_bml_annotation(name);
     expect_character(NAME_MARK, "a binding is missing its value");
     Form *value = parse_bml_expression();
     skip_bml();
-    if (source_offset < source_length && source_bytes[source_offset] == STATEMENT_END) {
-        source_offset = checked_add(source_offset, ONE_ELEMENT);
-    }
+    if (source_offset < source_length && source_bytes[source_offset] == STATEMENT_END) ++source_offset;
     Form *arguments[] = {name, value};
     return form_call("let", arguments, ARITY_TWO, name->offset);
+}
+
+/* Transitional source carrier: construct the existing Form language values.
+ * language-template.fk and form-bml-lower.fk own their meaning and shrink path. */
+static void parse_bml_class(Form ***forms, size_t *count, size_t *capacity, int is_template) {
+    Form *name = read_bml_symbol();
+    Form *types = parse_bml_type_list();
+    parse_bml_attributes();
+    Form *base = NULL;
+    skip_bml();
+    if (!is_template && source_offset < source_length && source_bytes[source_offset] == PAIR_MARK) {
+        ++source_offset;
+        base = read_bml_symbol();
+        types = parse_bml_type_list();
+    }
+    Form *members = form_call("list", NULL, 0, name->offset);
+    Form *names[4];
+    for (size_t i = 0; i < 4; ++i) names[i] = form_call("list", NULL, 0, name->offset);
+    skip_bml();
+    int template_line = is_template && source_offset < source_length && source_bytes[source_offset] == STATEMENT_END;
+    if (template_line) ++source_offset;
+    else {
+        expect_character(SECTION_OPEN, "a class was not opened");
+        for (;;) {
+            skip_bml();
+            if (source_offset >= source_length) fail_at(name->offset, "a class was not closed");
+            if (source_bytes[source_offset] == SECTION_CLOSE) { ++source_offset; break; }
+            if (is_template) {
+                if (!take_keyword("member")) fail_at(source_offset, "a template expects a member");
+                Form *member = read_bml_symbol();
+                expect_character(PAIR_MARK, "a template member needs its type");
+                Form *type = parse_bml_type();
+                expect_character(STATEMENT_END, "a template member was not finished");
+                Form *args[] = {symbol_text(member), type};
+                group_add(members, form_call("language-template-member", args, 2, member->offset));
+                continue;
+            }
+            Form *method;
+            size_t kind = 0;
+            if (take_keyword(DEF_WORD)) method = parse_bml_definition();
+            else {
+                if (base != NULL) fail_at(source_offset, "a language class expects a method");
+                if (take_keyword("field")) kind = 1;
+                else if (take_keyword("ref")) kind = 2;
+                else if (take_keyword("thought")) kind = 3;
+                else fail_at(source_offset, "an abstraction expects a member");
+                Form *member = read_bml_symbol();
+                parse_bml_annotation(member);
+                expect_character(NAME_MARK, "a member needs its value");
+                Form *body = parse_bml_expression();
+                expect_character(STATEMENT_END, "a member was not finished");
+                method = definition_form(member, new_form(FORM_GROUP, member->offset), body);
+            }
+            Form *member = method->parts[DEFN_NAME];
+            group_add(names[kind], symbol_text(member));
+            if (base != NULL) {
+                size_t length = checked_add(checked_add(name->text_length, 1), member->text_length);
+                char *qualified = allocate_zeroed(length + 1, 1);
+                memcpy(qualified, name->text, name->text_length);
+                qualified[name->text_length] = '_';
+                memcpy(qualified + name->text_length + 1, member->text, member->text_length);
+                Form *qualified_name = form_symbol(qualified, member->offset);
+                qualified_name->annotation = member->annotation;
+                method->parts[DEFN_NAME] = qualified_name;
+                free(qualified);
+                Form *args[] = {symbol_text(member), qualified_name};
+                group_add(members, form_call("language-class-member-method", args, 2, member->offset));
+            }
+            append_form(forms, count, capacity, method);
+        }
+        skip_bml();
+        if (source_offset < source_length && source_bytes[source_offset] == STATEMENT_END) ++source_offset;
+    }
+    Form *value;
+    if (is_template) {
+        Form *args[] = {symbol_text(name), types, members};
+        value = form_call(template_line ? "language-template" : "language-template-with-members", args, template_line ? 2 : 3, name->offset);
+    } else if (base != NULL) {
+        Form *args[] = {symbol_text(name), base, types, members};
+        value = form_call("language-class", args, 4, name->offset);
+    } else {
+        Form *args[] = {form_text("abstraction", 11, name->offset), symbol_text(name), types, names[0], names[1], names[2], names[3]};
+        value = form_call("list", args, 7, name->offset);
+        append_form(forms, count, capacity, definition_form(name, new_form(FORM_GROUP, name->offset), value));
+        return;
+    }
+    Form *args[] = {name, value};
+    append_form(forms, count, capacity, form_call("let", args, 2, name->offset));
 }
 
 static void parse_bml_statements(Form ***forms, size_t *count, size_t *capacity) {
@@ -6882,9 +7155,7 @@ static void parse_bml_statements(Form ***forms, size_t *count, size_t *capacity)
         if (take_keyword("defer")) {
             Form *deferred = parse_bml_expression();
             skip_bml();
-            if (source_offset < source_length && source_bytes[source_offset] == STATEMENT_END) {
-                source_offset = checked_add(source_offset, ONE_ELEMENT);
-            }
+            if (source_offset < source_length && source_bytes[source_offset] == STATEMENT_END) ++source_offset;
             Form **rest = NULL;
             size_t rest_count = EMPTY_COUNT;
             size_t rest_capacity = EMPTY_COUNT;
@@ -6902,37 +7173,41 @@ static void parse_bml_statements(Form ***forms, size_t *count, size_t *capacity)
             append_form(forms, count, capacity, form_call("do", sequence, ARITY_THREE, deferred->offset));
             return;
         }
-        if (take_keyword("let") || take_keyword("ref") || take_keyword("thought")) {
+        if (take_declaration_keyword("let", 1) || take_declaration_keyword("ref", 0) || take_declaration_keyword("thought", 0)) {
             append_form(forms, count, capacity, parse_bml_binding());
             continue;
         }
-        if (take_keyword(DEF_WORD)) {
+        if (take_declaration_keyword("blueprint", 0)) {
+            Form *name = read_bml_symbol();
+            Form *args[] = {symbol_text(name), parse_bml_blueprint_fields(1)};
+            append_form(forms, count, capacity, form_call("bl-declare", args, 2, name->offset));
+            skip_bml();
+            if (source_offset < source_length && source_bytes[source_offset] == STATEMENT_END) ++source_offset;
+            continue;
+        }
+        if (take_declaration_keyword(DEF_WORD, 0)) {
             append_form(forms, count, capacity, parse_bml_definition());
             continue;
         }
-        if (take_keyword("field")) {
+        if (take_declaration_keyword("field", 0)) {
             Form *name = read_bml_symbol();
-            skip_type_arguments();
+            parse_bml_annotation(name);
             expect_character(NAME_MARK, "a field is missing its value");
             Form *body = parse_bml_expression();
             expect_character(STATEMENT_END, "a field was not finished");
             append_form(forms, count, capacity, definition_form(name, new_form(FORM_GROUP, name->offset), body));
             continue;
         }
-        if (take_keyword("member")) {
+        if (take_declaration_keyword("member", 0)) {
             skip_member();
             continue;
         }
-        if (take_keyword("class") || take_keyword("template")) {
-            Form *name = read_bml_symbol();
-            bind_global(name->text, name->text_length, text_value(name->text, name->text_length));
-            skip_type_arguments();
-            expect_character(SECTION_OPEN, "a class was not opened");
-            parse_bml_statements(forms, count, capacity);
-            skip_bml();
-            if (source_offset < source_length && source_bytes[source_offset] == STATEMENT_END) {
-                source_offset = checked_add(source_offset, ONE_ELEMENT);
-            }
+        if (take_declaration_keyword("class", 0)) {
+            parse_bml_class(forms, count, capacity, 0);
+            continue;
+        }
+        if (take_declaration_keyword("template", 0)) {
+            parse_bml_class(forms, count, capacity, 1);
             continue;
         }
         if (source_bytes[source_offset] == SECTION_OPEN) {
@@ -6970,6 +7245,59 @@ static char *read_import_path(void) {
 
 static void load_unit(const char *from_file, const char *relative);
 static void drive_forms(Form **forms, size_t form_count);
+
+/* The catalog owns home names; this seed only links their source units. The
+ * native source linker can take this admission step without changing recipes. */
+typedef struct { char *name; size_t length; char *unit; } HomeName;
+static HomeName *home_names;
+static size_t home_count;
+static int homes_read;
+
+static void link_home_names(Form **forms, size_t count, const char *from_file) {
+    if (!homes_read) {
+        homes_read = 1;
+        char *catalog = resolve_unit(from_file, "form-stdlib/home-index.txt");
+        size_t length = 0;
+        char *bytes = read_source(catalog, &length);
+        size_t capacity = 0, at = 0;
+        while (at < length) {
+            size_t end = at;
+            while (end < length && bytes[end] != '\n') ++end;
+            while (at < end && isspace((unsigned char)bytes[at])) ++at;
+            if (at < end && bytes[at] != '#') {
+                size_t name = at;
+                while (at < end && !isspace((unsigned char)bytes[at])) ++at;
+                size_t name_length = at - name;
+                while (at < end && isspace((unsigned char)bytes[at])) ++at;
+                size_t unit = at;
+                while (at < end && !isspace((unsigned char)bytes[at])) ++at;
+                if (name_length != 0 && at > unit) {
+                    home_names = grow_list(home_names, &capacity, sizeof *home_names, checked_add(home_count, 1));
+                    home_names[home_count++] = (HomeName){copy_bytes(bytes + name, name_length), name_length, copy_bytes(bytes + unit, at - unit)};
+                }
+            }
+            at = end + 1;
+        }
+        free(bytes);
+        free(catalog);
+    }
+    Form **pending = NULL;
+    size_t used = 0, capacity = 0;
+    for (size_t i = 0; i < count; ++i) append_form(&pending, &used, &capacity, forms[i]);
+    while (used != 0) {
+        Form *form = pending[--used];
+        if (form->kind == FORM_SYMBOL && find_function_text(form->text, form->text_length) == NULL && find_operation_text(form->text, form->text_length) == NULL) {
+            for (size_t i = 0; i < home_count; ++i) {
+                if (bytes_equal(form->text, form->text_length, home_names[i].name, home_names[i].length)) {
+                    load_unit(from_file, home_names[i].unit);
+                    break;
+                }
+            }
+        }
+        for (size_t i = 0; i < form->part_count; ++i) append_form(&pending, &used, &capacity, form->parts[i]);
+    }
+    free(pending);
+}
 
 static void load_preludes(const char *bytes, size_t length, const char *from_file) {
     size_t line_start = FIRST_INDEX;
@@ -7009,64 +7337,111 @@ static void load_preludes(const char *bytes, size_t length, const char *from_fil
     }
 }
 
+static int at_source_section(void) {
+    if (!at_keyword(SECTION_WORD)) return 0;
+    size_t after = source_offset + strlen(SECTION_WORD);
+    while (after < source_length && isspace((unsigned char)source_bytes[after])) ++after;
+    return after < source_length && source_bytes[after] == INDEX_OPEN;
+}
+
+static Form *parse_source_section(void) {
+    size_t opening = source_offset;
+    if (!take_keyword(SECTION_WORD)) fail_at(opening, "a section was expected");
+    expect_character(INDEX_OPEN, "a section name was not opened");
+    size_t name_at = source_offset;
+    while (source_offset < source_length && source_bytes[source_offset] != INDEX_CLOSE) ++source_offset;
+    size_t name_length = source_offset - name_at;
+    expect_character(INDEX_CLOSE, "a section name was not closed");
+    int executable = name_length == strlen(FORM_BML_SECTION) && memcmp(source_bytes + name_at, FORM_BML_SECTION, name_length) == 0;
+    expect_character(SECTION_OPEN, "a section was not opened");
+    Form **forms = NULL;
+    size_t count = 0, capacity = 0;
+    if (executable) parse_bml_statements(&forms, &count, &capacity);
+    else {
+        size_t depth = 1;
+        while (depth != 0) {
+            skip_bml();
+            if (source_offset >= source_length) fail_at(opening, "a section was not closed");
+            char c = source_bytes[source_offset];
+            if (c == TEXT_DELIMITER) { parse_text(); continue; }
+            ++source_offset;
+            if (c == SECTION_OPEN) ++depth;
+            if (c == SECTION_CLOSE) --depth;
+        }
+    }
+    return form_call("do", forms, count, opening);
+}
+
 static Form **parse_bml_source(size_t *form_count) {
     Form **forms = NULL;
     size_t count = EMPTY_COUNT;
     size_t capacity = EMPTY_COUNT;
     while (1) {
-        skip_bml();
+        skip_space_and_comments();
         if (source_offset >= source_length) break;
         if (take_keyword(IMPORT_WORD)) {
             char *relative = read_import_path();
             skip_bml();
-            if (source_offset < source_length && source_bytes[source_offset] == STATEMENT_END) {
-                source_offset = checked_add(source_offset, ONE_ELEMENT);
-            }
+            if (source_offset < source_length && source_bytes[source_offset] == STATEMENT_END) ++source_offset;
             load_unit(source_path, relative);
             free(relative);
             continue;
         }
-        if (!take_keyword(SECTION_WORD)) {
-            append_form(&forms, &count, &capacity, parse_bml_expression());
-            skip_bml();
-            if (source_offset < source_length && source_bytes[source_offset] == STATEMENT_END) {
-                source_offset = checked_add(source_offset, ONE_ELEMENT);
-            }
+        if (!at_source_section()) {
+            size_t span_count = 0;
+            Form **span = parse_source_span(&span_count, 1);
+            for (size_t i = 0; i < span_count; ++i) append_form(&forms, &count, &capacity, span[i]);
+            free(span);
             continue;
         }
-        expect_character(INDEX_OPEN, "a section name was not opened");
-        size_t name_at = source_offset;
-        while (source_offset < source_length && source_bytes[source_offset] != INDEX_CLOSE) {
-            source_offset = checked_add(source_offset, ONE_ELEMENT);
-        }
-        size_t name_length = source_offset - name_at;
-        expect_character(INDEX_CLOSE, "a section name was not closed");
-        int executable = name_length == strlen(FORM_BML_SECTION) && memcmp(source_bytes + name_at, FORM_BML_SECTION, name_length) == STRING_COMPARE_EQUAL;
-        expect_character(SECTION_OPEN, "a section was not opened");
-        if (!executable) {
-            size_t depth = ONE_ELEMENT;
-            while (depth != EMPTY_COUNT) {
-                skip_bml();
-                if (source_offset >= source_length) fail_at(source_offset, "a section was not closed");
-                char character = source_bytes[source_offset];
-                if (character == TEXT_DELIMITER) {
-                    parse_text();
-                    continue;
-                }
-                source_offset = checked_add(source_offset, ONE_ELEMENT);
-                if (character == SECTION_OPEN) depth = checked_add(depth, ONE_ELEMENT);
-                if (character == SECTION_CLOSE) depth -= ONE_ELEMENT;
-            }
-            continue;
-        }
-        parse_bml_statements(&forms, &count, &capacity);
+        Form *section = parse_source_section();
+        for (size_t i = CALL_ARGUMENTS; i < section->part_count; ++i) append_form(&forms, &count, &capacity, section->parts[i]);
     }
     *form_count = count;
     return forms;
 }
 
+static int source_has_section(void) {
+    int quoted = 0, escaped = 0, line_comment = 0, block_comment = 0, line_start = 1;
+    size_t word_length = strlen(SECTION_WORD);
+    for (size_t i = 0; i < source_length; ++i) {
+        char c = source_bytes[i];
+        char next = i + 1 < source_length ? source_bytes[i + 1] : 0;
+        if (line_comment) {
+            if (c == '\n') { line_comment = 0; line_start = 1; }
+            continue;
+        }
+        if (block_comment) {
+            if (c == '*' && next == '/') { block_comment = 0; ++i; }
+            if (c == '\n') line_start = 1;
+            continue;
+        }
+        if (quoted) {
+            if (escaped) escaped = 0;
+            else if (c == '\\') escaped = 1;
+            else if (c == TEXT_DELIMITER) quoted = 0;
+            if (c == '\n') line_start = 1;
+            else line_start = 0;
+            continue;
+        }
+        if (c == COMMENT_INTRODUCER || (c == '/' && next == '/')) { line_comment = 1; continue; }
+        if (c == '/' && next == '*') { block_comment = 1; ++i; continue; }
+        if (c == TEXT_DELIMITER) { quoted = 1; line_start = 0; continue; }
+        if (c == '\n') { line_start = 1; continue; }
+        if (isspace((unsigned char)c)) continue;
+        if (line_start && source_length - i >= word_length &&
+            memcmp(source_bytes + i, SECTION_WORD, word_length) == 0) {
+            size_t after = i + word_length;
+            while (after < source_length && isspace((unsigned char)source_bytes[after])) ++after;
+            if (after < source_length && source_bytes[after] == INDEX_OPEN) return 1;
+        }
+        line_start = 0;
+    }
+    return 0;
+}
+
 static Form **parse_current_source(size_t *form_count) {
-    if (contains_text(source_bytes, source_length, SECTION_TAG)) return parse_bml_source(form_count);
+    if (source_has_section()) return parse_bml_source(form_count);
     return parse_source(form_count);
 }
 
@@ -7089,6 +7464,7 @@ static void load_unit(const char *from_file, const char *relative) {
     size_t form_count = EMPTY_COUNT;
     Form **forms = parse_current_source(&form_count);
     bind_definitions(forms, form_count);
+    link_home_names(forms, form_count, path);
     if (form_count != EMPTY_COUNT) drive_forms(forms, form_count);
     source_path = saved_path;
     restore_source(saved);
@@ -7102,6 +7478,8 @@ static void drive_forms(Form **forms, size_t form_count) {
 }
 
 int main(int argc, char **argv) {
+    setvbuf(stdin, NULL, _IONBF, 0);
+    runtime_executable = argv[0];
     process_born_ms = unix_milliseconds();
     if (argc < PROGRAM_ARGUMENT_COUNT) {
         fputs(USAGE_TEXT, stderr);
@@ -7110,12 +7488,15 @@ int main(int argc, char **argv) {
     register_builtin_operations();
     source_path = argv[SOURCE_PATH_ARGUMENT];
     source_bytes = read_source(source_path, &source_length);
+    entry_source_bytes = source_bytes;
+    entry_source_length = source_length;
     remember_unit(copy_bytes(source_path, strlen(source_path)));
     load_preludes(source_bytes, source_length, source_path);
     source_offset = FIRST_INDEX;
     size_t form_count = EMPTY_COUNT;
     Form **forms = parse_current_source(&form_count);
     bind_definitions(forms, form_count);
+    link_home_names(forms, form_count, source_path);
     drive_forms(forms, form_count);
     print_value(finished);
     fputs(LINE_ENDING, stdout);

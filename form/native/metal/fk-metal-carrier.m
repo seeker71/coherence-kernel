@@ -1163,6 +1163,9 @@ long long fk_metal_buf_from_file_external(const char *path, long long path_len,
         if (path_len <= 0 || path_len >= (long long)sizeof(p)) {
             fk_err(@"buf_from_file path length out of range"); return 0;
         }
+        if (path == NULL || memchr(path, 0, (size_t)path_len) != NULL) {
+            fk_err(@"buf_from_file path contains NUL"); return 0;
+        }
         memcpy(p, path, (size_t)path_len);
         p[path_len] = 0;
 

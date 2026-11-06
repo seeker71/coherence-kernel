@@ -9,7 +9,44 @@ import form-stdlib/hex.fk;
 import form-stdlib/str-byte-at.fk;
 import form-stdlib/json.fk;
 section [form.bml] {
+ let FBC-PUBLISH=record_new(0,"next",0);
  class FormbinCodec {
+  // Native admission uses this same inert codec. Only exact scalar bit
+  // transport crosses float_leaf (34 pack, 35 admit); framing stays in Form.
+  def fbc-native-data(node) {
+   if value_kind(node)=="string" then fbc-string(1,node)
+   else if value_kind(node) != "node_id" then nothing()
+   else if !node_eq(node,node_category(node)) then fbc-composite(fbc-native-data(node_category(node)),map(fbc-native-data,node_children(node)))
+   else if node_level(node)==1 && node_type(node)==2 then fbc-string(node_pkg(node),node_value(node))
+   else if node_level(node)==1 && node_type(node)==5 then fbc-number(3,float_leaf(34,[3,node_value(node)]))
+   else if node_level(node)==1 && node_type(node)==7 then fbc-number(2,float_leaf(34,[2,node_value(node)]))
+   else fbc-leaf(node_pkg(node),node_level(node),node_type(node),node_inst(node));
+  }
+  def fbc-native-node(data) {
+   if data[0]==1 then intern_node(fbc-native-node(data[1]),map(fbc-native-node,data[2]))
+   else if data[0]==4 then intern_trivial_string(data[2])
+   else if data[0]==2 || data[0]==3 then float_leaf(35,data)
+   else if data[1]==1 && data[2]==1 && data[3]==1 then intern_trivial_int(data[4]>=2147483648 ? data[4]-4294967296 : data[4])
+   else make_nodeid(data[1],data[2],data[3],data[4]);
+  }
+  def fbc-native-result(decoded) = fbc-good(decoded) ? fbc-native-node(fbc-value(decoded)) : nothing();
+  def read_form_binary(path) = fbc-native-result(fbc-load(path));
+  def recipe_to_bytes(node) {
+   let encoded=fbc-encode(fbc-native-data(node));
+   fbc-good(encoded) ? range(0,len(fbc-value(encoded))) |> map(i=>str_byte_at(fbc-value(encoded),i)) : nothing();
+  }
+  def bytes_to_recipe(bytes) = value_kind(bytes) != "list" || !all?(byte=>value_kind(byte)=="int" && byte>=0 && byte<=255,bytes) ? nothing() : fbc-native-result(fbc-decode(fbc-finish(foldl((bins,byte)=>fbc-put(bins,byte_to_str(byte)),[],bytes),"")));
+  def write_form_binary(path,node) {
+   let encoded=fbc-encode(fbc-native-data(node));
+   if !fbc-good(encoded) then -1 else {
+    let ordinal=record_get(FBC-PUBLISH,"next");
+    record_set(FBC-PUBLISH,"next",ordinal+1);
+    let stage=path+".tmp."+host_pid().str()+"."+ordinal.str();
+    let bytes=fbc-value(encoded);
+    let wrote=write_file(stage,bytes);
+    if wrote==len(bytes) && host_path_rename(stage,path)==0 then wrote else { host_path_remove(stage); -1; };
+   };
+  }
   def fbc-max-bytes() = 67108864;
   def fbc-fail(reason) = [0, ("form binary: " + reason), [], 0, 0];
   def fbc-ok(value, nodes, depth) = [1, "", value, nodes, depth];

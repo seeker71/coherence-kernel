@@ -3,7 +3,8 @@
 // A model writes <|form:VERB|>PAYLOAD<|/form:VERB|>; when the stream closes the control, Form
 // runs the verb (form-token-verbs.bml) and answers in the same stream
 // with <|form:observation|>RESULT<|/form:observation|>. RESULT is value=<v>; recipe=@<p.l.t.i>;
-// node=@<p.l.t.i>; or nothing=<reason>;. A refusal is an observation, never a stop.
+// node=@<p.l.t.i>; or nothing=<reason>;. A refusal offers another choice.
+// Repeating a refused observation echo ends that stream with its evidence intact.
 //
 // The opening bytes of recipe-birth, recipe-exec and knowledge-query are the ones
 // form-recipe-birth-token.fk, form-recipe-exec-token.fk and form-knowledge-query-token.fk read;
@@ -79,6 +80,21 @@ section [form.bml] {
   def ftg-window-past?() = ftg-window-until() > 0 && host_monotonic_ms() >= ftg-window-until();
   def ftg-window-feed(icpt, cursor, chunk) = ftg-window-past?() ? [cursor, chunk, ftg-window-end()] : ftg-feed(icpt, cursor, chunk);
   def ftg-window-inject(icpt, s, text) = ftg-window-past?() ? fcms-refuse(s, ftg-window-end()) : ftg-inject(icpt, s, text);
+  def ftg-choice-needed() = "unchanged-observation-refusal";
+  def ftg-observation-choice(owner,verb,result) {
+   if verb == "observation" && len(result)>0 then {
+    let repeated=record_get(owner,"observation-refused") == 1;
+    record_set(owner,"observation-refused",1);
+    record_set(owner,"control-choice-needed",repeated ? 1 : 0);
+    result + " Form supplies observations. Continue with your answer in plain prose or choose a different executable control; do not write or echo observation controls.";
+   } else {
+    if ftg-result-kind(result) != "nothing" && len(result)>0 then {
+     record_set(owner,"observation-refused",0);
+     record_set(owner,"control-choice-needed",0);
+    } else 0;
+    result;
+   };
+  }
   // a lane that knows its request's lineage (a conversation, a task) binds the lanes' workspace to
   // it; "" for the request starts a fresh one in that lineage
   def ftg-bind(lineage, request) {
@@ -226,7 +242,7 @@ section [form.bml] {
    if ftg-checkpoint?(icpt) then fcms-decode-pulse(record_get(icpt, "fed")) else 0;
    let w = ftg-window(record_get(icpt, "window"), chunk, record_get(icpt, "reserve"));
    record_set(icpt, "window", w[0]);
-   let result = ftg-window-result(record_get(icpt, "session"), w);
+   let result = ftg-observation-choice(icpt,w[2],ftg-window-result(record_get(icpt, "session"), w));
    if len(result) > 0 then ftg-note(icpt, w[3], result, w[1] == "control" ? record_get(record_get(icpt, "session"), "touched") : "") else 0;
    [cursor, chunk, result];
   }
@@ -242,13 +258,13 @@ section [form.bml] {
   // The pending ID is committed once, then the observation; the session answers the first
   // prediction after it. Observation admission grows the owned context as needed. The
   // newest crossing's flag reads whether the observation entered the stream.
-  def ftg-inject(icpt, session, text) {
+  def ftg-inject(icpt, session, text) = record_get(icpt,"control-choice-needed") == 1 ? fcms-refuse(session,ftg-choice-needed()) : {
    let ids=fcms-inline-bml-observation-ids(session,ftg-envelope(text));
    let resumed = ftg-inject-encoded(session,ids);
    let flags = record_get(icpt, "injected");
    if !nil?(flags) then record_set(icpt, "injected", cons(fcms-live?(resumed) ? 1 : 0, flags[1:])) else 0;
    resumed;
-  }
+  };
   def ftg-inject-ids(session, text) = ftg-inject-encoded(session,fcms-inline-bml-observation-ids(session,ftg-envelope(text)));
   def ftg-inject-encoded(session, ids) {
    let owner=nothing?(ids) ? session : fcms-ensure-room(session,len(ids)+2);
@@ -289,6 +305,7 @@ section [form.bml] {
    ftg-coding-chunk(ftg-lane-session("code"),len(before),fcmo-text(session,drop(len(before),ids)));
   }
   def ftg-coding-chunk(lane,prior,chunk) {
+   if prior==0 then { record_set(lane,"observation-refused",0); record_set(lane,"control-choice-needed",0); } else 0;
    record_set(lane,"coding-previous-chunk",prior==0 ? "" : record_get(lane,"coding-chunk") ?? "");
    record_set(lane,"coding-chunk",chunk);
    let held=prior==0 ? "" : record_get(lane,"coding-window") ?? "";
@@ -309,13 +326,16 @@ section [form.bml] {
      let lane = ftg-lane-session("code");
      record_set(lane,"render-room",max2(0,fcms-maxpos(session)-fcms-pos(session)));
      let started=host_monotonic_ms();
-     let answered = map(c => len(c[3]) > 0 ? [c[3], "",nothing()] : ftg-observe-touched(lane, c[0], c[1]), items);
+     let answered = map(c => {
+      let observed=len(c[3]) > 0 ? [c[3], "",nothing()] : ftg-observe-touched(lane,c[0],c[1]);
+      [ftg-observation-choice(lane,c[0],observed[0]),observed[1],observed[2]];
+     },items);
      let executed=host_monotonic_ms();
      record_set(lane,"render-room",nothing());
      let admitted=ftg-admit-observations(session,lane,answered,text=>fcms-inline-bml-observation-ids(session,text));
      let encoded=host_monotonic_ms();
     let results=admitted[0]; let ids=admitted[1];
-    let resumed=ftg-inject-encoded(session,ids);
+    let resumed=record_get(lane,"control-choice-needed") == 1 ? fcms-refuse(session,ftg-choice-needed()) : ftg-inject-encoded(session,ids);
    let injected = fcms-live?(resumed) ? 1 : 0;
     let timing=[oh-n("execution_ms",executed - started),oh-n("encoding_ms",encoded - executed),oh-n("prefill_ms",host_monotonic_ms() - encoded)];
     let crossing=json-node-object(append(json-object-pairs(ftg-crossing-line("code",items,results,injected)),timing));

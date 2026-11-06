@@ -581,7 +581,10 @@ none. Optional `context` selects an initial context. Absent or zero uses the
 artifact's declared window, subject to actual memory admission; a full coding
 stream retains its work through the existing context renewal. Phases select planning,
 implementation or repair. The helper's task
-prompt renders the selected sources and pinned context. It runs through the
+prompt renders the selected sources and pinned context. Omitted entries carry
+catalog metadata; their source bytes remain with the parent. The helper requests
+needed omitted evidence from the parent and cannot claim to have read it.
+It runs through the
 existing unmanaged read-only review lane, with no writable paths, recalled
 answers, provider call or training. Its report is advice; it cannot complete
 the parent task or change the original checker.
