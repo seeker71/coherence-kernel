@@ -144,10 +144,17 @@ section [form.bml] {
     // the room, when nobody is speaking. It carries the gate: that row is the instrument that
     // finds a gate standing on the noise floor, and a room is quiet most of the time, so an
     // instrument only present mid-sentence is an instrument that is not there when it is needed.
-    def el-emit-quiet(db, fl) = {
-        let w = sbt-append(el-spool(), el-cat(["<|ear:frame|>", el-nl(), el-kv("t", now_unix_ms().str()), el-kv("kind", "quiet"), el-kv("db", db.str()), el-kv("live", ""), el-kv("livelang", ""), el-kv("livems", "0"), el-kv("heard", ""), el-kv("lang", ""), el-kv("nsp", "0"), el-kv("heardms", "0"), el-kv("floor", fl.str()), el-kv("gate", el-gate(fl).str()), "<|/ear:frame|>", el-nl()]));
+    def el-emit-quiet(db, fl) = el-emit-quiet-of(db, fl, []);
+    // a judged pass (eac-judge) carries the judge's no-speech, and a witness pass what turbo would have said under it
+    def el-emit-quiet-of(db, fl, h) = {
+        let w = sbt-append(el-spool(), el-cat(["<|ear:frame|>", el-nl(), el-kv("t", now_unix_ms().str()), el-kv("kind", "quiet"), el-kv("db", db.str()), el-kv("live", ""), el-kv("livelang", ""), el-kv("livems", "0"), el-kv("heard", ""), el-kv("lang", ""), el-kv("nsp", len(h) < 8 ? "0" : h[7].str()), el-kv("heardms", "0"), el-kv("floor", fl.str()), el-kv("gate", el-gate(fl).str()), el-unheard-fields(h), "<|/ear:frame|>", el-nl()]));
         w;
     };
+    def el-unheard-fields(h) = (Comparable) len(eac-unheard(h)) == 0 ? "" : el-cat([el-kv("unheard", eac-unheard(h)), el-kv("unheardlp", h[9].str())]);
+    // the judge (eac-judge) stands in the lane's held record beside the capture clock: tiny's open state while
+    // turbo carries the words, nothing while tiny carries them itself; -1 is the verdict of a lane with no judge
+    def el-judge(held) = record_get(held, "judge") ?? [];
+    def el-verdict(held, parts, total, cut, listening) = (Comparable) len(el-judge(held)) == 0 ? [0 - 1, 0] : eac-judge(el-judge(held), parts, total, cut, listening);
     // a pass that heard nothing BUT a tag: the room's own sound, named. It is never a line, never
     // reaches the tongues, and is not silence either — so it travels as its own kind.
     def el-emit-phantom(db, tags, nsp) = el-emit-refusal(db, tags, nsp, []);
@@ -179,7 +186,10 @@ section [form.bml] {
             let speech1 = el-cadence?() ? 1 : (Comparable) heard? == 1 ? 1 : speech;
             let lastvoice1 = (Comparable) heard? == 1 ? tend : lastvoice;
             (Comparable) speech1 == 1 && total1 - cut >= 9600 ? {
-                let h = el-turbo?() ? eac-open-plain(st, w1, total1, cut, (Number) 8 + (Number) ((total1 - cut) / 2000), listening1) : eac-open(st, w1, total1, cut, (Number) 8 + (Number) ((total1 - cut) / 2000), listening1);
+                let verdict = el-verdict(capture, w1, total1, cut, listening1);
+                let asked = eac-ask?(capture, verdict);
+                let h0 = !asked ? eac-unasked(verdict) : (el-turbo?() ? eac-open-plain(st, w1, total1, cut, (Number) 8 + (Number) ((total1 - cut) / 2000), listening1) : eac-open(st, w1, total1, cut, (Number) 8 + (Number) ((total1 - cut) / 2000), listening1));
+                let h = verdict[0] < 0 ? h0 : eac-judged(h0, verdict[0]);
                 !ewl-running?(deadline) ? live : {
                     let now = now_unix_ms();
                     let changed = (Comparable) len(lasth) == 0 ? 1 : (String) h[1] == lasth[1] ? 0 : 1;
@@ -196,8 +206,8 @@ section [form.bml] {
                     // moved, and a pass that found no words at all beats quiet: this lane's stamp
                     // now advances while it lives, which is the only thing that makes it a clock.
                     let beat = now - lastquiet > el-beat() ? 1 : 0;
-                    let wrote = (Comparable) words? == 1 ? (Comparable) changed == 1 || (Comparable) beat == 1 ? 1 : 0 : (Comparable) phantom? == 1 ? (Comparable) beat == 1 ? 3 : 0 : (Comparable) beat == 1 ? 2 : 0;
-                    let e = (Comparable) wrote == 1 ? el-emit-live(db, h, now - tend, tend, cut, stable1, fl1) : (Comparable) wrote == 2 ? el-emit-quiet(db, fl1) : (Comparable) wrote == 3 ? el-emit-phantom(db, tags, h[7]) : 0;
+                    let wrote = (Comparable) words? == 1 ? (Comparable) changed == 1 || (Comparable) beat == 1 ? 1 : 0 : (Comparable) phantom? == 1 ? (Comparable) beat == 1 ? 3 : 0 : (Comparable) beat == 1 || (Comparable) len(eac-unheard(h)) > 0 ? 2 : 0;
+                    let e = (Comparable) wrote == 1 ? el-emit-live(db, h, now - tend, tend, cut, stable1, fl1) : (Comparable) wrote == 2 ? el-emit-quiet-of(db, fl1, h) : (Comparable) wrote == 3 ? el-emit-phantom(db, tags, h[7]) : 0;
                     let lq1 = wrote > 0 ? now : lastquiet;
                     // settled: the words have held still long enough to be worth reading,
                     // and they are given once, the moment that becomes true
@@ -213,7 +223,8 @@ section [form.bml] {
                     let why1 = el-cadence?() ? total1 - cut >= el-window() ? "full" : "" : elp-close(now - lastvoice1, tsil, (Comparable) words? == 1 ? stable1 : 0, total1 - cut >= el-window());
                     len(why1) > 0 ? {
                         let review = eac-close(st, w1, total1, cut, (Number) 8 + (Number) ((total1 - cut) / 2000), h[10], best);
-                        let final = review[0];
+                        // a review pass is turbo's own and reads no-speech 0: the line keeps the judge's reading of it
+                        let final = verdict[0] < 0 || len(best) < 11 ? review[0] : eac-judged(review[0], best[7]);
                         // A retired owner cannot publish after its second model pass.
                         !ewl-running?(deadline) ? live : !eac-credible?(final) ? {
                             let ep = eac-words?(final) ? el-emit-refusal(db, final[1], final[7], review) : 0;
@@ -239,13 +250,15 @@ section [form.bml] {
     def el-start(secs, owner) = {
         let snap = ("/Users/ursmuff/.cache/huggingface/hub/models--mlx-community--whisper-tiny/snapshots/" + trim(en-text(read_file("/Users/ursmuff/.cache/huggingface/hub/models--mlx-community--whisper-tiny/refs/main"))));
         let st = el-turbo?() ? nws-open(nws-base(), nws-tokenizer()) : enw-open((snap + "/weights.npz"), enw-tokenizer-path());
+        // turbo cannot say that nobody is speaking (eac-judge): tiny stands beside it as the window's judge
+        let judge = el-turbo?() ? enw-open((snap + "/weights.npz"), enw-tokenizer-path()) : [];
         let mic = ewl-owned?(owner) ? sense_mic_stream_start() : -1;
         let born = ewl-owned?(owner) ? el-emit("born", -120, "", "", 0, "", "", 0, 0) : 0;
         // the lane names its own birth in its own log, so the glass reads who is standing
         // from the lane's mouth and not only from the sensor's bookkeeping
-        let said = print_str(el-cat(["live lane open, pid ", host_pid().str(), ", mic ", mic.str(), ", standing ", secs.str(), " s"]));
+        let said = print_str(el-cat(["live lane open, pid ", host_pid().str(), ", mic ", mic.str(), ", standing ", secs.str(), " s", (Comparable) len(judge) == 0 ? "" : ", tiny judges turbo's windows"]));
         // The first real chunk initializes the noise estimate; pre-roll keeps its audio available.
-        let frames = el-loop(st, [], 0, 0, 0, 0, now_unix_ms(), ewl-session((Number) now_unix_ms() + (Number) (1000 * secs), owner), 0, [], 0 - 1, [], [], 0, elp-born(), "", 0,record_new(0,"at",-1));
+        let frames = el-loop(st, [], 0, 0, 0, 0, now_unix_ms(), ewl-session((Number) now_unix_ms() + (Number) (1000 * secs), owner), 0, [], 0 - 1, [], [], 0, elp-born(), "", 0,record_new(0,"at",-1,"judge",judge,"quiet",0));
         let stopmic = sense_mic_stream_stop();
         let done = ewl-owned?(owner) ? el-emit("done", -120, "", "", 0, "", "", 0, 0) : 0;
         let segdone = ewl-owned?(owner) ? sbt-append(el-segs(), ("done" + el-nl())) : 0;

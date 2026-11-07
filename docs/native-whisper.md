@@ -66,3 +66,18 @@ commits, 3 phantoms (the glass's tiny lane: 94 in the same seconds); the hook ca
 won't you take me?", "Won't you take me? Take me." at mean logprob −0.09, "I wanna go to function
 down" for *Funkytown* — at ~230–250 ms encode + 10–70 ms decode per pass. Without cadence the floor
 follower learned the song as quiet (8 passes in 90 s, each a sub-second pause commit, each "you").
+
+Turbo cannot say that nobody is speaking. Its first night on cadence (2026-11-06 18:59 to 11-07 10:35)
+closed 5476 lines, one every 8 s through the night, and 2257 of them were only "So", "Okay." or
+"Thank you."; 5645 of the 5650 turbo lines read no-speech 0, and its passes filled 10 of the night's
+15.6 hours. Over 8 s of digital silence turbo's sot step puts `<|nospeech|>` at 0.00000, its weight on
+`<|transcribe|>` (0.816), and its line is " Thank you." at −0.459; tiny over the same silence answers
+0.877. Cadence passes on everything, so nothing stood between the night and turbo's words. In the morning
+the same lane read the room's conversation as whole, coherent sentences that tiny never wrote. So
+tiny now stands beside turbo as the window's judge (`eac-judge`): before each pass tiny reads the same
+window's no-speech, a few ms, and that reading takes the pass's no-speech slot, where the close and
+`eac-credible?` read it. Past `enw-doubt-line` the window is quiet and turbo is not asked, except
+every fourth quiet pass in a row, whose words travel on the quiet frame as `unheard`, so the spool keeps
+measuring the judge against what turbo would have said. The room's own 2 s fixture is a limit worth
+knowing: turbo hears "Okay, let's try the guitar." as "Like, Pretor Kisawa." in an 8 s window and as
+"Okay." in a 30 s one, where tiny hears it whole. Witness: `form/form-stdlib/tests/ear-judge-band.bml` (63).
