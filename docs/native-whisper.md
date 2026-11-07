@@ -76,7 +76,9 @@ closed 5476 lines, one every 8 s through the night, and 2257 of them were only "
 the same lane read the room's conversation as whole, coherent sentences that tiny never wrote. So
 tiny now stands beside turbo as the window's judge (`eac-judge`): before each pass tiny reads the same
 window's no-speech, a few ms, and that reading takes the pass's no-speech slot, where the close and
-`eac-credible?` read it. Past `enw-doubt-line` the window is quiet and turbo is not asked, except
+`eac-credible?` read it. The judge's line is its own (`eac-judge-milli`, 0.85): the room's conversation
+read 0.29–0.82 in its first judged minutes, crowding tiny's 0.75, while silence reads 0.877 (digital) and
+0.90–0.92 (the quiet room). Past it the window is quiet and turbo is not asked, except
 every fourth quiet pass in a row, whose words travel on the quiet frame as `unheard`, so the spool keeps
 measuring the judge against what turbo would have said. The room's own 2 s fixture is a limit worth
 knowing: turbo hears "Okay, let's try the guitar." as "Like, Pretor Kisawa." in an 8 s window and as
