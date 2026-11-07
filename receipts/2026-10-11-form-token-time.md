@@ -248,6 +248,15 @@ The ledger now counts what each bucket carried. The 40-question evaluation's one
 device, about 45 ms a token, 7 to a forward on average); the feeds that go by themselves carried 2808 tokens in 213 calls, 145 of them a
 lone token (the scheduler batches one-token feeds only when two or more wait) and 68 real blocks of about 39 tokens (93.3 s wall, 83.9 s
 device, about 31 ms a token). A block of 39 tokens goes through the matrix unit, which does 32 tokens for the price of 8 on a matvec, yet its
-token costs only 30% less than a batched decode token. In the quiet profile of eight prompts' prefill, `nam_matmul` (the LoRA's long
-reduction, one simdgroup an output: 46 tokens by rank 8 is 368 of them for a 3072-deep dot) took 2.5 s against 1.2 s for `nam_affine_mma`,
-5.1 ms a dispatch in prefill and 50 us in decode. The LoRA product, not the quantized matvec, is what prefill waits on.
+token costs only 30% less than a batched decode token.
+
+Correction, same day. This section first said the LoRA's long-reduction `nam_matmul` is what prefill waits on, from a profile of eight
+prompts' prefill (2.5 s of `nam_matmul` against 1.2 s of `nam_affine_mma`, 5.1 ms a dispatch) read by subtracting two runs' totals. A
+direct microbenchmark of the real shapes does not reproduce it: the adapter's rank is 8, and x.A at 46 tokens costs 13 to 38 us a
+dispatch (159 us at k 8192, 101 us for the second half), so a prompt's roughly 112 LoRA products cost under 10 ms of a prefill that takes
+hundreds. The subtraction mixed two runs and the first run's first-use costs; it was not a reading of a warm prefill. A profile of one
+warm 44-token prompt with snapshots around it did not settle where its prefill goes either: its rows summed to 450 ms against 173 ms of
+device busy in the same run (the candle drifted 41 to 95 ms during it), so per-kernel rows taken while neighbours move are not trusted;
+unprofiled, the same prompt cost 341 to 378 ms of device at a candle of 105 to 137 ms (the quiet gate timed out after thirty minutes and
+ran loaded). A prefill by kernel in a window that stays quiet, and whether `nam_affine_mma` at the fp32 matrix-unit rate is its floor, is
+still unmeasured.
