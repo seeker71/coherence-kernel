@@ -35,7 +35,7 @@
 //   questions 64   from 0   per_family 0   limit 96   crossings 0   arms plain,taught,lora
 //   adapter form/form-stdlib/adapters/llama-3.2-3b-form-tokens   traces learn/form-token-traces.rows
 //   deadline_ms 0   dry 0   shared 0   batch 1
-// (batch N, 2 to 8: N questions walk at once and their one-token feeds go in one forward (form-token-eval.bml fte-stream-many;
+// (batch N, 2 to 32: N questions walk at once and their one-token feeds go in one forward (form-token-eval.bml fte-stream-many;
 // native-llama-metal.bml nll-forward-multi), each question to the bits it would have alone; 1 asks one at a time;
 // from: the held-out rows passed over before the first one asked; per_family k > 0: the first k of each family;
 // deadline_ms > 0: no question is begun that long after the door started, and each arm reads only what it asked;
@@ -93,7 +93,7 @@ section [form.bml] {
   def ftev-fed(s, pre) = [s[0], pre[1], pre[0], pre[2], s[4]];
   // The feeds of several streams at once (fte-stream-many): each stream's state after its own feed, as ftev-feed makes it. A stream
   // that has stopped keeps its state, one that would pass its capacity stops, a memory refusal is the same refusal, and a feed of
-  // one token that fits goes with the others in ONE forward (nll-forward-multi, eight streams at most, each to the bits of its own
+  // one token that fits goes with the others in ONE forward (nll-forward-multi, thirty-two streams at most, each to the bits of its own
   // step); a feed of several tokens (Form's seam and observation) is the ordinary prefill.
   def ftev-feed-plan(model, s, ids) = (Comparable) len(s[3]) > 0 ? "keep" : (s[1] + len(ids)) > s[4] ? "capacity" : len(ids) == 1 ? ((Comparable) nlg-chunk(model, 1, s[1]) == 0 ? "pressure" : "one") : "block";
   def ftev-feed-many(session, sts, idss) {
@@ -111,8 +111,8 @@ section [form.bml] {
    else if (String) plan == "one" then [s[0], s[1] + 1, tops[k], "", s[4]]
    else ftev-feed(session, s, ids);
   }
-  // the best three of each stream, eight streams to a forward
-  def ftev-multi-tops(model, ctxs, ids, poss) = nil?(ctxs) ? [] : append(nll-forward-multi(model, take(8, ctxs), take(8, ids), take(8, poss)), ftev-multi-tops(model, drop(8, ctxs), drop(8, ids), drop(8, poss)));
+  // the best three of each stream, as many streams to a forward as nll-forward-multi takes
+  def ftev-multi-tops(model, ctxs, ids, poss) = nil?(ctxs) ? [] : append(nll-forward-multi(model, take(nll-multi-max(), ctxs), take(nll-multi-max(), ids), take(nll-multi-max(), poss)), ftev-multi-tops(model, drop(nll-multi-max(), ctxs), drop(nll-multi-max(), ids), drop(nll-multi-max(), poss)));
   def ftev-end(s) = nothing?(s[0]) ? 0 : nll-context-close(s[0]);
   def ftev-walk(session, limit) {
    let voice = ftev-voice-of(session, limit);
@@ -141,8 +141,8 @@ section [form.bml] {
    let closed = nlg-close(session);
    arms;
   }
-  // `batch N` (2 to 8): N questions walk at once, their one-token feeds in one forward (fte-stream-many); 1 asks one at a time.
-  def ftev-batch-width(n) = n < 1 ? 1 : n > 8 ? 8 : n;
+  // `batch N` (2 to 32): N questions walk at once, their one-token feeds in one forward (fte-stream-many); 1 asks one at a time.
+  def ftev-batch-width(n) = n < 1 ? 1 : n > nll-multi-max() ? nll-multi-max() : n;
   def ftev-replies-many(voice, arm, rows, limit, crossings, width, deadline) = fte-stream-many(voice, map(r => [ftev-prompt(arm, fte-question(r)), (String) arm == "plain" ? nothing() : ftev-observer], rows), limit, crossings, width, deadline);
   def ftev-arm-named(arms, name) = foldl((found, a) => (String) a[0] == name ? a : found, nothing(), arms);
   def ftev-compare(arms, name) {

@@ -226,13 +226,19 @@ kernel void nam_stats(device const float* x [[buffer(0)]],device float* out [[bu
   // epsilon of the scalar walk, not to its bits (the Qwen prefill's matrix unit stands on the same bound). It needs the columns
   // and the group a multiple of 32, which every projection of the 3B model is.
   def nam-mma?(view, tokens) = tokens >= 16 && (view[4] % 64) == 0 && (view[5] % 8) == 0;
-  def nam-mt-kernel(view, tokens) = nam-mma?(view, tokens) ? "nam_affine_mma" : nam-decode?(view, tokens) ? "nam_affine_v1" : nam-mt-four?(view) ? "nam_affine_mt4" : "nam_affine_mt";
-  def nam-mt-groups(view,tokens) = nam-mma?(view, tokens) ? ((tokens + 31) / 32) * ((view[3] + 31) / 32) : nam-decode?(view, tokens) ? view[3] : (nam-mt-four?(view) ? view[3] / 4 : view[3]) * ((tokens + 7) / 8);
-  def nam-linear-mt(view,x,y,tokens) = tokens <= 0 ? form_error("native affine token count must be positive") : nam-linear-mt-grid(view,x,y,tokens,0,nam-mt-groups(view,tokens));
-  def nam-linear-mt-grid(view,x,y,tokens,first,count) = first >= count ? 1 : {
+  def nam-mt-kernel(view, tokens) = nam-mt-kernel-by(view, tokens, nam-mma?(view, tokens));
+  def nam-mt-kernel-by(view, tokens, mma) = mma ? "nam_affine_mma" : nam-decode?(view, tokens) ? "nam_affine_v1" : nam-mt-four?(view) ? "nam_affine_mt4" : "nam_affine_mt";
+  def nam-mt-groups(view,tokens) = nam-mt-groups-by(view, tokens, nam-mma?(view, tokens));
+  def nam-mt-groups-by(view,tokens,mma) = mma ? ((tokens + 31) / 32) * ((view[3] + 31) / 32) : nam-decode?(view, tokens) ? view[3] : (nam-mt-four?(view) ? view[3] / 4 : view[3]) * ((tokens + 7) / 8);
+  def nam-linear-mt(view,x,y,tokens) = nam-linear-mt-by(view,x,y,tokens,nam-mma?(view,tokens));
+  // The same product on the scalar kernels at any token count, never the matrix unit: a token's row equals the same token decoded
+  // alone, to the bit, whatever its neighbors in the block (the batched decode's contract; nll-forward-multi).
+  def nam-linear-exact(view,x,y,tokens) = nam-reference?() ? nam-linear-ref(view,x,y,tokens) : nam-linear-mt-by(view,x,y,tokens,0);
+  def nam-linear-mt-by(view,x,y,tokens,mma) = tokens <= 0 ? form_error("native affine token count must be positive") : nam-linear-mt-grid(view,x,y,tokens,0,nam-mt-groups-by(view,tokens,mma),mma);
+  def nam-linear-mt-grid(view,x,y,tokens,first,count,mma) = first >= count ? 1 : {
    let width = (count - first) < AffineDispatchGroups() ? (count - first) : AffineDispatchGroups();
-   let sent = nam-run-tg(nam-mt-kernel(view,tokens),[view[0],view[1],view[2],x,y],[view[3],view[4],tokens,view[5],view[6],first % AffineIndexWord(),first / AffineIndexWord()],width,nam-mma?(view,tokens) ? 256 : 32);
-   nam-linear-mt-grid(view,x,y,tokens,first + width,count);
+   let sent = nam-run-tg(nam-mt-kernel-by(view,tokens,mma),[view[0],view[1],view[2],x,y],[view[3],view[4],tokens,view[5],view[6],first % AffineIndexWord(),first / AffineIndexWord()],width,mma ? 256 : 32);
+   nam-linear-mt-grid(view,x,y,tokens,first + width,count,mma);
   };
   // Bound each cooperative grid while retaining every output's global index.
   def nam-linear-lanes(view,x,y,tokens,transpose) = tokens <= 0 ? form_error("native affine token count must be positive") : nam-linear-grid(view,x,y,tokens,transpose,0,tokens * (transpose ? view[4] : view[3]));

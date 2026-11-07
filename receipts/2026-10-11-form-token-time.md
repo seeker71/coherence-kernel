@@ -216,3 +216,28 @@ scales; I had not read it before touching a kernel. The band now maps its tensor
 `uint*` load, green against the byte one), and the kernel says why it reads bytes. What was not settled: the machine ran 3 to 5 times
 slower than its quiet state through most of the afternoon (neighbouring doors; the candle read 60 to 170 ms against 28), so no
 whole-evaluation wall-clock is claimed for this change.
+
+## 2026-11-07: the batched step on a quiet machine, and a block of thirty-two
+
+On a quiet GPU (candle 27 ms; the neighbours were browser renderers, so the profile waited for a candle under 45 ms) eight streams step in
+28.0 ms: the device busy 24.3 ms (87%), the host 3.6 ms. Per step the block kernel `nam_affine_mt4` is about 23 of the profiled 26.9 ms
+(197 dispatches, 116 us each) and every other kernel together about 4 ms (628 dispatches a step), so fusing the small kernels cannot give
+more than a few percent. The block kernel's cost goes with the tokens (5, 8, 32 tokens: 5.4, 7.1, 22.5 ms for eight products of the 3B
+shape, one loaded window), so it is bound by its own arithmetic, not by the weights it reads.
+
+The batched forward now takes up to thirty-two streams: the three cache kernels (`nll_store8`, `nll_scores8`, `nll_attend8`) take a `base`
+and run once a group of eight streams, each group at its offset in the block; every projection and the head ran on the matrix unit past
+fifteen tokens, and the matrix unit answers to an epsilon of the scalar walk, not to its bits: twenty streams picked the same ids and wrote
+the same caches but every logits row differed in its low bits (the first run of claim 32 of `nll-multi-band`, 31 of 63). The batched
+forward therefore uses `nam-linear-exact` (the scalar kernels at any token count) for its projections and its head, and claim 32 holds
+twenty streams to their own one-token steps to the byte, two steps (63). On the real model every one of 24 streams carries the ids its
+width-8 run gives, and the 40-question evaluation at `batch 24` reads exactly the batch-8 outcomes (29 exact, 70 controls, 68
+observations, 2512 IDs). Per stream a step costs 21% less at width 24 than at width 8 (30.8 to 24.2 ms, loaded machine); the evaluation
+still averages 7 questions to a round at width 24 (493 rounds of 5 at width 8, 325 of 7), and its feeds one stream at a time (the
+multi-token feeds 59.9 s, the prompts 22.7 s, device busy 51.4 and 17.2 s, loaded) are now most of the feed time: the next floor is to
+feed several streams' blocks together.
+
+What stays a choice for Urs: the matrix unit at sixteen tokens and more costs about what the block kernel costs at eight (7.7 ms against
+7.1 ms for eight products at 8 tokens, 8.7 ms at 32 tokens against 22.5), so a block of thirty-two on it would carry the matvec of four
+steps for the price of one, at the price that a stream's logits would depend on how many neighbours it has (picks and caches agreed on the
+fixture; the bytes did not). That is a quality-policy call, not a kernel one.

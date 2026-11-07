@@ -3,21 +3,27 @@
 ; preludes: form-stdlib/core.fk form-stdlib/tests/native-llama-fixture.bml
 ; REQUIRES: the Metal carrier (a fresh worktree builds it: form-stdlib/metal-carrier.bml)
 ;
-; nll-forward-multi feeds one token to each of up to eight streams (each its own context and position) as one block: the
-; projections, norms and LoRA on a block of eight, rope at each stream's position, the KV store into each stream's cache, the scores
-; and the attend over each stream's history, the best three of each stream's logits. This band takes the two-layer fixture and three
-; streams of different lengths (prompts of 3, 6 and 4 tokens), prefilled the same way twice, once to be stepped one stream at a time
-; (nll-forward, one token) and once to be stepped together.
+; nll-forward-multi feeds one token to each of up to thirty-two streams (each its own context and position) as one block: the
+; projections, norms and LoRA on the whole block, rope at each stream's position, the KV store into each stream's cache, the scores
+; and the attend over each stream's history (a group of eight streams at a time, each group at its offset in the block), the best
+; three of each stream's logits. This band takes the two-layer fixture and three streams of different lengths (prompts of 3, 6 and 4
+; tokens), prefilled the same way twice, once to be stepped one stream at a time (nll-forward, one token) and once to be stepped
+; together; claim 32 does the same with twenty streams (three groups of eight, the last of four). Twenty tokens is past sixteen,
+; where the ordinary projection takes the matrix unit and answers to an epsilon of the scalar walk (every logits row differed in
+; its low bits, 2026-11-07); the batched forward stays on the scalar kernels (nam-linear-exact) so a stream's bytes never depend on
+; how many neighbors it has.
 ;
-; Verdict 31 when every claim lands:
+; Verdict 63 when every claim lands:
 ;   1   the best three of every stream equal those of its own one-token step
 ;   2   every stream's logits row equals its own one-token step's, to the byte
 ;   4   every layer's K and V cache of every stream, whole, equals the stepped-alone stream's: the token was written at the stream's
 ;       own position and nothing else moved
 ;   8   a second step (each stream feeding what it picked) agrees again in the picks, the logits and the caches: the positions
 ;       the first step wrote are the history the second reads
-;   16  a request that does not fit is refused by name, not run: nine streams, a position past a stream's context, a token off the
-;       vocabulary
+;   16  a request that does not fit is refused by name, not run: thirty-three streams, a position past a stream's context, a token off
+;       the vocabulary
+;   32  twenty streams (the three prompts and five ids cycled, each its own context) step together to every stream's own one-token
+;       step: the best three, the logits to the byte, every layer's caches whole, and again after a second step
 section [form.bml] {
  class NllMultiBand {
   def nmb-bit(ok, bit) = ok ? bit : 0;
@@ -64,12 +70,30 @@ section [form.bml] {
    let single2 = map(i => nmb-alone(m, alone[i], next[i], poss2[i]), range(0, 3));
    let multi2 = nll-forward-multi-logits(m, together, next, poss2);
    let c4 = (String) value_str(multi2[0]) == (String) value_str(map(s => s[0], single2)) && (String) multi2[1] == (String) str-join(map(s => s[1], single2)) && nmb-all-caches-equal?(m, alone, together);
-   let refused9 = try nll-forward-multi(m, map(i => together[0], range(0, 9)), map(i => 1, range(0, 9)), map(i => 0, range(0, 9))) catch "refused";
+   let refused9 = try nll-forward-multi(m, map(i => together[0], range(0, 33)), map(i => 1, range(0, 33)), map(i => 0, range(0, 33))) catch "refused";
    let refusedPos = try nll-forward-multi(m, [together[0]], [1], [nmb-cap()]) catch "refused";
    let refusedId = try nll-forward-multi(m, [together[0]], [vocab], [3]) catch "refused";
    let c5 = (String) refused9 == "refused" && (String) refusedPos == "refused" && (String) refusedId == "refused";
    let closed = map(c => nll-context-close(c), append(alone, together));
-   nmb-bit(c1, 1) + nmb-bit(c2, 2) + nmb-bit(c3, 4) + nmb-bit(c4, 8) + nmb-bit(c5, 16);
+   nmb-bit(c1, 1) + nmb-bit(c2, 2) + nmb-bit(c3, 4) + nmb-bit(c4, 8) + nmb-bit(c5, 16) + nmb-bit(nmb-wide(m), 32);
+  }
+  // twenty streams against their own one-token steps: two steps, the picks, the logits and the caches
+  def nmb-wide-ids() = [7, 11, 13, 5, 9];
+  def nmb-wide(m) {
+   let g = m[0]; let n = 20;
+   let prompts = map(i => nmb-prompts()[i % 3], range(0, n));
+   let alone = map(p => nmb-ready(m, p), prompts);
+   let together = map(p => nmb-ready(m, p), prompts);
+   let ids = map(i => nmb-wide-ids()[i % 5], range(0, n)); let poss = map(p => len(p), prompts);
+   let single = map(i => nmb-alone(m, alone[i], ids[i], poss[i]), range(0, n));
+   let multi = nll-forward-multi-logits(m, together, ids, poss);
+   let first = (String) value_str(multi[0]) == (String) value_str(map(s => s[0], single)) && (String) multi[1] == (String) str-join(map(s => s[1], single)) && nmb-all-caches-equal?(m, alone, together);
+   let next = map(s => s[0][0], single); let poss2 = map(p => p + 1, poss);
+   let single2 = map(i => nmb-alone(m, alone[i], next[i], poss2[i]), range(0, n));
+   let multi2 = nll-forward-multi-logits(m, together, next, poss2);
+   let second = (String) value_str(multi2[0]) == (String) value_str(map(s => s[0], single2)) && (String) multi2[1] == (String) str-join(map(s => s[1], single2)) && nmb-all-caches-equal?(m, alone, together);
+   let closed = map(c => nll-context-close(c), append(alone, together));
+   first && second && len(multi[1]) == n * g[5] * 4;
   }
  }
  nmb-score();
