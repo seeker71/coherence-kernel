@@ -241,3 +241,13 @@ What stays a choice for Urs: the matrix unit at sixteen tokens and more costs ab
 7.1 ms for eight products at 8 tokens, 8.7 ms at 32 tokens against 22.5), so a block of thirty-two on it would carry the matvec of four
 steps for the price of one, at the price that a stream's logits would depend on how many neighbours it has (picks and caches agreed on the
 fixture; the bytes did not). That is a quality-policy call, not a kernel one.
+
+### The feeds by tokens (2026-11-07, batch 24, a loaded machine: candle 70 to 170 ms, so ratios only)
+
+The ledger now counts what each bucket carried. The 40-question evaluation's one-token forwards carried 2299 tokens (106.9 s wall, 102.9 s
+device, about 45 ms a token, 7 to a forward on average); the feeds that go by themselves carried 2808 tokens in 213 calls, 145 of them a
+lone token (the scheduler batches one-token feeds only when two or more wait) and 68 real blocks of about 39 tokens (93.3 s wall, 83.9 s
+device, about 31 ms a token). A block of 39 tokens goes through the matrix unit, which does 32 tokens for the price of 8 on a matvec, yet its
+token costs only 30% less than a batched decode token. In the quiet profile of eight prompts' prefill, `nam_matmul` (the LoRA's long
+reduction, one simdgroup an output: 46 tokens by rank 8 is 368 of them for a 3072-deep dot) took 2.5 s against 1.2 s for `nam_affine_mma`,
+5.1 ms a dispatch in prefill and 50 us in decode. The LoRA product, not the quantized matvec, is what prefill waits on.
