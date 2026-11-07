@@ -1,0 +1,97 @@
+// decode-real-smoke-run.bml — the real 3B model decodes what it decoded, and a stream's bytes are its own at any width.
+//
+//   ./fkwu observe/decode-real-smoke-run.bml        about 25 s on a quiet machine
+//
+// The bands hold a kernel to synthetic tensors, and every synthetic tensor starts at offset 0 with a tidy shape; the real model's
+// tensors start at any byte offset (a `uint*` weight load decoded noise while every band was green, 2026-11-06) and its matrix-unit
+// path answers to an epsilon (twenty streams on it picked the same ids and wrote the same caches with every logits row different in
+// its low bits, 2026-11-07). Run this before a `nam_*` or `nll_*` kernel, a kernel selector or the batched forward changes: it is the
+// real-model check CURRENT_FLOOR.md's kernel paragraph names, as one command.
+//
+// The eight evaluation questions of the batched decode, twenty-four steps each, stepped together (nll-forward-multi):
+//   1  the first question's ids are the ones the model gave on 2026-11-07 (the voice adapter llama-3.2-3b-voice-native, greedy):
+//      "the result, follow the order of operations: 1. Multiply 17 and 23"
+//   2  the same eight questions inside a block of twenty-four streams (each cycled three times) give every stream the ids of its
+//      width-8 run: nothing a stream computes depends on its neighbours
+//   4  one step's logits rows, bytes, at width 24 equal the width-8 rows, and the first stream's equal its own one-token step's
+// Verdict 7 when every claim lands. With no model on this machine the door says it is held and ends, claiming nothing.
+// preflight-exec: forbidden
+import form-stdlib/native-llama-voice.bml;
+import form-stdlib/model-registry.bml;
+import form-stdlib/metal-carrier.bml;
+section [form.bml] {
+ class DecodeRealSmokeRun {
+  def drs-questions() = ["What is 17 * 23 + 4?", "Which is larger, 398 or 411?", "How many letters are in the word substrate?", "Add 351 and 70, then multiply by 801.", "Is 91 a prime number?", "What is 12 squared minus 5?", "Name the capital of France.", "What is 1000 divided by 8?"];
+  def drs-oracle() = [11294, 279, 1121, 11, 1833, 279, 2015, 315, 7677, 1473, 16, 13, 72159, 220, 1114, 323, 220, 1419, 25, 220, 1114, 353, 220, 1419];
+  def drs-steps() = 24;
+  def drs-bit(ok, bit) = ok ? bit : 0;
+  // a stream: [its context, the position of the token it feeds, that token]
+  def drs-ready(model, tk, q) {
+   let ids = nlt-chat(tk, q);
+   let ctx = nll-context(model, len(ids) + drs-steps() + 8);
+   let pre = nlg-prefill(model, ctx, ids, 0, "");
+   [ctx, pre[1], pre[0][0]];
+  }
+  def drs-streams(model, tk, n) = map(i => drs-ready(model, tk, drs-questions()[i % 8]), range(0, n));
+  def drs-together(model, sts, steps, trail) = steps <= 0 ? trail : drs-more(model, sts, steps, trail);
+  def drs-more(model, sts, steps, trail) {
+   let tops = nll-forward-multi(model, map(s => s[0], sts), map(s => s[2], sts), map(s => s[1], sts));
+   drs-together(model, map(i => [sts[i][0], sts[i][1] + 1, tops[i][0]], range(0, len(sts))), steps - 1, cons(map(i => tops[i][0], range(0, len(sts))), trail));
+  }
+  // every stream's id sequence of a run of n streams
+  def drs-ids(model, tk, n) {
+   let sts = drs-streams(model, tk, n);
+   let trail = reverse(drs-together(model, sts, drs-steps(), []));
+   let freed = map(s => nll-context-close(s[0]), sts);
+   map(j => map(r => r[j], trail), range(0, n));
+  }
+  // one step's logits rows of n streams (the eight questions cycled), bytes
+  def drs-rows(model, tk, n) {
+   let sts = drs-streams(model, tk, n);
+   let out = nll-forward-multi-logits(model, map(s => s[0], sts), map(s => s[2], sts), map(s => s[1], sts));
+   let freed = map(s => nll-context-close(s[0]), sts);
+   (String) out[1];
+  }
+  // the first question's own one-token step, bytes
+  def drs-alone(model, tk) {
+   let s = drs-ready(model, tk, drs-questions()[0]);
+   let r = nll-forward(model, s[0], [s[2]], s[1], 0);
+   let bytes = (String) metal_buf_read(r[0], 0, model[0][5] * 4);
+   let freed = nll-forward-close(r);
+   let closed = nll-context-close(s[0]);
+   bytes;
+  }
+  // substring is (text, start, end), not (text, start, length): row i of a block of rows
+  def drs-row-at(bytes, i, rowBytes) = (String) substring(bytes, i * rowBytes, (i + 1) * rowBytes);
+  def drs-score(model, tk) {
+   let w8 = drs-ids(model, tk, 8);
+   let w24 = drs-ids(model, tk, 24);
+   let c1 = (String) value_str(w8[0]) == (String) value_str(drs-oracle());
+   let c2 = len(filter(j => (String) value_str(w24[j]) != (String) value_str(w8[j % 8]), range(0, 24))) == 0;
+   let rowBytes = model[0][5] * 4;
+   let r8 = drs-rows(model, tk, 8);
+   let r24 = drs-rows(model, tk, 24);
+   let alone = drs-alone(model, tk);
+   let c3 = len(r8) == 8 * rowBytes && len(r24) == 24 * rowBytes && len(filter(j => (String) drs-row-at(r24, j, rowBytes) != (String) drs-row-at(r8, j % 8, rowBytes), range(0, 24))) == 0 && (String) drs-row-at(r8, 0, rowBytes) == alone;
+   print_str("decode-real-smoke: ids " ++ (c1 ? "oracle" : "OFF the oracle") ++ ", width 24 " ++ (c2 ? "equals" : "DIFFERS from") ++ " width 8 in ids, logits bytes " ++ (c3 ? "equal across widths and the one-token step" : "DIFFER across widths or from the one-token step"));
+   drs-bit(c1, 1) + drs-bit(c2, 2) + drs-bit(c3, 4);
+  }
+  def drs-run() {
+   let a = mca-admit(".hearth/carrier.log", ".hearth/carrier.err");
+   let reg = mr-find("llama32-3b-mlx-4bit");
+   let session = (Comparable) len(mr-path(reg)) == 0 ? "" : try nlg-open(mr-path(reg), "form/form-stdlib/adapters/llama-3.2-3b-voice-native") catch "";
+   (Comparable) len(session) == 0 ? drs-held() : drs-open(session);
+  }
+  def drs-held() {
+   print_str("decode-real-smoke: held — llama32-3b-mlx-4bit is not on this machine, so no real-model claim is made");
+   0;
+  }
+  def drs-open(session) {
+   let verdict = drs-score(session[0], session[1]);
+   let closed = nlg-close(session);
+   print_str("decode-real-smoke: verdict " ++ verdict.str() ++ " of 7");
+   verdict == 7 ? 7 : form_error("decode-real-smoke: a real-model claim did not land (verdict " ++ verdict.str() ++ " of 7)");
+  }
+ }
+ drs-run();
+}

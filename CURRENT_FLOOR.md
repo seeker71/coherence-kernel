@@ -503,7 +503,10 @@ from 52 to 6 seconds, tokenization identical over 256,038 corpus ids; `nlg-open`
 the real model's buffers while the band's synthetic ones passed; a weight word loaded through `uint*` did the same on 2026-11-06
 (decode into noise, every band at offset 0 green), so `native-affine-mt-band` claim 512 now maps its tensors from a file at odd
 byte offsets, as a safetensors model's are, and `nam_affine_mt4` reads bytes only. A kernel change still goes through
-`observe/native-lora-score-bench-run.bml` on real rows before the trainer. The batched decode (`nll-forward-multi`) takes up to 32
+`observe/native-lora-score-bench-run.bml` on real rows before the trainer, and a `nam_*`/`nll_*` kernel, a kernel selector or the
+batched forward through `observe/decode-real-smoke-run.bml` (about 25 s, the real 3B: its ids are the oracle's, 24 streams carry their
+width-8 ids, and the logits bytes agree across widths and with the one-token step; 7 of 7, read 3 against the matrix unit, held when
+the model is not on the machine). The batched decode (`nll-forward-multi`) takes up to 32
 streams, attention by groups of eight, and stays on the scalar kernels (`nam-linear-exact`): the matrix unit past fifteen tokens
 answers to an epsilon, so every logits row of a twenty-stream block differed in its low bits (`nll-multi-band` claim 32 holds the
 bytes; 63). Bands: `native-affine-mt-band` 1023, `nll-multi-band` 63,
