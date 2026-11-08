@@ -450,6 +450,10 @@ static size_t heap_text_allocations, heap_list_allocations, heap_collection_epoc
 struct Form {
     FormKind kind;
     size_t syntax_id;
+    /* A call form's resolved head (operation and function slots), valid while
+     * head_epoch equals global_epoch; zero never matches. */
+    uint64_t head_epoch;
+    size_t head_operation, head_function;
     Value syntax_view;
     int syntax_view_ready;
     const char *source;
@@ -1783,8 +1787,14 @@ static void capture_program(CellProgram *program) {
     program->units = loaded_units; program->unit_count = loaded_count; program->unit_capacity = loaded_capacity;
 }
 
+typedef struct { const char *text; size_t length; size_t index; uint64_t epoch; } GlobalHit;
+enum { GLOBAL_HIT_SLOTS = 8192 };
+static GlobalHit global_hits[GLOBAL_HIT_SLOTS];
+static uint64_t global_epoch = 1;
+
 static void select_program(CellProgram *program) {
     if (program == current_program) return;
+    ++global_epoch;
     capture_program(current_program);
     functions = program->functions; function_count = program->function_count; function_capacity = program->function_capacity;
     globals = program->globals; global_count = program->global_count; global_capacity = program->global_capacity;
@@ -2129,6 +2139,7 @@ static void bind_definition(Form *form) {
     functions[function_count].previous_function = name_index_find(&function_names, name->text, name->text_length) + 1;
     name_index_set(&function_names, name->text, name->text_length, function_count);
     function_count = needed;
+    ++global_epoch;
     form->is_bound = 1;
 }
 
@@ -6910,7 +6921,16 @@ static int find_value_binding(const char *bytes, size_t length, Value *out) {
         *out = integer_value(WORD_FALSE);
         return 1;
     }
-    size_t global = name_index_find(&global_names, bytes, length);
+    /* A symbol's text pointer is stable for its form, so its global slot is
+     * cached until any write to the global table (global_epoch) moves it. */
+    GlobalHit *hit = &global_hits[(((uintptr_t)bytes >> 3) ^ length) & (GLOBAL_HIT_SLOTS - 1)];
+    size_t global;
+    if (hit->text == bytes && hit->length == length && hit->epoch == global_epoch &&
+        (hit->index == SIZE_MAX || bytes_equal(globals[hit->index].bytes, globals[hit->index].length, bytes, length))) global = hit->index;
+    else {
+        global = name_index_find(&global_names, bytes, length);
+        *hit = (GlobalHit){bytes, length, global, global_epoch};
+    }
     if (global != SIZE_MAX) {
         *out = globals[global].value;
         return 1;
@@ -6926,7 +6946,13 @@ static Value value_from_atom(Form *form) {
     if (form->unresolved) return nothing_value();
     if (form->kind == FORM_INTEGER) return integer_value(form->integer);
     if (form->kind == FORM_REAL) return real_value(form->real);
-    if (form->kind == FORM_TEXT) return text_value(form->text, form->text_length);
+    if (form->kind == FORM_TEXT) {
+        /* A literal's bytes are parser-owned, terminated and never freed or
+         * written, so the value borrows them: no allocation, nothing to collect. */
+        Value literal = nothing_value();
+        literal.kind = KIND_TEXT; literal.text = form->text; literal.text_length = form->text_length;
+        return literal;
+    }
     if (form->kind == FORM_SYMBOL) {
         Value bound;
         if (find_value_binding(form->text, form->text_length, &bound)) return bound;
@@ -7013,8 +7039,22 @@ static void begin_call(Form *form) {
         begin_function_call(form, bound);
         return;
     }
-    const Operation *operation = find_operation_text(head->text, head->text_length);
-    Binding *function = operation == NULL ? find_function_owned(head->text, head->text_length, form->path) : NULL;
+    const Operation *operation;
+    Binding *function;
+    if (form->head_epoch == global_epoch) {
+        operation = form->head_operation == SIZE_MAX ? NULL : &operations[form->head_operation];
+        function = form->head_function == SIZE_MAX ? NULL : &functions[form->head_function];
+    } else {
+        operation = find_operation_text(head->text, head->text_length);
+        function = operation == NULL ? find_function_owned(head->text, head->text_length, form->path) : NULL;
+        /* Only a slot in this program's own table is cached; a closure owner's is looked up each time. */
+        int own = function == NULL || (function >= functions && function < functions + function_count);
+        if (own) {
+            form->head_operation = operation == NULL ? SIZE_MAX : (size_t)(operation - operations);
+            form->head_function = function == NULL ? SIZE_MAX : (size_t)(function - functions);
+            form->head_epoch = global_epoch;
+        }
+    }
     if (function != NULL) {
         begin_function_call(form, function->value);
         return;
@@ -7202,25 +7242,28 @@ static int field_view_needed(Value value) {
     return package == 0 || (package == 1 && level == 1 && (type == 2 || type == 5 || type == 7));
 }
 
-static int enter_field_owner(size_t index, Frame frame) {
-    const char *name = frame.operation->id == OP_FIELD ? frame.operation->spelling : NULL;
+/* Reads the frame in place; the 552-byte copy is taken only when the call is
+ * actually redirected to the field owner. */
+static int enter_field_owner(size_t index, const Frame *view) {
+    const Operation *op = view->operation; const Value *arg = view->arguments;
+    const char *name = op->id == OP_FIELD ? op->spelling : NULL;
     Value args = nothing_value();
-    if (frame.operation->offer == offer_kernel_live && frame.arguments[0].kind == KIND_INTEGER && frame.arguments[0].integer == (long long)getpid()) name = "kernel_live";
-    if (frame.operation->offer == offer_kernel_stat && frame.arguments[0].kind == KIND_INTEGER) {
-        long long key = frame.arguments[0].integer;
+    if (op->offer == offer_kernel_live && arg[0].kind == KIND_INTEGER && arg[0].integer == (long long)getpid()) name = "kernel_live";
+    if (op->offer == offer_kernel_stat && arg[0].kind == KIND_INTEGER) {
+        long long key = arg[0].integer;
         if (key == 4 || key == 58 || key == 59 || key == 60 || key == 70 || key == 71 || key == 72 || (key>=79 && key<=86)) name = "kernel_stat";
     }
-    if ((frame.operation->offer == offer_node_payload || frame.operation->offer == offer_node_category ||
-         frame.operation->offer == offer_node_children || frame.operation->offer == offer_node_source ||
-         frame.operation->offer == offer_float_value) && field_view_needed(frame.arguments[0])) name = frame.operation->spelling;
-    if (frame.operation->offer == offer_node_source && frame.arguments[0].kind == KIND_NODE &&
-        ((frame.arguments[0].cell != NULL && frame.arguments[0].cell->field_ref != 0) ||
-         (frame.arguments[0].cell == NULL && fk_nid_get((fk_node_id)frame.arguments[0].integer,0)!=63))) name = "node_source";
-    if (frame.operation->offer == offer_fb_record && frame.arguments[0].kind == KIND_NODE &&
-        (frame.arguments[0].cell == NULL || frame.arguments[0].cell->field_ref != 0)) name = "fb_record";
-    if (frame.operation->offer == offer_float_leaf && frame.arguments[0].kind == KIND_INTEGER) {
-        long long mode = frame.arguments[0].integer;
-        Value value = frame.arguments[1];
+    if ((op->offer == offer_node_payload || op->offer == offer_node_category ||
+         op->offer == offer_node_children || op->offer == offer_node_source ||
+         op->offer == offer_float_value) && field_view_needed(arg[0])) name = op->spelling;
+    if (op->offer == offer_node_source && arg[0].kind == KIND_NODE &&
+        ((arg[0].cell != NULL && arg[0].cell->field_ref != 0) ||
+         (arg[0].cell == NULL && fk_nid_get((fk_node_id)arg[0].integer,0)!=63))) name = "node_source";
+    if (op->offer == offer_fb_record && arg[0].kind == KIND_NODE &&
+        (arg[0].cell == NULL || arg[0].cell->field_ref != 0)) name = "fb_record";
+    if (op->offer == offer_float_leaf && arg[0].kind == KIND_INTEGER) {
+        long long mode = arg[0].integer;
+        Value value = arg[1];
         if (mode == 2) { name = "make_float64"; args = list_from(&value, 1); }
         else if (mode == 0 && field_view_needed(value)) { name = "float_value"; args = list_from(&value, 1); }
         else if (mode == 35 && value_proper_list(value) && value.item_count == 2) {
@@ -7234,6 +7277,7 @@ static int enter_field_owner(size_t index, Frame frame) {
         }
     }
     if (name == NULL) return 0;
+    Frame frame = frames[index];
     if (native_field_entry.kind != KIND_FUNCTION) fail("native field Form owner is not admitted");
     if (args.kind == KIND_NOTHING) args = list_from(frame.arguments, frame.argument_count);
     Value operation_name = text_value(name, strlen(name));
@@ -7249,21 +7293,36 @@ static int enter_field_owner(size_t index, Frame frame) {
 }
 
 static void step_eager(size_t index) {
-    Frame frame = frames[index];
-    if (frame.has_incoming) {
-        frame.arguments[frame.next_part] = frame.incoming;
-        frame.has_incoming = 0;
-        frame.next_part = checked_add(frame.next_part, ONE_ELEMENT);
-        frames[index] = frame;
+    /* The hot paths read and write the frame in place. The pointer is used only
+     * before any call that can append a frame and so move the frame array. */
+    Frame *live = &frames[index];
+    if (live->has_incoming) {
+        live->arguments[live->next_part] = live->incoming;
+        live->has_incoming = 0;
+        live->next_part = checked_add(live->next_part, ONE_ELEMENT);
         return;
     }
-    if (frame.next_part >= frame.argument_count) {
-        if (frame.operation == NULL) {
-            run_function_body(index);
-            return;
-        }
-        operations[(size_t)(frame.operation - operations)].calls = checked_add(frame.operation->calls, ONE_ELEMENT);
-        if (enter_field_owner(index, frame)) return;
+    if (live->next_part < live->argument_count) {
+        Form *child = call_argument(live->form, live->next_part);
+        offer_form(child);
+        return;
+    }
+    if (live->operation == NULL) {
+        run_function_body(index);
+        return;
+    }
+    operations[(size_t)(live->operation - operations)].calls = checked_add(live->operation->calls, ONE_ELEMENT);
+    if (enter_field_owner(index, live)) return;
+    live = &frames[index];
+    if (live->operation->id != OP_KERNEL_AST && live->operation->id != OP_METHOD_INVOKE && live->operation->id != OP_FORM_ERROR) {
+        const Operation *operation = live->operation;
+        Value result = operation->offer(live->arguments, live->argument_count);
+        pop_frame();
+        deliver(result);
+        return;
+    }
+    Frame frame = frames[index];
+    {
         if (frame.operation->id == OP_KERNEL_AST) {
             Value query = frame.arguments[1];
             Value command = query.kind == KIND_LIST ? list_at(query, 0) : nothing_value();
@@ -7300,14 +7359,7 @@ static void step_eager(size_t index) {
             step_fail(index);
             return;
         }
-        Value result = frame.operation->offer(frame.arguments, frame.argument_count);
-        pop_frame();
-        deliver(result);
-        return;
     }
-    Form *child = call_argument(frame.form, frame.next_part);
-    frames[index] = frame;
-    offer_form(child);
 }
 
 static void bind_global(const char *bytes, size_t length, Value value) {
@@ -7318,6 +7370,7 @@ static void bind_global(const char *bytes, size_t length, Value value) {
     globals[global_count].value = value;
     name_index_set(&global_names, bytes, length, global_count);
     global_count = needed;
+    ++global_epoch;
 }
 
 static int inside_function(void) {
@@ -9266,6 +9319,7 @@ static void cell_merge_library(CellProgram *library, int with_globals) {
         functions[function_count] = binding;
         functions[function_count].previous_function = name_index_find(&function_names, binding.bytes, binding.length) + 1;
         name_index_set(&function_names, binding.bytes, binding.length, function_count++);
+        ++global_epoch;
     }
     if (with_globals) for (size_t i = 0; i < library->global_count; ++i) {
         Binding binding = library->globals[i];
@@ -9695,6 +9749,57 @@ static int check_image_path(char *out, size_t capacity) {
     return wrote > 0 && (size_t)wrote < capacity;
 }
 
+/* Per-unit clean verdicts. A unit is clean when every name it uses is known; the
+ * known set is every function and top-level let name of the checked program plus
+ * this build's operations. Its marker is keyed by that name set's digest, the
+ * unit's path and bytes, and the build, so removing a name anywhere rechecks every
+ * unit, and editing one unit rechecks only it. A unit with rows is never imaged. */
+typedef struct { const char *bytes; size_t length; } CheckName;
+static CheckName *check_names; static size_t check_name_count, check_name_capacity;
+static void check_name_add(const char *bytes, size_t length) {
+    check_names = grow_list(check_names, &check_name_capacity, sizeof *check_names, check_name_count + 1);
+    check_names[check_name_count++] = (CheckName){bytes, length};
+}
+static void check_name_lets(Form *form) {
+    if (form == NULL || form->kind != FORM_GROUP || form->part_count == 0 || form->parts[0]->kind != FORM_SYMBOL) return;
+    Form *head = form->parts[0];
+    if (bytes_equal_cstr(head->text, head->text_length, "do")) { for (size_t i = 1; i < form->part_count; ++i) check_name_lets(form->parts[i]); }
+    else if (bytes_equal_cstr(head->text, head->text_length, "let") && form->part_count == 3 && form->parts[1]->kind == FORM_SYMBOL)
+        check_name_add(form->parts[1]->text, form->parts[1]->text_length);
+}
+static int check_name_order(const void *a, const void *b) {
+    const CheckName *x = a, *y = b; size_t n = x->length < y->length ? x->length : y->length;
+    int c = memcmp(x->bytes, y->bytes, n);
+    return c != 0 ? c : (x->length > y->length) - (x->length < y->length);
+}
+static uint64_t check_names_digest(CellProgram *root) {
+    check_name_count = 0;
+    for (size_t i = 0; i < root->function_count; ++i) check_name_add(root->functions[i].bytes, root->functions[i].length);
+    for (size_t i = 0; i < root->source_count; ++i) {
+        SourceView *view = &source_views[root->sources[i].serial - 1];
+        for (size_t j = 0; j < view->form_count; ++j) check_name_lets(view->forms[j]);
+    }
+    if (check_name_count > 1) qsort(check_names, check_name_count, sizeof *check_names, check_name_order);
+    static const char build[] = __TIMESTAMP__ " " __DATE__ " " __TIME__;
+    uint64_t key = hash_bytes(VALUE_HASH_OFFSET, build, sizeof build - 1);
+    for (size_t i = 0; i < check_name_count; ++i) {
+        if (i > 0 && check_name_order(&check_names[i - 1], &check_names[i]) == 0) continue;
+        key = hash_bytes(hash_mix(key, 0x0a), check_names[i].bytes, check_names[i].length);
+    }
+    return key;
+}
+static int check_unit_path(char *out, size_t capacity, uint64_t names, SourceView *view) {
+    uint64_t key = hash_mix(names, (uint64_t)view->length);
+    if (view->path != NULL) key = hash_bytes(hash_mix(key, 0x2f), view->path, strlen(view->path));
+    key = hash_bytes(key, view->bytes, view->length);
+    const char *directory = getenv("TMPDIR");
+    if (directory == NULL || directory[0] == TEXT_TERMINATOR) directory = TEMP_DIRECTORY;
+    size_t length = strlen(directory);
+    while (length > 1 && directory[length - 1] == PATH_SEPARATOR) --length;
+    int wrote = snprintf(out, capacity, "%.*s/fkwu-unit-%016llx-%zx", (int)length, directory, (unsigned long long)key, view->length);
+    return wrote > 0 && (size_t)wrote < capacity;
+}
+
 static void check_program_bindings(CellProgram *program) {
     CellProgram *saved = current_program;
     capture_program(saved);
@@ -9703,6 +9808,17 @@ static void check_program_bindings(CellProgram *program) {
     int imaged = check_image_path(image, sizeof image);
     struct stat seen;
     int admitted = imaged && stat(image, &seen) == 0 && S_ISREG(seen.st_mode);
+    CellProgram *root = active_cell != NULL ? active_cell->program : &main_program;
+    uint64_t names = admitted ? 0 : check_names_digest(root);
+    unsigned char *carried = admitted ? NULL : allocate_zeroed(program->source_count + 1, 1);
+    if (!admitted) for (size_t i = 0; i < program->source_count; ++i) {
+        SourceView *view = &source_views[program->sources[i].serial - 1];
+        char unit[4096];
+        if (view->binding_checked || !check_unit_path(unit, sizeof unit, names, view)) continue;
+        if (stat(unit, &seen) == 0 && S_ISREG(seen.st_mode)) {
+            view->binding_checks = list_from(NULL, 0); view->binding_checked = 1; carried[i] = 1;
+        }
+    }
     Value rows;
     if (admitted) rows = list_from(NULL, 0);
     else {
@@ -9747,6 +9863,17 @@ static void check_program_bindings(CellProgram *program) {
             if (syntax_forms[id.integer - 1]->source == view->bytes) checks[count++] = row;
         }
         view->binding_checks = list_from(checks, count); view->binding_checked = 1; free(checks);
+    }
+    if (carried != NULL) {
+        for (size_t i = 0; i < program->source_count; ++i) {
+            SourceView *view = &source_views[program->sources[i].serial - 1];
+            char unit[4096];
+            if (carried[i] || !view->binding_checked || view->binding_checks.kind != KIND_LIST || view->binding_checks.item_count != 0) continue;
+            if (!check_unit_path(unit, sizeof unit, names, view)) continue;
+            int marker = open(unit, O_WRONLY | O_CREAT | O_EXCL, TEXT_FILE_MODE);
+            if (marker >= 0) close(marker);
+        }
+        free(carried);
     }
     for (CellProgram *dependency = cell_programs; dependency != NULL; dependency = dependency->next) {
         if (active_cell == NULL || dependency->admission_owner != active_cell) continue;
@@ -10011,6 +10138,7 @@ static Value cell_execute(Value path, Value argument, Value deadline, Value inpu
             global_count = program->library_globals;
             free(global_names.slots); global_names = (NameIndex){0};
             for (size_t i = 0; i < global_count; ++i) name_index_set(&global_names, globals[i].bytes, globals[i].length, i);
+            ++global_epoch;
         }
         call->diagnostics = program->diagnostics;
         call->errors = program->errors;

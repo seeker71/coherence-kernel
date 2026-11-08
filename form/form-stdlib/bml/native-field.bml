@@ -46,7 +46,13 @@ section [form.bml] {
     let stamp=nps-file-stamp(lease);
     nothing?(stamp) ? form_error("native field "+stage+" currentness stamp unavailable") : stamp;
    }
-   def nfs-read-source(source,offset,count) = value_kind(source)=="string" ? substring(source,offset,offset+count) : nfs-read(source,offset,count);
+   // A source is a whole captured image (string), a descriptor, or a partial
+   // capture [base,bytes,header]: bytes from absolute offset base, header the first 8.
+   def nfs-read-source(source,offset,count) = value_kind(source)=="string" ? substring(source,offset,offset+count)
+    : value_kind(source)=="list" ? (offset+count<=8 ? substring(source[2],offset,offset+count)
+     : offset>=source[0] ? substring(source[1],offset - source[0],offset - source[0]+count) : form_error("native field partial capture does not hold offset "+offset.str()))
+    : nfs-read(source,offset,count);
+   def nfs-tail(source,offset) = offset<=24 ? "" : nfs-read-source(source,offset - 16,16);
    def nfs-fingerprint(fd,extent,offset,state) = offset==extent ? state : {
    let count=bfp-span(extent,offset);
     nfs-fingerprint(fd,extent,offset+count,bfp-fold(nfs-read-source(fd,offset,count),state));
@@ -85,7 +91,12 @@ section [form.bml] {
      record_set(state,"seal",seal);
      record_set(state,"valid",0);
      if size<observed[0] then form_error("native field lost a previously observed committed extent") else 0;
-      if !nothing?(cached) && (!trusted || stamp != record_get(cached,"stamp")) && nfs-fingerprint(source,observed[0],0,bfp-initial())!=observed[1] then form_error("native field previously committed bytes changed") else 0;
+      // An append-only journal under an exclusive writer lease, admitted by file
+      // identity, keeps its committed prefix: the last committed frame's checksum
+      // is re-read in place. Only a state without that checksum folds the prefix.
+      let held=!nothing?(cached) && value_kind(record_get(cached,"tail"))=="string";
+      if !nothing?(cached) && (!trusted || stamp != record_get(cached,"stamp"))
+       && (held ? nfs-tail(source,observed[0]) != record_get(cached,"tail") : nfs-fingerprint(source,observed[0],0,bfp-initial())!=observed[1]) then form_error("native field previously committed bytes changed") else 0;
      let before=record_get(state,"offset");
       nfs-replay(source,state,size);
      if record_get(state,"offset")>before then record_set(state,"durability_pending",1) else 0;
@@ -171,10 +182,12 @@ section [form.bml] {
    def nfs-warm-now(path) {
      let image=nfs-warm-image(path);
      if nothing?(image) then 0 else {
-      let state=nfs-admit-image(image[0],len(image[2]),image[1],image[2]);
+      let state=nfs-admit-image(image[0],image[3],image[1],image[2]);
       record_set(nfs-warmed-paths,path,nfs-admitted(state,image[1])); 0;
      };
     }
+    // A trusted cached state needs only the bytes past its committed offset (and
+    // the 16-byte checksum before it); a cold reader captures everything.
     def nfs-warm-image(path) {
     let lease=nps-file-lease(path,0);
      if nothing?(lease) then nothing() else {
@@ -182,8 +195,13 @@ section [form.bml] {
       let size=nps-file-size(lease[1]);
        size<0 ? form_error("native field capture extent unavailable") : size==0 ? nothing() : {
        let identity=nps-file-identity(lease); let stamp=nfs-stamp(lease,"capture");
-       let bytes=nfs-read(lease[1],0,size);
-        if nothing?(identity) || len(bytes)!=size || size != nps-file-size(lease[1]) || stamp != nfs-stamp(lease,"captured") then form_error("native field changed during image capture") else [identity,stamp,bytes];
+       let key=nothing?(identity) ? "" : nfs-key(identity);
+       let cached=record_has(nfs-journals,key) ? record_get(nfs-journals,key) : nothing();
+       let from=!nothing?(cached) && record_get(cached,"valid")==1 && value_kind(record_get(cached,"tail"))=="string"
+        && record_get(cached,"offset")>24 && record_get(cached,"offset")<=size ? record_get(cached,"offset") - 16 : 0;
+       let bytes=nfs-read(lease[1],from,size - from);
+       let source=from==0 ? bytes : [from,bytes,nfs-read(lease[1],0,8)];
+        if nothing?(identity) || len(bytes)!=size - from || size != nps-file-size(lease[1]) || stamp != nfs-stamp(lease,"captured") then form_error("native field changed during image capture") else [identity,stamp,source,size];
       };
     };
    }
@@ -238,6 +256,7 @@ section [form.bml] {
          foldl((done,row)=>{nfs-apply(state,row);done;},0,frame[2]);
           record_set(state,"fold",bfp-fold(header+payload,record_get(state,"fold")));
         record_set(state,"offset",offset+40+count);
+        record_set(state,"tail",substring(payload,count,count+16));
          nfs-replay-window(fd,state,extent,view);
        };
       };
@@ -363,6 +382,7 @@ section [form.bml] {
      form_error("native field publication failed: wrote="+wrote[1].str()+" result="+wrote[2].str()+" sync="+str(synced)+" rollback="+resized.str()+" rollback_sync="+settled.str());
     } else {
      record_set(state,"offset",offset+len(frame));
+     record_set(state,"tail",substring(frame,len(frame) - 16,len(frame)));
      record_set(state,"fold",bfp-fold(frame,record_get(state,"fold")));
      record_set(state,"pending",[]); 1;
     };
