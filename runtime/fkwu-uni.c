@@ -6273,6 +6273,37 @@ static int fk_path_is_dir(const char *p) {
     return S_ISDIR(st.st_mode) ? 1 : 0;
 #endif
 }
+/* Presence and extent are a stat. A pipe is never opened: open waits for the other end, and an extent is a regular file's. */
+static int fk_path_present(const char *p) {
+#ifdef FK_HAVE_STAT_HEADER
+    struct stat st;
+    return stat(p, &st) == 0;
+#else
+    int fd = open(p, 0);
+    if (fd < 0) {
+        return 0;
+    }
+    close(fd);
+    return 1;
+#endif
+}
+static long long fk_regular_extent(const char *p) {
+#ifdef FK_HAVE_STAT_HEADER
+    struct stat st;
+    if (stat(p, &st) != 0 || !S_ISREG(st.st_mode)) {
+        return -1;
+    }
+    return (long long)st.st_size;
+#else
+    int fd = open(p, 0);
+    if (fd < 0) {
+        return -1;
+    }
+    long n = lseek(fd, 0, 2);
+    close(fd);
+    return n < 0 ? -1 : (long long)n;
+#endif
+}
 static int fk_name_eq(const char *a, const char *b) {
     int j = 0;
     while (a[j] != 0 && b[j] != 0) {
@@ -20211,12 +20242,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         static char p[FK_PATH_CAP];
         fk_cstr(fk_walk(fk_node[i][1], fp), p, FK_PATH_CAP);
         fk_host_resolve(p);
-        int fd = open(p, 0);
-        if (fd < 0) {
-            return 0;
-        }
-        close(fd);
-        return 2;
+        return fk_path_present(p) ? 2 : 0;
     }
     if (t == 58) {
         static char p[FK_PATH_CAP];
@@ -20279,13 +20305,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         static char p[FK_PATH_CAP];
         fk_cstr(fk_walk(fk_node[i][1], fp), p, FK_PATH_CAP);
         fk_host_resolve(p);
-        int fd = open(p, 0);
-        if (fd < 0) {
-            return -2;
-        }
-        long n = lseek(fd, 0, 2);
-        close(fd);
-        return ((long long)n) << 1;
+        long long extent = fk_regular_extent(p);
+        return extent < 0 ? -2 : extent << 1;
     }
     if (t == 61) {
         static char p[FK_PATH_CAP];
