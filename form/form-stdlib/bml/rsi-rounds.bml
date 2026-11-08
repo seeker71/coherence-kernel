@@ -1,0 +1,303 @@
+// rsi-rounds.bml — Terminal-RSI's recursive rounds carried by the body's own doors, each round measured.
+//
+// Terminal-RSI (arXiv:2610.22192, github.com/jyyang26/terminal-rsi, Apache-2.0) improves Qwen3.8-27B, the base of this
+// body's voice, by alternating Recursive Self-Rewrite (RSR: verified successes become actor-only supervision) with
+// Recursive Policy-Refine (RPR: an inherited critic is calibrated, then turn-aware advantages steer the actor). A round
+// here is that alternation over the native-turn queue (learn/native-turn-queue.jsonl), the band judging every option:
+//   split      each gap is held out or trained on, fixed by a hash of its id (every held_out_every-th bucket is held
+//              out, and at least one gap is): a held-out gap is never offered as a lesson, so its reading is a test
+//   eval       every held-out gap takes one turn through the turn door (observe/native-turn-run.bml) into this round's
+//              own ledger, so each round's walk starts fresh and the main ledger does not move
+//   collect    every trained gap takes one turn the same way
+//   score      turn-reward.bml's SPR on a walk's last option is the walk's reward; FDR and SPR failed shares are read
+//   TB-GAE     a walk's options are its interaction turns; the reward stands at its last turn, and discount and trace
+//              decay apply across turns only: delta_t = r_t + gamma V(t+1) - V(t), A_t = delta_t + gamma lambda A(t+1)
+//              (slime_plugins/harbor/tb_gae.py; gamma = lambda = 1 as configs/harbor_rpr1_fdr.yaml sets them)
+//   critic     V is a table keyed by gap and turn index, inherited from the round before (the warm critic handoff);
+//              the returns are fixed once from the inherited V, then calib_steps critic-only updates move V toward
+//              them before any advantage is used (four in the paper); loss before and after and explained variance
+//              are measured
+//   RSR        a trained gap whose walk went green with a positive advantage (it did better than the calibrated
+//              critic expected) becomes one lesson: the gap's goal as prompt, the candidate the walk kept under
+//              .hearth/native-turns as completion, offered to the session learner (native-session-memory.bml
+//              nsm-offer), which retains it only under the home's retention scope and trains only under train:1
+//   learn      with learn:1 the session learner drains between rounds (observe/native-session-learning-run.fk),
+//              its exit read as it is: on a host without the Metal carrier the learner names its failure
+// What is not carried: the paper's token-level PPO actor update of RPR. The actor moves only through RSR's supervised
+// lessons, chosen by the critic's advantage; a policy-gradient step on the voice's logprobs is a Metal lane the body
+// does not hold yet, and every round row says so (rpr_actor).
+// Every round lands rows in receipts/rsi-rounds.jsonl (ids and numbers, no person's words) and the critic in
+// .hearth/rsi/<run>/critic.txt. observe/rsi-report-run.bml reads a run back as a table of rounds.
+// PROOF: form-stdlib/tests/rsi-rounds-band.bml; door observe/rsi-round-run.bml.
+import form-stdlib/bml/turn-reward.bml;
+import form-stdlib/bml/form-cli-heal-native-io.bml;
+import form-stdlib/native-session-memory.bml;
+import form-stdlib/bml/host-child.bml;
+section [form.bml] {
+ class RsiRounds {
+  def rsi-door() = "rsi-rounds";
+  def rsi-spec() = [["run", "str"], ["rounds", "int"], ["queue", "str"], ["home", "str"], ["receipts", "str"], ["work", "str"], ["turn_door", "str"], ["held_out_every", "int"], ["turn_ms", "int"], ["calib_steps", "int"], ["critic_lr_milli", "int"], ["learn", "int"], ["learn_ms", "int"], ["gaps", "int"], ["turns_dir", "str"], ["reset", "int"], ["reset_depth", "int"], ["band_ms", "int"]];
+  def rsi-opt(opts, key, dflt) = (String) fcgp-str(opts, key) == "" ? dflt : fcgp-str(opts, key);
+  def rsi-int(opts, key, dflt) = fcgp-num(opts, key) ?? dflt;
+  def rsi-run-id(opts) = rsi-opt(opts, "run", "rsi-" ++ now_unix_ms().str());
+  def rsi-receipts(opts) = rsi-opt(opts, "receipts", "receipts/rsi-rounds.jsonl");
+  def rsi-abs(p) = (Comparable) str_find(p, "/", 0) == 0 ? p : host_cwd() ++ "/" ++ p;
+  def rsi-work(opts) = rsi-abs(rsi-opt(opts, "work", ".hearth/rsi")) ++ "/" ++ rsi-run-id(opts);
+  // the directory every turn runs in: the reset tree when the pool was reset, else this checkout
+  def rsi-tree(opts) = rsi-work(opts) ++ "/tree";
+  def rsi-turn-cwd(opts) = (Comparable) rsi-int(opts, "reset", 0) == 1 ? rsi-tree(opts) : "";
+  def rsi-actor-note() = "rsr-lessons-only;token-ppo-not-carried";
+
+  // ---- the split: a hash of the id's bytes, the same on every host
+  def rsi-hash(s) = foldl((h, i) => ((h * 31) + str_byte_at(s, i)) % 1000003, 7, rsi-range(0, len(s)));
+  def rsi-held?(id, every) = every > 0 && (Comparable) (rsi-hash(id) % every) == 0;
+  def rsi-gap-ids(queue) = map(r => fcgp-str(r, "id"), filter(r => (String) fcgp-str(r, "id") != "" && (String) fcgp-str(r, "band") != "", fcgp-rows(queue)));
+  // [held-out, trained]: at least one gap is held out whenever two or more stand
+  def rsi-split(ids, every) {
+   let held = filter(i => rsi-held?(i, every), ids);
+   let held2 = nil?(held) && len(ids) >= 2 ? [ids[0]] : held;
+   [held2, filter(i => !any?(h => (String) h == i, held2), ids)];
+  }
+  def rsi-take(n, xs) = n <= 0 || nil?(xs) ? [] : cons(xs[0], rsi-take(n - 1, xs[1:]));
+
+  // ---- one turn through the turn door, a child of this process: its exit is read, never assumed
+  def rsi-turn(opts, id, ledger, session, dir) {
+   let inp = dir ++ "/turn.in";
+   let i = write_file_text(inp, "{\"gap\":\"" ++ id ++ "\",\"ledger\":\"" ++ ledger ++ "\",\"queue\":\"" ++ rsi-opt(opts, "queue", "learn/native-turn-queue.jsonl") ++ "\",\"session\":\"" ++ session ++ "\",\"deadline_ms\":" ++ (host_monotonic_ms() + rsi-int(opts, "turn_ms", 900000)).str() ++ "}\n");
+   let pid = host_spawn_at(["./fkwu", rsi-opt(opts, "turn_door", "observe/native-turn-run.bml")], [inp, dir ++ "/turn.out", dir ++ "/turn.err", rsi-turn-cwd(opts)]);
+   pid <= 0 ? -1 : host_wait(pid);
+  }
+  def rsi-turns(opts, ids, ledger, session, dir) = foldl((bad, id) => (Comparable) rsi-turn(opts, id, ledger, session, dir) == 0 ? bad : bad + 1, 0, ids);
+
+  // ---- walks: a gap's attempt rows in this round's ledger, in the order they landed
+  def rsi-walk(rows, id) = filter(r => (String) fcgp-str(r, "gap") == id && trw-attempt?(r), rows);
+  def rsi-walks(rows, ids) = filter(w => !nil?(w[1]), map(id => [id, rsi-walk(rows, id)], ids));
+  def rsi-last(w) = trw-attempt(w[1][-1]);
+  def rsi-green?(w) = (Comparable) rsi-last(w)[3] == 1;
+  def rsi-spr-of(w) = trw-spr(rsi-last(w), rsi-last(w)[2]);
+  def rsi-process-of(w) = rsi-last(w)[2] <= 0 ? 0.0 : (1.0 * rsi-last(w)[1]) / rsi-last(w)[2];
+  def rsi-milli(x) = floor(1000.0 * x + 0.5);
+  def rsi-mean(xs) = nil?(xs) ? 0.0 : foldl((s, x) => s + x, 0.0, xs) / len(xs);
+
+  // ---- the critic: [[key, value], ...] keyed by gap and turn index; an unseen key reads 0
+  def rsi-key(id, t) = id ++ "#" ++ (t > 5 ? 5 : t).str();
+  def rsi-v(critic, key) = (foldl((acc, kv) => (String) kv[0] == key ? kv : acc, nothing(), critic) ?? [key, 0.0])[1];
+  def rsi-v-set(critic, key, v) = any?(kv => (String) kv[0] == key, critic) ? map(kv => (String) kv[0] == key ? [key, v] : kv, critic) : append(critic, [[key, v]]);
+  // TB-GAE over one walk: [[key, value, advantage, return], ...] per turn, the reward at the last turn only
+  def rsi-range(a, b) = a >= b ? [] : cons(a, rsi-range(a + 1, b));
+  def rsi-gae(critic, w, gamma, lambda) {
+   let n = len(w[1]);
+   let vs = map(t => rsi-v(critic, rsi-key(w[0], t)), rsi-range(0, n));
+   rsi-gae-back(w[0], vs, rsi-spr-of(w), gamma, lambda, n - 1, [], 0.0);
+  }
+  // from the last turn back: the reward stands at the last turn, a turn after the last is worth 0
+  def rsi-gae-back(id, vs, r, gamma, lambda, t, out, next-adv) = t < 0 ? out : rsi-gae-turn(id, vs, r, gamma, lambda, t, out, next-adv);
+  def rsi-gae-turn(id, vs, r, gamma, lambda, t, out, next-adv) {
+   let last = t == len(vs) - 1;
+   let next-v = last ? 0.0 : vs[t + 1];
+   let reward = last ? r : 0.0;
+   let adv = reward + gamma * next-v - vs[t] + gamma * lambda * next-adv;
+   rsi-gae-back(id, vs, r, gamma, lambda, t - 1, cons([rsi-key(id, t), vs[t], adv, adv + vs[t]], out), adv);
+  }
+  def rsi-gaes(critic, walks) = foldl((acc, w) => append(acc, rsi-gae(critic, w, 1.0, 1.0)), [], walks);
+  def rsi-loss(critic, targets) = rsi-mean(map(s => (s[3] - rsi-v(critic, s[0])) * (s[3] - rsi-v(critic, s[0])), targets));
+  def rsi-var(xs) { let m = rsi-mean(xs); rsi-mean(map(x => (x - m) * (x - m), xs)); }
+  def rsi-ev(critic, targets) {
+   let vg = rsi-var(map(s => s[3], targets));
+   vg <= 0.0 ? 0.0 : 1.0 - rsi-var(map(s => s[3] - rsi-v(critic, s[0]), targets)) / vg;
+  }
+  // one critic-only step: each key moves lr of the way toward the mean return its turns hold
+  def rsi-calib-step(critic, targets, lr) {
+   let keys = foldl((acc, s) => any?(k => (String) k == s[0], acc) ? acc : append(acc, [s[0]]), [], targets);
+   foldl((c, k) => rsi-v-set(c, k, rsi-v(c, k) + lr * (rsi-mean(map(s => s[3], filter(s => (String) s[0] == k, targets))) - rsi-v(c, k))), critic, keys);
+  }
+  def rsi-calibrate(critic, targets, steps, lr) = steps <= 0 ? critic : rsi-calibrate(rsi-calib-step(critic, targets, lr), targets, steps - 1, lr);
+  // the critic on disk: one "key micro" line each
+  def rsi-critic-text(critic) = str-join(map(kv => kv[0] ++ " " ++ floor(1000000.0 * kv[1] + 0.5).str() ++ "\n", critic));
+  def rsi-signed(s) = (Comparable) str_byte_at(s, 0) == 45 ? 0 - rsi-digits(s, 1, 0) : rsi-digits(s, 0, 0);
+  def rsi-digits(s, i, acc) = i < len(s) && str_byte_at(s, i) >= 48 && str_byte_at(s, i) <= 57 ? rsi-digits(s, i + 1, acc * 10 + (str_byte_at(s, i) - 48)) : acc;
+  def rsi-critic-line(l) { let sp = str_find(l, " ", 0); sp <= 0 ? nothing() : [substring(l, 0, sp), rsi-signed(substring(l, sp + 1, len(l))) / 1000000.0]; }
+  def rsi-critic-read(path) = filter(kv => !nothing?(kv), map(l => rsi-critic-line(trim(l)), filter(l => len(trim(l)) > 0, split-on(read_file(path) ?? "", "\n"))));
+
+  // ---- RSR: the lesson a green walk teaches, offered to the session learner
+  def rsi-queue-row(opts, id) = foldl((acc, r) => (String) fcgp-str(r, "id") == id ? r : acc, nothing(), fcgp-rows(rsi-opt(opts, "queue", "learn/native-turn-queue.jsonl")));
+  def rsi-stamp-ms(name, id) = rsi-digits(name, len(id) + 1, 0);
+  def rsi-turns-dir(opts) = rsi-opt(opts, "turns_dir", (Comparable) rsi-int(opts, "reset", 0) == 1 ? rsi-tree(opts) ++ "/.hearth/native-turns" : ".hearth/native-turns");
+  def rsi-candidates(opts, id, since) {
+   let d = rsi-turns-dir(opts);
+   let names = (Comparable) host_path_exists(d) == 1 ? fs-list(d) : [];
+   filter(n => str_find(n, id ++ "-", 0) == 0 && str_find(n, ".candidate", 0) > 0 && rsi-stamp-ms(n, id) >= since, names);
+  }
+  def rsi-completion(opts, id, since) = str-join(map(n => "=== " ++ substring(n, str_find(n, "-", len(id) + 1) + 1, len(n) - 10) ++ "\n" ++ (read_file(rsi-turns-dir(opts) ++ "/" ++ n) ?? ""), rsi-candidates(opts, id, since)));
+  // [offered, retained, held-reason] for one green walk
+  def rsi-offer(opts, w, adv, run, round, since) {
+   let home = rsi-opt(opts, "home", "");
+   let q = rsi-queue-row(opts, w[0]);
+   let completion = rsi-completion(opts, w[0], since);
+   (String) home == "" ? [0, 0, "home-unnamed"]
+   : !nsm-retention(home) ? [0, 0, "retention-scope-required"]
+   : nothing?(q) ? [0, 0, "gap-absent"]
+   : (String) completion == "" ? [0, 0, "candidate-absent"]
+   : rsi-offered(nsm-offer(home, run ++ "-r" ++ round.str(), w[0] ++ "-r" ++ round.str(), "rsi-rsr", fcgp-str(q, "goal"), completion, "verified-band-green", "band " ++ fcgp-str(q, "band") ++ " advantage_milli " ++ rsi-milli(adv).str(), false));
+  }
+  def rsi-offered(r) = [1, (String) r[0] == "" ? 0 : 1, (String) r[0] == "" ? r[1] : ""];
+  // the walk's first-turn advantage under the calibrated critic decides the lesson
+  def rsi-first-adv(critic, w) = rsi-gae(critic, w, 1.0, 1.0)[0][2];
+
+  // ---- measurement of one phase: a JSON row of numbers
+  def rsi-n(k, v) = "\"" ++ k ++ "\":" ++ v.str();
+  def rsi-s(k, v) = "\"" ++ k ++ "\":\"" ++ v ++ "\"";
+  def rsi-phase-fields(rows, ids, bad, wall) {
+   let walks = rsi-walks(rows, ids);
+   let r = trw-read(rows);
+   let greens = filter(w => rsi-green?(w), walks);
+   [rsi-n("gaps", len(ids)), rsi-n("walks", len(walks)), rsi-n("green", len(greens)), rsi-n("success_permille", nil?(ids) ? 0 : (len(greens) * 1000) / len(ids)), rsi-n("spr_mean_milli", rsi-milli(rsi-mean(map(w => rsi-spr-of(w), walks)))), rsi-n("process_mean_milli", rsi-milli(rsi-mean(map(w => rsi-process-of(w), walks)))), rsi-n("options", foldl((n, w) => n + len(w[1]), 0, walks)), rsi-n("failed_share_fdr_permille", r[4]), rsi-n("failed_share_spr_permille", r[5]), rsi-n("turn_exit_nonzero", bad), rsi-n("rented_rows", len(filter(x => (Comparable) (fcgp-num(x, "rented_mind") ?? 0) == 1, rows))), rsi-n("wall_ms", wall)];
+  }
+  def rsi-row(head, fields) = "{" ++ str-join-with(append(head, fields), ",") ++ "}";
+  def rsi-land(opts, line) { let a = fhn-append(rsi-receipts(opts), line ++ "\n"); print_str(line); }
+
+  // ---- one phase: turns into a round ledger, then the reading
+  def rsi-phase(opts, ids, round, phase) {
+   let dir = rsi-work(opts) ++ "/r" ++ round.str() ++ "-" ++ phase;
+   let m = host_dir_mkdir(dir);
+   let ledger = dir ++ "/turns.jsonl";
+   let started = host_monotonic_ms();
+   let since = now_unix_ms();
+   let bad = rsi-turns(opts, ids, ledger, rsi-run-id(opts) ++ "-r" ++ round.str() ++ "-" ++ phase, dir);
+   [fcgp-rows(ledger), bad, host_monotonic_ms() - started, since];
+  }
+  def rsi-head(opts, round, phase) = [rsi-s("run", rsi-run-id(opts)), rsi-n("round", round), rsi-s("phase", phase), rsi-n("at_unix_ms", now_unix_ms())];
+  def rsi-eval(opts, held, round) {
+   let p = rsi-phase(opts, held, round, "eval");
+   rsi-land(opts, rsi-row(rsi-head(opts, round, "eval"), rsi-phase-fields(p[0], held, p[1], p[2])));
+  }
+  // collect, calibrate, teach: answers the critic the next round inherits
+  def rsi-train(opts, trained, round, critic) {
+   let p = rsi-phase(opts, trained, round, "train");
+   let walks = rsi-walks(p[0], trained);
+   let targets = rsi-gaes(critic, walks);
+   let lr = rsi-int(opts, "critic_lr_milli", 500) / 1000.0;
+   let calibrated = rsi-calibrate(critic, targets, rsi-int(opts, "calib_steps", 4), lr);
+   let greens = filter(w => rsi-green?(w), walks);
+   let chosen = filter(w => rsi-first-adv(calibrated, w) > 0.0, greens);
+   let offers = map(w => rsi-offer(opts, w, rsi-first-adv(calibrated, w), rsi-run-id(opts), round, p[3]), chosen);
+   let held = foldl((acc, o) => (String) o[2] == "" || any?(h => (String) h == o[2], acc) ? acc : append(acc, [o[2]]), [], offers);
+   let learned = (Comparable) rsi-int(opts, "learn", 0) == 1 && any?(o => (Comparable) o[1] == 1, offers) ? rsi-learn(opts) : -2;
+   let saved = write_file_text(rsi-work(opts) ++ "/critic.txt", rsi-critic-text(calibrated));
+   let fields = append(rsi-phase-fields(p[0], trained, p[1], p[2]), [rsi-n("critic_keys", len(calibrated)), rsi-n("critic_loss_before_micro", floor(1000000.0 * rsi-loss(critic, targets) + 0.5)), rsi-n("critic_loss_after_micro", floor(1000000.0 * rsi-loss(calibrated, targets) + 0.5)), rsi-n("explained_variance_milli", rsi-milli(rsi-ev(calibrated, targets))), rsi-n("mean_abs_adv_milli", rsi-milli(rsi-mean(map(s => s[2] < 0.0 ? 0.0 - s[2] : s[2], rsi-gaes(calibrated, walks))))), rsi-n("rsr_green", len(greens)), rsi-n("rsr_chosen", len(chosen)), rsi-n("rsr_offered", foldl((n, o) => n + o[0], 0, offers)), rsi-n("rsr_retained", foldl((n, o) => n + o[1], 0, offers)), rsi-s("rsr_held", str-join-with(held, ";")), rsi-n("learner_exit", learned), rsi-s("rpr_actor", rsi-actor-note())]);
+   let landed = rsi-land(opts, rsi-row(rsi-head(opts, round, "train"), fields));
+   calibrated;
+  }
+  // the offer itself launches the learner under train:1 (nsm-kick); the round waits for it to end before the next eval,
+  // so that eval reads the adapter the lessons made. -3: the home grants no training; 0: the learner completed;
+  // n > 0: its exit; -4: still running at learn_ms (default an hour); -5: it ended in a state that names no exit
+  def rsi-learn(opts) {
+   let home = rsi-opt(opts, "home", "");
+   !nsm-training(home) ? -3 : rsi-learn-wait(home, host_monotonic_ms() + rsi-int(opts, "learn_ms", 3600000));
+  }
+  def rsi-learn-wait(home, until) = nsm-running(home) ? (host_monotonic_ms() >= until ? -4 : rsi-learn-slept(home, until, host_sleep_ms(2000))) : rsi-learn-state(nsm-worker-state(home));
+  def rsi-learn-slept(home, until, slept) = rsi-learn-wait(home, until);
+  def rsi-learn-state(s) = (String) s == "completed" ? 0 : str_find(s, "failed-exit-", 0) == 0 ? rsi-digits(s, 12, 0) : -5;
+  def rsi-rounds(opts, split, round, last, critic) {
+   let e = rsi-eval(opts, split[0], round);
+   round >= last ? round : rsi-rounds(opts, split, round + 1, last, rsi-train(opts, split[1], round, critic));
+  }
+  // ---- the pool: a gap the body already closed is reopened in a tree of its own, as Terminal-RSI resets a task's environment
+  // A detached worktree of HEAD under the run's work directory holds every pooled gap. For each gap the commits that touched its
+  // writable files are walked newest first (at most reset_depth); at each, the writables are set to their text in that commit's
+  // parent (absent where the parent held none), and the gap's band runs in the tree. The first text under which the band reads a
+  // number short of full is the gap's reset: the band itself says the gap is open again. A gap no text reopens is left out by name.
+  // Once every gap is set, every pooled band is read again, and a gap another's reset moved is left out as reset-crossed.
+  def rsi-pool-io(opts) = rsi-work(opts) ++ "/pool-io";
+  def rsi-git(opts, step, args) = hch-git-in(rsi-pool-io(opts), rsi-tree(opts), step, args);
+  def rsi-tree-ready(opts) {
+   let made = (Comparable) host_path_exists(rsi-tree(opts) ++ "/.git") == 1 ? [0, "", ""] : hch-run-in(rsi-pool-io(opts), "worktree", ["git", "worktree", "add", "--detach", rsi-tree(opts), "HEAD"], "", hch-by(hch-git-backstop-ms()));
+   let built = !hch-ok?(made) ? made : (Comparable) host_path_exists(rsi-tree(opts) ++ "/fkwu") == 1 ? [0, "", ""] : hch-run-at(rsi-pool-io(opts), "seed", rsi-tree(opts), ["cc", "-O2", "-o", "fkwu", "runtime/fkwu-uni.c"], "", hch-by(1800000));
+   !hch-ok?(made) ? "worktree: " ++ hch-said(made) : !hch-ok?(built) ? "seed: " ++ hch-status-text(built) : "";
+  }
+  def rsi-strs(node) = map(x => json-string-value(x), json-array-elements(node));
+  def rsi-writables(q) = fcgp-present?(q, "writable") ? rsi-strs(json-object-get(q, "writable")) : [];
+  def rsi-last-int(text) = foldl((acc, l) => len(trim(l)) > 0 && rsi-int-line?(trim(l)) ? rsi-signed(trim(l)) : acc, nothing(), split-on(text ?? "", "\n"));
+  def rsi-int-line?(l) = len(l) > 0 && all?(i => (str_byte_at(l, i) >= 48 && str_byte_at(l, i) <= 57) || (i == 0 && (Comparable) str_byte_at(l, i) == 45), rsi-range(0, len(l)));
+  // the gap's band in the tree: its number, or nothing when it printed none
+  def rsi-band-read(opts, q) {
+   let run = hch-run-at(rsi-pool-io(opts), "band-" ++ fcgp-str(q, "id"), rsi-tree(opts), ["./fkwu", fcgp-str(q, "band")], "", hch-by(rsi-int(opts, "band_ms", 600000)));
+   rsi-last-int(run[1]);
+  }
+  def rsi-set-text(opts, path, commit) {
+   let shown = rsi-git(opts, "show", ["show", commit ++ "^:" ++ path]);
+   hch-ok?(shown) ? write_file_text(rsi-tree(opts) ++ "/" ++ path, shown[1]) : host_path_remove(rsi-tree(opts) ++ "/" ++ path);
+  }
+  def rsi-head-text(opts, path) {
+   let shown = rsi-git(opts, "head", ["show", "HEAD:" ++ path]);
+   hch-ok?(shown) ? write_file_text(rsi-tree(opts) ++ "/" ++ path, shown[1]) : host_path_remove(rsi-tree(opts) ++ "/" ++ path);
+  }
+  def rsi-commits(opts, ws) = filter(c => len(c) > 0, map(l => trim(l), split-on(rsi-git(opts, "log", append(["log", "--format=%H", "-n", rsi-int(opts, "reset_depth", 6).str(), "--"], ws))[1], "\n")));
+  // [id, commit, band reading] or [id, "", reason]
+  def rsi-reset-gap(opts, q) {
+   let ws = rsi-writables(q);
+   nil?(ws) ? [fcgp-str(q, "id"), "", "no-writable"] : rsi-reset-try(opts, q, ws, rsi-commits(opts, ws));
+  }
+  def rsi-reset-try(opts, q, ws, commits) {
+   let restored = nil?(commits) ? foldl((n, w) => n + rsi-head-text(opts, w), 0, ws) : 0;
+   nil?(commits) ? [fcgp-str(q, "id"), "", "no-earlier-text-opens-band"] : rsi-reset-read(opts, q, ws, commits, foldl((n, w) => n + rsi-set-text(opts, w, commits[0]), 0, ws));
+  }
+  def rsi-reset-read(opts, q, ws, commits, set) {
+   let b = rsi-band-read(opts, q);
+   let full = fcgp-num(q, "full") ?? 0;
+   !nothing?(b) && b >= 0 && b < full ? [fcgp-str(q, "id"), commits[0], b] : rsi-reset-try(opts, q, ws, commits[1:]);
+  }
+  def rsi-pool-line(r) = "{\"id\":\"" ++ r[0] ++ "\",\"reset_commit\":\"" ++ r[1] ++ "\"," ++ ((String) r[1] == "" ? "\"left_out\":\"" ++ r[2] ++ "\"" : "\"band_before\":" ++ r[2].str()) ++ "}";
+  // the pooled ids, after the crossing read; every gap's line lands in <work>/pool.jsonl and its count in the run line
+  def rsi-pool(opts, ids) {
+   let qs = filter(q => any?(i => (String) i == fcgp-str(q, "id"), ids), fcgp-rows(rsi-opt(opts, "queue", "learn/native-turn-queue.jsonl")));
+   let resets = map(q => rsi-reset-gap(opts, q), qs);
+   let crossed = map(r => (String) r[1] == "" ? r : rsi-cross(opts, qs, r), resets);
+   let w = write_file_text(rsi-work(opts) ++ "/pool.jsonl", str-join(map(r => rsi-pool-line(r) ++ "\n", crossed)));
+   crossed;
+  }
+  def rsi-cross(opts, qs, r) {
+   let q = foldl((acc, x) => (String) fcgp-str(x, "id") == r[0] ? x : acc, nothing(), qs);
+   let b = rsi-band-read(opts, q);
+   !nothing?(b) && (Comparable) b == r[2] ? r : [r[0], "", "reset-crossed"];
+  }
+  def rsi-pooled(rows) = map(r => r[0], filter(r => (String) r[1] != "", rows));
+  def rsi-left(rows) = str-join-with(map(r => r[0] ++ ":" ++ r[2], filter(r => (String) r[1] == "", rows)), " ");
+
+  // ---- the report: a run's rows read back as one table, each round beside the first
+  def rsi-num(r, k) = fcgp-num(r, k) ?? 0;
+  def rsi-pad(s, n) = len(s) >= n ? s : rsi-pad(" " ++ s, n);
+  def rsi-signed-str(n) = n > 0 ? "+" ++ n.str() : n.str();
+  def rsi-eval-line(r, first) = "round " ++ rsi-pad(rsi-num(r, "round").str(), 2) ++ " eval   success " ++ rsi-pad(rsi-num(r, "green").str(), 3) ++ "/" ++ rsi-num(r, "gaps").str() ++ " (" ++ rsi-num(r, "success_permille").str() ++ " permille, " ++ rsi-signed-str(rsi-num(r, "success_permille") - rsi-num(first, "success_permille")) ++ ")  spr " ++ rsi-num(r, "spr_mean_milli").str() ++ " (" ++ rsi-signed-str(rsi-num(r, "spr_mean_milli") - rsi-num(first, "spr_mean_milli")) ++ ")  process " ++ rsi-num(r, "process_mean_milli").str() ++ " (" ++ rsi-signed-str(rsi-num(r, "process_mean_milli") - rsi-num(first, "process_mean_milli")) ++ ")  options " ++ rsi-num(r, "options").str() ++ "  wall_s " ++ (rsi-num(r, "wall_ms") / 1000).str() ++ "  nonzero " ++ rsi-num(r, "turn_exit_nonzero").str();
+  def rsi-train-line(r) = "round " ++ rsi-pad(rsi-num(r, "round").str(), 2) ++ " train  success " ++ rsi-pad(rsi-num(r, "green").str(), 3) ++ "/" ++ rsi-num(r, "gaps").str() ++ "  spr " ++ rsi-num(r, "spr_mean_milli").str() ++ "  failed_share fdr " ++ rsi-num(r, "failed_share_fdr_permille").str() ++ " permille spr " ++ rsi-num(r, "failed_share_spr_permille").str() ++ " permille  critic loss " ++ rsi-num(r, "critic_loss_before_micro").str() ++ "->" ++ rsi-num(r, "critic_loss_after_micro").str() ++ " micro ev " ++ rsi-num(r, "explained_variance_milli").str() ++ " permille  rsr green/chosen/retained " ++ rsi-num(r, "rsr_green").str() ++ "/" ++ rsi-num(r, "rsr_chosen").str() ++ "/" ++ rsi-num(r, "rsr_retained").str() ++ ((String) fcgp-str(r, "rsr_held") == "" ? "" : " held " ++ fcgp-str(r, "rsr_held")) ++ "  learner " ++ rsi-num(r, "learner_exit").str();
+  def rsi-report-rows(rows) {
+   let evals = filter(r => (String) fcgp-str(r, "phase") == "eval", rows);
+   let first = nil?(evals) ? nothing() : evals[0];
+   map(r => (String) fcgp-str(r, "phase") == "eval" ? rsi-eval-line(r, first) : rsi-train-line(r), rows);
+  }
+  def rsi-report(opts) {
+   let all = fcgp-rows(rsi-receipts(opts));
+   let run = (String) fcgp-str(opts, "run") != "" ? fcgp-str(opts, "run") : nil?(all) ? "" : fcgp-str(all[-1], "run");
+   let rows = filter(r => (String) fcgp-str(r, "run") == run, all);
+   let head = print_str("[rsi-report] run=" ++ run ++ " rows=" ++ len(rows).str() ++ " (eval: held-out gaps never offered as lessons; rpr_actor " ++ rsi-actor-note() ++ ")");
+   foldl((n, l) => n + print_str(l), 0, rsi-report-rows(rows));
+  }
+  // the run's id is read once: every row and every directory of the run carries the same one
+  def rsi-run(given) {
+   let opts = oh-set(given, "run", json-node-string(rsi-run-id(given)));
+   let ids = rsi-gap-ids(rsi-opt(opts, "queue", "learn/native-turn-queue.jsonl"));
+   let picked = (Comparable) rsi-int(opts, "gaps", 0) > 0 ? rsi-take(rsi-int(opts, "gaps", 0), ids) : ids;
+   let m = host_dir_mkdir(rsi-abs(rsi-opt(opts, "work", ".hearth/rsi")));
+   let n = host_dir_mkdir(rsi-work(opts));
+   let reset = (Comparable) rsi-int(opts, "reset", 0) == 1;
+   let tree = reset ? rsi-tree-ready(opts) : "";
+   let pool = reset && (String) tree == "" ? rsi-pool(opts, picked) : [];
+   let said-pool = reset ? print_str("[rsi-rounds] pool " ++ ((String) tree != "" ? "refused: " ++ tree : "reopened=" ++ len(rsi-pooled(pool)).str() ++ " of " ++ len(picked).str() ++ " left_out: " ++ rsi-left(pool))) : 0;
+   let split = rsi-split(reset ? rsi-pooled(pool) : picked, rsi-int(opts, "held_out_every", 4));
+   let critic = rsi-critic-read(rsi-work(opts) ++ "/critic.txt");
+   let said = print_str("[rsi-rounds] run=" ++ rsi-run-id(opts) ++ " held_out=" ++ len(split[0]).str() ++ " trained=" ++ len(split[1]).str() ++ " rounds=" ++ rsi-int(opts, "rounds", 2).str() ++ " critic_inherited=" ++ len(critic).str());
+   rsi-rounds(opts, split, 0, rsi-int(opts, "rounds", 2), critic);
+  }
+ }
+ 0;
+}
