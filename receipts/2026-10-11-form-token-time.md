@@ -267,5 +267,23 @@ projections, 220 us each), 92%; the LoRA products `nam_matmul` 0.7 ms and `nam_m
 (`nam_affine_v1`) 0.7 ms; norms, attention, rope, adds, swiglu and stores 2.3 ms together. Earlier readings of 173 and 341 to 378 ms were
 the candle inside the window and a loaded machine (candle 105 to 137), not the prefill. The projections are 2.82 billion weights a token, so
 the matrix unit carried 248 GFLOP in 43.3 ms, 5.7 TFLOP/s on this M4 Max (40 GPU cores); 44 tokens fill two 32-token tiles, so 8.3 TFLOP/s
-of tile work. The fp32 peak of this GPU is not measured here; a matrix-unit microbenchmark at 64 tokens would say how close
-`nam_affine_mma` stands to it.
+of tile work.
+
+2026-11-08 12:49, the same kernel alone on the real gate projection (8192 by 3072, group 64), beside two fp32 kernels of its own 32 by
+32 tile and 8 simdgroups with no dequantization, best of five runs of eight, the candle read after each row (28, 28, 29, 33 ms; two
+earlier runs went loaded at 128 tokens while the walk's day turn held the GPU, candle up to 327, and Urs stopped it):
+
+| tokens | `nam_affine_mma` 4-bit | fp32 same tile, staged | fp32 same tile, `simdgroup_load` from device |
+|---|---|---|---|
+| 32 | 203 us, 7.9 TFLOP/s | 240 us, 6.7 | 573 us, 2.8 |
+| 64 | 361 us, 8.9 | 437 us, 7.4 | 1043 us, 3.1 |
+| 128 | 702 us, 9.2 | 856 us, 7.5 | 2105 us, 3.1 |
+| 256 | 1461 us, 8.8 | 1777 us, 7.3 | 4974 us, 2.6 |
+
+The rate is flat from 32 to 256 tokens: a tile costs the same however many there are.
+
+The 4-bit kernel is faster than the same tile reading fp32 weights, so the dequantization is not what it waits on, and at 32 tokens it
+reads its 12.6 MB of weights at 62 GB/s, a ninth of what this memory carries, so neither is the memory. What bounds it is the tile
+itself: 32 by 32 outputs a threadgroup, each 64-column step copied element by element into 16 KB of threadgroup memory between two
+barriers. The matrix unit's own peak is still not read; a kernel that keeps more of the tile in registers (a 64 by 64 tile, four
+accumulators a simdgroup) is the instrument that would read it, and the prefill's 43 ms is what it would move.
