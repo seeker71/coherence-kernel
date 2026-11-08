@@ -171,6 +171,25 @@ kernel void nam_stats(device const float* x [[buffer(0)]],device float* out [[bu
   }
   def nam-profile-rows() = map(n => [n, record_get(NAM-PROFILE, n)[0], record_get(NAM-PROFILE, n)[1]], record_get(NAM-PROFILE, "names"));
   def nam-profile-report() = nam-profile-order(nam-profile-rows());
+  // One window of the profile: the rows that grew while thunk ran, beside the device's own busy total over the same window. Every
+  // dispatch goes through nam-enqueue and is waited for, so the rows sum to the total; when they do not, work outside the thunk landed
+  // in the rows (a candle read inside the window did: 450 ms of rows against 173 ms of device, 2026-11-07) or a dispatch bypassed the
+  // profile. Answers [rows most expensive first, device us, rows us, covered]: covered is 1 when the two agree within 1%. Whether the
+  // machine itself held still is the candle's question, read outside the window.
+  def nam-profile-window(thunk) {
+   let rows0 = nam-profile-rows();
+   let l0 = metal_live()[11];
+   let value = thunk();
+   let device = metal_live()[11] - l0;
+   let rows = nam-profile-order(filter(r => r[2] > 0, map(r => nam-profile-since(r, rows0), nam-profile-rows())));
+   let sum = foldl((s, r) => s + r[1], 0, rows);
+   [rows, device, sum, nam-profile-covered(device, sum)];
+  }
+  def nam-profile-since(r, rows0) {
+   let was = filter(p => (String) p[0] == (String) r[0], rows0);
+   nil?(was) ? r : [r[0], r[1] - was[0][1], r[2] - was[0][2]];
+  }
+  def nam-profile-covered(device, sum) = device > 0 && (sum - device) * 100 <= device && (device - sum) * 100 <= device ? 1 : 0;
   def nam-profile-top(rows) = foldl((best, r) => r[1] > best[1] ? r : best, rows[0], rows[1:]);
   def nam-profile-order(rows) = nil?(rows) ? [] : cons(nam-profile-top(rows), nam-profile-order(filter(r => (String) r[0] != (String) nam-profile-top(rows)[0], rows)));
   def nam-alloc(n) = n <= 0 ? form_error("native affine empty allocation") : nam-held(metal_buf_alloc(n * 4));

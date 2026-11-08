@@ -255,8 +255,17 @@ prompts' prefill (2.5 s of `nam_matmul` against 1.2 s of `nam_affine_mma`, 5.1 m
 direct microbenchmark of the real shapes does not reproduce it: the adapter's rank is 8, and x.A at 46 tokens costs 13 to 38 us a
 dispatch (159 us at k 8192, 101 us for the second half), so a prompt's roughly 112 LoRA products cost under 10 ms of a prefill that takes
 hundreds. The subtraction mixed two runs and the first run's first-use costs; it was not a reading of a warm prefill. A profile of one
-warm 44-token prompt with snapshots around it did not settle where its prefill goes either: its rows summed to 450 ms against 173 ms of
-device busy in the same run (the candle drifted 41 to 95 ms during it), so per-kernel rows taken while neighbours move are not trusted;
-unprofiled, the same prompt cost 341 to 378 ms of device at a candle of 105 to 137 ms (the quiet gate timed out after thirty minutes and
-ran loaded). A prefill by kernel in a window that stays quiet, and whether `nam_affine_mma` at the fp32 matrix-unit rate is its floor, is
-still unmeasured.
+warm 44-token prompt with snapshots around it summed its rows to 450 ms against 173 ms of device busy in the same run. That was not the
+neighbours: the probe read its closing candle (three 128 by 3072 by 3072 products at about 95 ms) after its device total and before its
+second snapshot of the rows, so the candle's own `nam_matmul` landed in them (173 + about 280 = 450). Every dispatch goes through
+`nam-enqueue` and is waited for, so the rows must sum to the device total; `nam-profile-window(thunk)` now answers the rows beside that
+total and whether they agree within 1%, and the candle is read outside the window.
+
+2026-11-08 08:38, quiet (candle 27 then 28 ms), the warm 44-token prompt through the window: 47 ms of device, the rows covering it to the
+microsecond (wall 175 ms, inflated by a sync a dispatch under the profile). `nam_affine_mma` 43.3 ms in 196 dispatches (28 layers by 7
+projections, 220 us each), 92%; the LoRA products `nam_matmul` 0.7 ms and `nam_matmul_sk` 0.5 ms; the head on the last token
+(`nam_affine_v1`) 0.7 ms; norms, attention, rope, adds, swiglu and stores 2.3 ms together. Earlier readings of 173 and 341 to 378 ms were
+the candle inside the window and a loaded machine (candle 105 to 137), not the prefill. The projections are 2.82 billion weights a token, so
+the matrix unit carried 248 GFLOP in 43.3 ms, 5.7 TFLOP/s on this M4 Max (40 GPU cores); 44 tokens fill two 32-token tiles, so 8.3 TFLOP/s
+of tile work. The fp32 peak of this GPU is not measured here; a matrix-unit microbenchmark at 64 tokens would say how close
+`nam_affine_mma` stands to it.
