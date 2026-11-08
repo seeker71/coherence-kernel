@@ -394,3 +394,19 @@ The native session cells live in `form/form-stdlib/native-session-learning.bml`
 `native-session-experience.bml`, with `bml/native-session-code.bml` for the
 coding continuation. The worker door is `observe/native-session-learning-run.fk`,
 which the form-cli `session` verb drives.
+
+## Reward over native turns
+
+`form/form-stdlib/bml/turn-reward.bml` reads `receipts/native-turn-ledger.jsonl`
+through two rewards from Terminal-RSI (arXiv:2610.22192, Apache-2.0), which
+trains this voice's own base, Qwen3.8-27B, as a terminal agent judged by a
+protected verifier. A turn's band is that verifier: the checks passed are the
+bits `band_after` holds of `full`, and success is `band_green` with every
+check passed. Family Dense Reward is `passed / D` and Success-Prioritized
+Reward is `success + passed / (passed + D)`, with `D` the check count of the
+family's first attempt, frozen from history. Under SPR every success outranks
+every failure while partial progress stays visible. The door
+`observe/turn-reward-run.bml` prints the failed reward share each scheme gives
+(`{"rows":1}` adds one row per attempt). It reads allocation over turns that
+already ran; it opens no model and moves no gradient. Band:
+`form-stdlib/tests/turn-reward-band` → 127.

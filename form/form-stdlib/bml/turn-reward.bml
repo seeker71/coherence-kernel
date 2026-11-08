@@ -1,0 +1,84 @@
+// turn-reward.bml — the body's native turns scored as Terminal-RSI scores a terminal agent's trajectories.
+//
+// Terminal-RSI (Yang et al., arXiv:2610.22192, github.com/jyyang26/terminal-rsi, Apache-2.0) trains Qwen3.8-27B, the base this body's
+// own voice runs on, as a terminal agent whose trial passes only when a protected verifier passes. Its reward reads two numbers from
+// the verifier, the checks passed and the strict gate, and two of its rewards are carried here as Form
+// (slime_plugins/harbor/partial_reward.py, test_count_progress_rewards and success_smoothed_progress_rewards):
+//   FDR  Family Dense Reward          passed / D(family)
+//   SPR  Success-Prioritized Reward   success + passed / (passed + D(family))   every failure scores below 1, every success at least 1
+// A native turn (receipts/native-turn-ledger.jsonl) is that trajectory already: its band is the verifier, a bitmask of checks, so
+//   passed   the bits band_after holds of full        total  the bits of full
+//   success  band_green and passed == total           family the turn's gap
+//   D        the bits of the first full this family's ledger rows hold: frozen from history, never from the batch, so the value a
+//            family's turn is worth does not drift as more turns arrive (the paper's frozen per-family divisor)
+// An attempt is a turn with work to do: not dry, not a test, full above 0 and band_before short of full. A turn that found its band
+// already full ran no trajectory and is left out, as are query rows, which carry no band.
+// The reading's own measure is the paper's failed reward share: the part of all reward mass a scheme gives to failed attempts. Binary
+// success gives failures none and so teaches nothing of partial progress; FDR's mass flows to failures that brushed many checks;
+// SPR keeps progress visible while every success outranks every failure. It is a measure of how reward is allocated over turns that
+// already ran, not of any training effect: no gradient moves here (docs/native-session-learning.md holds the learning controls).
+// PROOF: form-stdlib/tests/turn-reward-band.bml; door observe/turn-reward-run.bml.
+import form-stdlib/bml/form-cli-guide-packet.bml;
+import form-stdlib/bml/door-options.bml;
+import form-stdlib/bml/stdin-source.bml;
+section [form.bml] {
+ class TurnReward {
+  def trw-door() = "turn-reward";
+  def trw-spec() = [["ledger", "str"], ["rows", "int"]];
+  def trw-ledger(opts) = (String) fcgp-str(opts, "ledger") == "" ? "receipts/native-turn-ledger.jsonl" : fcgp-str(opts, "ledger");
+  // ---- bits, by arithmetic: the ledger's bands are non-negative integers
+  def trw-bits(n) = n <= 0 ? 0 : (n % 2) + trw-bits(n / 2);
+  def trw-and(a, b) = a <= 0 || b <= 0 ? 0 : ((a % 2) * (b % 2)) + 2 * trw-and(a / 2, b / 2);
+  def trw-int(row, key) = fcgp-num(row, key) ?? 0;
+  def trw-attempt?(row) {
+   let full = trw-int(row, "full");
+   (Comparable) trw-int(row, "dry") == 0 && (Comparable) trw-int(row, "test") == 0 && full > 0 && fcgp-present?(row, "band_before") && fcgp-present?(row, "band_after") && (Comparable) trw-and(trw-int(row, "band_before"), full) != full;
+  }
+  // ---- one attempt: [family, passed, total, success, at_unix_ms]
+  def trw-attempt(row) {
+   let full = trw-int(row, "full");
+   let passed = trw-bits(trw-and(trw-int(row, "band_after"), full));
+   let total = trw-bits(full);
+   [fcgp-str(row, "gap"), passed, total, (Comparable) trw-int(row, "band_green") == 1 && (Comparable) passed == total ? 1 : 0, trw-int(row, "at_unix_ms")];
+  }
+  def trw-attempts(rows) = map(r => trw-attempt(r), filter(r => trw-attempt?(r), rows));
+  // the divisor each family carries: the check count of its first attempt in the ledger's order
+  def trw-divisors(attempts) = foldl((acc, a) => any?(d => (String) d[0] == a[0], acc) ? acc : append(acc, [[a[0], a[2]]]), [], attempts);
+  def trw-divisor(divisors, family) = (foldl((acc, d) => (String) d[0] == family ? d : acc, nothing(), divisors) ?? [family, 1])[1];
+  def trw-fdr(a, d) = d <= 0 ? 0.0 : (1.0 * a[1]) / d;
+  def trw-spr(a, d) = (1.0 * a[3]) + (a[1] + d <= 0 ? 0.0 : (1.0 * a[1]) / (a[1] + d));
+  def trw-binary(a, d) = 1.0 * a[3];
+  // ---- the failed reward share of a scheme, in thousandths so the band can pin it: 0 when no reward was given
+  def trw-mass(attempts, divisors, scheme, failed) = foldl((s, a) => failed && (Comparable) a[3] == 1 ? s : s + scheme(a, trw-divisor(divisors, a[0])), 0.0, attempts);
+  def trw-share(attempts, divisors, scheme) {
+   let all = trw-mass(attempts, divisors, scheme, false);
+   all <= 0.0 ? 0 : floor((1000.0 * trw-mass(attempts, divisors, scheme, true)) / all + 0.5);
+  }
+  // does every success outrank every failure under the scheme: 1 when it does or when either side is empty
+  def trw-ordered?(attempts, divisors, scheme) {
+   let won = map(a => scheme(a, trw-divisor(divisors, a[0])), filter(a => (Comparable) a[3] == 1, attempts));
+   let lost = map(a => scheme(a, trw-divisor(divisors, a[0])), filter(a => (Comparable) a[3] == 0, attempts));
+   nil?(won) || nil?(lost) ? 1 : foldl((m, x) => x < m ? x : m, won[0], won) > foldl((m, x) => x > m ? x : m, lost[0], lost) ? 1 : 0;
+  }
+  // ---- the reading: [attempts, families, successes, binary-share, fdr-share, spr-share, fdr-ordered, spr-ordered]
+  def trw-read(rows) {
+   let attempts = trw-attempts(rows);
+   let divisors = trw-divisors(attempts);
+   [len(attempts), len(divisors), len(filter(a => (Comparable) a[3] == 1, attempts)), trw-share(attempts, divisors, trw-binary), trw-share(attempts, divisors, trw-fdr), trw-share(attempts, divisors, trw-spr), trw-ordered?(attempts, divisors, trw-fdr), trw-ordered?(attempts, divisors, trw-spr)];
+  }
+  def trw-permille(n) = (n / 10).str() ++ "." ++ (n % 10).str() ++ "%";
+  def trw-line(r) = "[turn-reward] attempts=" ++ r[0].str() ++ " families=" ++ r[1].str() ++ " success=" ++ r[2].str() ++ " failed_reward_share binary=" ++ trw-permille(r[3]) ++ " fdr=" ++ trw-permille(r[4]) ++ " spr=" ++ trw-permille(r[5]) ++ " success_outranks_failure fdr=" ++ r[6].str() ++ " spr=" ++ r[7].str() ++ " (allocation over turns that ran; no training effect)";
+  def trw-row-line(a, d) = "{\"gap\":\"" ++ a[0] ++ "\",\"at_unix_ms\":" ++ a[4].str() ++ ",\"passed\":" ++ a[1].str() ++ ",\"total\":" ++ a[2].str() ++ ",\"divisor\":" ++ d.str() ++ ",\"success\":" ++ a[3].str() ++ ",\"spr_milli\":" ++ floor(1000.0 * trw-spr(a, d) + 0.5).str() ++ "}";
+  def trw-print-rows(rows) {
+   let attempts = trw-attempts(rows);
+   let divisors = trw-divisors(attempts);
+   foldl((n, a) => n + print_str(trw-row-line(a, trw-divisor(divisors, a[0]))), 0, attempts);
+  }
+  def trw-run(opts) {
+   let rows = fcgp-rows(trw-ledger(opts));
+   let shown = (Comparable) (fcgp-num(opts, "rows") ?? 0) == 1 ? trw-print-rows(rows) : 0;
+   print_str(trw-line(trw-read(rows)));
+  }
+ }
+ 0;
+}
