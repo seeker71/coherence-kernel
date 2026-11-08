@@ -100,7 +100,74 @@ section [form.bml] {
     // reader must not hold every writer while it constructs its local index.
     // Publication reacquires the writable lease and rechecks identity, the
     // committed prefix and every new frame before any caller effect executes.
-   def nfs-warm(path) = record_has(nfs-warmed-paths,path) && record_get(record_get(nfs-warmed-paths,path),"valid")==1 ? 0 : nfs-warm-now(path);
+   // Ownership and rotation. Every process that holds field state keeps a shared
+   // flock on <journal>.owners for its whole life (a raw descriptor no cell owns;
+   // the kernel drops it when the process ends). The first use tries an exclusive
+   // lock first: granted means no other process holds any field state, so a journal
+   // past the floor is rotated before anything is replayed. The new journal is one
+   // field-rotate frame that carries the next id forward, so coordinates stay
+   // monotonic and are never reissued; the replaced journal stays as <journal>.prior.
+   def nfs-rotate-floor() = 262144;
+   def nfs-own(path) = record_has(nfs-process,"owner") ? 0 : nfs-own-now(path);
+   def nfs-own-now(path) {
+    let owners=path+".owners";
+    let made=nps-file-open(owners,1);
+    if value_kind(made)!="list" then form_error("native field owner file unavailable: "+owners) else nps-file-settle(made);
+    let fd=file_open(owners);
+    if fd<0 then form_error("native field owner file unreadable: "+owners) else {
+     let solo=nps-file-try-exclusive(fd)==0;
+     let rotated=solo ? nfs-rotate(path) : 0;
+     let shared=nps-result(73,131,[fd,1]);
+     if shared != 0 then form_error("native field owner share refused: "+shared.str()) else 0;
+     record_set(nfs-process,"owner",fd); record_set(nfs-process,"rotated",rotated); 0;
+    };
+   }
+   // The last whole frame, by headers alone: [offset,count], or nothing() when any
+   // header fails its checksum or a tail is incomplete (then nothing rotates).
+   def nfs-last-frame(fd,offset,extent,last) = offset==extent ? last : extent - offset<40 ? nothing() : {
+    let header=nfs-read(fd,offset,24); let lengthBytes=substring(header,0,8);
+    if bfp-text(lengthBytes)!=substring(header,8,24) then nothing() else {
+     let count=float_leaf(35,[3,lengthBytes,"value"]);
+     count<0 || count>extent - offset - 40 ? nothing() : nfs-last-frame(fd,offset+40+count,extent,[offset,count]);
+    };
+   };
+   def nfs-frame-bytes(rows,first) {
+    let bytes=nfs-wire([1,first,rows]);
+    let lengthBytes=float_leaf(34,[3,len(bytes)]);
+    lengthBytes+bfp-text(lengthBytes)+bytes+bfp-text(bytes);
+   }
+   def nfs-rotation-frame?(frame) = fbc-proper?(frame) && len(frame)==3 && frame[0]==1 && value_kind(frame[1])=="int" && frame[1]>=nfs-first-id()
+    && fbc-proper?(frame[2]) && len(frame[2])==1 && value_kind(frame[2][0])=="list" && !nil?(frame[2][0]) && frame[2][0][0]=="field-rotate";
+   def nfs-rotate(path) {
+    let lease=nps-file-lease(path,1);
+    if nothing?(lease) then 0 else {
+     defer nps-file-settle(lease);
+     let fd=lease[1]; let extent=nps-file-size(fd);
+     if extent<=nfs-rotate-floor() || nfs-read(fd,0,8)!=nfs-magic() then 0 else {
+      let last=nfs-last-frame(fd,8,extent,nothing());
+      if nothing?(last) then 0 else {
+       let payload=nfs-read(fd,last[0]+24,last[1]+16); let bytes=substring(payload,0,last[1]);
+       if substring(payload,last[1],last[1]+16)!=bfp-text(bytes) then 0 else {
+        let frame=nfs-unwire(bytes);
+        if !fbc-proper?(frame) || len(frame)!=3 || frame[0]!=1 || value_kind(frame[1])!="int" || !fbc-proper?(frame[2]) then 0 else {
+         let next=frame[1]+len(frame[2]);
+         let content=nfs-magic()+nfs-frame-bytes([["field-rotate",next,extent]],next);
+         let fresh=path+".rotating";
+         let written=nps-with-file(fresh,1,out=>{
+          let cut=nps-file-resize(out,0); let wrote=nfs-write(out,0,content,0);
+          wrote[0]==1 && cut==0 && nps-file-sync(out)==0 ? 1 : 0;
+         });
+         if written != 1 then form_error("native field rotation could not write "+fresh) else {
+          if fs_rename(path,path+".prior")!=0 then form_error("native field rotation could not retain the prior journal") else 0;
+          if fs_rename(fresh,path)!=0 then form_error("native field rotation could not publish "+fresh) else extent;
+         };
+        };
+       };
+      };
+     };
+    };
+   }
+   def nfs-warm(path) = record_has(nfs-warmed-paths,path) && record_get(record_get(nfs-warmed-paths,path),"valid")==1 ? 0 : {nfs-own(path); nfs-warm-now(path);};
    def nfs-warm-now(path) {
      let image=nfs-warm-image(path);
      if nothing?(image) then 0 else {
@@ -165,6 +232,8 @@ section [form.bml] {
        let bytes=substring(payload,0,count); let checksum=bfp-text(bytes);
        if substring(payload,count,count+16)!=checksum then form_error("native field frame checksum failed") else {
        let frame=nfs-unwire(bytes);
+       // A rotated journal opens with one field-rotate frame carrying the next id.
+       if offset==8 && record_get(state,"next")==nfs-first-id() && nfs-rotation-frame?(frame) then record_set(state,"next",frame[1]) else 0;
        if !fbc-proper?(frame) || len(frame)!=3 || frame[0]!=1 || frame[1]!=record_get(state,"next") || !fbc-proper?(frame[2]) || nil?(frame[2]) then form_error("native field frame sequence or rows refused") else {
          foldl((done,row)=>{nfs-apply(state,row);done;},0,frame[2]);
           record_set(state,"fold",bfp-fold(header+payload,record_get(state,"fold")));
@@ -264,6 +333,7 @@ section [form.bml] {
     if value_kind(row)=="list" && !nil?(row) && row[0]=="field-reset" then {
      if !fbc-proper?(row) || len(row)!=4 || row[1]!=record_get(state,"epoch") || value_kind(row[2])!="int" || row[2]<=0 || value_kind(row[3])!="int" || row[3]<=0 then form_error("native field epoch history refused") else record_set(state,"epoch",id);
     } else 0;
+    if value_kind(row)=="list" && !nil?(row) && row[0]=="field-rotate" then record_set(state,"epoch",id) else 0;
     nfs-gift-apply(state,id,row);
     record_set(state,"next",id+1); id;
    };

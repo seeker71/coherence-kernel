@@ -9672,16 +9672,51 @@ static void heap_collect(Value result) {
 
 /* Form owns the lexical decision and its health text. This carrier retains the
  * result with the parsed incarnation and applies only the named syntax sites. */
+/* The binding check's verdict image. A clean verdict (no rows) depends only on the
+ * exact sources the checker saw and on this runtime's build, so it is admitted once
+ * and replayed by digest after that: a temp-dir marker named by the digest of every
+ * source view (path and bytes, in order) and the runtime's own source stamp. A verdict
+ * with rows is never imaged; those sources are checked again on every start. */
+static int check_image_path(char *out, size_t capacity) {
+    static const char build[] = __TIMESTAMP__ " " __DATE__ " " __TIME__;
+    uint64_t key = hash_bytes(VALUE_HASH_OFFSET, build, sizeof build - 1);
+    size_t total = 0;
+    for (size_t i = 0; i < source_view_count; ++i) {
+        SourceView *view = &source_views[i];
+        if (view->path != NULL) key = hash_bytes(hash_mix(key, 0x2f), view->path, strlen(view->path));
+        key = hash_bytes(hash_mix(key, (uint64_t)view->length), view->bytes, view->length);
+        total += view->length;
+    }
+    const char *directory = getenv("TMPDIR");
+    if (directory == NULL || directory[0] == TEXT_TERMINATOR) directory = TEMP_DIRECTORY;
+    size_t length = strlen(directory);
+    while (length > 1 && directory[length - 1] == PATH_SEPARATOR) --length;
+    int wrote = snprintf(out, capacity, "%.*s/fkwu-check-%016llx-%zx-%zu", (int)length, directory, (unsigned long long)key, total, source_view_count);
+    return wrote > 0 && (size_t)wrote < capacity;
+}
+
 static void check_program_bindings(CellProgram *program) {
     CellProgram *saved = current_program;
     capture_program(saved);
     select_program(&main_program);
-    Form head = {.kind = FORM_SYMBOL, .text = "kas-check", .text_length = 9};
-    Form pid = {.kind = FORM_INTEGER, .integer = (long long)getpid()};
-    Form *parts[] = {&head, &pid};
-    Form invoke = {.kind = FORM_GROUP, .parts = parts, .part_count = 2};
-    Form *forms[] = {&invoke}; drive_forms(forms, 1);
-    Value rows = finished;
+    char image[4096];
+    int imaged = check_image_path(image, sizeof image);
+    struct stat seen;
+    int admitted = imaged && stat(image, &seen) == 0 && S_ISREG(seen.st_mode);
+    Value rows;
+    if (admitted) rows = list_from(NULL, 0);
+    else {
+        Form head = {.kind = FORM_SYMBOL, .text = "kas-check", .text_length = 9};
+        Form pid = {.kind = FORM_INTEGER, .integer = (long long)getpid()};
+        Form *parts[] = {&head, &pid};
+        Form invoke = {.kind = FORM_GROUP, .parts = parts, .part_count = 2};
+        Form *forms[] = {&invoke}; drive_forms(forms, 1);
+        rows = finished;
+        if (imaged && rows.kind == KIND_LIST && rows.item_count == 0) {
+            int marker = open(image, O_WRONLY | O_CREAT | O_EXCL, TEXT_FILE_MODE);
+            if (marker >= 0) close(marker);
+        }
+    }
     expect_kind(rows, KIND_LIST, "source binding observation must answer rows");
     Value *diagnostics = allocate_zeroed(rows.item_count, sizeof *diagnostics);
     size_t text_length = 0;
