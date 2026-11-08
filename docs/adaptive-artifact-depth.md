@@ -10,9 +10,8 @@ host stack depth. The body runs on fkwu throughout.
 Depth is an observation. A linked continuation holds open composites, including
 their remaining children. Both descent and completion can yield between slices
 (`fbd-slice`). A deeper valid artifact advances the attention watermark; it is
-never rejected because it crossed a depth number. Extent and u32 wire checks
-reject malformed geometry. A caller can supply its own byte allowance through
-`fbc-load-limited`; the codec has no preset total size or node-count ceiling.
+never rejected because it crossed a depth number. Byte, node and child-count
+format checks still reject malformed or oversized input.
 
 The initial policy (`fbd-initial-attention`) offers 256 operations, a depth
 watermark of 32 and a 50 ms attention target. These are starting observations,
@@ -22,13 +21,15 @@ slice below one quarter of the target doubles it; otherwise it continues. Actual
 GC activity requests attention, but only measured delay requests smaller slices.
 The continuation survives each choice. There is no aggregate duration timeout.
 
-The rewrite's binary admission doors use this Form codec. The physical scalar
-bridge transports exact numeric bits; it does not carry a second tree reader
-or an independent nesting policy.
+The seed's own FORMBIN reader (`runtime/fkwu-uni.c`) still refuses an artifact
+nested deeper than 256 with `form binary: maximum node depth exceeded`; the Form
+codec has no such ceiling. A repair of that refusal follows the real artifact:
+read the Form codec's depth and node count for it (`fbc-decode`), preserve the
+continuation, then witness the chosen path.
 
 The traversal cell is `form/form-stdlib/bml/formbin-depth.bml`;
 `gate/tests/canonical-conformance-band.fk` (1023) reads the pinned kernel artifact
 through the Form codec.
 
-Keep reader ownership here as new artifact consumers arrive, preserving the
-same continuations, geometry checks and explicit caller allowances.
+Where it is going: every reader of FORMBIN2 meets the same Form traversal, and the
+seed's depth refusal lowers into it.

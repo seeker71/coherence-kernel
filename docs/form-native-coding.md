@@ -367,17 +367,6 @@ Glass admission paints its first frame, observes a compact watcher hint and pres
 
 An evaluated session LoRA may offer a proposal before Qwen unless the request names a model, selects evaluation or requests review. The original checks decide whether it suffices. The optional learner uses native workers. Explicit `model` and `weight_training: 0` keep ongoing quality assessment on the selected local model with checkpoints and no answer gradients. [Session learning](native-session-learning.md), [healing](form-cli-healing.md), [provider repair](form-response-resource.md) and [provider synthesis](form-response-synthesis.md) describe their separate interfaces; provider paths are not implicit `code` behavior.
 
-Session observation recording follows model settlement and checkpoint retention.
-If recording stops, the result preserves its completion, documents, checkpoint,
-usage and release status. `session_learning_worker` then reports
-`session-observation-unverified;completed-result-preserved`: a record may already
-have been published, so the result claims neither absence nor successful retention.
-The health observation names the home and owned checkpoint. After that resource
-changes, an explicit resume rechecks completed work without counting another model
-turn. An unchanged successful recheck retries the same immutable observation;
-changed checker evidence owns a separate assessment. An already completed task
-does not reopen a model.
-
 ## Native surface lifting
 
 Mixed modules use the same native lifter: raw Form definitions become BML while
@@ -450,22 +439,22 @@ The CLI's native tool JSON also admits `{id,path}` file snapshots before executi
 | `mode` | `code` (default) or `review` |
 | `report_checks` | Required, nonempty in review; read-only assertions on the report |
 | `model` | Registry name; default `qwen38-q8`; explicit selection skips the LoRA proposal |
-| `context` | Nonnegative integer positions per admission; absent or zero uses the artifact window, subject to measured admission |
-| `turns` | Optional nonnegative caller reply allowance; omitted or zero has none; a positive value adds that allowance on resume |
+| `context` | Positions per admission; default 8192 |
+| `turns` | Reply allowance; default 64; additional allowance on resume |
 | `max_reply_tokens` | Optional positive integer ceiling per reply |
 | `code_entry`, `review_entry` | Respective mode only: `staged` (default) or `direct` |
 | `document_context` | `full` (default) or `catalog` |
 | `source_queries` | Catalog-only `[{tool,arguments}]` read-only queries; no supplied input/output |
 | `context_graph` | Optional `{focus:[path],dependencies:[[source,required_source]]}` over admitted source paths |
 | `helper` | Coding-only native read-only consultation: model, prompt and phases; optional caller allowances, otherwise native completion and progress; see below |
-| `evaluation` | Integer 0/1; 1 keeps a private checkpoint for explicit continuation of the same evaluation, excludes recall across attempts, LoRA proposals and training |
+| `evaluation` | Integer 0/1; 1 excludes recall, resume, checkpoint writes, LoRA proposals and training |
 | `weight_training` | Integer 0/1, default 1; 0 excludes answer gradients while preserving ordinary continuity |
 | `resume` | Returned checkpoint ID with the same original request |
 | `feedback` | Coding resume only: exactly `{id,text}`, both nonempty |
 | `native_rehearsal_checks` | Coding-only integer 0–64, default 0 |
-| `initial_reasoning_tokens` | Positive integer; first reply of admission, subject to available context |
-| `reasoning_tokens` | Positive integer; every reply; requires answer reserve and excludes initial-only option |
-| `reasoning_answer_tokens` | Positive integer; requires one of the reasoning options; both stages and their handoff must fit observed context |
+| `initial_reasoning_tokens` | Positive integer ≤8192; first reply of admission |
+| `reasoning_tokens` | Positive integer ≤8192; every reply; requires answer reserve and excludes initial-only option |
+| `reasoning_answer_tokens` | Positive integer ≤8192; requires one of the reasoning options |
 
 Tool checks are `{tool,arguments,input?,stdout,exit?}`. They require exact stdout, empty diagnostics and the requested exit (default 0, otherwise a canonical nonnegative integer). For example `{"tool":"rg","arguments":["-F","obsolete claim","answer.md"],"stdout":"","exit":1}` expects a normal no-match. Missing source remains a failure. Failed assertions retain actual output/status and checked source identities; source text stays in the resident catalog.
 
@@ -562,14 +551,12 @@ ranking or a change to the decoder's linear KV stream.
 
 The parent prompt names selected and omitted paths and binds the view at
 `task_context.context_graph` and `code_context.context_graph`. Its selected
-`sources` remain exact native cells, read with `fcap-context-field`. In graph-enabled
-catalog mode, each new stream also receives the selected current source text and
-identities once at bootstrap. This is the working candidate, including completed
-edits; original sources and caller checks stay unchanged. Original goal,
-writable/check authority, plan, pending tasks, caller corrections, completed
-source effects and the latest observation/failure stay in the view. Omitted
-sources remain in the owner's resident documents and tools. Actual tokenizer
-admission and existing context renewal still decide capacity.
+`sources` remain exact native cells, read with `fcap-context-field`; selection
+does not copy every source into the token window. Original goal, writable/check
+authority, plan, pending tasks, caller corrections, completed source effects and
+the latest observation/failure stay in the view. Omitted sources remain in the
+owner's resident documents and tools. Actual tokenizer admission and existing
+context renewal still decide capacity.
 
 A caller may also request native read-only consultations:
 
@@ -594,10 +581,7 @@ none. Optional `context` selects an initial context. Absent or zero uses the
 artifact's declared window, subject to actual memory admission; a full coding
 stream retains its work through the existing context renewal. Phases select planning,
 implementation or repair. The helper's task
-prompt renders the selected sources and pinned context. Omitted entries carry
-catalog metadata; their source bytes remain with the parent. The helper requests
-needed omitted evidence from the parent and cannot claim to have read it.
-It runs through the
+prompt renders the selected sources and pinned context. It runs through the
 existing unmanaged read-only review lane, with no writable paths, recalled
 answers, provider call or training. Its report is advice; it cannot complete
 the parent task or change the original checker.
@@ -608,31 +592,17 @@ helper from starting. The helper must release before the parent reopens from
 the same checkpoint. Incomplete advice remains explicitly unfinished. Exact
 task prompt bytes and hash, selected paths, model, phase, result, release and
 usage are retained in `helper_consultations`; the native review lane adds its
-usual protocol and source bindings around that task prompt. A completed report
-and measured usage remain visible while release is pending. `usage_complete`
-and `usage_scope` distinguish final observed counts from retained lower bounds;
-an unavailable original process cannot turn its pending zero snapshot into a
-known final cost. Cleanup does not promote usage completeness. Newly observed
-helper work contributes to the invocation's generated/injected IDs and
-observations; a cleanup-only replay spends no new model tokens. The journal and
+usual protocol and source bindings around that task prompt. Helper usage is
+included in total generated/injected IDs and observations. The journal and
 graph links use the existing checkpoint, with no separate graph store.
 
 The consultation key includes phase, pending work, plan/brief, exact current
 observation and failure evidence, all retained source identities, caller corrections,
 completed effects and the graph/helper request. Identical resumed context does not
-spend a second call. All caller corrections remain exact in the bound context,
-including older and longer entries; current source and verification determine
-whether their reported conditions still hold. A successful full or ranged read
-of unchanged selected source carries the prior consultation from the read boundary,
-including an unfinished attempt and its cause.
-Completing a pending task also preserves that advice when the phase, candidate,
-selected context and evidence stay unchanged. These applications retain the original
-prompt and attribution without adding a call or cost; arbitrary task replacement,
-new observations and changed source still invite consultation. The repeated-read
-care signal can also recover a consultation against its exact nested observation.
-The first omitted-source observation can invite advice; repeating an already
-consulted observation preserves that receipt and its measured cost. Counters alone
-do not renew consultation; changed evidence can invite another within any explicit caller allowance. A retained
+spend a second call. An observed repeated successful full or ranged read of source supplied to a
+completed consultation reuses advice for the same work even when its care note
+changes. Reads of omitted source and unfinished advice remain eligible. Counters alone do not
+renew consultation; changed evidence can invite another within any explicit caller allowance. A retained
 pending consultation without observed release holds continuation rather than
 starting an overlapping model. `form-cli-code-bounded-note-band` exercises these
 contracts with scripted model ports; an actual model run separately establishes
@@ -646,7 +616,7 @@ The JSON door can normalize exact yes/no/true/false strings when a caller's root
 
 ### Edit a retained response
 
-Supply an existing answer as a writable document with `mode: "code"`, direct entry, the original enquiry, immutable sources and checks. Use guarded `edit`; `write` creates an absent document. Read the changed answer after verification. Keep assessed answers out of gradients with `weight_training: 0`, or use `evaluation: 1` for an independent evaluation with no recall across attempts. Its private checkpoint preserves completed effects and observations for explicit continuation.
+Supply an existing answer as a writable document with `mode: "code"`, direct entry, the original enquiry, immutable sources and checks. Use guarded `edit`; `write` creates an absent document. Read the changed answer after verification. Keep assessed answers out of gradients with `weight_training: 0`, or use `evaluation: 1` for fresh evaluation without continuity.
 
 ### Amend a retained report
 
@@ -823,11 +793,6 @@ holds. External requests, results and receipts retain their
 public JSON compatibility; result fields are assembled once as cells and emitted
 only at that public boundary. A repeated call keeps the result it returned.
 Old checkpoint evidence is converted at admission.
-Checkpoints from the early rewrite's string-based JSON categories are adapted
-only at composite category positions. Literal strings remain unchanged. The
-stored digest, original caller contract, state ownership and evaluation policy
-must still match before saved work resumes. Unknown or ambiguous data refuses;
-a verified resume writes the current canonical representation.
 
 Native tool observations stay as structured cells in policy state, binary
 checkpoints and model context. Guard, read, mutation and verification metadata
@@ -964,9 +929,9 @@ Each stage below is a BML organ with its own band; none of the bands opens a mod
 
 ### Checkpoints, resume and feedback
 
-`observe/native-turn-run.bml` continues through available distinct local choices.
-Optional positive `attempts` and `turns` values retain the caller's attempt and
-reply allowances; omitted or zero values impose no count cutoff.
+`observe/native-turn-run.bml` offers six local attempts by default; stdin
+`attempts` selects a positive allowance. Each admission allows 64 local replies
+by default, twice the earlier allowance; `turns` selects another amount.
 A gap is walked as a ladder of
 distinct approaches (`form-stdlib/bml/native-turn-ladder.bml`), each an option of one backtrack walk. First a
 coherence check: a gap whose band reads above its `full`, or whose own `; Verdict n` head names another number,
@@ -1193,7 +1158,7 @@ remains available.
 
 Ordinary JSON jobs save native binary checkpoints under `.hearth/code-memory/` after completed transitions. Resume uses the same original request and returned checkpoint ID; `turns` adds replies and `context` sizes the admission. Candidate documents, tasks, findings and failed checks survive. Incomplete output never becomes an action. A complete candidate is rechecked before reuse, with zero new model/tool counts and its earlier provenance retained. Exact original goal/documents/writable/checks select that lesson; changed contracts do not. Review recall supplies guidance rather than presenting an old report as new work.
 
-An observed failure beyond a completed coding job's checks can reopen that checkpoint with `feedback:{id,text}`. Repeating identical event bytes is idempotent; reusing an ID with changed text is a conflict. The original contract, review and candidate remain. Keep `weight_training:0` on continuation while assessing quality. `evaluation:1` starts without recall; an explicit `resume` continues only a checkpoint with the same evaluation policy and original contract. It rechecks completed work and keeps prior observations and effects, without writing lessons, shared repetition history or answer gradients. Review reports remain assessment experience, not verified implementation targets. Checkpoint digests detect corruption; filesystem publication remains caller-owned.
+An observed failure beyond a completed coding job's checks can reopen that checkpoint with `feedback:{id,text}`. Repeating identical event bytes is idempotent; reusing an ID with changed text is a conflict. The original contract, review and candidate remain. Keep `weight_training:0` on continuation while assessing quality. `evaluation:1` starts fresh before continuity lookup and cannot resume. Review reports remain assessment experience, not verified implementation targets. Checkpoint digests detect corruption; filesystem publication remains caller-owned.
 
 ## Native BML boolean repair
 

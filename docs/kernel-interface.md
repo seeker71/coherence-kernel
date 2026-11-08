@@ -5,113 +5,7 @@ carries off the interface is released; a meaning that differs between two readin
 one name is a defect in exactly one place. This page says what stands and where the
 interface is going; history lives in git.
 
-## Audio ownership
-
-The optional system carrier owns AudioQueue callbacks and lifetime. The C seed
-only transports byte strings and the caller's remaining deadline; its shrink
-path is the existing native carrier ABI. `host-sense-organ.fk` owns PCM statistics,
-WAV validation, framing and reports. `float_leaf(59, milliseconds)` supplies a
-private raw capture to that Form owner; zero milliseconds returns empty bytes
-without opening input. A three-item `[pcm, rate, tail_ms]` packet supplies private
-air loopback. It leaves a standing public input stream untouched.
-
-Mic/speaker count, name and health describe the available default AudioQueue
-endpoint, not microphone permission or a witnessed recording. Stream writes
-return accepted samples; playback returns a completed sample count only after
-observed queue startup, buffer return and stopped state. The caller's deadline
-covers admission, copying and draining. Disposal precedes context release;
-incomplete release retains its owner for an explicit stop/retry. No policy cap
-silently shortens the requested duration or replaces a larger PCM buffer.
-
-The current verification uses silent invalid-input, closed-stream and synthetic
-PCM/WAV observations. It does not establish microphone or speaker hardware
-behavior on this host.
-
 ## Source: one reader, one lowering
-
-The Form `native-posix.bml` owner also carries positioned file reads/writes,
-size, resize and durable sync. Its transient file lease uses
-`float_leaf(60,["open",path,writing])` to admit an owned private regular file and
-lock it; the returned `[handle, descriptor]` belongs to the active cell.
-`["close",handle]` releases it and `["held",handle]` reads that ownership.
-`["identity",handle]` reads the admitted descriptor's device/inode, and
-`["status",handle]` retains ownership and the close error separately. Admission
-is nonblocking before regular-file validation, so a FIFO cannot defeat the
-cell deadline. Linux close errors retire the descriptor without retrying a
-number that the OS can already have assigned to another owner.
-`["stamp",handle]` includes its extent and host modification/change times.
-A lock that would wait for this process's own held lease refuses with its
-owner intact; it cannot self-wait indefinitely. Foreign lock contention still
-honors the caller's deadline.
-`nps-with-file` uses native `defer` for ordinary failure, and evaluator unwind
-releases a lease when a deadline bypasses Form recovery. This physical hook does
-not establish shared node identity by itself. Its shrink path is the native
-walker carrying the same resource ownership; storage framing and publication
-remain Form work.
-
-The versioned `bml/native-field.bml` journal owns canonical row lookup, monotone
-row allocation, framing, checksums and publication through that lease. Existing
-rows are reused before allocating another identity. Cold and invalidated readers
-recover under shared leases. A replaced journal releases the exclusive lease
-before rebuilding its index; no callback effects are repeated. Execution
-reacquires an exclusive writable lease, rechecks its
-physical identity and observed prefix, and syncs recovered bytes before exposing
-IDs. This includes a recovered header with no frames. Speculative indexes are
-inadmissible after failure or a deadline, while their verified byte checkpoint
-survives repeated refusals and failed readback. Missing currentness stamps refuse.
-When host change metadata differs, the complete cached prefix is fingerprinted
-again under the lease. Replay decoding stays inert; it cannot admit coordinates.
-Incomplete, changed or incompatible retained frames
-refuse explicitly. Public constructors, typed binary admission, full-coordinate
-lookup and cell-map operations enter this Form owner. Attached immutable views
-retain payloads and dotted children; adoption does not count as a mint. Map
-capabilities are weakly tracked by native GC so an interrupted caller's lost
-result can be reclaimed. The bootstrap handoff and physical view/handle carrier
-shrink into the native walker; canonical identity stays in Form.
-
-The v7 process page uses `/fg7-k<pid>` and a versioned atomic snapshot header.
-Its logical word count is checked independently of OS page padding. Public
-words28–30 identify the field version/device/inode;22 reports the shared owner.
-Exit retains an ended snapshot. Form journal rows own roster membership, and
-foreign map admission checks both page identity and the host process birth.
-This wire does not reinterpret legacy live pages. In this version, counters5/6
-and live words7/8 report allocated local text/list objects (including objects
-not yet collected), not legacy table high-water marks or native text nodes.
-Counter69/live word21 reports completed GC epochs.
-
-`field_reset` starts a new permanent interning epoch under the journal lease.
-It requires the current owner to stand alone among all retained process
-identities, including forgotten owners whose death is unproven. It returns1
-only after commit/readback, and absence when exclusive ownership is unproven.
-It preserves the inode, monotone IDs, fixed coordinates, historical catalog,
-attached views, source attribution and gift graph. New string/float/composite
-interning belongs to the new epoch. This is not physical storage reclamation.
-
-Owned gift generations and byte frames use the same Form journal. A fixed64-byte
-physical descriptor names a committed generation; payload capacity comes from
-the actual reservation and the caller's allowance. Reopening with a larger
-allowance does not change the frame inode or invalidate existing readers.
-Readonly handles cannot publish. Reader pins, current publications, promotions
-and their transitive dependencies retain generations. Unavailable owner or frame
-observations cannot prove reclamation. An interrupted odd publication is restored
-only after matching frame identity and proving the recorded writer ended.
-Held values carry GC-traced provenance through children and list/record views;
-permanent promotion retains the owned identity rather than flattening it away.
-
-The native POSIX fork uses libc's child bookkeeping. Active file leases or held
-gift views refuse with EBUSY until released or explicitly handed off; they never
-silently become independently owned copies. Form retains continuation policy.
-General regular-file handles share evaluator unwind ownership with journal
-leases, without imposing private-journal permissions or locks. Form streams
-copy and positioned writes, checks descriptor identity before truncation, keeps
-permissions, and verifies release. The C carrier supplies descriptor admission
-and host timezone conversion; it has no duplicate copy loop.
-
-Operation reflection retains public tag/arity and appends the actual delegated
-Form source owner. Surface checks verify that owner against its declared home.
-Binding validation consults indexed names and positive operation observations
-before lexical lookup; a negative operation observation still permits a local
-binding, and missing names retain their original source diagnostic.
 
 **Stands.** fkwu resolves a unit's closure — `; preludes:`, `// preludes:`, `import`
 in every spelling, `home-index.txt` names — and lowers every `.bml` and section-bearing
@@ -144,8 +38,8 @@ add_u32 bnot_u32 method_define method_has method_invoke recipe_to_bytes
 bytes_to_recipe`) stays native until a warm BML home matches it; then it becomes one
 `home-index.txt` row. Everything else lives in a Form or BML home that fkwu links by
 name. A native that shadows a home (`char_at ord int_to_str str_to_int sum abs range
-intern_node_at …`) is released, so fkwu runs the body's own meaning. `bp` links its
-reviewed Form resolution through that same home index.
+intern_node_at …`) is released, so fkwu runs the body's own meaning. `bp` is the one
+name whose native and BML meanings differ (law 10).
 
 ### Laws the core pins
 
@@ -179,7 +73,7 @@ moves a kernel:
 | 7 | on the band's rows | 8192–65536 |
 | 8 | pinned | 131072, 262144, 524288 |
 | 9 | `value_str` and `print` give `<record>` for a record and `<closure>` for a closure | 1073741824 |
-| 10 | Form-owned: `bp` resolves a reviewed NodeID and stops on an unknown name; category-name string literals remain distinct | `form-bml-cursor-full-band.fk`, 105 |
+| 10 | open: fkwu's tag 45 answers its own argument, a string, while the BML resolution in `form-ontology-bp.fk` answers a NodeID and stops on an unknown name; no arm runs the BML `bp` | — |
 
 The band also pins `fs_list` and `host_dir_list` (a path that is no directory answers
 `nothing`, an empty directory `[]`), `record_has` of a record, `record_get` and
@@ -243,14 +137,6 @@ a cursor and 32 answers the text of an interned id. A row is 13 ints: `idx pid t
 stage key phase depth link dur outcome amount body digest`. Phase 1 opens, 2 closes, 3
 closes unwound and 4 says the stage died; a close's link is its open.
 
-Source initialization also speaks on this ring: `source-initialization` names
-the matched source unit as its key and reports the form count on completion.
-BML admission wrappers and their translated units retain their separate paths.
-Synthetic binding/image calls and empty sources do not claim a unit entry;
-interrupted entries unwind through the existing cell recovery or process exit.
-This observation moves with initialization from the C bootstrap into the Form
-source loader; it adds no execution allowance.
-
 **The fold.** `form/form-stdlib/bml/stage-vitality.bml` folds the rows without calling a
 door. Each stage key learns its own bound (its p95, then the stage's, from a log2
 histogram), and the fold finds seven kinds: **overstay** (an open past its bound),
@@ -277,37 +163,6 @@ and a lane between turns reads `need=none`. The glass view of the findings
 
 `observe/body-vitals-live.fk` is a different watch: it folds each glass surface's
 stamps into that surface's own rhythm and publishes the `vitals` frame.
-
-## Owned Metal buffer operands
-
-The existing Metal leaves keep their arities and scalar operands. An owned
-allocation uses `metal_buf_alloc([bytes, owner, key])`; an owned file mapping
-uses `metal_buf_from_file([path, owner, key], offset, bytes)`. The named record
-field must already contain a proper list. A positive returned handle is attached
-to that list inside the physical leaf, before another evaluator deadline poll.
-
-`metal_buf_free([handle, owner, key])` requires that exact handle in the owner's
-list. It removes the handle only when the carrier confirms release. A refusal
-leaves the list unchanged; a different owner cannot release it. Form retains
-the record before entering construction and owns retries, reservations and
-retirement selections. The bridge adds no process-wide cleanup registry.
-
-These operand adaptations are temporary seed glue beside the physical Metal
-leaves. They leave with those leaves when their native walker carrier takes over;
-allocation policy, model geometry and continuation meaning remain in Form.
-
-## Bootstrap source location
-
-Source resolution preserves the caller's local and ancestor choices first.
-When those lack a library, it searches from the executing image's location so
-a scratch working directory can use this body's Form home. Local dependencies
-continue to override that fallback. Metal loading shares the executable-location
-carrier. Linux builder identity still reads `/proc/self/exe` itself, preserving
-the loaded image identity across pathname replacement.
-
-This location carrier remains in the temporary C seed because the first home
-index is needed before Form admission runs. It moves into Form with the initial
-loader; it introduces no new public primitive or environment authority.
 
 ## Order
 

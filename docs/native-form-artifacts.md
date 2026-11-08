@@ -14,9 +14,7 @@ invalid encoding or decoding returns a refusal with a diagnostic.
 Artifact file reads compare the extent observed before and after
 reading with the exact bytes returned. Partial reads and changed extents refuse
 before parsing. `fbc-read-exact(path, maximum)` retains `[ok, error, bytes,
-before, after]`; a zero maximum imposes no caller byte allowance.
-`fbc-load-limited(path, maximum)` applies an explicit positive caller allowance
-before reading. Ordinary `fbc-load` has no preset artifact-size ceiling.
+before, after]`; a zero maximum leaves the lens's existing size policy open.
 Extent checks do not claim an atomic snapshot against a same-size concurrent
 rewrite. The caller owns publication and stable inputs.
 
@@ -30,18 +28,10 @@ is narrowed through a Form scalar during a wire roundtrip.
 The decoder shares `formbin-depth.bml`'s explicit continuation stack. A deep
 tree consumes Form data rather than recursive host stack frames. Encoding
 joins chunks through binary carries, avoiding a whole-prefix copy for every
-emitted node. String and child counts must fit the actual artifact extent;
-each encoded count and individual string length must fit its u32 wire field.
-There is no preset total byte, pooled string, node, child or depth ceiling.
-Traversal retains its continuation while actual resource signals and explicit
-caller allowances govern execution.
-
-`fbc-data` and `fbc-data-value` carry ordinary values through this inert codec,
-including dotted lists and binary strings. Numeric decoding uses the physical
-scalar path and issues no native identity. Native values require an explicit
-policy: `fbc-native-data` carries payload, while `fbc-data-coordinate` carries
-only the coordinate and deliberately conveys no resident payload or lifetime.
-Parsed-source cache values use this same ordinary-value adapter.
+emitted node. Current conformance admission ceilings are 64 MiB per artifact, 262144 strings,
+32 MiB of string content, 262144 children per composite and 1000000 nodes.
+Nesting has no fixed depth ceiling. These are resource admission policy;
+the direction is context-owned budgets and incremental resource observations.
 
 Complete JSON syntax admission precedes parsing, and duplicate keys retain
 their last value. `json-wire-admission.bml` reuses the shared lexical rules
@@ -53,10 +43,9 @@ holds each to its pinned rendering (`form/conformance/canonical-s-expression-vec
 It pins the 119 FORMBIN2 interop bytes (and their SHA-256) of
 `(list "fkb-interop" 42 2147483648 3.5)` in `gate/canonical-conformance.bml`: the
 Form codec decodes them to the rendering fkwu computes from that source and
-re-encodes them byte for byte, and the codec's own artifact equals its pinned bytes. All 12 refusal vectors
+re-encodes them byte for byte, and the codec's own artifact equals its pinned bytes. All 12 malformed vectors
 (`form/conformance/formbin2-malformed-vectors.json`) are refused by the Form
-codec with their expected words. They distinguish malformed geometry from an
-explicit caller byte allowance. The complete conformance witness is **1023**:
+codec with their expected words. The complete conformance witness is **511**:
 
 ```sh
 form-run ./fkwu gate/tests/canonical-conformance-band.fk

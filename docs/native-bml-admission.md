@@ -122,10 +122,7 @@ def middle(xs) {
 ## Owned resources
 
 `defer expr;` runs `expr` when its block ends. Several defers run in reverse
-order (last registered, first released), on normal completion and ordinary
-failure. A completed `nothing()` stays an absent result after cleanup, and zero
-stays zero. A hard cell deadline can bypass Form cleanup; physical leases also
-register their owner with evaluator unwind for that boundary.
+order (last registered, first released), on a normal exit and on a stop.
 
 A class that owns a handle names its release once:
 
