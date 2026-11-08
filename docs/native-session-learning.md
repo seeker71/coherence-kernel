@@ -425,7 +425,9 @@ long ago, so their bands read full before any option opens and no trajectory
 forms. A detached worktree of HEAD under the run's work directory is set up.
 For each gap, the commits that touched its writable files are walked newest
 first (`reset_depth`), with the writables set to the text each commit's parent
-held. The first text under which the gap's own band reads a number short of
+held. A gap whose writables include the harness (the turn door, its ladder,
+these rounds, the reward) is left out, since rewinding it would measure
+another harness. The first text under which the gap's own band reads a number short of
 full is the gap's reset. The band says the gap is open again; no timestamp is
 guessed. Gaps no text reopens, and gaps another gap's reset moved, are left
 out by name in `pool.jsonl`. Every turn then runs inside that tree, and the
