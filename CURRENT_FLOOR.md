@@ -231,7 +231,7 @@ observe/tests/belief-rewitness-band      -> 63
 learn/tests/homecoming-distillation-corpus-band -> 131071
 form-stdlib/tests/self-distill-band -> 255  (the voice's own frontier row, judged and refused by name, a blind second read of its why, in learn/distillation-native-candidates.jsonl apart from the rented rows)
 form-stdlib/tests/self-review-band -> 511  (the wrong line of e06d7217e and cf090e073 and its repair, replayed through the voice door and graded on what the line computes; the register's self-review reads that row, and the reason stays a person's to read)
-form-stdlib/tests/turn-reward-band -> 127  (Terminal-RSI's FDR and SPR over the native-turn ledger: a band is the verifier, every success outranks every failure under SPR; ./fkwu observe/turn-reward-run.bml read 179 attempts in 30 families, 24 successes, failed reward share FDR 92.1% and SPR 61.8%, 2026-11-08)
+form-stdlib/tests/turn-reward-band -> 127  (Terminal-RSI's FDR and SPR over the native-turn ledger: a band is the verifier, every success outranks every failure under SPR; ./fkwu observe/turn-reward-run.bml read 149 attempts in 30 families, 24 successes (interrupted rows judged nothing and are left out), failed reward share FDR 88.3% and SPR 55.4%, 2026-11-08)
 form-stdlib/tests/rsi-rounds-band -> 255  (Terminal-RSI's rounds over the native-turn queue: split, TB-GAE, inherited critic calibrated four steps, RSR lessons by advantage, the reset pool's reading; through the stand-in turn door, no model, 2026-11-08)
 value-eq-arena-band 31 · import-carry-band 255 · form-cli-author-high-band 4095
 closure-lines-band 31 · sort-band 31   (the queue's two gaps, written by the local lane; 2026-10-01)
