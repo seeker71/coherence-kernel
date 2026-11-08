@@ -43,10 +43,11 @@ section [form.bml] {
 
     // ---- the tensor table, every row, priced by the reader's own geometry ------------------------------------
     // a row is [name, ggml type, dims, relative offset, absolute offset, priced bytes]; priced bytes is 0 for a type the body does not price
-    def dvl-dims(src, off, k, n) = k == n ? [] : cons(egg-ti-dim(src, off, k), dvl-dims(src, off, k + 1, n));
+    def dvl-dims(src, off, k, n) = n<0 || k<0 || k>n || n>len(src)/8 ? form_error("GGUF tensor dimensions exceed their header window") : k == n ? [] : cons(egg-ti-dim(src, off, k), dvl-dims(src, off, k + 1, n));
     def dvl-row(src, off, base) = [gm-name(src, off), egg-ti-type(src, off), dvl-dims(src, off, 0, egg-ti-ndims(src, off)), egg-ti-dataoff(src, off), base + egg-ti-dataoff(src, off), gm-bytes(src, off)];
-    def dvl-rows-go(src, off, n, base) = n == 0 ? [] : cons(dvl-row(src, off, base), dvl-rows-go(src, egg-ti-next(src, off), n - 1, base));
-    def dvl-rows(src) = dvl-rows-go(src, egg-tinfo-start(src), egg-tensor-count(src), egg-data-base(src, 32));
+    def dvl-rows-go(src, off, n, base) = n<0 || n>len(src) ? form_error("GGUF tensor count exceeds its header window") : n == 0 ? [] : cons(dvl-row(src, off, base), dvl-rows-go(src, egg-ti-next(src, off), n - 1, base));
+    def dvl-table(src) {let start=egg-tinfo-start(src);let count=egg-tensor-count(src);[start,count,egg-align-up(egg-tinfo-walk(src,start,count),32)];}
+    def dvl-rows(src) {let table=dvl-table(src);dvl-rows-go(src,table[0],table[1],table[2]);}
     def dvl-r-name(r) = r[0];
     def dvl-r-type(r) = r[1];
     def dvl-r-dims(r) = r[2];
@@ -65,7 +66,7 @@ section [form.bml] {
     // ---- the metadata ------------------------------------------------------------------------------------
     def dvl-key(src, key) = gmt-u32(src, "deepseek4." ++ key);
     def dvl-fkey(src, key) = gmt-f32(src, "deepseek4." ++ key);
-    def dvl-arr-go(src, off, i, n) = i == n ? [] : cons(eqr-le(src, gm-arr-elem-off(src, off, i), egg-vtype-size(gmt-arr-etype(src, off))), dvl-arr-go(src, off, i + 1, n));
+    def dvl-arr-go(src, off, i, n) = n<0 || i<0 || i>n || n>len(src) ? form_error("GGUF array count exceeds its header window") : i == n ? [] : cons(eqr-le(src, gm-arr-elem-off(src, off, i), egg-vtype-size(gmt-arr-etype(src, off))), dvl-arr-go(src, off, i + 1, n));
     // an integer array by key ([] when the key is absent)
     def dvl-ints(src, key) = {
         let off = gmt-find(src, key);
@@ -101,7 +102,7 @@ section [form.bml] {
             "indexer", dvl-count-present(ix, dvl-indexer-names(p)),
             "names", names, "missing", len(names) - dvl-count-present(ix, names));
     }
-    def dvl-layers-go(ix, e, hd, ratios, il, n) = il == n ? [] : cons(dvl-layer(ix, e, hd, il < len(ratios) ? ratios[il] : 0 - 1, il), dvl-layers-go(ix, e, hd, ratios, il + 1, n));
+    def dvl-layers-go(ix, e, hd, ratios, il, n) = n<0 || il<0 || il>n || n>len(record_keys(ix)) ? form_error("GGUF layer count exceeds its tensor table") : il == n ? [] : cons(dvl-layer(ix, e, hd, il < len(ratios) ? ratios[il] : 0 - 1, il), dvl-layers-go(ix, e, hd, ratios, il + 1, n));
 
     // ---- the model ---------------------------------------------------------------------------------------
     // the layers after the blocks that the table carries under another prefix (dspark.0, dspark.1, ...), counted from the table
@@ -112,14 +113,15 @@ section [form.bml] {
     def dvl-table-blocks(ix) = dvl-blocks-go(ix, 0);
     // open a model from its header source: the whole layout in one record
     def dvl-open(src) {
-        let rows = dvl-rows(src);
+        let table=dvl-table(src);
+        let rows = dvl-rows-go(src,table[0],table[1],table[2]);
         let ix = dvl-index(rows);
         let nl = dvl-key(src, "block_count");
         let e = dvl-key(src, "embedding_length");
         let hd = dvl-key(src, "attention.key_length");
         let ratios = dvl-ints(src, "deepseek4.attention.compress_ratios");
         let layers = dvl-layers-go(ix, e, hd, ratios, 0, nl);
-        record_new(0, "arch", gmt-str(src, "general.architecture"), "rows", rows, "index", ix, "tensors", len(rows), "data-base", egg-data-base(src, 32),
+        record_new(0, "arch", gmt-str(src, "general.architecture"), "rows", rows, "index", ix, "tensors", len(rows), "data-base", table[2],
             "layers-n", nl, "e", e, "nh", dvl-key(src, "attention.head_count"), "hd", hd, "vd", dvl-key(src, "attention.value_length"),
             "nrot", dvl-key(src, "rope.dimension_count"), "qr", dvl-key(src, "attention.q_lora_rank"), "ng", dvl-key(src, "attention.output_group_count"),
             "rank", dvl-key(src, "attention.output_lora_rank"), "hc", dvl-key(src, "hyper_connection.count"), "iters", dvl-key(src, "hyper_connection.sinkhorn_iterations"),
@@ -178,6 +180,28 @@ section [form.bml] {
     def dvl-buffer-bytes(bufs, name) = len(bufs) == 0 ? 0 - 1 : bufs[0][0] == name ? bufs[0][1] : dvl-buffer-bytes(bufs[1:], name);
     def dvl-sum-bufs(bufs) = len(bufs) == 0 ? 0 : bufs[0][1] + dvl-sum-bufs(bufs[1:]);
     def dvl-scratch-bytes(m) = dvl-sum-bufs(dvl-buffers(m));
+    // Allocation and admission share the complete scratch geometry. Logits
+    // retain slot 28, shared with the session sampler.
+    def dso-max-comp-go(m,il,cap,best) = il==record_get(m,"layers-n") ? best : dso-max-comp-go(m,il+1,cap,max2(dvl-comp-rows(m,il,cap),best));
+    def dso-max-comp(m,cap) = dso-max-comp-go(m,0,cap,0);
+    def dso-attn-rows(m,cap) = cap+dso-max-comp(m,cap);
+    def dso-extras(m,cap) {
+        let e=record_get(m,"e");let hd=record_get(m,"hd");let nh=record_get(m,"nh");
+        let qdim=nh*hd;let used=record_get(m,"used");let hidden=dvl-max-layer(m,"hidden");let rows=dso-attn-rows(m,cap);
+        [["hc-split",record_get(m,"mix")*4],["router-score",dvl-max-layer(m,"router-rows")*4],["q-latn",record_get(m,"qr")*4],["q-n",qdim*4],["kv-raw",hd*4],["kv-n",hd*4],["kv-q",hd*4],
+         ["comp-pool",hd*4],["comp-normed",hd*4],["comp-q",hd*4],["ffn-out",e*4],
+         ["att-score",nh*rows*4],["att-exp",nh*rows*4],["att-inv",nh*4],
+         ["xgate",used*hidden*4],["xup",used*hidden*4],["xmid",used*hidden*4],["xdown",used*e*4],
+         ["rope-plain",(record_get(m,"nrot")/2)*4],["rope-comp",(record_get(m,"nrot")/2)*4],["argmax-idx",4],["argmax-val",4],["nan-count",4]];
+    }
+    def dso-logits-slot() = 28;
+    def dso-layout-plan(m) {
+        let b=dvl-buffers(m);let n=len(b);
+        append(b[0:n - 1],cons(["head-w",record_get(m,"hc")*4],[b[n - 1]]));
+    }
+    def dso-scratch-plan(m,cap) = append(dso-layout-plan(m),dso-extras(m,cap));
+    def dso-plan-names(plan) = map(row=>row[0],plan);
+    def dso-plan-bytes(plan) = dvl-sum-bufs(plan);
     // the layers' whole tensor census under the driver's set, and what the file holds that no driver here maps
     def dvl-driver-names-go(m, il) = il == record_get(m, "layers-n") ? [] : append(dvl-l(m, il, "names"), dvl-driver-names-go(m, il + 1));
     def dvl-driver-names(m) = append(dvl-global-names(), dvl-driver-names-go(m, 0));

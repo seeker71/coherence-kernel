@@ -4,6 +4,7 @@
 import form-stdlib/bml/form-cli-heal-policy.bml;
 import form-stdlib/bml/retry.bml;
 import form-stdlib/json.fk;
+import form-stdlib/bml/json-view.bml;
 import form-stdlib/qwen35-artifact-seal-reader.fk;
 import form-stdlib/spool-bell-transport.fk;
 import form-stdlib/bml/spawn-guard.bml;
@@ -69,9 +70,10 @@ section [form.bml] {
    let rows = fhn-name-lines(names);
    !nothing?(rows) && cbn-link-free?(root, rows);
   }
-  def fhn-manifest(paths, root) = paths |> map(path => fhn-s(path, fhn-hash(fhn-at(root, path))));
+   def fhn-manifest(paths, root) = paths |> map(path => [path,fhn-hash(fhn-at(root,path))]);
   def fhn-manifest-valid(pairs) = nil?(pairs) ? 1 : (fhn-valid-hash(json-string-value(json-pair-value(pairs[0]))) && fhn-manifest-valid(pairs[1:]));
-  def fhn-dirty(pairs, root, except) = nil?(pairs) ? "" : (!((String) json-pair-key(pairs[0]) == except)) && (!((String) fhn-hash(fhn-at(root, json-pair-key(pairs[0]))) == json-string-value(json-pair-value(pairs[0])))) ? json-pair-key(pairs[0]) : fhn-dirty(pairs[1:], root, except);
+   def fhn-dirty(pairs, root, except) = fhn-dirty-by(pairs,root,except,json-pair-key,pair=>json-string-value(json-pair-value(pair)));
+   def fhn-dirty-by(pairs,root,except,key,value) = nil?(pairs) ? "" : key(pairs[0])!=except && fhn-hash(fhn-at(root,key(pairs[0])))!=value(pairs[0]) ? key(pairs[0]) : fhn-dirty-by(pairs[1:],root,except,key,value);
   def fhn-owned(job, doc) = (String) fs-path-dirname(job) == fhn-at(fhn-string(doc, "root"), ".form-heal");
   def fhn-prepare(target, band) {
    let root = fhn-root();
@@ -88,19 +90,28 @@ section [form.bml] {
    !(((Comparable) listed == 0) && (fhn-names-valid(names, root) && fhn-no-links(job, root, fhn-at(job, "names.txt")))) ? "refused:snapshot-inventory-or-symlink" : fhn-prepare-sealed(job, root, target, band, names);
   }
   def fhn-prepare-sealed(job, root, target, band, names) {
+    let began=host_monotonic_ms();
    let manifest = fhn-manifest(names, root);
+    let hashed=host_monotonic_ms();
    let work = fhn-at(job, "work");
    let made = fs_mkdir(work);
    let empty = fs_mkdir(fhn-at(job, "empty"));
-   let copied = (String) cbn-copy(root, names, work) == "" ? 0 : 1;
-   let doc = json-node-object([fhn-s("root", root), fhn-s("target", target), fhn-s("band", band), json-node-pair("manifest", json-node-object(manifest)), fhn-s("carrier", "native-form-v1")]);
-   let saved = fhn-write-json(fhn-at(job, "snapshot.json"), doc);
+    let copied = cbn-copy(root,names,work);
+    let copiedAt=host_monotonic_ms();
+    let doc=jv-object([jv-s("root",root),jv-s("target",target),jv-s("band",band),jv-pair("manifest",jv-object(map(pair=>jv-s(pair[0],pair[1]),manifest))),jv-s("carrier","native-form-v1")]);
+    let saved=write_file(fhn-at(job,"snapshot.json"),jv-emit(doc)+"\n");
    let original = write_file(fhn-at(job, "original"), fhn-read(fhn-at(root, target)));
    let checker = write_file(fhn-at(job, "checker"), fhn-read(fhn-at(root, band)));
    let t = write_file(fhn-at(job, "target"), target);
    let b = write_file(fhn-at(job, "band"), band);
    let ledger = write_file(fhn-at(job, "attempts.tsv"), "");
-   !(((Comparable) copied == 0) && fhn-manifest-valid(manifest)) ? "refused:snapshot-copy-or-digest" : !((String) fhn-dirty(manifest, work, "") == "") ? "refused:snapshot-byte-mismatch" : job;
+    let invalid=filter(pair=>!fhn-valid-hash(pair[1]),manifest);
+     let verified=copied=="" && nil?(invalid);
+     let dirty=verified ? fhn-dirty-by(manifest,work,"",pair=>pair[0],pair=>pair[1]) : "";
+    let status=copied != "" || !nil?(invalid) ? "refused:snapshot-copy-or-digest" : dirty != "" ? "refused:snapshot-byte-mismatch" : "ready";
+     let evidence=jv-object([jv-s("status",status),jv-s("copy_result",copied),jv-pair("invalid_digests",jv-array(map(pair=>jv-string(pair[0]),invalid))),jv-pair("work_dirty",verified ? jv-string(dirty) : jv-null()),jv-pair("root_dirty",dirty=="" ? jv-null() : jv-string(fhn-dirty-by(manifest,root,"",pair=>pair[0],pair=>pair[1]))),jv-n("manifest_ms",hashed - began),jv-n("copy_ms",copiedAt - hashed),jv-n("verify_ms",host_monotonic_ms() - copiedAt)]);
+    write_file(fhn-at(job,"prepare.json"),jv-emit(evidence)+"\n");
+    status=="ready" ? job : status;
   }
   def fhn-guard(job) {
    let doc = fhn-json(fhn-at(job, "snapshot.json"));

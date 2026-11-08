@@ -16,26 +16,29 @@
 import form/form-stdlib/gpu-lease.bml;
 section [form.bml] {
   def gpc-dir() = ".hearth/lease-probe";
-  def gpc-again(path, n, ms) {
-   let s = host_sleep_ms(ms);
-   gpc-await(path, n - 1, ms);
-  }
-  def gpc-await(path, n, ms) {
+  def gpc-await(path) {
    let t = read_file(path);
-   (nothing?(t) && (n > 0)) ? gpc-again(path, n, ms) : t;
+   nothing?(t) && host_alive(gpl-parent()) != 0 ? { host_sleep_ms(50);gpc-await(path); } : t;
   }
   // the gate lets two children start their takes in the same few milliseconds
-  def gpc-gate(go) = (Comparable) len(go) == 0 ? 0 : (nothing?(gpc-await(go, 4000, 5)) ? 0 : 1);
+  def gpc-gate(go, parent) = len(go)==0 || !nothing?(read_file(go)) ? 1
+   : host_alive(parent)==0 ? form_error("lease fixture parent ended before releasing its children")
+   : {let waited=host_sleep_ms(5);gpc-gate(go,parent);};
   def gpc-write(tag, name, ans) {
    let tok = gpu-lease-token(ans);
-   write_file(gpc-dir() ++ "/" ++ name ++ "-" ++ tag, ans[0] ++ gpl-nl() ++ (nothing?(tok) ? "" : tok) ++ gpl-nl() ++ value_str(ans));
+   gpc-publish(gpc-dir() ++ "/" ++ name ++ "-" ++ tag, ans[0] ++ gpl-nl() ++ (nothing?(tok) ? "" : tok) ++ gpl-nl() ++ value_str(ans));
+  }
+  def gpc-publish(path,text) {
+   let stage=path+".new";
+   write_file(stage,text)==len(text) && host_path_rename(stage,path)==0 ? len(text) : form_error("lease fixture publication failed: "+path);
   }
   def gpc-hold(ls, ans) {
    let s = host_sleep_ms(gpl-num(ls[3]));
    gpc-write(ls[2], "rel", gpu-lease-give(ls[1], ans));
   }
   def gpc-run(ls) {
-   let gated = gpc-gate(ls[5]);
+   let ready = gpc-publish(gpc-dir() ++ "/ready-" ++ ls[2], "ready");
+   let gated = gpc-gate(ls[5], len(ls) > 6 ? gpl-num(ls[6]) : 0);
    let ans = gpu-lease-take-with(ls[1], "child-" ++ ls[2], [gpl-num(ls[4]), 100, 1500, gpl-markers()]);
    let w = gpc-write(ls[2], "ans", ans);
    (String) ls[0] == "hold" ? gpc-hold(ls, ans) : ((String) ls[0] == "hang" ? host_sleep_ms(gpl-num(ls[3])) : 0);
@@ -44,7 +47,7 @@ section [form.bml] {
    let t0 = host_monotonic_ms();
    let held = try gpu-lease-hold-at(ls[1], "child-" ++ ls[2], gpl-num(ls[4])) catch ["refused"];
    let ms = host_monotonic_ms() - t0;
-   (String) held[0] == "refused" ? write_file(gpc-dir() ++ "/lent-" ++ ls[2], "refused") : gpc-lent-turns(ls, held, ms);
+   (String) held[0] == "refused" ? gpc-publish(gpc-dir() ++ "/lent-" ++ ls[2], "refused") : gpc-lent-turns(ls, held, ms);
   }
   // a turn on the request's lock whose run reads the token standing on that lock
   def gpc-turn(ls, label) = gpu-lease-turn-at(ls[1], label ++ "-" ++ ls[2], gpl-num(ls[4]), () => true, () => gpl-read(ls[1])[1]);
@@ -53,9 +56,9 @@ section [form.bml] {
    let turned = gpc-turn(ls, "child-turn");
    let door = gpu-lease-door-hold-at(ls[1], "child-door-" ++ ls[2], gpl-num(ls[4]), () => true, () => [gpc-turn(ls, "child-door-a"), gpc-turn(ls, "child-door-b")]);
    let gave = gpu-lease-unhold-at(ls[1], held);
-   write_file(gpc-dir() ++ "/lent-" ++ ls[2], held[0] ++ gpl-nl() ++ gpc-held-token(held) ++ gpl-nl() ++ turned ++ gpl-nl() ++ door[0] ++ gpl-nl() ++ door[1] ++ gpl-nl() ++ gave[0] ++ gpl-nl() ++ ms.str());
+   gpc-publish(gpc-dir() ++ "/lent-" ++ ls[2], held[0] ++ gpl-nl() ++ gpc-held-token(held) ++ gpl-nl() ++ turned ++ gpl-nl() ++ door[0] ++ gpl-nl() ++ door[1] ++ gpl-nl() ++ gave[0] ++ gpl-nl() ++ ms.str());
   }
-  let req = gpc-await(gpc-dir() ++ "/req-" ++ host_pid().str(), 200, 50);
+  let req = gpc-await(gpc-dir() ++ "/req-" ++ host_pid().str());
   let taken = host_path_remove(gpc-dir() ++ "/req-" ++ host_pid().str());
   nothing?(req) ? 0 : ((String) gpl-lines(req)[0] == "lent" ? gpc-lent(gpl-lines(req)) : gpc-run(gpl-lines(req)));
 }

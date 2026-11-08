@@ -64,17 +64,18 @@ section [form.bml] {
     // one layer's three arena buffers, or nothing after freeing what this layer allocated (the caller frees the earlier layers')
     def dxa-alloc-layer(m, il, eb, slots) {
         let s = dxa-slots-of(slots, dvl-l(m, il, "nexp"));
-        let g = metal_buf_alloc(s * eb[0]);
-        let u = g > 0 ? metal_buf_alloc(s * eb[1]) : 0;
-        let d = (g > 0 && u > 0) ? metal_buf_alloc(s * eb[2]) : 0;
-        (g > 0 && u > 0 && d > 0) ? [g, u, d] : { let held = dvb-free-rounds(dxa-positive([g, u, d]), 4); nothing(); };
+        let g=dso-allocate(m,s*eb[0]);
+        let u=g>0 ? dso-allocate(m,s*eb[1]) : 0;
+        let d=g>0 && u>0 ? dso-allocate(m,s*eb[2]) : 0;
+        g>0 && u>0 && d>0 ? [g,u,d] : {dxa-refused(m,dxa-positive([g,u,d]));nothing();};
     }
+    def dxa-refused(m,handles) = dso-owned?(m) ? 0 : dso-retain-refused(m,dvb-free-rounds(handles,4));
     def dxa-positive(hs) = len(hs) == 0 ? [] : (hs[0] > 0 ? cons(hs[0], dxa-positive(hs[1:])) : dxa-positive(hs[1:]));
     def dxa-flat(bufs) = len(bufs) == 0 ? [] : append(bufs[0], dxa-flat(bufs[1:]));
     def dxa-alloc-go(m, ebs, il, n, slots, acc) {
         il == n ? reverse(acc) : {
             let b = dxa-alloc-layer(m, il, ebs[il], slots);
-            nothing?(b) ? { let held = dvb-free-rounds(dxa-flat(acc), 4); nothing(); } : dxa-alloc-go(m, ebs, il + 1, n, slots, cons(b, acc));
+            nothing?(b) ? {dxa-refused(m,dxa-flat(acc));nothing();} : dxa-alloc-go(m,ebs,il+1,n,slots,cons(b,acc));
         };
     }
 
@@ -90,7 +91,7 @@ section [form.bml] {
         let n = record_get(m, "layers-n");
         let ebs = dxa-ebs-go(ctx, 0, n);
         record_new(0, "path", ctx[9], "slots", slots, "layers", n, "bufs", bufs, "eb", ebs, "off", dxa-offs-go(ctx, 0, n), "ids", ids, "pipe4", p4, "pipe1", p1,
-         "cache", dxc-open(n, slots), "native", 1, "pending", [], "handles", append(dxa-flat(bufs), [ids]), "bytes", 0, "fills", 0, "syncs", 0, "ms-sync", 0, "ms-plan", 0, "ms-fill", 0, "price", dxa-bytes-go(m, ebs, 0, n, slots));
+         "cache", dxc-open(n, slots), "native", 1, "pending", [], "allocation-ports",record_get(m,"allocation-ports"), "handles", append(dxa-flat(bufs), [ids]), "bytes", 0, "fills", 0, "syncs", 0, "ms-sync", 0, "ms-plan", 0, "ms-fill", 0, "price", dxa-bytes-go(m, ebs, 0, n, slots));
     }
     // the cache's slot count per layer follows the layer's stored experts: dxc-open gives every layer `slots`, and dxc-step admits only ids under the layer's nexp, so a layer of fewer experts than slots never fills the rest;
     // the buffer holds only min(slots, nexp) slots, so the cache's table is the buffer's size: dxa-tables re-seats each layer's table at its own size
@@ -111,8 +112,8 @@ section [form.bml] {
     }
     def dxa-open-alloc(ctx, m, ebs, slots, n, p4, p1) {
         let bufs = dxa-alloc-go(m, ebs, 0, n, slots, []);
-        let ids = nothing?(bufs) ? 0 : metal_buf_alloc(4 * record_get(m, "used"));
-        nothing?(bufs) ? nothing() : (ids > 0 ? dxa-attach(ctx, m, slots, bufs, ids, p4, p1) : { let held = dvb-free-rounds(dxa-flat(bufs), 4); nothing(); });
+        let ids=nothing?(bufs) ? 0 : dso-allocate(m,4*record_get(m,"used"));
+        nothing?(bufs) ? nothing() : ids>0 ? dxa-attach(ctx,m,slots,bufs,ids,p4,p1) : {dxa-refused(m,dxa-flat(bufs));nothing();};
     }
     def dxa-attach(ctx, m, slots, bufs, ids, p4, p1) {
         let ar = dxa-record(ctx, slots, bufs, ids, p4, p1);
@@ -123,15 +124,19 @@ section [form.bml] {
 
     // THE OPEN A SESSION OR A WINDOW TAKES: the context in the arena mode and its arena in one answer: a context (thirteen slots, with the arena in its layout record), or [] with everything released (a refused
     // open, or an arena the device or the layout refuses: the context is closed in synced rounds first). `slots` is the experts a layer holds (dls-cache-experts, 64, is the lease's term).
-    def dxa-or-close(ctx, ar) = nothing?(ar) ? { let held = dsv4-close(ctx, []); []; } : ctx;
-    def dsv4-open-arena(path, maxpos, span, slots) {
-        let ctx = dsv4-open-span-mode(path, maxpos, span, dkr-graph-units(), "arena");
-        len(ctx) != 13 ? [] : dxa-or-close(ctx, dxa-open(ctx, slots));
+    def dxa-or-close(ctx, ar) = nothing?(ar) && dso-owned?(ctx[2]) ? {record_set(ctx[2],"open-refused","arena-open-incomplete");ctx;} : nothing?(ar) ? {
+        let held=dsv4-close(ctx,[]);
+        nil?(held) ? [] : {record_set(ctx[2],"open-refused","arena-open-release-incomplete");ctx;};
+    } : ctx;
+    def dsv4-open-arena(path,maxpos,span,slots) = dsv4-open-arena-by(path,maxpos,span,slots,nothing());
+    def dsv4-open-arena-by(path,maxpos,span,slots,ports) {
+        let ctx=dsv4-open-span-mode-by(path,maxpos,span,dkr-graph-units(),"arena",ports);
+        !dso-open-ok?(ctx) ? ctx : dxa-or-close(ctx, dxa-open(ctx, slots));
     }
 
     // ---- a layer's plan: the sync, the ids, the cache, the slot numbers, the fills --------------------------------------------------------------
     // the views a fill made are free once the work that named them has settled: the handles the carrier did not release stay pending
-    def dxa-free-pending(ar) { let left = dvb-free-once(record_get(ar, "pending")); record_set(ar, "pending", left); len(left); }
+    def dxa-free-pending(ar) = len(dso-free-pending(ar));
     def dxa-count(ar, key, by) = record_set(ar, key, record_get(ar, key) + by);
     // one span of an expert into its slot: a view of exactly [stack offset + e x stride, + stride) of the file, a copy kernel over it into the slot of the stack's arena buffer. 1 when enqueued, 0 when the view or the copy was refused
     // A FILL NEVER LEAVES ITS SLOT AND NEVER READS ANOTHER EXPERT'S BYTES: a slot outside the layer's buffer (its slots are min(asked, stored experts)) or an expert outside [0, the layer's stored experts) is refused
@@ -154,7 +159,9 @@ section [form.bml] {
         n == eb ? 1 : dxa-fill-view(ar, il, k, slot, e, eb);
     }
     def dxa-fill-view(ar, il, k, slot, e, eb) {
-        let v = metal_buf_from_file(record_get(ar, "path"), record_get(ar, "off")[il][k] + e * eb, eb);
+        let ports=record_get(ar,"allocation-ports");
+        let v=record?(ports) ? (record_get(ports,"from-file"))(record_get(ar,"path"),record_get(ar,"off")[il][k]+e*eb,eb) : metal_buf_from_file([record_get(ar,"path"),ar,"pending"],record_get(ar,"off")[il][k]+e*eb,eb);
+        if record?(ports) && v>0 then record_set(ar,"pending",cons(v,record_get(ar,"pending"))) else 0;
         v > 0 ? dxa-fill-copy(ar, il, k, slot, eb, v) : 0;
     }
     // the view road's copy: one dispatch, counted in the plan record (fdisp) beside the ledger's dispatches
@@ -162,7 +169,6 @@ section [form.bml] {
         let dst = record_get(ar, "bufs")[il][k];
         let wide = (eb % 16) == 0;
         let r = wide ? dkr-go(record_get(ar, "pipe4"), [v, dst], [(slot * eb) / 16, eb / 16], eb / 16) : dkr-go(record_get(ar, "pipe1"), [v, dst], [slot * eb, eb], eb);
-        let k1 = record_set(ar, "pending", cons(v, record_get(ar, "pending")));
         let k2 = r == 1 ? dkr-hz-put("fdisp", dkr-hz-get("fdisp") + 1) : 0;
         r == 1 ? 1 : 0;
     }

@@ -1,6 +1,6 @@
 // Resident model/tokenizer ownership with a growing KV context and a token stream.
 // maxTokens=0 keeps streaming until EOS, cancellation, architectural or memory pressure.
-// A cap is a signal, not a ceiling. Caller token caps grow toward EOS.
+// Explicit caller token allowances remain exact; an omitted allowance follows EOS.
 // Consecutive repetition at the active tail is an adaptation signal. Shared
 // references and sentence openings alone are not loops. The byte-period witness
 // reads at most 512 tail bytes; it is a bounded heuristic, not a semantic judge.
@@ -15,28 +15,55 @@ import form/form-stdlib/gpu-lease.bml;
 import form-stdlib/spool-bell-transport.fk;
 import form-stdlib/form-fs.fk;
 section [form.bml] {
+ let NLG-OWNED=record_new(0,"opening",nothing(),"owners",[]);
  class NativeLlamaVoice {
   def nlg-event(path,stage,count,start,live,model) {
+    len(path)==0 ? 0 : {
    let now = host_monotonic_ms(); let current = metal_live();
    let event = json-node-object([json-node-pair("stage",json-node-string(stage)),json-node-pair("tokens",json-node-int(count)),json-node-pair("wall_ms",json-node-int(now - start)),json-node-pair("gpu_busy_us",json-node-int(current[11] - live[11])),json-node-pair("dispatches",json-node-int(current[7] - live[7])),json-node-pair("buffers_created",json-node-int(current[16] - live[16])),json-node-pair("new_pipelines",json-node-int(current[3] - live[3])),json-node-pair("live_buffers",json-node-int(current[2])),json-node-pair("device_bytes",json-node-int(current[18])),json-node-pair("model",json-node-string(model[4])),json-node-pair("adapter",json-node-string(nll-adapter(model))),json-node-pair("lora_pairs",json-node-int(nll-pair-count(model[1]))),json-node-pair("lora_rank",json-node-int((Comparable) nll-pair-count(model[1]) == 0 ? 0 : nll-rank(model[1])))]);
-   (Comparable) len(path) == 0 ? 0 : sbt-append(path,json-emit(event) + "\n");
+    sbt-append(path,json-emit(event) + "\n");
+    };
   }
   def nlg-open(dir,adapter) = nlg-open-at(dir,adapter,"");
   // The voice is a Metal client: two at once wedge the GPU wait and time-slice each other (a validation of 81 rows read 282 s and
   // 388 s beside a day-turn and two band sweeps, 2026-10-11), so the open holds the machine's one GPU lease until nlg-close, or
   // inherits it from the door that holds it across its stages (gpu-lease.bml gpu-lease-hold).
   def nlg-open-at(dir,adapter,events) {
-   let lease = gpu-lease-hold("native-llama-voice");
-   let start = host_monotonic_ms(); let live = metal_live(); let model = nll-open(dir,adapter);
+   let prior=record_get(NLG-OWNED,"opening");
+   let pending=filter(owner=>record_get(owner,"release-pending")==1,record_get(NLG-OWNED,"owners"));
+   let settled=map(nlg-close-owner,pending);
+   !all?(ok=>ok,settled) || record?(prior) && !nlg-close-owner(prior) ? form_error("native Llama prior admission release incomplete") : nlg-open-owned(dir,adapter,events);
+  }
+  def nlg-open-owned(dir,adapter,events) {
+   let owner=nll-group(nothing(),"llama-voice");record_set(NLG-OWNED,"opening",owner);
+   record_set(NLG-OWNED,"owners",append(record_get(NLG-OWNED,"owners"),[owner]));
+   try nlg-admit(owner,dir,adapter,events) catch {
+    let released=nlg-close-owner(owner);
+    form_error(released ? "native Llama admission failed; resources released" : "native Llama admission failed; original owner retained for release");
+   };
+  }
+  def nlg-admit(owner,dir,adapter,events) {
+   let lease=gpu-lease-hold-retaining("native-llama-voice",held=>record_set(owner,"lease",held));
+   let start=host_monotonic_ms();let live=metal_live();
+   let model=nll-open-owned(dir,len(adapter)==0 ? "" : nag-resolve(adapter),owner);record_set(owner,"model",model);
    let opened = nlg-event(events,"model-admission",0,start,live,model);
    let t0 = host_monotonic_ms(); let lg = metal_live(); let tk = nlt-open(dir);
    let indexed = nlg-event(events,"tokenizer-index",0,t0,lg,model);
-   [model,tk,lease];
+   let session=[model,tk,lease,owner];record_set(owner,"session",session);record_set(NLG-OWNED,"opening",nothing());session;
   }
+  def nlg-close-owner(owner) = record_get(owner,"closed")==1 ? 1 : {
+   record_set(owner,"release-pending",1);
+   let closed=nll-release(owner);let lease=record_get(owner,"lease");
+   let given=!closed ? ["retained"] : nothing?(lease) ? ["released"] : gpu-lease-unhold(lease);
+    let ok=closed && (given[0]=="released" || given[0]=="inherited" || given[0]=="refused" && given[1]=="no-lease" && host_path_exists(gpu-lease-path())==0);
+   record_set(owner,"release-result",given);record_set(owner,"closed",ok);
+   if ok then record_set(NLG-OWNED,"owners",filter(o=>o != owner,record_get(NLG-OWNED,"owners"))) else 0;ok;
+  };
   def nlg-close(session) {
-   let closed = nll-close(session[0]);
-   let given = len(session) > 2 ? gpu-lease-unhold(session[2]) : 0;
-   closed;
+   record?(nll-owner(session)) ? nlg-close-owner(nll-owner(session)) : {
+    let closed=nll-close(session[0]);let given=closed && len(session)>2 ? gpu-lease-unhold(session[2]) : ["inherited"];
+    closed && (given[0]=="released" || given[0]=="inherited");
+   };
   }
   def nlg-min(a,b) = a < b ? a : b;
   def nlg-max(a,b) = a > b ? a : b;
@@ -51,20 +78,31 @@ section [form.bml] {
   def nlg-copy-cache-next(old,new,n,width,rc) = rc < 0 ? form_error("native Llama cache copy refused") : nlg-copy-cache(old[1:],new[1:],n,width);
   def nlg-grow(model,ctx,used) {
    let size = nlg-min(model[0][9],ctx[0] * 2);
-   (size <= ctx[0]) || (!nlg-room(nlg-cache-bytes(model,size))) ? nothing() : nlg-grow-admitted(model,ctx,used,size);
+   nlg-grow-fit(model,ctx,used,size);
   }
+  def nlg-grow-fit(model,ctx,used,size) = size<=used || size<=ctx[0] ? nothing() : {
+   let next=nlg-room(nlg-cache-bytes(model,size)) ? nlg-grow-admitted(model,ctx,used,size) : nothing();
+   !nothing?(next) ? next : size<=used+1 ? nothing() : nlg-grow-fit(model,ctx,used,nlg-max(used+1,size / 2));
+  };
   def nlg-grow-admitted(model,ctx,used,size) {
-   let next = nll-context(model,size); let width = model[0][3] * model[0][4];
-   let k = nlg-copy-cache(ctx[1],next[1],used,width);
-   let v = nlg-copy-cache(ctx[2],next[2],used,width);
-   let done = nam-sync(); let released = nll-context-close(ctx);
-   next;
+   let owner=nll-group(nll-owner(model),"llama-context-growth");record_set(owner,"original",ctx);
+   let next=try {
+    let candidate=nll-context-owned(model,size,owner);let width=model[0][3]*model[0][4];record_set(owner,"candidate",candidate);
+    nlg-copy-cache(ctx[1],candidate[1],used,width);nlg-copy-cache(ctx[2],candidate[2],used,width);nam-sync();candidate;
+   } catch nothing();
+   nothing?(next) ? (nll-release(owner) ? nothing() : form_error("native Llama growth candidate release incomplete; original context retained")) : {
+    record_set(owner,"active",1);let modelOwner=nll-owner(model);
+    if record?(modelOwner) then record_set(modelOwner,"active-context",next) else 0;
+     nlg-context-moved(model,next);
+    let released=nll-context-close(ctx);record_set(owner,"previous-release-ok",released);next;
+   };
   }
   def nlg-forward-next(model,ctx,ids,pos,events,stage) {
    let t0 = host_monotonic_ms(); let live = metal_live();
    let r = nll-forward(model,ctx,ids,pos,0);
    defer nll-forward-close(r);
-   let selected = nll-select(r[0],model[0][5]);
+   let selected=nll-pick-owned("nll_argmax",r[0],[model[0][5]],nll-owner(r),1);
+    nlg-settled-forward(model,ctx,pos + len(ids),nothing());
    let event = nlg-event(events,stage,len(ids),t0,live,model);
    selected;
   }
@@ -73,7 +111,8 @@ section [form.bml] {
    let r = nll-forward(model,ctx,ids,pos,0);
    defer nll-forward-close(r);
    let vocab = model[0][5];
-   let top = nll-select3(r[0],vocab);
+   let top = nll-select3-by(r[0],vocab,nll-owner(r));
+    nlg-settled-forward(model,ctx,pos + len(ids),top);
    let event = nlg-event(events,stage,len(ids),t0,live,model);
    top;
   }
@@ -103,16 +142,9 @@ section [form.bml] {
    let layer = (t * (((7 * d) + (2 * kd)) + ((3 * g[1]) + 2))) + (t * (g[2] * (pos + t)));
    4 * ((g[6] * layer) + ((t * (d + nll-rank(model[1]))) + (g[5] + (2 * d))));
   }
-  // Room is not wisdom. The tape a slice unrolls is layers x t x heads x (pos+t):
-  // quadratic in the slice itself, so on a host with a large budget the first
-  // chunk takes the whole prompt and holds tens of gigabytes — this 3B at 4,200
-  // prompt IDs asks for seventy, which the budget allows and the machine cannot
-  // work in. A slice is bounded by a share of the device's own budget, and the
-  // prefill walks the prompt in as many slices as that takes.
-  def nlg-slice-share() = 16;
-  def nlg-slice-ceiling() = nlg-slice-ceiling-of(metal_live());
-  def nlg-slice-ceiling-of(live) = live[19] <= 0 ? 0 : (live[19] / nlg-slice-share());
-  def nlg-slice-fits?(bytes) = nlg-room(bytes) && ((nlg-slice-ceiling() <= 0) || (bytes <= nlg-slice-ceiling()));
+   // Price the actual forward tape against observed device headroom. A smaller
+   // slice is another execution choice, with every original prompt ID retained.
+   def nlg-slice-fits?(bytes) = nlg-room(bytes);
   def nlg-chunk(model,t,pos) = t <= 0 ? 0 : nlg-slice-fits?(nlg-forward-bytes(model,t,pos)) ? t : nlg-chunk(model,t / 2,pos);
   def nlg-prefill(model,ctx,ids,pos,events) {
    let t = nlg-chunk(model,len(ids),pos);
@@ -129,6 +161,35 @@ section [form.bml] {
   // Result: text, reason (empty only on EOS), emitted count, final context, event file.
   def nlg-result(text,why,n,ctx,events) = [(String) why == "adapted-repeat" ? nlg-complete(text) : text,why,n,ctx,events];
   def nlg-stream(stream,text) = (Comparable) len(stream) == 0 ? 0 : sbt-append(stream,text);
+   def nlg-stream-intent(model,path,text) {
+    let owner=nll-owner(model);
+    let pending=nlg-stream-record(path,text);let c=record?(owner) ? record_get(owner,"continuation") : nothing();
+    if record?(c) then record_set(c,"stream-pending",pending) else if record?(owner) then record_set(owner,"stream-pending",pending) else 0;
+   }
+   def nlg-stream-record(path,text) = record_new(0,"path",path,"start",max2(0,file_size(path)),"text",text,"delivered",len(path)==0,"regular",len(path)==0 || nlg-stream-regular(path),"attempted",0);
+   def nlg-stream-record-of(model) {
+    let owner=nll-owner(model);let terminal=record?(owner) ? record_get(owner,"terminal-result") : nothing();let c=record?(owner) ? record_get(owner,"continuation") : nothing();
+    value_kind(terminal)=="list" && len(terminal)>5 ? terminal[5] : record?(c) && record_has(c,"stream-pending") ? record_get(c,"stream-pending") : record?(owner) ? record_get(owner,"stream-pending") : nothing();
+   }
+   def nlg-stream-regular(path) {
+    host_path_exists(path)==0 ? 1 : {let lease=nps-file-open(path,0);value_kind(lease) != "list" ? 0 : {nps-file-settle(lease);1;};};
+   }
+   def nlg-stream-pending(model) {
+    let pending=nlg-stream-record-of(model);
+    record?(pending) && record_get(pending,"delivered") != 1;
+   }
+   def nlg-stream-flush(model,path) {
+    let pending=nlg-stream-record-of(model);
+    !record?(pending) || record_get(pending,"delivered")==1 ? 1 : len(path)==0 ? {record_set(pending,"delivered",1);1;} : {
+     if record_get(pending,"path") != path then {record_set(pending,"path",path);record_set(pending,"start",max2(0,file_size(path)));record_set(pending,"regular",nlg-stream-regular(path));record_set(pending,"attempted",0);} else 0;
+     let start=record_get(pending,"start");let text=record_get(pending,"text");let size=max2(0,file_size(path));let present=max2(0,min2(len(text),size - start));
+     record_get(pending,"regular") != 1 ? record_get(pending,"attempted")==1 ? 0 : {record_set(pending,"attempted",1);let sent=nlg-stream(path,text);let delivered=!nothing?(sent) && sent>=0;if delivered then record_set(pending,"delivered",1) else 0;delivered;} : size<start || present>0 && read_file_slice(path,start,present) != substring(text,0,present) ? 0 : {
+      let result=present==len(text) ? 0 : nlg-stream(path,substring(text,present,len(text)));
+      let delivered=!nothing?(result) && result>=0;
+      if delivered then record_set(pending,"delivered",1) else 0;delivered;
+     };
+    };
+   }
   def nlg-want-capacity(prompt-n,limit) = prompt-n + (limit > 0 ? limit : 16);
   def nlg-admit-capacity(want,maxpos) = want > maxpos ? maxpos : want;
   def nlg-floor-capacity(prompt-n) = prompt-n + 1;
@@ -136,33 +197,8 @@ section [form.bml] {
    let floor = nlg-floor-capacity(prompt-n);
    capacity <= floor ? floor : nlg-max(floor,capacity / 2);
   }
-  def nlg-drop(xs,n) = (n <= 0) || nil?(xs) ? xs : nlg-drop(xs[1:],n - 1);
-  def nlg-take-last(xs,n) {
-   let d = len(xs) - n;
-   d <= 0 ? xs : nlg-drop(xs,d);
-  }
-  def nlg-slide-n(ids) {
-   let n = len(ids);
-   n <= 1 ? n : nlg-max(1,n / 2);
-  }
   // Retain each emitted ID alongside the current context's IDs.
   def nlg-remember(ids,id) = append(ids,[id]);
-  def nlg-grown-limit(limit,maxpos,pos) {
-   limit <= 0 ? 0 : nlg-grown-limit-room(limit,maxpos - pos);
-  }
-  // An allowance grows toward the end of a sentence; the growing itself has an
-  // end. Left to double into the room the context leaves, a voice that neither
-  // repeats nor reaches an ending will run until the context is full: on
-  // 2026-09-23 a walk asked for 512 and was still speaking sixteen hours later,
-  // holding eleven gigabytes, with no answer written because an answer is only
-  // written when generation returns. Past the reach the allowance stops growing
-  // and the answer is given as it stands, which is what token-limit already
-  // means. An asking larger than the reach is honoured as asked; it is only the
-  // growing that stops here.
-  def nlg-reach() = 4096;
-  def nlg-grown-limit-room(limit,room) {
-   room <= limit ? limit : limit >= nlg-reach() ? limit : nlg-min(nlg-reach(),(limit * 2) > room ? room : (limit * 2));
-  }
   def nlg-repeat-min-bytes() = 24;
   def nlg-repeat-max-period() = 256;
   def nlg-repeat-window() = 2 * nlg-repeat-max-period();
@@ -223,77 +259,84 @@ section [form.bml] {
    let short = room <= 0 ? nlg-looping(added) : nlg-looping((String) substring(acc,nlg-max(0,len(acc) - room),len(acc)) + added);
    (Comparable) short == 1 ? 1 : nlg-long-stuck(acc,added);
   }
-  def nlg-adapt-token(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids) {
-   (Comparable) nlg-stuck(acc,"") == 1 ? nlg-result(acc,"adapted-repeat",n,ctx,events)
-   : nlg-adapt-grow(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids,nlg-grown-limit(limit,model[0][9],pos));
-  }
-  def nlg-adapt-grow(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids,grown) {
-   grown <= limit ? nlg-result(acc,"token-limit",n,ctx,events)
-   : nlg-adapt-continue(model,tk,ctx,id,pos,n,grown,acc,stream,cancel,events,ids,nlg-event(events,"adapt-token-limit",n,host_monotonic_ms(),metal_live(),model));
-  }
-  def nlg-adapt-continue(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids,logged) = nlg-decode(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids);
-  def nlg-adapt-emitted(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids) {
-   (Comparable) nlg-stuck(acc,"") == 1 ? nlg-result(acc,"adapted-repeat",n,ctx,events)
-   : nlg-adapt-emitted-grow(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids,nlg-grown-limit(limit,model[0][9],pos));
-  }
-  def nlg-adapt-emitted-grow(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids,grown) {
-   grown <= limit ? nlg-result(acc,"token-limit",n,ctx,events)
-   : nlg-adapt-emitted-go(model,tk,ctx,id,pos,n,grown,acc,stream,cancel,events,ids,nlg-event(events,"adapt-token-limit",n,host_monotonic_ms(),metal_live(),model));
-  }
-  def nlg-adapt-emitted-go(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids,logged) = pos >= ctx[0] ? nlg-grew(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids,nlg-grow(model,ctx,pos)) : nlg-feed(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids);
   def nlg-decode(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids) {
-   (id < 0) || (id >= model[0][5]) ? nlg-result(acc,"non-finite-logits",n,ctx,events)
-   : nlg-eos(tk,id) ? nlg-result(acc,"",n,ctx,events)
-   : !nlt-known-id(tk,id) ? nlg-result(acc,"tokenizer-id-absent:" + id.str(),n,ctx,events)
-   : (limit > 0) && (n >= limit) ? nlg-adapt-token(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids)
-   : (len(cancel) > 0) && (file_size(cancel) > 0) ? nlg-result(acc,"cancelled",n,ctx,events)
+    (id < 0) || (id >= model[0][5]) ? nlg-terminal(model,acc,"non-finite-logits",n,ctx,events)
+    : nlg-eos(tk,id) ? nlg-terminal(model,acc,"",n,ctx,events)
+    : !nlt-known-id(tk,id) ? nlg-terminal(model,acc,"tokenizer-id-absent:" + id.str(),n,ctx,events)
+    : (limit > 0) && (n >= limit) ? nlg-terminal(model,acc,"token-limit",n,ctx,events)
+    : (len(cancel) > 0) && (file_size(cancel) > 0) ? nlg-terminal(model,acc,"cancelled",n,ctx,events)
    : nlg-emit(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids);
   }
   def nlg-emit(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids) {
-   let text = nlt-decode-id(tk,id); let sent = nlg-stream(stream,text);
+    let text = nlt-decode-id(tk,id);
    let all = (String) acc + text; let count = n + 1; let held = nlg-remember(ids,id);
-   (Comparable) nlg-stuck(acc,text) == 1 ? nlg-result(all,"adapted-repeat",count,ctx,events)
-   : (limit > 0) && (count >= limit) ? nlg-adapt-emitted(model,tk,ctx,id,pos,count,limit,all,stream,cancel,events,held)
+    let owner=nll-owner(model);let emission=nlg-continuation(owner,"decode","",ctx,held,id,pos,count,limit,all,events);
+    record_set(emission,"stream-pending",nlg-stream-record(stream,text));
+    if record?(owner) then record_set(owner,"continuation",emission) else 0;
+    let terminal=nlg-stuck(acc,text)==1 ? nlg-terminal(model,all,"adapted-repeat",count,ctx,events) : limit>0 && count>=limit ? nlg-terminal(model,all,"token-limit",count,ctx,events) : nothing();
+    let sent = nlg-stream-flush(model,stream);
+    !sent ? nlg-result(all,"stream-write-refused",count,ctx,events) : !nothing?(terminal) ? terminal
    : pos >= ctx[0] ? nlg-grew(model,tk,ctx,id,pos,count,limit,all,stream,cancel,events,held,nlg-grow(model,ctx,pos))
    : nlg-feed(model,tk,ctx,id,pos,count,limit,all,stream,cancel,events,held);
   }
   def nlg-grew(model,tk,old,id,pos,n,limit,acc,stream,cancel,events,ids,next) = nothing?(next) ? nlg-press(model,tk,old,id,pos,n,limit,acc,stream,cancel,events,ids,pos >= model[0][9] ? "model-position-limit" : "memory-pressure") : nlg-feed(model,tk,next,id,pos,n,limit,acc,stream,cancel,events,ids);
   def nlg-feed(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids) = !nlg-room(nlg-forward-bytes(model,1,pos)) ? nlg-press(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids,"memory-pressure") : nlg-chosen(model,tk,ctx,nlg-forward-choice(model,ctx,[id],pos,events,"decode"),pos + 1,n,limit,acc,stream,cancel,events,ids);
   def nlg-press(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids,why) {
-   let keep = nlg-take-last(ids,nlg-slide-n(ids));
-   len(keep) >= len(ids) ? nlg-result(acc,why,n,ctx,events) : nlg-slide(model,tk,ctx,keep,n,limit,acc,stream,cancel,events);
+   nlg-keep-continuation(model,"decode",why,ctx,ids,id,pos,n,limit,acc,events);
+   nlg-result(acc,why,n,ctx,events);
   }
-  def nlg-slide(model,tk,old,keep,n,limit,acc,stream,cancel,events) {
-   let cap = nlg-admit-capacity(nlg-want-capacity(len(keep),limit > 0 ? nlg-max(1,limit - n) : 16),model[0][9]);
-   !nlg-room(nlg-cache-bytes(model,cap)) ? nlg-result(acc,"memory-pressure",n,old,events) : nlg-slide-go(model,tk,old,keep,n,limit,acc,stream,cancel,events,cap);
+  def nlg-keep-continuation(model,phase,why,ctx,ids,id,pos,n,limit,text,events) {
+   let owner=nll-owner(model);
+    if record?(owner) then record_set(owner,"continuation",nlg-continuation(owner,phase,why,ctx,ids,id,pos,n,limit,text,events)) else 0;
   }
-  def nlg-slide-go(model,tk,old,keep,n,limit,acc,stream,cancel,events,cap) {
-   let released = nll-context-close(old);
-   let logged = nlg-event(events,"adapt-slide",n,host_monotonic_ms(),metal_live(),model);
-   nlg-slide-admitted(model,tk,keep,n,limit,acc,stream,cancel,events,cap);
-  }
-  def nlg-slide-admitted(model,tk,keep,n,limit,acc,stream,cancel,events,cap) {
-   let ctx = nll-context(model,cap);
-   let pre = nlg-prefill(model,ctx,keep,0,events);
-   len(pre[2]) > 0 ? nlg-result(acc,pre[2],n,ctx,events) : nlg-chosen(model,tk,ctx,pre[0],pre[1],n,limit,acc,stream,cancel,events,keep);
-  }
+   def nlg-continuation(owner,phase,why,ctx,ids,id,pos,n,limit,text,events) = record_new(0,"phase",phase,"reason",why,"request",record?(owner) ? record_get(owner,"request") : nothing(),"ids",ids,"text",text,"emitted",n,"pending",id,"position",pos,"context",ctx,"limit",limit,"events",events);
+   def nlg-continuation-moved(c,ctx,pos,phase,choice) {
+    let next=record_new(0,"phase",phase,"reason",record_get(c,"reason"),"request",record_get(c,"request"),"ids",record_get(c,"ids"),"text",record_get(c,"text"),"emitted",record_get(c,"emitted"),"pending",record_get(c,"pending"),"position",pos,"context",ctx,"limit",record_get(c,"limit"),"events",record_get(c,"events"),"choice",choice,"stream-pending",record_get(c,"stream-pending"));next;
+   }
+   def nlg-context-moved(model,ctx) {
+    let owner=nll-owner(model);let c=record?(owner) ? record_get(owner,"continuation") : nothing();
+    if record?(c) then record_set(owner,"continuation",nlg-continuation-moved(c,ctx,record_get(c,"position"),record_get(c,"phase"),record_get(c,"choice"))) else 0;
+   }
+   def nlg-settled-forward(model,ctx,pos,choice) {
+    let owner=nll-owner(model);let c=record?(owner) ? record_get(owner,"continuation") : nothing();
+    if record?(c) then {
+     record_set(owner,"continuation",nlg-continuation-moved(c,ctx,pos,nothing?(choice) ? "prefill" : "choice",choice));
+    } else 0;
+   }
+   def nlg-terminal(model,text,why,n,ctx,events) {
+    let result=append(nlg-result(text,why,n,ctx,events),[nlg-stream-record-of(model)]);let owner=nll-owner(model);
+    if record?(owner) then {record_set(owner,"terminal-result",result);record_set(owner,"completed-answer",[result[0],why,n,events]);record_set(owner,"continuation",nothing());} else 0;
+    result;
+   }
   def nlg-chosen(model,tk,ctx,choice,pos,n,limit,acc,stream,cancel,events,ids) {
    let picked = nlg-pick-id(tk,acc,choice[0],choice[1],choice[2]);
-   picked[0] < 0 ? nlg-result(acc,picked[1],n,ctx,events)
+    picked[0] < 0 ? nlg-terminal(model,acc,picked[1],n,ctx,events)
    : nlg-chosen-go(model,tk,ctx,picked[0],pos,n,limit,acc,stream,cancel,events,ids,picked[1]);
   }
   def nlg-chosen-go(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids,why) {
+    nlg-keep-continuation(model,"sampled","",ctx,ids,id,pos,n,limit,acc,events);
    let logged = (String) why == "adapted-choice" ? nlg-event(events,"adapt-choice",n,host_monotonic_ms(),metal_live(),model) : 0;
    nlg-decode(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids);
   }
   def nlg-finish-event(model,result,events,start) {
+    len(events)==0 ? 0 : {
    let event = json-node-object([json-node-pair("stage",json-node-string("finished")),json-node-pair("wall_ms",json-node-int(host_monotonic_ms() - start)),json-node-pair("tokens_emitted",json-node-int(result[2])),json-node-pair("bytes_emitted",json-node-int(len(result[0]))),json-node-pair("reason",json-node-string((Comparable) len(result[1]) == 0 ? "eos" : result[1])),json-node-pair("model",json-node-string(model[4])),json-node-pair("adapter",json-node-string(nll-adapter(model)))]);
-   (Comparable) len(events) == 0 ? 0 : sbt-append(events,json-emit(event) + "\n");
+    sbt-append(events,json-emit(event) + "\n");
+    };
   }
   def nlg-ask(session,prompt,limit,stream,cancel,events) {
    let start = host_monotonic_ms();
-   let result = nlg-ask-inner(session,prompt,limit,stream,cancel,events);
+   let owner=nll-owner(session);let request=[prompt,limit];let continuation=record?(owner) ? record_get(owner,"continuation") : nothing();
+    let terminal=record?(owner) ? record_get(owner,"terminal-result") : nothing();
+    let pendingDelivery=record?(owner) && record_get(owner,"answer-delivery")=="pending" && nothing?(terminal) && !record?(continuation);
+    let streamReady=record?(owner) && record_get(owner,"request")==request ? nlg-stream-flush(session[0],stream) : 1;
+    let result=!streamReady ? [record_get(owner,"completed-answer")[0],"stream-write-refused",record_get(owner,"completed-answer")[2],events] : pendingDelivery ? record_get(owner,"request")==request ? record_get(owner,"completed-answer") : ["","prior-request-awaiting-resource",0,events] : record?(owner) && record_get(owner,"closed")==1 ? ["","session-closed",0,events] : !nothing?(terminal) ? record_get(owner,"request")==request ? nlg-finish-answer(session[0],terminal,events) : ["","prior-request-awaiting-resource",0,events] : record?(continuation) ? record_get(continuation,"request")==request ? nlg-resume(session,stream,cancel,events) : ["","prior-request-awaiting-resource",0,events] : {
+     if record?(owner) then {record_set(owner,"request",request);record_set(owner,"completed-answer",nothing());} else 0;
+    nlg-ask-inner(session,prompt,limit,stream,cancel,events);
+   };
+    if record?(owner) && result[1]!="prior-request-awaiting-resource" then {record_set(owner,"completed-answer",result);record_set(owner,"answer-delivery","pending");} else 0;
    let finished = nlg-finish-event(session[0],result,events,start);
+    if record?(owner) && result[1]!="prior-request-awaiting-resource" then record_set(owner,"answer-delivery","delivered") else 0;
    result;
   }
   def nlg-ask-inner(session,prompt,limit,stream,cancel,events) {
@@ -302,22 +345,62 @@ section [form.bml] {
    (limit < 0) || (len(ids) > maxpos) ? ["","context-admission-refused",0,events] : nlg-ask-fit(model,tk,ids,nlg-admit-capacity(nlg-want-capacity(len(ids),limit),maxpos),limit,stream,cancel,events);
   }
   def nlg-ask-fit(model,tk,ids,capacity,limit,stream,cancel,events) {
-   nlg-room(nlg-cache-bytes(model,capacity)) ? nlg-ask-admitted(model,tk,ids,capacity,limit,stream,cancel,events) : nlg-ask-shrink(model,tk,ids,capacity,limit,stream,cancel,events,nlg-shrink-capacity(capacity,len(ids)));
+   let ctx=nlg-room(nlg-cache-bytes(model,capacity)) ? nlg-try-context(model,capacity) : nothing();
+   !nothing?(ctx) ? nlg-ask-context(model,tk,ids,ctx,limit,stream,cancel,events) : nlg-ask-shrink(model,tk,ids,capacity,limit,stream,cancel,events,nlg-shrink-capacity(capacity,len(ids)));
   }
   def nlg-ask-shrink(model,tk,ids,capacity,limit,stream,cancel,events,next) {
    next >= capacity ? ["","context-admission-refused",0,events] : nlg-ask-fit(model,tk,ids,next,limit,stream,cancel,events);
   }
   def nlg-ask-admitted(model,tk,ids,capacity,limit,stream,cancel,events) {
-   let ctx = nll-context(model,capacity);
+   let ctx=nlg-try-context(model,capacity);
+   nothing?(ctx) ? ["","context-admission-refused",0,events] : nlg-ask-context(model,tk,ids,ctx,limit,stream,cancel,events);
+  }
+  def nlg-try-context(model,capacity) {
+   let owner=nll-group(nll-owner(model),"llama-context");
+   let ctx=try nll-context-owned(model,capacity,owner) catch nothing();
+   !nothing?(ctx) ? ctx : nll-release(owner) ? nothing() : form_error("native Llama partial context release incomplete");
+  }
+  def nlg-ask-context(model,tk,ids,ctx,limit,stream,cancel,events) {
+    nlg-keep-continuation(model,"prefill","",ctx,ids,-1,0,0,limit,"",events);
    let pre = nlg-prefill(model,ctx,ids,0,events);
-   let result = len(pre[2]) > 0 ? nlg-result("",pre[2],0,ctx,events) : nlg-chosen(model,tk,ctx,pre[0],pre[1],0,limit,"",stream,cancel,events,ids);
-   let released = nll-context-close(result[3]);
-   [result[0],result[1],result[2],events];
+   let result = len(pre[2]) > 0 ? {nlg-keep-continuation(model,"prefill",pre[2],ctx,ids,pre[0],pre[1],0,limit,"",events);nlg-result("",pre[2],0,ctx,events);} : nlg-chosen(model,tk,ctx,pre[0],pre[1],0,limit,"",stream,cancel,events,ids);
+   nlg-finish-answer(model,result,events);
+  }
+  def nlg-finish-answer(model,result,events) {
+   let owner=nll-owner(model);let answer=[result[0],result[1],result[2],events];
+   if record?(owner) then record_set(owner,"completed-answer",answer) else 0;
+    let held=result[1]=="memory-pressure" || result[1]=="model-position-limit" || result[1]=="stream-write-refused";
+   if !held && record?(owner) then record_set(owner,"continuation",nothing()) else 0;
+   let released=held ? 0 : nll-context-close(result[3]);
+   if record?(owner) then record_set(owner,"context-release-ok",released) else 0;
+    if released && record?(owner) then record_set(owner,"terminal-result",nothing()) else 0;
+   !held && !released ? form_error("native Llama answer retained; context release incomplete") : answer;
+  }
+   def nlg-resume(session,stream,cancel,events) = nlg-stream-flush(session[0],stream) ? nlg-resume-ready(session,stream,cancel,events) : {let answer=record_get(nll-owner(session),"completed-answer");[answer[0],"stream-write-refused",answer[2],events];};
+   def nlg-resume-ready(session,stream,cancel,events) {
+   let owner=nll-owner(session);let c=record_get(owner,"continuation");
+   !record?(c) || record_get(owner,"closed")==1 ? form_error("native Llama live continuation unavailable") : {
+    let model=session[0];let tk=session[1];let ctx=record_get(c,"context");let ids=record_get(c,"ids");let pos=record_get(c,"position");let n=record_get(c,"emitted");let limit=record_get(c,"limit");let acc=record_get(c,"text");
+    let result=record_get(c,"phase")=="prefill" ? {
+     let pre=nlg-prefill(model,ctx,drop(pos,ids),pos,events);
+     len(pre[2])>0 ? {nlg-keep-continuation(model,"prefill",pre[2],ctx,ids,pre[0],pre[1],n,limit,acc,events);nlg-result(acc,pre[2],n,ctx,events);} : nlg-chosen(model,tk,ctx,pre[0],pre[1],n,limit,acc,stream,cancel,events,ids);
+     } : record_get(c,"phase")=="choice" ? nlg-chosen(model,tk,ctx,record_get(c,"choice"),pos,n,limit,acc,stream,cancel,events,ids) : record_get(c,"phase")=="sampled" ? nlg-decode(model,tk,ctx,record_get(c,"pending"),pos,n,limit,acc,stream,cancel,events,ids) : pos>=ctx[0] ? nlg-grew(model,tk,ctx,record_get(c,"pending"),pos,n,limit,acc,stream,cancel,events,ids,nlg-grow(model,ctx,pos)) : nlg-feed(model,tk,ctx,record_get(c,"pending"),pos,n,limit,acc,stream,cancel,events,ids);
+    nlg-finish-answer(model,result,events);
+   };
   }
   def nlg-once(dir,adapter,prompt,limit,stream,cancel,events) {
-   let session = nlg-open-at(dir,adapter,events);
-   defer nlg-close(session);
-   nlg-ask(session,prompt,limit,stream,cancel,events);
+    let request=[dir,adapter,prompt,limit];let prior=record_get(NLG-OWNED,"one-shot");
+    record?(prior) && record_get(prior,"closed") != 1 && record_get(prior,"one-shot-request") != request ? ["","prior-request-awaiting-resource",0,events] : {
+     let session=record?(prior) && record_get(prior,"closed") != 1 ? record_get(prior,"session") : nlg-open-at(dir,adapter,events);
+     let owner=nll-owner(session);record_set(owner,"one-shot-request",request);record_set(NLG-OWNED,"one-shot",owner);
+     let retained=record_get(owner,"completed-answer");
+     let answer=record_get(owner,"release-pending")==1 && !nothing?(retained) ? retained : try nlg-ask(session,prompt,limit,stream,cancel,events) catch nothing();
+     let settled=record_get(owner,"completed-answer");let continuation=record_get(owner,"continuation");
+     (record?(continuation) || nlg-stream-pending(session[0])) && record_get(owner,"release-pending") != 1 ? (!nothing?(answer) ? answer : [record?(continuation) ? record_get(continuation,"text") : settled[0],"interrupted",record?(continuation) ? record_get(continuation,"emitted") : settled[2],events]) : {
+      let closed=nlg-close(session);
+      !closed ? form_error("native Llama completed effects retained; final release incomplete") : !nothing?(answer) ? answer : !nothing?(settled) ? settled : form_error("native Llama generation interrupted; resources released");
+     };
+    };
   }
   def nlg-registry-id() = "llama32-3b-mlx-4bit";
   def nlg-base() = mr-path(mr-find(nlg-registry-id()));

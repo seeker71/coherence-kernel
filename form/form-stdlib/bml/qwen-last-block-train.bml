@@ -31,7 +31,9 @@ import form-stdlib/qwen35-encode-indexed.fk;
 import native/metal/qwen35-crystal.fk;
 import form-stdlib/json.fk;
 import form-stdlib/gpu-lease.bml;
+import form-stdlib/form-cli-model-session.fk;
 section [form.bml] {
+ let QLBT-CAPTURE-OWNER=record_new(0);
  class QwenLastBlockTrain {
   def qlbt-cut-bytes() = 1200;
   def qlbt-msl() = "#include <metal_stdlib>\nusing namespace metal;\n" ++ q80-msl-spine() ++ q80-msl-weight()
@@ -74,33 +76,67 @@ section [form.bml] {
   def qlbt-capture-path(dir, row) = dir ++ "/row-" ++ row[0].str() ++ "-xin.f32";
   def qlbt-sidecar-path(dir, row) = dir ++ "/row-" ++ row[0].str() ++ "-xin.json";
   // [bytes (n x d f32, "" when the prefill did not land), prefill ms, from cache?]
-  def qlbt-capture(ctx, L, dir, row, cap) {
+  def qlbt-capture-session() {
+   !record_has(QLBT-CAPTURE-OWNER,"session") ? record_set(QLBT-CAPTURE-OWNER,"session",fcms-none("training-capture-owner")) : 0;
+   record_get(QLBT-CAPTURE-OWNER,"session");
+  }
+  def qlbt-capture(ctx,L,dir,row,cap) = qlbt-capture-owned(qlbt-capture-session(),ctx,L,dir,row,cap);
+   def qlbt-publish-capture(owner) {
+    let capture=record_get(owner,"completed-capture");
+     !record?(capture) || record_get(capture,"settled")==1 ? 1 : {
+     let path=record_get(capture,"path");let side=record_get(capture,"side-path");let raw=record_get(capture,"raw");let metadata=record_get(capture,"metadata");
+     if read_file(path)!=raw then write_file(path,raw) else 0;
+     if read_file(side)!=metadata then write_file(side,metadata) else 0;
+     let kept=read_file(path)==raw && read_file(side)==metadata;record_set(capture,"retained",kept);kept;
+    };
+   }
+   def qlbt-settle-capture(owner) {
+     let kept=qlbt-publish-capture(owner);let released=fcms-phase-close(owner);
+     let capture=record_get(owner,"completed-capture");
+     if kept && released && record?(capture) then {record_set(capture,"settled",1);record_set(capture,"raw",nothing());} else 0;
+     kept && released;
+   }
+  def qlbt-capture-owned(session,ctx, L, dir, row, cap) {
+   let prior=record_get(fcms-release-ledger(session),"training-capture");
+    record?(prior) && !qlbt-settle-capture(prior) ? form_error("training-capture-retention-or-release-incomplete; original bytes and owner retained") : 0;
    let d = ctx[2][0];
    let n = qlbt-row-n(row);
    let cached = read_file(qlbt-capture-path(dir, row)) ?? "";
    let side = read_file(qlbt-sidecar-path(dir, row)) ?? "";
-   len(cached) == n * d * 4 && qlbt-sidecar-matches?(side, row[1]) == 1 ? [cached, 0, 1] : qlbt-prefill(ctx, L, dir, row, cap);
+   len(cached) == n * d * 4 && qlbt-sidecar-matches?(side, row[1]) == 1 ? [cached, 0, 1] : qlbt-prefill-owned(session,ctx, L, dir, row, cap);
   }
-  def qlbt-prefill(ctx, L, dir, row, cap) {
+  def qlbt-prefill(ctx,L,dir,row,cap) = qlbt-prefill-owned(qlbt-capture-session(),ctx,L,dir,row,cap);
+  def qlbt-prefill-owned(session,ctx, L, dir, row, cap) {
    let d = ctx[2][0];
    let n = qlbt-row-n(row);
-   let o = qlbc-open(ctx, L, cap);
-   let sts = q38-new-state(ctx[2]);
+   let owner=fcms-phase-open(session,"qwen training capture",append(take(2,drop(2,q38-session-parts(ctx[2],q38-ctx-span(ctx),0))),[["capture",qlbc-own-bytes(d,cap)]]));
+   record_set(fcms-release-ledger(session),"training-capture",owner);
+   let allocate=bytes=>q38x-alloc(owner,bytes);
+   let o = qlbc-open-by(ctx, L, cap,allocate);
+   let sts = q38-new-state-by(ctx[2],allocate);
+   !qlbc-ok?(o) || !q38-state-complete?(sts,ctx[2]) || !fcms-phase-ready(owner) ? form_error("training-capture-allocation-incomplete") : 0;
    let t0 = host_monotonic_ms();
    let r = qlbc-prefill(o, sts, row[1]);
    let t1 = host_monotonic_ms();
    let raw = qlbc-bytes(o, "xin");
    let landed = r[2] == n && len(raw) == n * d * 4 ? 1 : 0;
-   let wrote = landed == 1 ? write_file(qlbt-capture-path(dir, row), raw) : 0;
-   let sidew = landed == 1 ? write_file(qlbt-sidecar-path(dir, row), "{\"name\":\"xin\",\"line\":" ++ row[0].str() ++ ",\"layer\":" ++ L.str() ++ ",\"shape\":[" ++ n.str() ++ "," ++ d.str() ++ "],\"dtype\":\"f32\",\"layout\":\"row-major token-major little-endian\",\"bytes\":" ++ wrote.str() ++ ",\"ids\":[" ++ qlbt-ids-text(row[1]) ++ "]}\n") : 0;
-   let freed = qlbc-free(o) + q38-free-state(sts);
+    if landed==1 then {
+     let metadata="{\"name\":\"xin\",\"line\":" ++ row[0].str() ++ ",\"layer\":" ++ L.str() ++ ",\"shape\":[" ++ n.str() ++ "," ++ d.str() ++ "],\"dtype\":\"f32\",\"layout\":\"row-major token-major little-endian\",\"bytes\":" ++ len(raw).str() ++ ",\"ids\":[" ++ qlbt-ids-text(row[1]) ++ "]}\n";
+     record_set(owner,"completed-capture",record_new(0,"raw",raw,"ids",row[1],"path",qlbt-capture-path(dir,row),"side-path",qlbt-sidecar-path(dir,row),"metadata",metadata,"elapsed",t1 - t0,"retained",0));
+    } else 0;
+    !qlbt-settle-capture(owner) ? form_error("training-capture-retention-or-release-incomplete; completed bytes and owner retained") : 0;
    [landed == 1 ? raw : "", t1 - t0, 0];
   }
   // ── the step's device state ──
   // rec: the qlh-rr record on slot 4 (A [ff, r], B [r, d], u [ncap, r]); logits/dz [ncap, vocab]; loss/mask/targets/inv [ncap];
   // hn/nrm/dh/dres [ncap, d]; dA/mA/vA [ff, r]; dB/mB/vB [r, d]; du [ncap, r]; t1/m1/l1 one entry each and dz1 [vocab] for the
   // one-token serving-head check
-  def qlbt-open(geo, lay, onormTv, ncap, r, scale) {
+  def qlbt-open(geo,lay,onormTv,ncap,r,scale) = qlbt-open-by(geo,lay,onormTv,ncap,r,scale,bytes=>metal_buf_alloc(bytes));
+  def qlbt-buffer-sizes(geo,ncap,r) {
+   let d=geo[0];let ff=geo[10];let vocab=geo[19];
+   map(n=>n*4,[ff*r,r*d,r*ncap,vocab*ncap,vocab*ncap,ncap,ncap,ncap,d*ncap,d*ncap,ncap,d*ncap,d*ncap,ff*r,ff*r,ff*r,r*d,r*d,r*d,r*ncap,4,4,4,vocab]);
+  }
+  def qlbt-open-by(geo, lay, onormTv, ncap, r, scale,allocate) {
    let d = geo[0];
    let ff = geo[10];
    let vocab = geo[19];
@@ -113,24 +149,19 @@ section [form.bml] {
     let rmsl = qlh-rr-msl();
     let dot = metal_pipeline(rmsl, "form_qwen_lora_rr_dot_f32");
     let add = metal_pipeline(rmsl, "form_qwen_lora_rr_add_f32");
-    let ah = metal_buf_alloc(ff * r * 4);
-    let bh = metal_buf_alloc(r * d * 4);
-    let uh = metal_buf_alloc(r * ncap * 4);
-    let rec = [4, dot, add, ah, bh, uh, ff, r, d, md-f32-bits(scale), ncap];
-    record_new(0, "ncap", ncap, "d", d, "ff", ff, "r", r, "vocab", vocab, "scale", scale, "tmm", tmm, "ce", ce, "fill", fill, "rec", rec,
-     "logits", metal_buf_alloc(vocab * ncap * 4), "dz", metal_buf_alloc(vocab * ncap * 4), "loss", metal_buf_alloc(ncap * 4), "mask", metal_buf_alloc(ncap * 4), "targets", metal_buf_alloc(ncap * 4),
-     "hn", metal_buf_alloc(d * ncap * 4), "nrm", metal_buf_alloc(d * ncap * 4), "inv", metal_buf_alloc(ncap * 4), "dh", metal_buf_alloc(d * ncap * 4), "dres", metal_buf_alloc(d * ncap * 4),
-     "dA", metal_buf_alloc(ff * r * 4), "mA", metal_buf_alloc(ff * r * 4), "vA", metal_buf_alloc(ff * r * 4), "dB", metal_buf_alloc(r * d * 4), "mB", metal_buf_alloc(r * d * 4), "vB", metal_buf_alloc(r * d * 4), "du", metal_buf_alloc(r * ncap * 4),
-     "t1", metal_buf_alloc(16), "m1", metal_buf_alloc(16), "l1", metal_buf_alloc(16), "dz1", metal_buf_alloc(vocab * 4));
+    let handles=map(allocate,qlbt-buffer-sizes(geo,ncap,r));
+    let rec = [4, dot, add, handles[0], handles[1], handles[2], ff, r, d, md-f32-bits(scale), ncap];
+    let owner=record_new(0, "ncap", ncap, "d", d, "ff", ff, "r", r, "vocab", vocab, "scale", scale, "tmm", tmm, "ce", ce, "fill", fill, "rec", rec);
+    map(i=>record_set(owner,qlbt-names()[i],handles[i+3]),range(0,len(qlbt-names())));owner;
    };
   }
   def qlbt-names() = ["logits", "dz", "loss", "mask", "targets", "hn", "nrm", "inv", "dh", "dres", "dA", "mA", "vA", "dB", "mB", "vB", "du", "t1", "m1", "l1", "dz1"];
   def qlbt-handles(o) = append([record_get(o, "rec")[3], record_get(o, "rec")[4], record_get(o, "rec")[5]], map(k => record_get(o, k), qlbt-names()));
   def qlbt-ok?(o) = record_get(o, "tmm") > 0 && record_get(o, "ce") > 0 && record_get(o, "fill") > 0 && qlh-rr-valid?(record_get(o, "rec")) == 1 && q38-handles-ok?(qlbt-handles(o)) == 1;
   def qlbt-free(o) = q38-free-handles(qlbt-handles(o));
-  def qlbt-handle-count() = 24;
+  def qlbt-handle-count() = 3+len(qlbt-names());
   // the bytes this step holds beside the forward's scratch
-  def qlbt-own-bytes(geo, ncap, r) = (4 * geo[10] * r + 4 * r * geo[0] + 2 * r * ncap + 2 * geo[19] * ncap + 4 * ncap + 4 * geo[0] * ncap + geo[19]) * 4 + 48;
+  def qlbt-own-bytes(geo,ncap,r) = sum(qlbt-buffer-sizes(geo,ncap,r));
   // design D at this T and rank: tape + gradient temporaries per token, logits + dz, P + dP, the pair x4 (param, grad, m, v)
   def qlbt-design-budget(geo, T, r) = T * 2 * 139264 * 4 + 2 * geo[19] * T * 4 + 2 * geo[12] * T * T * 4 + 4 * 4 * r * (geo[10] + geo[0]);
   // A from the hash at aScale, B = +0, the moments +0 (serial batch; synced)

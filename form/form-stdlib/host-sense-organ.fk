@@ -6,8 +6,59 @@
 // which organs count as active, the derived power-cost and signal metrics the mesh reads,
 // and the discovery state. The same recipe serves the Windows host carrier once it lands.
 //
-// Builtins only (cons/list/let/if/add/div/gt/...) — kernel-fast on the carrier hot path.
+// PCM interpretation and reports live here; the optional carrier owns AudioQueue.
+import form-stdlib/core.fk;
+import form-stdlib/bml/ear-listening.bml;
+import form-stdlib/wav-emit.fk;
+import form-stdlib/native-wav.bml;
 section [form.bml] {
+    def hso-pcm-stats-go(bytes,at,nonzero,sum,peak) = at>=len(bytes) ? [at/2,nonzero,at==0 ? 0 : sum/(at/2),peak] : {
+        let sample=abs(elp-s16(bytes,at));
+        hso-pcm-stats-go(bytes,at+2,nonzero+(sample>0 ? 1 : 0),sum+sample,sample>peak ? sample : peak);
+    };
+    def hso-pcm-stats(bytes) = nothing?(bytes) ? nothing() : value_kind(bytes)!="string" || len(bytes)%2!=0 ? form_error("audio PCM requires complete signed 16-bit samples") : hso-pcm-stats-go(bytes,0,0,0,0);
+    def sense_mic_capture(milliseconds) = hso-pcm-stats(float_leaf(59,milliseconds));
+    def sense_spk_count() = float_leaf(10,0);
+    def sense_spk_name(index) = float_leaf(11,index);
+    def sense_spk_health(index) = float_leaf(12,index);
+    def sense_spk_play(pcm) = sense_spk_play_at(pcm,16000);
+    def sense_spk_play_at(pcm,rate) = float_leaf(13,cons(pcm,rate));
+    def sense_spk_stream_start() = sense_spk_stream_start_at(16000);
+    def sense_spk_stream_start_at(rate) = float_leaf(14,rate);
+    def sense_spk_stream_write(pcm) = float_leaf(15,pcm);
+    def sense_spk_stream_stop() = float_leaf(16,0);
+    def sense_report() {
+        let microphones=sense_mic_count(); let cameras=sense_cam_count();
+        print("sense: default audio endpoint availability; input permission is observed at admission");
+        let mic=map(i=>{let health=sense_mic_health(i);print(["mic",i,health,sense_mic_name(i)]);health>0 ? 1 : 0;},range(0,microphones));
+        let cam=map(i=>{let health=sense_cam_health(i);print(["camera",i,health,sense_cam_name(i)]);health>0 ? 1 : 0;},range(0,cameras));
+        let count=foldl((a,b)=>a+b,0,append(mic,cam));
+        print(["available sense endpoints",count,"microphones",microphones,"cameras",cameras]); count;
+    };
+    def sense_sensors() {
+        let wifi=sense_wifi_ssid(); let bluetooth=sense_bt_present(); let power=sense_power(); let memory=sense_mem();
+        print(["wifi",wifi,"signal",sense_wifi_signal()]); print(["bluetooth",bluetooth,"near",sense_bt_count()]);
+        print(["battery",power,"memory",memory]);
+        let count=(len(wifi)>0 ? 1 : 0)+(bluetooth>0 ? 1 : 0)+(power>=0 ? 1 : 0)+(memory>=0 ? 1 : 0);
+        print(["live sensors",count]); count;
+    };
+    def hso-pcm-wav(pcm) = len(pcm)%2!=0 || len(pcm)>4294967259 ? form_error("captured PCM exceeds RIFF geometry") : we-header(16000,len(pcm)/2)+pcm;
+    def sense_wav_loopback(input,output) {
+        let metadata=nwa-inspect(input); let fmt=metadata[0]; let data=metadata[1];
+        fmt[1]!=1 || fmt[2]!=16 || fmt[3]!=1 ? form_error("speaker WAV requires mono signed 16-bit PCM") : {
+            let pcm=read_file_slice(input,data[0],data[1]);
+            nothing?(pcm) || len(pcm)!=data[1] ? form_error("speaker WAV sample read incomplete") : output=="" ? {
+                let played=sense_spk_play_at(pcm,fmt[0]); played<0 ? nothing() : [played,0,0,0];
+            } : {
+                let result=float_leaf(59,[pcm,fmt[0],500]);
+                nothing?(result) ? nothing() : nothing?(result[1]) ? [result[0],nothing(),nothing(),nothing()] : {
+                    let captured=result[1]; let stats=hso-pcm-stats(captured); let wav=hso-pcm-wav(captured);
+                    let wrote=write_file(output,wav);
+                    wrote != len(wav) ? form_error("air loopback output write incomplete") : [result[0],stats[0],stats[3],stats[2]];
+                };
+            };
+        };
+    };
     // --- derived mesh metrics (ppm) ---
     // power-cost: the mean of cpu and gpu utilization — how hard the host is working.
     def hso-power-cost(cpu-ppm, gpu-ppm) = (cpu-ppm + gpu-ppm) / 2;

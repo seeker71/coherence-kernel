@@ -1,14 +1,16 @@
 ; http-client.bml - Form-native HTTP client surface.
 ;
 import form-stdlib/core.fk;
+import form-stdlib/bml/string-join.bml;
+import form-stdlib/kernel-http-header.fk;
+import form-stdlib/line-grammar.fk;
 ;
 ; Authored in the source-level Form/BML maintenance grammar. Kernel execution
 ; receives lowered Form recipes from source-compiler.fk.
 ;
 ; Plain HTTP verbs are recipes over the host socket floor:
-; socket_connect / socket_send / socket_recv / socket_close. http_get remains a
-; compatibility native outside the method layer. sock_request is retained only as
-; a native fallback when the decomposed socket_connect path cannot open the peer.
+; socket_connect / socket_send / socket_recv / socket_close. The same owner
+; composes raw exchanges; an incomplete exchange never retries completed sends.
 
 section [form.bml] {
     def kh-render-request(method, path, host, body) {
@@ -22,7 +24,7 @@ section [form.bml] {
             (host_line + "\r\n");
     }
 
-    def http-open(host, port) = socket_connect(host, str_to_int(port));
+    def http-open(host, port) = socket_connect(host, value_kind(port)=="list" ? [str_to_int(port[0]),port[1],"request"] : [str_to_int(port),0,"request"]);
 
     def http-send-all-step(conn, bytes, from) {
         let n = socket_send(conn, substring(bytes, from, len(bytes)));
@@ -61,7 +63,7 @@ section [form.bml] {
 
     def http-response-complete-at(msg, body-start) {
         let expected = http-content-length(msg);
-        expected < 0 ? true : ((len(msg) - body-start) >= expected);
+        expected < 0 ? false : ((len(msg) - body-start) >= expected);
     }
 
     def http-response-complete?(msg) {
@@ -80,31 +82,36 @@ section [form.bml] {
     // "" stays the peer's orderly close: the accumulated reply is whole.
     def http-recv-response-into(conn, acc) {
         let chunk = socket_recv(conn, 65536);
-        nothing?(chunk) ? chunk : (Comparable) len(chunk) == 0 ? acc : http-recv-response-next(conn, acc, chunk);
+        nothing?(chunk) ? chunk : (Comparable) len(chunk) == 0 ? {
+            let body-start=http-body-offset(acc); let expected=http-content-length(acc);
+            body-start>=0 && (expected<0 || len(acc) - body-start>=expected) ? acc : nothing();
+        } : http-recv-response-next(conn, acc, chunk);
     }
 
-    def http-recv-response(conn) = socket_recv(conn, 65536);
+    def http-recv-response(conn) = http-recv-response-into(conn, "");
+    def http-recv-until-close(conn, chunks) {
+        let chunk=socket_recv(conn,65536);
+        nothing?(chunk) ? nothing() : len(chunk)==0 ? str-join-with(reverse(chunks),"") : http-recv-until-close(conn,cons(chunk,chunks));
+    }
 
     def http-plain-request-connected(conn, req) {
-        let sent = http-send-all(conn, req, 0);
-        let response = sent > 0 ? http-recv-response(conn) : "";
-        socket_close(conn);
-        response;
+        let response = try {
+            let sent = http-send-all(conn, req, 0);
+            sent == len(req) ? http-recv-until-close(conn,[]) : nothing();
+        } catch nothing();
+        let released=socket_close(conn);
+        released==0 ? response : nothing();
     }
 
     // a peer never reached answers nothing (2026-08-27); this boundary names
     // the absence, then "" keeps this cell's no-body meaning downstream.
     def http-answer-or-empty(r) = r ?? "";
 
-    def http-plain-request-response-or-fallback(host, port, conn, req) {
-        let response = http-plain-request-connected(conn, req);
-        nothing?(response) ? http-answer-or-empty(sock_request(host, port, req)) : len(response) > 0 ? response : http-answer-or-empty(sock_request(host, port, req));
-    }
-
-    def http-plain-request(host, port, req) {
+    def sock_request(host, port, req) {
         let conn = http-open(host, port);
-        conn < 0 ? http-answer-or-empty(sock_request(host, port, req)) : http-plain-request-response-or-fallback(host, port, conn, req);
+        conn < 0 ? nothing() : http-plain-request-connected(conn, req);
     }
+    def http-plain-request(host, port, req) = http-answer-or-empty(sock_request(host,port,req));
 
     def http-fetch(method, url, body) {
         let https = (Comparable) str_find(url, "https://", 0) == 0;
@@ -144,5 +151,66 @@ section [form.bml] {
         let line = kh-msg-start-line(response);
         let sp = str_find(line, " ", 0);
         (Comparable) sp == -1 ? 0 : kh-status-of-rest(substring(line, sp + 1, len(line)));
+    }
+
+    def http-result(status,body,error,elapsed,headers) = ["__dict__","status_code",status,"body",body,"error",error,"duration_ms",elapsed,"headers",headers];
+    def http-clean-url?(text) = all?(i=>{let b=str_byte_at(text,i); b>32 && b != 127;},range(0,len(text)));
+    def http-decimal?(text) = len(text)>0 && all?(i=>{let b=str_byte_at(text,i); b>=48 && b<=57;},range(0,len(text)));
+    def http-decimal-digits(text) = len(text)>1 && char_at(text,0)=="0" ? http-decimal-digits(substring(text,1,len(text))) : text;
+    def http-port?(text) = http-decimal?(text) && len(http-decimal-digits(text))<=5 && str_to_int(text)>0 && str_to_int(text)<=65535;
+    def http-url-parts(url) {
+        let secure=str_find(url,"https://",0)==0;
+        !http-clean-url?(url) || (!secure && str_find(url,"http://",0)!=0) ? nothing() : {
+            let fragment=str_find(url,"#",0);
+            let after=substring(url,secure ? 8 : 7,fragment<0 ? len(url) : fragment);
+            let slash=str_find(after,"/",0); let query=str_find(after,"?",0);
+            let stop=min2(slash<0 ? len(after) : slash,query<0 ? len(after) : query);
+            let authority=substring(after,0,stop);
+            let bracket=len(authority)>0 && char_at(authority,0)=="[";
+            let close=bracket ? str_find(authority,"]",0) : -1;
+            let colon=bracket ? close>=0 && close+1<len(authority) && char_at(authority,close+1)==":" ? close+1 : -1 : str_find(authority,":",0);
+            let host=bracket ? close>1 ? substring(authority,1,close) : "" : substring(authority,0,colon<0 ? len(authority) : colon);
+            let port=colon<0 ? secure ? "443" : "80" : substring(authority,colon+1,len(authority));
+            let target=stop==len(after) ? "/" : char_at(after,stop)=="?" ? "/"+substring(after,stop,len(after)) : substring(after,stop,len(after));
+            len(host)==0 || str_find(authority,"@",0)>=0 || !http-port?(port) || (bracket && (close<0 || (colon<0 && close+1!=len(authority)))) || (!bracket && str_find(host,":",0)>=0) ? nothing() : [secure,host,port,target,authority];
+        };
+    }
+    def http-header-name-safe?(text) = value_kind(text)=="string" && len(text)>0 && all?(i=>{let b=str_byte_at(text,i); (b>=65 && b<=90) || (b>=97 && b<=122) || (b>=48 && b<=57) || b==45;},range(0,len(text)));
+    def http-header-value-safe?(text) = value_kind(text)=="string" && all?(i=>{let b=str_byte_at(text,i); b==9 || (b>=32 && b != 127);},range(0,len(text)));
+    def http-header-offered?(row) = value_kind(row)=="list" && len(row)==3 && row[0]==43001 && http-header-name-safe?(row[1]) && http-header-value-safe?(row[2]) && !any?(name=>kh-str-eq-ci?(row[1],name),["Host","Connection","Content-Length","Transfer-Encoding","Proxy-Connection","Keep-Alive","Upgrade","TE","Trailer"]);
+    def http-trim-left(text,at) = at<len(text) && (str_byte_at(text,at)==32 || str_byte_at(text,at)==9) ? http-trim-left(text,at+1) : at;
+    def http-trim-right(text,end) = end>0 && (str_byte_at(text,end - 1)==32 || str_byte_at(text,end - 1)==9 || str_byte_at(text,end - 1)==13) ? http-trim-right(text,end - 1) : end;
+    def http-header-line(line) {
+        let colon=str_find(line,":",0);
+        colon<=0 ? nothing() : {
+            let name=substring(line,0,colon); let rest=substring(line,colon+1,len(line));
+            let value=substring(rest,http-trim-left(rest,0),http-trim-right(rest,len(rest)));
+            http-header-name-safe?(name) && http-header-value-safe?(value) ? kh-header(name,value) : nothing();
+        };
+    }
+    def http-result-from-wire(wire,began) {
+        let offset=http-body-offset(wire);
+        let status=kh-status-of(wire);
+        offset<0 || status<=0 ? http-result(0,"","invalid HTTP response",0,[]) : {
+            let rows=map(http-header-line,split-on(substring(wire,0,offset),"\n")[1:]);
+            let headers=reverse(filter(row=>!nothing?(row),rows));
+            let body=substring(wire,offset,len(wire));
+            let length=kh-header-value-or(headers,"Content-Length",nothing());
+            !nothing?(length) && (!http-decimal?(length) || http-decimal-digits(length)!=len(body).str()) ? http-result(0,"","incomplete HTTP body",0,headers) : http-result(status,body,"",max2(1,host_monotonic_ms() - began),headers);
+        };
+    }
+    def http_get(url,headers,timeout_ms) {
+        let began=host_monotonic_ms();
+        let parts=value_kind(url)=="string" ? http-url-parts(url) : nothing();
+        let numeric=value_kind(timeout_ms)=="int" || value_kind(timeout_ms)=="float";
+        nothing?(parts) ? http-result(0,"","invalid HTTP URL",0,[]) : !numeric || timeout_ms != timeout_ms || timeout_ms>=4611686018427387903 - began ? http-result(0,"","invalid HTTP timeout",0,[]) : {
+            let allowance=timeout_ms>0 ? float_to_int(timeout_ms)+ (timeout_ms>float_to_int(timeout_ms) ? 1 : 0) : 0;
+            let deadline=allowance>0 ? began+allowance : 0;
+            let offered=value_kind(headers)=="list" ? filter(http-header-offered?,headers) : [];
+            let extra=str-join-with(map(row=>row[1]+": "+row[2]+"\r\n",offered),"");
+            let request="GET "+parts[3]+" HTTP/1.0\r\nHost: "+parts[4]+"\r\nConnection: close\r\n"+extra+"\r\n";
+            let response=parts[0] ? tls_request(parts[1],[parts[2],deadline],request) : sock_request(parts[1],[parts[2],deadline],request);
+            nothing?(response) ? http-result(0,"",deadline>0 && host_monotonic_ms()>=deadline ? "caller deadline reached" : "HTTP transport failed",0,[]) : http-result-from-wire(response,began);
+        };
     }
 }

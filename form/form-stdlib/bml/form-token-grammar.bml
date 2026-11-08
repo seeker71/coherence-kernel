@@ -3,7 +3,8 @@
 // A model writes <|form:VERB|>PAYLOAD<|/form:VERB|>; when the stream closes the control, Form
 // runs the verb (form-token-verbs.bml) and answers in the same stream
 // with <|form:observation|>RESULT<|/form:observation|>. RESULT is value=<v>; recipe=@<p.l.t.i>;
-// node=@<p.l.t.i>; or nothing=<reason>;. A refusal is an observation, never a stop.
+// node=@<p.l.t.i>; or nothing=<reason>;. A refusal offers another choice.
+// Repeating a refused observation echo ends that stream with its evidence intact.
 //
 // The opening bytes of recipe-birth, recipe-exec and knowledge-query are the ones
 // form-recipe-birth-token.fk, form-recipe-exec-token.fk and form-knowledge-query-token.fk read;
@@ -79,6 +80,21 @@ section [form.bml] {
   def ftg-window-past?() = ftg-window-until() > 0 && host_monotonic_ms() >= ftg-window-until();
   def ftg-window-feed(icpt, cursor, chunk) = ftg-window-past?() ? [cursor, chunk, ftg-window-end()] : ftg-feed(icpt, cursor, chunk);
   def ftg-window-inject(icpt, s, text) = ftg-window-past?() ? fcms-refuse(s, ftg-window-end()) : ftg-inject(icpt, s, text);
+  def ftg-choice-needed() = "unchanged-observation-refusal";
+  def ftg-observation-choice(owner,verb,result) {
+   if verb == "observation" && len(result)>0 then {
+    let repeated=record_get(owner,"observation-refused") == 1;
+    record_set(owner,"observation-refused",1);
+    record_set(owner,"control-choice-needed",repeated ? 1 : 0);
+    result + " Form supplies observations. Continue with your answer in plain prose or choose a different executable control; do not write or echo observation controls.";
+   } else {
+    if ftg-result-kind(result) != "nothing" && len(result)>0 then {
+     record_set(owner,"observation-refused",0);
+     record_set(owner,"control-choice-needed",0);
+    } else 0;
+    result;
+   };
+  }
   // a lane that knows its request's lineage (a conversation, a task) binds the lanes' workspace to
   // it; "" for the request starts a fresh one in that lineage
   def ftg-bind(lineage, request) {
@@ -123,7 +139,7 @@ section [form.bml] {
   def ftg-nodeid-payload(payload) = ftv-starts?(payload, "concept=") ? substring(payload, 8, len(payload)) : ftv-starts?(payload, "nodeid=") ? substring(payload, 7, len(payload)) : payload;
   def ftg-dispatch(session, verb, payload) {
    if verb == "eval" then ftv-eval(session, payload)
-   else if verb == "knowledge-query" then ftv-knowledge(session, payload)
+   else if verb == "knowledge-query" then { let lookup=ftw-get(session,"knowledge-query"); nothing?(lookup) ? ftv-knowledge(session,payload) : lookup(payload); }
    else if verb == "node-get" then ftv-node-get(session, payload)
    else if verb == "node-make" then ftv-node-make(session, payload)
    else if verb == "node-select" then ftv-node-select(session, payload)
@@ -200,7 +216,7 @@ section [form.bml] {
    let verb = verbEnd < 0 ? "" : substring(held, len(prefix), verbEnd);
    let close = "<|/form:" ++ verb ++ "|>";
    let end = verbEnd < 0 ? -1 : str_find(held, close, verbEnd + 2);
-   let tooLong = len(held) > reserve;
+   let tooLong = !nothing?(reserve) && len(held) > reserve;
    let frame = end < 0 ? "" : substring(held, 0, end + len(close));
    if (at < 0) || ((end < 0) && !tooLong) then [held, "held", verb, "", ""]
    else if tooLong then ["", "too-long", verb, frame, ""]
@@ -226,7 +242,7 @@ section [form.bml] {
    if ftg-checkpoint?(icpt) then fcms-decode-pulse(record_get(icpt, "fed")) else 0;
    let w = ftg-window(record_get(icpt, "window"), chunk, record_get(icpt, "reserve"));
    record_set(icpt, "window", w[0]);
-   let result = ftg-window-result(record_get(icpt, "session"), w);
+   let result = ftg-observation-choice(icpt,w[2],ftg-window-result(record_get(icpt, "session"), w));
    if len(result) > 0 then ftg-note(icpt, w[3], result, w[1] == "control" ? record_get(record_get(icpt, "session"), "touched") : "") else 0;
    [cursor, chunk, result];
   }
@@ -242,13 +258,13 @@ section [form.bml] {
   // The pending ID is committed once, then the observation; the session answers the first
   // prediction after it. Observation admission grows the owned context as needed. The
   // newest crossing's flag reads whether the observation entered the stream.
-  def ftg-inject(icpt, session, text) {
+  def ftg-inject(icpt, session, text) = record_get(icpt,"control-choice-needed") == 1 ? fcms-refuse(session,ftg-choice-needed()) : {
    let ids=fcms-inline-bml-observation-ids(session,ftg-envelope(text));
    let resumed = ftg-inject-encoded(session,ids);
    let flags = record_get(icpt, "injected");
    if !nil?(flags) then record_set(icpt, "injected", cons(fcms-live?(resumed) ? 1 : 0, flags[1:])) else 0;
    resumed;
-  }
+  };
   def ftg-inject-ids(session, text) = ftg-inject-encoded(session,fcms-inline-bml-observation-ids(session,ftg-envelope(text)));
   def ftg-inject-encoded(session, ids) {
    let owner=nothing?(ids) ? session : fcms-ensure-room(session,len(ids)+2);
@@ -289,6 +305,7 @@ section [form.bml] {
    ftg-coding-chunk(ftg-lane-session("code"),len(before),fcmo-text(session,drop(len(before),ids)));
   }
   def ftg-coding-chunk(lane,prior,chunk) {
+   if prior==0 then { record_set(lane,"observation-refused",0); record_set(lane,"control-choice-needed",0); } else 0;
    record_set(lane,"coding-previous-chunk",prior==0 ? "" : record_get(lane,"coding-chunk") ?? "");
    record_set(lane,"coding-chunk",chunk);
    let held=prior==0 ? "" : record_get(lane,"coding-window") ?? "";
@@ -309,13 +326,16 @@ section [form.bml] {
      let lane = ftg-lane-session("code");
      record_set(lane,"render-room",max2(0,fcms-maxpos(session)-fcms-pos(session)));
      let started=host_monotonic_ms();
-     let answered = map(c => len(c[3]) > 0 ? [c[3], "",nothing()] : ftg-observe-touched(lane, c[0], c[1]), items);
+     let answered = map(c => {
+      let observed=len(c[3]) > 0 ? [c[3], "",nothing()] : ftg-observe-touched(lane,c[0],c[1]);
+      [ftg-observation-choice(lane,c[0],observed[0]),observed[1],observed[2]];
+     },items);
      let executed=host_monotonic_ms();
      record_set(lane,"render-room",nothing());
      let admitted=ftg-admit-observations(session,lane,answered,text=>fcms-inline-bml-observation-ids(session,text));
      let encoded=host_monotonic_ms();
     let results=admitted[0]; let ids=admitted[1];
-    let resumed=ftg-inject-encoded(session,ids);
+    let resumed=record_get(lane,"control-choice-needed") == 1 ? fcms-refuse(session,ftg-choice-needed()) : ftg-inject-encoded(session,ids);
    let injected = fcms-live?(resumed) ? 1 : 0;
     let timing=[oh-n("execution_ms",executed - started),oh-n("encoding_ms",encoded - executed),oh-n("prefill_ms",host_monotonic_ms() - encoded)];
     let crossing=json-node-object(append(json-object-pairs(ftg-crossing-line("code",items,results,injected)),timing));
@@ -368,6 +388,15 @@ section [form.bml] {
     sbt-append-count(ftg-ledger(), frb-row-text(ftg-crossing-row-with(lane, frames, results, injected, touched)));
    };
   }
+   // A caller retains this exact row before publication. Readback makes a
+   // stopped append resumable without counting the same crossings twice.
+   def ftg-retain-row-once(text) {
+    if len(text)==0 then 0 else {
+     fs_mkdir(HearthDir());fs_mkdir(ftg-ledger-dir());
+     if str_find(read_file(ftg-ledger()) ?? "",text,0)<0 then sbt-append-count(ftg-ledger(),text) else 0;
+     str_find(read_file(ftg-ledger()) ?? "",text,0)>=0 ? len(text) : 0;
+    };
+   }
 
   // ── reading the crossing ledger ──────────────────────────────────────
   // One reading over every row: [rows, controls, injected, value, recipe, node, nothing, other,
@@ -440,7 +469,7 @@ section [form.bml] {
 
   // ── teaching ─────────────────────────────────────────────────────────
   def ftg-bml-teaching() = " BML names can contain hyphens. Space infix and conditional operators, as in c * c - e * e and flag ? yes : no. For text search use str_find(text, needle, 0) >= 0; split-on(text, \"\\n\") gives lines. Use these native functions for string inspection. A refused control names a failed operation: change the operation using that evidence before retrying. unknown-name identifies a missing binding; inspect spelling and operator spacing before changing numerical inputs. Discover reusable native libraries with <|form:recipe-import|>?<|/form:recipe-import|>, then import an observed name with the same verb. Callable exports supply recipe names and executable addresses. A node-get address identifies data, not a callable; node(\"actual-coordinate-from-enquiry\") reads that data. Its functions are callable as recipe(\"LIBRARY.EXPORT\")(input). In eval, syntax(name,children) builds semantic program nodes; recipe-make(params,body,captures) creates a callable graph with ordered [name,value] captures. recipe-bml(node,name) renders BML; execution does not require that view. In recipe-exec, input is one BML expression; group several arguments in one list [first,second,third]. Replace catalog example names with the enquiry's actual values and coordinates. Reuse an available verified library before constructing another implementation; its output can pass directly into another call.";
-  def ftg-teaching() = "Form answers controls inside your stream. Write <|form:VERB|>PAYLOAD<|/form:VERB|> and stop there: before your next token Form adds <|form:observation|>RESULT<|/form:observation|>, where RESULT is value=...; recipe=@...; node=@...; or nothing=reason;. A nothing is evidence, not an answer. Whatever you make stays in your workspace: every later control, and every later request of this lane, reaches it by name or by its @address. eval runs BML with the body's whole environment, its functions, its doors (files, processes, the clock, nodes) and every name you made: <|form:eval|>17 * 23 + 4<|/form:eval|>, <|form:eval|>let xs = [1,2,3]; xs |> map(x => x * x) |> sum<|/form:eval|>, then <|form:eval|>len(xs) + it<|/form:eval|>, where it is your last value. A let or def is a name; begin a payload with global: to share it beyond this lane or local: to keep it to this reply. knowledge-query reads this body's sources: <|form:knowledge-query|>microthought codec<|/form:knowledge-query|>. node-make interns a node from a category and children, named or not: <|form:node-make|>p = pair;3,4<|/form:node-make|>. node-get reads one: <|form:node-get|>p<|/form:node-get|> answers value=[kind, value, [children]];, and <|form:node-get|>@p.l.t.i;100..200<|/form:node-get|> reads a window of a large one. node-select answers the first candidate n whose predicate holds: <|form:node-select|>kids(n)[0] > 3;p,@p.l.t.i<|/form:node-select|>. recipe-birth makes a recipe, also from a BML function: <|form:recipe-birth|>sq = bml;x => x * x + 1<|/form:recipe-birth|>, run with <|form:recipe-exec|>sq;input=5;carrier=auto<|/form:recipe-exec|> or as sq(5) in eval; <|form:choice|>@p.l.t.i,sq;input=5;carrier=auto<|/form:choice|> runs the first that answers a value. tool names a coding tool and its words, <|form:tool|>rg -n -F word path<|/form:tool|>, and answers node=@address of the call cell the coding lane runs (a lane that runs no tools leaves it unrun); a call that does not read answers nothing=tool-... naming what failed. A value too large to show answers node=@address with a summary; reach its parts with node-get. A name you made comes before any word of the body's, so choose names you mean to keep using. What print writes is the observation's first words. A control answers within a minute: past it the walk answers nothing=eval-stopped:deadline, a body function still running is stopped (nothing=body-call-timeout:NAME) and so is a process or network door still waiting (nothing=door-timeout:DOOR); only socket_accept, socket_recv and a fifo opened with file_open wait without a deadline, so leave those alone. Your stream's stdin and stdout are Form's own channel, never yours: read_line or a path that names /dev/stdin answers nothing=stdin-is-the-lanes, a write to /dev/stdout answers nothing=stdout-is-the-lanes, and a process you start reads nothing and speaks into your observation. carrier=metal runs only while reasoning; elsewhere it answers nothing=carrier-unavailable. field_reset resets the field every live kernel shares, so while another kernel lives it answers [field-shared, pids] and changes nothing. Copy addresses exactly from observations. One control at a time; prefer Form's observation to a guess, then answer the enquiry." + ftg-bml-teaching();
+  def ftg-teaching() = "Form answers controls inside your stream. Write <|form:VERB|>PAYLOAD<|/form:VERB|> and stop there: before your next token Form adds <|form:observation|>RESULT<|/form:observation|>, where RESULT is value=...; recipe=@...; node=@...; or nothing=reason;. A nothing is evidence, not an answer. Whatever you make stays in your workspace: every later control, and every later request of this lane, reaches it by name or by its @address. eval runs BML with the body's whole environment, its functions, its doors (files, processes, the clock, nodes) and every name you made: <|form:eval|>17 * 23 + 4<|/form:eval|>, <|form:eval|>let xs = [1,2,3]; xs |> map(x => x * x) |> sum<|/form:eval|>, then <|form:eval|>len(xs) + it<|/form:eval|>, where it is your last value. A let or def is a name; begin a payload with global: to share it beyond this lane or local: to keep it to this reply. knowledge-query reads this body's sources: <|form:knowledge-query|>microthought codec<|/form:knowledge-query|>. node-make interns a node from a category and children, named or not: <|form:node-make|>p = pair;3,4<|/form:node-make|>. node-get reads one: <|form:node-get|>p<|/form:node-get|> answers value=[kind, value, [children]];, and <|form:node-get|>@p.l.t.i;100..200<|/form:node-get|> reads a window of a large one. node-select answers the first candidate n whose predicate holds: <|form:node-select|>kids(n)[0] > 3;p,@p.l.t.i<|/form:node-select|>. recipe-birth makes a recipe, also from a BML function: <|form:recipe-birth|>sq = bml;x => x * x + 1<|/form:recipe-birth|>, run with <|form:recipe-exec|>sq;input=5;carrier=auto<|/form:recipe-exec|> or as sq(5) in eval; <|form:choice|>@p.l.t.i,sq;input=5;carrier=auto<|/form:choice|> runs the first that answers a value. tool names a coding tool and its words, <|form:tool|>rg -n -F word path<|/form:tool|>, and answers node=@address of the call cell the coding lane runs (a lane that runs no tools leaves it unrun); a call that does not read answers nothing=tool-... naming what failed. A value too large to show answers node=@address with a summary; reach its parts with node-get. A name you made comes before any word of the body's, so choose names you mean to keep using. What print writes is the observation's first words. A control answers within a minute: past it the walk answers nothing=eval-stopped:deadline, a body function still running is stopped (nothing=body-call-timeout:NAME) and so is a process or network door still waiting (nothing=door-timeout:DOOR); only socket_accept, socket_recv and a fifo opened with file_open wait without a deadline, so leave those alone. Your stream's stdin and stdout are Form's own channel, never yours: read_line or a path that names /dev/stdin answers nothing=stdin-is-the-lanes, a write to /dev/stdout answers nothing=stdout-is-the-lanes, and a process you start reads nothing and speaks into your observation. carrier=metal runs only while reasoning; elsewhere it answers nothing=carrier-unavailable. field_reset starts a new interning epoch and answers 1 only after durable publication; historical coordinates, held values and gifts remain. It answers nothing and changes no epoch unless the current owner is the only live owner; unknown liveness also refuses reset. Copy addresses exactly from observations. One control at a time; prefer Form's observation to a guess, then answer the enquiry." + ftg-bml-teaching();
  }
  0;
 }

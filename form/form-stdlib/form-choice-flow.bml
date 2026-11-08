@@ -64,12 +64,15 @@ section [form.bml] {
         // ---- the ledger: what this point has actually done -------------------
         def fcf-ledger(offered, taken, held, declined, waitMs, lastWaitMs) =
             ["form-choice-ledger-v1", offered, taken, held, declined, waitMs, lastWaitMs];
-        def fcf-ledger-offered(l) = l[1];
-        def fcf-ledger-taken(l) = l[2];
-        def fcf-ledger-held(l) = l[3];
-        def fcf-ledger-declined(l) = l[4];
-        def fcf-ledger-wait(l) = l[5];
-        def fcf-ledger-last-wait(l) = l[6];
+        // An absent measurement is retained as absence. The existing numeric
+        // reading surface uses -1 for an unavailable share or counter.
+        def fcf-ledger-measured?(l) = !nothing?(l);
+        def fcf-ledger-offered(l) = nothing?(l) ? -1 : l[1];
+        def fcf-ledger-taken(l) = nothing?(l) ? -1 : l[2];
+        def fcf-ledger-held(l) = nothing?(l) ? -1 : l[3];
+        def fcf-ledger-declined(l) = nothing?(l) ? -1 : l[4];
+        def fcf-ledger-wait(l) = nothing?(l) ? -1 : l[5];
+        def fcf-ledger-last-wait(l) = nothing?(l) ? -1 : l[6];
         def fcf-ledger-empty() = fcf-ledger(0, 0, 0, 0, 0, 0);
         // nothing was put: not a taking, not a decline, and not even a held
         // offer standing. A ledger noting this stays exactly as it was, because
@@ -78,7 +81,8 @@ section [form.bml] {
         def fcf-outcome-none() = "";
         // one outcome lands: the body's own three, from choice-receipt.fk
         def fcf-ledger-note(l, outcome, waitMs) =
-            if ((String) outcome == cr-outcome-success())
+            if (nothing?(l)) then nothing()
+            else if ((String) outcome == cr-outcome-success())
                 then fcf-ledger((fcf-ledger-offered(l) + 1), (fcf-ledger-taken(l) + 1), fcf-ledger-held(l), fcf-ledger-declined(l), (fcf-ledger-wait(l) + waitMs), waitMs)
             else if ((String) outcome == cr-outcome-fail())
                 then fcf-ledger((fcf-ledger-offered(l) + 1), fcf-ledger-taken(l), fcf-ledger-held(l), (fcf-ledger-declined(l) + 1), (fcf-ledger-wait(l) + waitMs), waitMs)
@@ -134,7 +138,7 @@ section [form.bml] {
         // a gap is nourished by adding an option, a wound by healing the door
         // the declines come through.
         def fcf-corridor?(p) = if (len(fcf-point-options(p)) < FCFLeastOptions()) then 1 else 0;
-        def fcf-dark?(p) = if (fcf-ledger-offered(fcf-point-ledger(p)) <= 0) then 1 else 0;
+        def fcf-dark?(p) = if (fcf-ledger-offered(fcf-point-ledger(p)) == 0) then 1 else 0;
         // A share of ONE offer is 0 or 100 and neither is a rate. A wound is a
         // pattern over offers, not an event, so a point that has been put fewer
         // than this many times has a reading but no verdict: the glass declared
@@ -148,6 +152,9 @@ section [form.bml] {
         def fcf-finding-note(f) = f[3];
         def fcf-finding-asks(f) = f[4];
         def fcf-point-findings(p) {
+            if (!fcf-ledger-measured?(fcf-point-ledger(p))) then
+                [fcf-finding("gap-unmeasured", fcf-point-id(p), "this choice has no current observation", "supply the owning runtime measurement")]
+            else {
             let corridor = if ((Comparable) fcf-corridor?(p) == 1) then [fcf-finding("gap-corridor", fcf-point-id(p), "one way through is not a choice", "offer a second option")] else [];
             let dark = if ((Comparable) fcf-dark?(p) == 1) then [fcf-finding("gap-dark", fcf-point-id(p), "this choice has never been offered", "reach it, or retire it")] else [];
             let wound = if ((Comparable) fcf-restricting?(p) == 1) then [fcf-finding("wound-restricting", fcf-point-id(p), "it closes more often than it opens", "heal the door the declines come through")] else [];
@@ -158,6 +165,7 @@ section [form.bml] {
             let holding = if (((Comparable) fcf-enough-offers?(p) == 1) && ((fcf-holding(p) > 50) && (((Comparable) fcf-wait-metered?(p) == 1) && ((Comparable) fcf-ripening?(p) == 0)))) then [fcf-finding("wound-stalled", fcf-point-id(p), "held offers whose wait is not falling", "ripen the arguments or widen the boundary")] else [];
             let unclocked = if (((Comparable) fcf-enough-offers?(p) == 1) && ((fcf-holding(p) > 50) && ((Comparable) fcf-wait-metered?(p) == 0))) then [fcf-finding("gap-unclocked", fcf-point-id(p), "offers are held here and nothing times them", "clock the wait so ripening can be told from stalling")] else [];
             append(corridor, append(dark, append(wound, append(holding, unclocked))));
+            };
         }
         def fcf-findings(points) = if ((Comparable) len(points) == 0) then [] else append(fcf-point-findings(points[0]), fcf-findings(points[1:]));
         def fcf-findings-of-kind(fs, kind) = if ((Comparable) len(fs) == 0) then [] else if ((String) fcf-finding-kind(fs[0]) == kind) then cons(fs[0], fcf-findings-of-kind(fs[1:], kind)) else fcf-findings-of-kind(fs[1:], kind);
@@ -190,6 +198,7 @@ section [form.bml] {
             else fcf-least-flow(steps[1:], least);
         def fcf-most-restricting(steps, worst) =
             if ((Comparable) len(steps) == 0) then worst
+            else if (fcf-step-restriction(steps[0]) < 0) then fcf-most-restricting(steps[1:], worst)
             else if ((Comparable) len(worst) == 0) then fcf-most-restricting(steps[1:], steps[0])
             else if (fcf-step-restriction(steps[0]) > fcf-step-restriction(worst)) then fcf-most-restricting(steps[1:], steps[0])
             else fcf-most-restricting(steps[1:], worst);
@@ -230,12 +239,14 @@ section [form.bml] {
         // a choice that always flows needs no attention, and a dark one needs
         // reaching before it can be judged.
         def fcf-attention(p) =
-            if ((Comparable) fcf-dark?(p) == 1) then 90
+            if (!fcf-ledger-measured?(fcf-point-ledger(p))) then -1
+            else if ((Comparable) fcf-dark?(p) == 1) then 90
             else if ((Comparable) fcf-corridor?(p) == 1) then 80
             else if ((Comparable) fcf-restricting?(p) == 1) then (70 + (fcf-restriction(p) / 10))
             else (60 - (fcf-flow(p) / 10));
         def fcf-next-choice(points, best) =
             if ((Comparable) len(points) == 0) then best
+            else if (!fcf-ledger-measured?(fcf-point-ledger(points[0]))) then fcf-next-choice(points[1:], best)
             else if ((Comparable) len(best) == 0) then fcf-next-choice(points[1:], points[0])
             else if (fcf-attention(points[0]) > fcf-attention(best)) then fcf-next-choice(points[1:], points[0])
             else fcf-next-choice(points[1:], best);

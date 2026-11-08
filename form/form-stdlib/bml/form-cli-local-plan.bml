@@ -109,8 +109,12 @@ section [form.bml] {
    def flp-ctx-deadline(ctx) = ctx[7];
    // Native care returns a released proposal or nothing. Verification and
    // publication stay in the planner; older eight-field contexts stay valid.
-   def flp-with-reference-care(ctx, care) = append(ctx[:8], [care]);
-   def flp-reference-care(req, ctx, said, refusal) = len(ctx) > 8 ? ctx[8](req, ctx, said, refusal) : nothing();
+   def flp-with-reference-care(ctx, care) = append(append(ctx[:8], [care]), len(ctx)>9 ? ctx[9:] : []);
+   def flp-reference-care(req, ctx, said, refusal) = len(ctx) > 8 && !nothing?(ctx[8]) ? ctx[8](req, ctx, said, refusal) : nothing();
+   def flp-with-admission-start(ctx,n) = append(append(append(ctx[:8],[len(ctx)>8 ? ctx[8] : nothing()]),[n]),len(ctx)>10 ? ctx[10:] : []);
+   def flp-admission-start(ctx) = len(ctx)>9 ? ctx[9] : 0;
+   def flp-with-admission-care(ctx,care) = append(take(10,flp-with-admission-start(ctx,flp-admission-start(ctx))),[care]);
+   def flp-admission-care(req,ctx,row,n) = len(ctx)>10 ? ctx[10](req,row,n) : nothing();
   // ── text ──
   def flp-starts?(s, p) = (len(s) >= len(p)) && ((String) substring(s, 0, len(p)) == p);
   def flp-ends?(s, p) = (len(s) >= len(p)) && ((String) substring(s, (len(s) - len(p)), len(s)) == p);
@@ -997,7 +1001,22 @@ section [form.bml] {
    let again = ((len(memory) >= 2) && ((String) memory[-2][1] == last[1]) && !flp-rising?(memory)) || flp-heard-before?(memory) || flp-focus-stuck?(memory);
    if (!flp-has?(voices, last[3])) then [voices[0], last[2], "voice"] else if (!again) then [last[3], last[2], "resume"] else flp-swerve(last, voices);
   }
-  def flp-swerve(last, voices) {
+   // Each offered voice is tried once per externally resumed walk when actual
+   // admission refuses memory. An incomplete release retains its owner first.
+   def flp-row-admission(row) = value_kind(row)=="node_id" ? json-object-get(row,"admission") : json-node-null();
+   def flp-resource-admission?(a) = value_kind(a)=="node_id" && fcgp-str(a,"status")=="unavailable" && fcgp-num(a,"released")==1 && fcgp-str(a,"ownership")=="released" && mg-memory-ending?(fcgp-str(a,"reason"));
+   def flp-release-held?(a) = value_kind(a)=="node_id" && fcgp-str(a,"ownership")=="release-incomplete";
+   def flp-resource-memory?(m) = flp-resource-admission?(flp-row-admission(m[5]));
+   def flp-choice(memory,ctx) {
+    let voices=flp-ctx-voices(ctx);
+    let last=nil?(memory) ? nothing() : flp-row-admission(memory[-1][5]);
+    flp-release-held?(last) ? [memory[-1][3],memory[-1][2],"held"] : !nil?(memory) && flp-resource-memory?(memory[-1]) ? {
+     let tried=memory[flp-admission-start(ctx):] |> filter(flp-resource-memory?) |> map(m=>m[3]);
+     let available=filter(voice=>!flp-has?(tried,voice),voices);
+     nil?(available) ? [memory[-1][3],memory[-1][2],"held"] : [available[0],flp-lenses()[0],"resource"];
+    } : flp-way(memory,voices);
+   }
+   def flp-swerve(last, voices) {
    let lenses = flp-lenses();
    let li = flp-index(lenses, last[2], 0);
    let vi = flp-index(voices, last[3], 0);
@@ -1013,8 +1032,9 @@ section [form.bml] {
   def flp-approach(way) = json-node-object([fhn-s("voice", way[0]), fhn-s("lens", way[1]), fhn-s("kind", way[2])]);
   def flp-approach-digest(way) = flp-sha(mc-cat([way[0], "|", way[1], "|", way[2]]));
   def flp-verdict-word(v) = if flp-held?(v) then "verified" else if flp-moot?(v) then "moot" else "refused";
-  def flp-option-row(req, n, way, v, plan, said, started, stamp) = json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("request", flp-req-id(req)), fhn-n("option", n), fhn-s("rung", way[2]), fhn-s("voice", way[0]), fhn-s("lens", way[1]), json-node-pair("approach", flp-approach(way)), fhn-s("approach_digest", flp-approach-digest(way)), fhn-s("outcome_digest", flp-sha(if flp-held?(v) then "verified" else v[1])), fhn-s("source_digest", flp-source-digest(req)), fhn-s("verdict", flp-verdict-word(v)), fhn-n("verify_rung", v[0]), fhn-s("kind", v[1]), fhn-s("failure", v[2]), fhn-s("plan_id", if nil?(plan) then "" else flp-p-id(plan)), fhn-s("band", if nil?(plan) then "" else flp-p-band(plan)), fcgp-maybe("band_before", v[3]), json-node-pair("stub_readings", json-node-array(map(x => json-node-int(x), v[4]))), fcgp-maybe("reference_reading", v[5]), json-node-pair("solofall", flp-falls-node(v[6])), json-node-pair("checkfall", flp-checkfall-node(v[6])), fhn-n("band_green", if flp-held?(v) then 1 else 0), fcgp-maybe("cases_held", nothing?(flp-cases-of(v)) ? nothing() : flp-cases-of(v)[0]), fcgp-maybe("cases_total", nothing?(flp-cases-of(v)) ? nothing() : flp-cases-of(v)[1]), json-node-pair("cases_failed", nothing?(flp-cases-of(v)) ? json-node-null() : flp-cases-node(flp-cases-of(v)[2])), fhn-n("cases_copied", flp-said-copied(said)), fhn-s("voice_status", said[0]), fhn-n("local_generated_ids", said[3]), fhn-n("local_injected_ids", said[2]), fhn-s("scratch", if (flp-held?(v) || flp-moot?(v)) then stamp else ""), fhn-s("reply", if (len(said) > 4) then said[4] else ""), fhn-n("wall_ms", (now_unix_ms() - started))]);
-  def flp-finding(n, way, v) = mc-cat(["Verification (", v[0].str(), ") refused option ", n.str(), " (", v[1], "): ", v[2]]);
+  def flp-option-base-row(req, n, way, v, plan, said, started, stamp) = json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("request", flp-req-id(req)), fhn-n("option", n), fhn-s("rung", way[2]), fhn-s("voice", way[0]), fhn-s("lens", way[1]), json-node-pair("approach", flp-approach(way)), fhn-s("approach_digest", flp-approach-digest(way)), fhn-s("outcome_digest", flp-sha(if flp-held?(v) then "verified" else v[1])), fhn-s("source_digest", flp-source-digest(req)), fhn-s("verdict", flp-verdict-word(v)), fhn-n("verify_rung", v[0]), fhn-s("kind", v[1]), fhn-s("failure", v[2]), fhn-s("plan_id", if nil?(plan) then "" else flp-p-id(plan)), fhn-s("band", if nil?(plan) then "" else flp-p-band(plan)), fcgp-maybe("band_before", v[3]), json-node-pair("stub_readings", json-node-array(map(x => json-node-int(x), v[4]))), fcgp-maybe("reference_reading", v[5]), json-node-pair("solofall", flp-falls-node(v[6])), json-node-pair("checkfall", flp-checkfall-node(v[6])), fhn-n("band_green", if flp-held?(v) then 1 else 0), fcgp-maybe("cases_held", nothing?(flp-cases-of(v)) ? nothing() : flp-cases-of(v)[0]), fcgp-maybe("cases_total", nothing?(flp-cases-of(v)) ? nothing() : flp-cases-of(v)[1]), json-node-pair("cases_failed", nothing?(flp-cases-of(v)) ? json-node-null() : flp-cases-node(flp-cases-of(v)[2])), fhn-n("cases_copied", flp-said-copied(said)), fhn-s("voice_status", said[0]), fhn-n("local_generated_ids", said[3]), fhn-n("local_injected_ids", said[2]), fhn-s("scratch", if (flp-held?(v) || flp-moot?(v)) then stamp else ""), fhn-s("reply", if (len(said) > 4) then said[4] else ""), fhn-n("wall_ms", (now_unix_ms() - started))]);
+   def flp-option-row(req,n,way,v,plan,said,started,stamp) = json-node-object(append(json-object-pairs(flp-option-base-row(req,n,way,v,plan,said,started,stamp)),[json-node-pair("admission",flp-said-admission(said))]));
+   def flp-finding(n, way, v) = mc-cat(["Verification (", v[0].str(), ") refused option ", n.str(), " (", v[1], "): ", v[2]]);
   // A transport refusal leaves useful definitions intact. Repair the rejected
   // cases in their retained proposal, then run the complete verifier again.
   def flp-case-repair?(memory) = !nil?(memory) && (flp-has?(["cases-unreadable","cases-shape","cases-cap","case-delimiters"],memory[-1][1]) || flp-starts?(memory[-1][1],"band-no-number:")) &&
@@ -1037,7 +1057,7 @@ section [form.bml] {
     fhn-read(path)==proposal ? 1 : form_error("repaired local proposal retention failed");
    } else 0;
    fb_record(["local-plan-case-repair",len(prior),len(cases),len(proposal),path],"form-cli-local-plan.bml",0);
-   [said[0],proposal,said[2],said[3]] + (path=="" ? [] : [path]);
+   [said[0],proposal,said[2],said[3],path,flp-said-refusal(said),flp-said-copied(said),flp-said-admission(said)];
   }
   // ── the focused path: the last proposal read cases held and failed, and the voice hears only the failing ones ──
   // The base is the last entry with failing rows, with only focused replies after it. Form keeps every held case by
@@ -1103,17 +1123,23 @@ section [form.bml] {
   def flp-index-int(xs,x,i) = nil?(xs) ? -1 : (Comparable) xs[0]==x ? i : flp-index-int(xs[1:],x,i+1);
   def flp-focus-repaired(base,said,earlier) {
    let m=flp-focus-merged(base,said[1],earlier);
-   if !nothing?(m[0]) then append(take(5,append(said,[""])),[m[0],m[2]]) else {
+   if !nothing?(m[0]) then append(take(5,append(said,[""])),[m[0],m[2],flp-said-admission(said)]) else {
     let path=len(said)>4 && said[4]!="" ? said[4]+".proposal.txt" : "";
     let kept=path=="" ? 0 : write_file_text(path,m[1]);
-    if path != "" && fhn-read(path) != m[1] then form_error("repaired local proposal retention failed") else [said[0],m[1],said[2],said[3],path,nothing(),m[2]];
+    if path != "" && fhn-read(path) != m[1] then form_error("repaired local proposal retention failed") else [said[0],m[1],said[2],said[3],path,nothing(),m[2],flp-said-admission(said)];
    };
   }
   def flp-said-copied(said) = len(said)>6 ? said[6] : 0;
   def flp-said-refusal(said) = len(said)>5 ? said[5] : nothing();
+  def flp-said-admission(said) = len(said)>7 ? said[7] : json-node-null();
   def flp-attempt(req, ctx, memory) {
    let n = len(memory) + 1;
-   let choice = flp-way(memory, flp-ctx-voices(ctx));
+   let choice = flp-choice(memory,ctx);
+   if choice[2]=="held" then {
+    let last=memory[-1];let admission=flp-row-admission(last[5]);
+    let cared=flp-release-held?(admission) ? flp-admission-care(req,ctx,last[5],n) : nothing();
+    !nothing?(cared) && !flp-release-held?(flp-said-admission(cared)) ? flp-heard(req,ctx,memory,n,[last[3],last[2],"release-resume"],cared,now_unix_ms()) : [2,["held",last[0],0,0,"",nothing(),0,admission]];
+   } else {
    let base = (String) choice[2]=="resume" ? flp-focus-base(memory) : nothing();
    let focusing = !nothing?(base);
    let repairing = !focusing && flp-case-repair?(memory);
@@ -1127,6 +1153,7 @@ section [form.bml] {
    let answered = fat-has(["answered","incomplete"],heard[0]);
    let said = focusing && answered ? flp-focus-repaired(base,heard,flp-copies-kept(map(m=>m[5],memory))) : repairing && answered ? flp-case-repaired(prior,heard) : heard;
    if ((String) said[0] == "held") then [2, said] else flp-heard(req, ctx, memory, n, way, said, started);
+   };
   }
   // the voice's reply, verified: [1, landing] when it lands, [3, witness] when the request is moot, [0, finding] when
   // refused; a refused option's scratch tree leaves once its row lands, and a verified or moot option's stays
@@ -1279,7 +1306,7 @@ section [form.bml] {
    let last = memory[(len(memory) - 3):];
    let outcomes = map(m => flp-row-digest(m, "outcome_digest"), last);
    let approaches = map(m => flp-row-digest(m, "approach_digest"), last);
-   ((Comparable) len(outcomes[0]) > 0) && all?(o => ((String) o == outcomes[0]), outcomes) && flp-distinct?(approaches) && !flp-rising?(memory);
+   all?(m=>!flp-resource-memory?(m) && !flp-release-held?(flp-row-admission(m[5])),last) && ((Comparable) len(outcomes[0]) > 0) && all?(o => ((String) o == outcomes[0]), outcomes) && flp-distinct?(approaches) && !flp-rising?(memory);
   };
   // The gradient: a climb is the rows from the last one that was not a focused reply. The first case reading of a climb
   // rises, as a new approach has moved nothing yet; after it held must pass every earlier reading of the climb. A focused
@@ -1333,7 +1360,17 @@ section [form.bml] {
    oac-node?(ack) ? (flp-outcome-still?(next) ? { print_str(flp-still-line(context[0], next)); flp-park-mark(context[0],context[1],"still"); flp-declined(context[0],context[1],next); } : flp-ways-spent?(next, flp-ctx-voices(context[1])) ? { print_str(flp-spent-line(context[0], next)); flp-park-mark(context[0],context[1],"spent"); flp-declined(context[0],context[1],next); } : again(next)) :
     oac-one?(ack) ? flp-ended(oac-payload(ack),memory) : flp-declined(context[0],context[1],memory);
   }
-  def flp-walk-from(req, ctx, memory) {
+  def flp-walk-from(req,ctx,memory) = flp-walk-owned(req,flp-with-admission-start(ctx,len(memory)),memory);
+  def flp-release-pending?(memory) = !nil?(memory) && flp-release-held?(flp-row-admission(memory[-1][5]));
+  def flp-walk-owned(req, ctx, memory) {
+   // Releasing and verifying an answer already produced consumes no new
+   // generation allowance, including after the last admitted attempt.
+   if flp-release-pending?(memory) then {
+    let resumed=flp-attempt(req,ctx,memory);
+    resumed[0]==0 ? flp-walk-options(req,ctx,append(memory,[resumed[1]])) : flp-ended([resumed[0]==1 ? "queued" : resumed[0]==3 ? "moot" : "held",resumed[1]],memory);
+   } else flp-walk-options(req,ctx,memory);
+  }
+  def flp-walk-options(req, ctx, memory) {
    if flp-parked?(req, memory, flp-ctx-voices(ctx)) || ((!nil?(memory)) && flp-park-marked?(req, flp-ctx-ledger(ctx))) then { print_str(flp-parked-line(req, memory)); flp-declined(req, ctx, memory); } else if nothing?(flp-ctx-attempts(ctx)) then {
     let owner=nve-open();
     let watch=repeat(owner,flp-repeat,[req,ctx],memory,[]);
@@ -1344,7 +1381,7 @@ section [form.bml] {
    } else {
    let w = oac-backtrack-walk(flp-options(flp-ctx-attempts(ctx)), [req, ctx], memory);
    let memory = oac-backtrack-memory(w);
-   if ((Comparable) oac-one?(oac-backtrack-ack(w)) == 1) then flp-ended(oac-payload(oac-backtrack-ack(w)), memory) else flp-declined(req, ctx, memory);
+    if ((Comparable) oac-one?(oac-backtrack-ack(w)) == 1) then flp-ended(oac-payload(oac-backtrack-ack(w)), memory) else if flp-release-pending?(memory) then flp-walk-owned(req,ctx,memory) else flp-declined(req, ctx, memory);
    };
   }
   // an option that ends the walk: its plan landed, its band showed the request moot, or the voice could not open (the

@@ -10,7 +10,9 @@ import form-stdlib/bml/qwen38-open-observation.bml;
 import form-stdlib/bml/model-admission.bml;
 import form-stdlib/metal-carrier.bml;
 import form-stdlib/bml/form-cli-guide-packet.bml;
+import form-stdlib/bml/native-owner-clock.bml;
 section [form.bml] {
+ let FCNV-ONE-SHOT=record_new(0,"current",nothing(),"continuations",record_new(0),"sequence",0);
  class FormCliNativeVoice {
   def fcnv-default-model() = mr-name(mr-for-role("answer"));
   def fcnv-limit() = 1536;
@@ -18,7 +20,7 @@ section [form.bml] {
   // the reply's room: the door's limit, or a reply_budget above it, so a walk the budget bounds ends at its budget and never at a position the session refuses
   def fcnv-room(budget) = nothing?(budget) ? fcnv-limit() : max2(budget,fcnv-limit());
   def fcnv-open-by(open,packet,path,context) = fcnv-open-room(open,packet,path,context,nothing());
-  def fcnv-open-room(open,packet,path,context,budget) = open(fcsp-open-plain,path,packet,context ?? 0,fcnv-profile(),nothing?(context) ? fcnv-room(budget) : 0);
+   def fcnv-open-room(open,packet,path,context,budget) = open(fcsp-open-plain-retaining,path,packet,context ?? 0,fcnv-profile(),nothing?(context) ? fcnv-room(budget) : 0);
   def fcnv-allowance-valid(context,limit) = value_kind(limit)=="int" && limit > 0 && (nothing?(context) || value_kind(context)=="int" && context > 0);
   // Result: status, accepted text, prompt IDs, generated IDs, artifact path,
   // completion, release, reason, raw generation text, original generated IDs,
@@ -44,8 +46,9 @@ section [form.bml] {
    // Decoder completion is retained independently: EOS inside an open control
    // still leaves the answer incomplete, with the precise reason and raw trace.
    let complete = (fcms-live?(session) && (fcms-stopped?(session) && fcms-pending?(session)));
-   let status = if (!released && !retained) then "release-incomplete" else if (!fcms-live?(session)) then "unavailable" else if (!complete || unfinished) then "incomplete" else if ((String) trim(prose) == "") then "empty" else "answered";
-   let reason = if ((String) status == "unavailable") then fcms-reason(session) else if (status=="incomplete" && unfinished) then "unfinished-native-control" else status;
+   let choiceNeeded=fcms-reason(session)==ftg-choice-needed();
+   let status = if (!released && !retained) then "release-incomplete" else if choiceNeeded then "incomplete" else if (!fcms-live?(session)) then "unavailable" else if (!complete || unfinished) then "incomplete" else if ((String) trim(prose) == "") then "empty" else "answered";
+   let reason = if ((String) status == "unavailable" || choiceNeeded) then fcms-reason(session) else if (status=="incomplete" && unfinished) then "unfinished-native-control" else status;
    [status,if ((String) status == "answered") then prose else "",fcms-prompt-ids(session),len(fcms-generation-ids(generation)),path,complete,released,reason,raw,fcms-generation-ids(generation),qlwe-dir-of(fcms-ctx(session))];
   }
   // wear: nothing, or the adapter a request names on this lane, [directory, scale or nothing (the config's)]: the session wears it on every forward
@@ -67,30 +70,33 @@ section [form.bml] {
     // decode steps alone, with the admission wait and the open as their own spans.
     // This cursor walks one token at a time. Choose its plain owner at open so
     // admission and prefill never carry an unused drafter or its hidden states.
-    let session = fcnv-open-room(nothing?(wear) ? fcms-open-sized-by : fcms-open-worn-by(wear),packet,path,context,budget);
+     fcnv-owned-call(FCNV-ONE-SHOT,[packet,path,context,limit,wear,budget,envelope],()=>fcnv-open-room(fcms-retained-opener(wear,s=>record_set(record_get(FCNV-ONE-SHOT,"current"),"session",s)),packet,path,context,budget),(session,owner)=>{
     // Decode is the generate call. The note is a stamp, not a peer line.
     // Prefill stamps are the session's own begin and ready.
     let _decode-begin = q38oo-note("voice-decode-begin", 0);
-    let heard = fcnv-generate-held(session,limit,budget,envelope);
+    let heard = fcnv-generate-owned(session,limit,budget,envelope,owner);
     let generated = heard[0];
-    let _decode-ready = q38oo-note("voice-decode-ready", 0);
     let ended = fcms-generation-session(generated);
-    let released = fcms-release-ok?(ended);
-    let clocks = fcms-clock-read(ended);
+     record_set(owner,"session",ended);record_set(owner,"generation",generated);record_set(owner,"envelope",heard[1]);
+     let _decode-ready = q38oo-note("voice-decode-ready", 0);
     // fcms-clock-read sets each of its four keys, nothing() where the session did not stamp the span
-    fcnv-enveloped(fcnv-admitted(fcnv-clocked(fcnv-read(generated,released,path),record_get(clocks,"prefill_ms") ?? 0,record_get(clocks,"decode_ms") ?? 0),record_get(clocks,"admission_ms"),record_get(clocks,"open_ms")),heard[1]);
+     released=>{let clocks=fcms-clock-read(ended);fcnv-enveloped(fcnv-admitted(fcnv-clocked(fcnv-read(generated,released,path),record_get(clocks,"prefill_ms") ?? 0,record_get(clocks,"decode_ms") ?? 0),record_get(clocks,"admission_ms"),record_get(clocks,"open_ms")),heard[1]);};
+     },fcnv-residence-close);
    };
   }
   // The one cursor every native ask decodes through, the opened ask's and the resident turn's: the progress signal at
   // each interval, and, when the request names an envelope, the hold (fcnv-envelope-hold). It answers the generation
   // and the envelope's reading, nothing() for an ask the envelope did not hold.
   def fcnv-generate(session,limit,budget) = fcnv-generate-held(session,limit,budget,nothing())[0];
-  def fcnv-generate-held(session,limit,budget,envelope) {
+  def fcnv-generate-held(session,limit,budget,envelope) = fcnv-generate-owned(session,limit,budget,envelope,nothing());
+  def fcnv-generate-owned(session,limit,budget,envelope,owner) {
    let cursor = ftg-pulsing(ftg-intercept-with(512,ftg-next-reply()));
+   record_set(cursor,"generation-owner",owner);
    record_set(cursor,"next-progress",limit);
    record_set(cursor,"observer",(stage,phase,c,generated) => fcnv-progress(cursor,limit,stage,phase,generated));
    let held = fcnv-envelope-hold(cursor,session,envelope);
    let generated = ftg-generate-with(cursor,session,budget,"voice");
+    if record?(owner) then {record_set(owner,"generation",generated);record_set(owner,"session",fcms-generation-session(generated));} else 0;
    [generated,fcnv-envelope-close(cursor)];
   }
   // After its clocks a result names its ownership and the prefix ids it reused (fcnv-metadata): an opened ask's is
@@ -153,17 +159,26 @@ section [form.bml] {
   // a cursor held from the envelope's start, for a walk whose session the caller scripts
   def fcnv-envelope-cursor() = fcnv-envelope-start(record_new(0));
   def fcnv-envelope-owner(cursor,s) = !nil?(record_get(cursor,"envelope-owner")) ? record_get(cursor,"envelope-owner") : {
-   let owner = fcsam-open(fcms-ctx(s)[2][19],1729);
-   let cleared = fcsam-reset(owner);
-   record_set(cursor,"envelope-owner",owner);
-   owner;
+    let vocab=fcms-ctx(s)[2][19];let need=fcsam-private-bytes(vocab);
+     let ledger=fcms-release-ledger(s);
+     let reservation=fcms-reservation(ledger,mg-lease-retaining("native voice envelope",fcms-path(s),0,need,token=>fcms-retain-reservation(ledger,token)),[["envelope",need]]);
+    !record_get(reservation,"ready") ? [] : {
+     let pending=fcms-retain-owned-release(s,[],record_get(reservation,"parts"));
+     record_set(cursor,"envelope-release",pending);
+     let owner=fcsam-open-by(vocab,1729,bytes=>q38x-alloc(pending,bytes));
+     record_set(cursor,"envelope-owner",owner);
+     let acknowledged=fcsam-live(owner) && fcms-reservation-ack(reservation,["envelope"]);
+     acknowledged ? {fcsam-reset(owner);owner;} : {fcms-pending-release(pending);[];};
+    };
   };
   // the envelope's reading, [mode, swaps, ends, cut, candidate ms], printed once; nothing() for an ask it did not hold
   def fcnv-envelope-reading(cursor) = [renv-mode(record_get(cursor,"envelope")),record_get(cursor,"envelope-swaps"),record_get(cursor,"envelope-ends"),record_get(cursor,"envelope-cut"),record_get(cursor,"envelope-ms")];
   def fcnv-envelope-close(cursor) = !((String) value_kind(record_get(cursor,"hold")) == "closure") ? nothing() : {
-   let owner = record_get(cursor,"envelope-owner");
-   let closed = nil?(owner) ? 0 : fcsam-close(owner);
-   let r = fcnv-envelope-reading(cursor);
+    let r = fcnv-envelope-reading(cursor);
+    let generationOwner=record_get(cursor,"generation-owner");
+    if record?(generationOwner) then record_set(generationOwner,"envelope",r) else 0;
+    let owner = record_get(cursor,"envelope-release");
+    let closed = !record?(owner) ? 1 : fcms-pending-release(owner);
    let said = print_str(mc-cat(["[native-voice:envelope] mode=",r[0]," swaps=",r[1].str()," ends=",r[2].str()," cut=",len(r[3]) == 0 ? "none" : r[3]," candidate_ms=",r[4].str()]));
    r;
   };
@@ -172,27 +187,131 @@ section [form.bml] {
   // The live buffers also
   // hold the last turn until overwritten or closed; only the checkpoint is
   // restored. Each request supplies its complete packet and explicit history.
-  def fcnv-residence() = record_new(0,"session",nothing(),"spare",[],"prefix",[],"context-spare",[],"context-prefix",[],"key",nothing(),"close-failed",0);
+   def fcnv-residence() = record_new(0,"session",nothing(),"spare",[],"prefix",[],"context-spare",[],"context-prefix",[],"key",nothing(),"close-failed",0,"checkpoint-owners",record_new(0));
+   // This admitted module owns one active ask and every unresolved release.
+   // Public result tuples carry a correlation key, never live device handles.
+   def fcnv-continuation(result) = len(result)>18 ? result[18] : "";
+   def fcnv-continued(result,key) = key=="" ? result : {
+    let timed=len(result)>12 ? result : fcnv-clocked(result,0,0);
+    let admitted=len(timed)>14 ? timed : fcnv-admitted(timed,nothing(),nothing());
+    append(append(take(15,admitted),[fcnv-ownership(result),fcnv-reused-ids(result),fcnv-envelope-of(result),key]),len(result)>19 ? result[19:] : []);
+   };
+   def fcnv-resumed?(result) = len(result)>20 && result[20]==1;
+   def fcnv-resumed(result) = append(append(take(19,result),[len(result)>19 ? result[19] : nothing()]),[1]);
+   def fcnv-current-usage(result) = fcnv-resumed?(result) ? append(append(take(2,result),[0,0]),result[4:]) : result;
+   def fcnv-active?(owner) = record_get(owner,"phase")=="active" && nps-file-status(record_get(owner,"lifetime")) != [0,0];
+   def fcnv-lifetime(owner) {
+    let root="/tmp/form-native-voice-lifetime";host_dir_mkdir(root);
+    let path=root+"/"+record_get(owner,"continuation");let lease=nps-file-open(path,1);
+    record_set(owner,"lifetime-path",path);
+    value_kind(lease)=="list" ? {record_set(owner,"lifetime",lease);1;} : {record_set(owner,"lifetime-refusal",lease);form_error("native voice lifetime unavailable");};
+   }
+   def fcnv-lifetime-close(owner) {
+    let lease=record_get(owner,"lifetime");let released=nps-file-release(lease);
+    released==1 ? {let path=record_get(owner,"lifetime-path");nothing?(path) ? 0 : host_path_remove(path);1;} : 0;
+   }
+   def fcnv-owned-close(owner,close) {
+    let dependency=record_get(owner,"blocked-owner");
+    let resources=try {record?(dependency) ? record_get(dependency,"phase")=="complete" || (!fcnv-active?(dependency) && fcnv-owned-close(dependency,close)) : close(owner);} catch 0;
+    let released=resources && fcnv-lifetime-close(owner);
+    record_set(owner,"phase",released ? "complete" : "release-pending");
+    let result=(record_get(owner,"project"))(released);
+    let continued=fcnv-continued(result,record_get(owner,"continuation"));
+    record_set(owner,"result",append(take(19,continued),[(record_get(owner,"project"))(1)]));
+    released;
+   }
+   def fcnv-resume-release-by(state,key,close) {
+    let continuations=record_get(state,"continuations");let owner=record_get(continuations,key);
+    !record?(owner) ? nothing() : fcnv-active?(owner) ? fcnv-continued(fcnv-none("release-incomplete",record_get(owner,"request")[1],"native-voice-in-progress"),key) : {
+     let released=record_get(owner,"phase")=="complete" || fcnv-owned-close(owner,close);
+     let result=record_get(owner,"result");
+     fcnv-resumed(result);
+    };
+   }
+   def fcnv-resume-release(key) = fcnv-resume-release-by(FCNV-ONE-SHOT,key,fcnv-residence-close);
+   def fcnv-owner-ended-by(key,alive,process) {
+    let parts=split-on(key,":");let versioned=len(parts)==4 && parts[0]=="v1";
+    let pid=parse-int(parts[versioned ? 1 : 0]);
+    nothing?(pid) || pid<=0 ? nothing() : noc-process-ended-by([pid,versioned ? parse-int(parts[2]) : nothing()],alive,process);
+   }
+   def fcnv-resume-retained(key,result) {
+    let local=fcnv-resume-release(key);
+    !nothing?(local) ? local : value_kind(result)=="list" && fcnv-continuation(result)==key && fcnv-resumed?(result) && result[6]==1 ? result : fcnv-owner-ended-by(key,pid=>host_alive(pid),pid=>host_process(pid))!=1 ? nothing() : {
+     let projected=value_kind(result)=="list" && len(result)>19 && fcnv-continuation(result)==key ? result[19] : nothing();
+     value_kind(projected)!="list" ? fcnv-resumed(fcnv-continued(fcnv-none("unavailable","","native-voice-owner-ended-result-unavailable"),key)) : fcnv-resumed(fcnv-continued(projected,key));
+    };
+   }
+   def fcnv-ack-release(result) {
+    let continuations=record_get(FCNV-ONE-SHOT,"continuations");let key=fcnv-continuation(result);let owner=record_get(continuations,key);
+    record?(owner) && record_get(owner,"phase")=="complete" && value_eq(take(20,record_get(owner,"result")),take(20,result)) ? {record_set(continuations,key,nothing());1;} : 0;
+   }
+   def fcnv-next-continuation(state) {
+    let n=record_get(state,"sequence")+1;record_set(state,"sequence",n);
+    "v1:"+noc-open();
+   }
+   def fcnv-blocked-call(state,request,prior,active) {
+    let key=fcnv-next-continuation(state);
+    let project=released=>fcnv-none(released ? "unavailable" : "release-incomplete",request[1],released ? "prior-native-release-completed" : active ? "native-voice-in-progress" : "previous-native-voice-release-incomplete");
+    let result=fcnv-continued(project(0),key);
+    let owner=record_new(0,"phase","release-pending","request",request,"continuation",key,"blocked-owner",prior,"project",project,"result",result);
+    record_set(record_get(state,"continuations"),key,owner);result;
+   }
+   def fcnv-owned-call(state,request,open,run,close) {
+    let prior=record_get(state,"current");
+    let active=record?(prior) && fcnv-active?(prior);
+    let pending=record?(prior) && record_get(prior,"phase") != "complete";
+    let ready=!record?(prior) || record_get(prior,"phase")=="complete" || (!active && fcnv-owned-close(prior,close));
+    !ready ? fcnv-blocked-call(state,request,prior,active) : pending && value_eq(record_get(prior,"request"),request) ? fcnv-resumed(record_get(prior,"result")) : {
+     let owner=fcnv-residence();let key=fcnv-next-continuation(state);
+     record_set(state,"current",owner);
+     record_set(owner,"phase","active");record_set(owner,"request",request);record_set(owner,"continuation",key);
+     record_set(owner,"project",released=>fcnv-stopped-result(owner,released,request[1]));
+     record_set(record_get(state,"continuations"),key,owner);
+     let result=try {
+      fcnv-lifetime(owner);
+      let session=open();record_set(owner,"session",session);
+      let project=run(session,owner);record_set(owner,"project",project);
+      fcnv-owned-close(owner,close);
+      record_get(owner,"result");
+     } catch {
+      fcnv-owned-close(owner,close);record_get(owner,"result");
+     };
+     record_get(owner,"phase")=="complete" ? record_set(record_get(state,"continuations"),key,nothing()) : 0;
+     result;
+    };
+   }
+   def fcnv-stopped-result(owner,released,path) {
+    let generation=record_get(owner,"generation");
+    value_kind(generation)!="list" ? fcnv-none(released ? "unavailable" : "release-incomplete",path,"native-voice-stopped") : {
+     let session=fcms-generation-session(generation);let clocks=fcms-clock-read(session);
+      let result=fcnv-read(generation,released,path);
+      fcnv-enveloped(fcnv-admitted(fcnv-clocked(result,record_get(clocks,"prefill_ms") ?? 0,record_get(clocks,"decode_ms") ?? 0),record_get(clocks,"admission_ms"),record_get(clocks,"open_ms")),record_get(owner,"envelope"));
+    };
+   }
   def fcnv-common(a,b,n) = n >= len(a) || n >= len(b) || a[n] != b[n] ? n : fcnv-common(a,b,n+1);
   def fcnv-prefix-fits?(prefix,ids) = !nothing?(ids) && len(prefix) > 0 && len(prefix) < len(ids) && take(len(prefix),ids) == prefix;
   def fcnv-residence-close(owner) {
    let session=record_get(owner,"session");
-   record_get(owner,"close-failed") == 1 ? 0 : nothing?(session) ? 1 : {
-    let spare=append(record_get(owner,"spare"),record_get(owner,"context-spare"));
-    let expected=foldl((n,row) => n + (row[0] > 0 ? 1 : 0) + (row[1] > 0 ? 1 : 0),0,spare);
-    let freed=q38-free-spare(spare);
-    let closed=fcms-release-ok?(session);
-    let ok=freed == expected && closed;
+    let checkpoints=record_get(owner,"checkpoint-owners") ?? record_new(0);
+    let outcomes=map(key=>{
+     let held=record_get(checkpoints,key);
+     q38x-close(held);
+     let token=record_get(held,"reservation");
+     let released=q38x-owned(held)==0 && (!record?(token) || mg-reservation-release(token));
+     if released then record_set(owner,key,[]) else 0;released;
+    },record_keys(checkpoints));
+    let closed=nothing?(session) || fcms-release-ok?(session);
+    let ok=all?(done=>done,outcomes) && closed;
     ok ? {
      record_set(owner,"session",nothing()); record_set(owner,"spare",[]);
      record_set(owner,"context-spare",[]); record_set(owner,"context-prefix",[]);
      record_set(owner,"prefix",[]); record_set(owner,"key",nothing());
+      record_set(owner,"close-failed",0);record_set(owner,"checkpoint-owners",record_new(0));
     } : {
-     record_set(owner,"close-failed",1); record_set(owner,"close-evidence",[freed,expected,closed]);
-     print(["native-voice-release-refused",freed,expected,closed]);
+      record_set(owner,"close-failed",1); record_set(owner,"close-evidence",[outcomes,closed]);
+      print(["native-voice-release-refused",outcomes,closed]);
     };
     ok;
-   };
   }
   def fcnv-packet-ids(session,packet) = fcmo-segment-ids(session,fcmg-chat-segments-profile(packet,fcnv-profile(),record_get(fcmo-owner(session),"crystal")));
   def fcnv-cold-ids(path,packet) {
@@ -211,11 +330,11 @@ section [form.bml] {
    fcnv-recorded(packet,request,result,host_monotonic_ms()-began);
   }
   def fcnv-resident-refuse(owner,path,reason) = fcnv-none(fcnv-residence-close(owner) ? "unavailable" : "release-incomplete",path,reason);
-  def fcnv-resident-ready(owner,packet,prefix,floor,request) = record_get(owner,"close-failed") == 1 ? fcnv-none("release-incomplete","","resident-close-refused") : {
+   def fcnv-resident-ready(owner,packet,prefix,floor,request) = record_get(owner,"close-failed") == 1 && !fcnv-residence-close(owner) ? fcnv-none("release-incomplete","","resident-close-refused") : {
    let model=json-object-has?(request,"model") ? json-string-value(json-object-get(request,"model")) : fcnv-default-model();
    let path=mr-path(mr-find(model));
    let present=path != "" && mr-file?(path);
-   // Retained plain Qwen owns the spare already charged by q38-state-bytes.
+    // Each retained checkpoint owns the recurrent copy it actually allocates.
    // Other lanes and explicit capacity/adapter choices keep their own opener.
    let previous=record_get(owner,"session");
    let qwen=present && (!nothing?(previous) && fcms-path(previous) == path ? !fcms-ds4?(previous) : mr-arch(mr-find(model)) != "deepseek4");
@@ -238,7 +357,7 @@ section [form.bml] {
    let prefixIds=fcnv-cold-ids(path,floor);
    let count=nothing?(prefixIds) ? 0 : fcnv-common(ids,prefixIds,0);
    count <= 0 || count >= len(ids) ? fcnv-none("unavailable",path,"resident-prefix-refused") : {
-    let session=fcms-open-sized-by(fcsp-open-plain,path,packet,0,fcms-prefix-profile(fcnv-profile(),count),fcnv-room(fcnv-budget(request)));
+      let session=fcms-open-sized-retaining(fcsp-open-plain-retaining,fcma-lease-span,nothing(),path,packet,0,fcms-prefix-profile(fcnv-profile(),count),fcnv-room(fcnv-budget(request)),s=>fcms-retain-in(owner,"session",s));
     record_set(owner,"session",session);
     !fcms-live?(session) || fcms-ds4?(session) || nothing?(fcmo-owner(session)) ? {
      let reason=fcms-reason(session);
@@ -246,10 +365,11 @@ section [form.bml] {
      fcnv-none(closed ? "unavailable" : "release-incomplete",path,reason);
     } : {
      let ctx=fcms-ctx(session);
-     let spare=q38-spare-state(ctx[2]); record_set(owner,"spare",spare);
+     let admitted=fcnv-checkpoint-room(owner,session,"spare");
+     let spare=record_get(owner,"spare");
      let expected=2*(ctx[2][21]-q38-full-layers(ctx[2][21],ctx[2][22]));
      let copyBegan=host_monotonic_ms();
-     let copied=q38-state-mark(ctx[0],fcms-sts(session),spare,ctx[2]);
+     let copied=admitted ? q38-state-mark(ctx[0],fcms-sts(session),spare,ctx[2]) : -1;
      let copyMs=host_monotonic_ms()-copyBegan;
      copied != expected ? {
       let closed=fcnv-residence-close(owner);
@@ -266,15 +386,22 @@ section [form.bml] {
   // A second checkpoint saves current retrieved context. Its recurrent bytes
   // are separately leased; both checkpoints share prefix KV rows. Replacing
   // that context invalidates its old mark BEFORE writing any of those rows.
-  def fcnv-context-room(owner,s) {
-   !nil?(record_get(owner,"context-spare")) ? 1 : {
+   def fcnv-context-room(owner,s) = fcnv-checkpoint-room(owner,s,"context-spare");
+   def fcnv-checkpoint-room(owner,s,key) {
+    let checkpoints=record_get(owner,"checkpoint-owners");
+    let previous=record_get(checkpoints,key);
+    record?(previous) ? record_get(previous,"ready")==1 : {
     let geo=fcms-ctx(s)[2];
-    let bytes=(geo[21]-q38-full-layers(geo[21],geo[22]))*q38-linear-bytes(geo);
-    let grant=mg-lease("native voice context checkpoint","",0,bytes);
+     let bytes=q38-recurrent-bytes(geo);
+     let grant=mg-lease("native voice "+key+" checkpoint","",0,bytes);
+     let token=mg-reservation-of(grant);
+     let held=record_new(0,"on",0,"release-handles",[],"reservation",token,"ready",0);
+     record_set(checkpoints,key,held);
     !mg-granted?(grant) ? 0 : {
-     record_set(owner,"context-spare",q38-spare-state(geo));
-     record_set(owner,"context-bytes",bytes);
-     1;
+       let spare=q38-spare-state-by(geo,bytes=>q38x-alloc(held,bytes));record_set(owner,key,spare);
+      let expected=2*(geo[21]-q38-full-layers(geo[21],geo[22]));
+      let ready=q38x-owned(held)==expected && mg-reservation-ack(mg-reservation-part(token,"allocation"),bytes);
+      record_set(held,"ready",ready);ready;
     };
    };
   }
@@ -316,7 +443,7 @@ section [form.bml] {
     let prepared=fcms-observe-ids(fcms-with-clock(contextual,clock),suffix,"resident-suffix-refused");
     record_set(owner,"session",prepared);
     let prefillMs=host_monotonic_ms()-began;
-    let heard=fcnv-generate-held(prepared,fcnv-number(request,"max_reply_tokens",fcnv-limit()),fcnv-budget(request),fcnv-envelope(request));
+    let heard=fcnv-generate-owned(prepared,fcnv-number(request,"max_reply_tokens",fcnv-limit()),fcnv-budget(request),fcnv-envelope(request),owner);
     let generated=heard[0];
     let ended=fcms-generation-session(generated); record_set(owner,"session",ended);
     let live=fcms-live?(ended);
@@ -378,8 +505,8 @@ section [form.bml] {
   def fcnv-lora(packet,adapter,limit) {
    let base = nlg-base();
    if (!fcnv-lora-ready?(base,adapter)) then fcnv-none("unavailable",base,"native-weights-or-adapter-absent")
-   else if ((limit <= 0) || (limit > 8192)) then fcnv-none("unavailable",base,"positive-token-allowance-up-to-8192-required")
-   else fcnv-lora-spoken(base,adapter,packet,limit);
+   else if !nothing?(limit) && (value_kind(limit)!="int" || limit<=0) then fcnv-none("unavailable",base,"positive-caller-reply-budget-required")
+   else fcnv-lora-spoken(base,adapter,packet,nothing?(limit) ? 0 : limit);
   }
   def fcnv-lane(request) = if json-object-has?(request,"lane") then json-string-value(json-object-get(request,"lane")) else "";
   def fcnv-adapter(request) = if json-object-has?(request,"adapter") then json-string-value(json-object-get(request,"adapter")) else fcnv-adapter-default();
@@ -415,14 +542,14 @@ section [form.bml] {
   def fcnv-named-kind(request) = json-object-has?(request,"enquiry_kind") ? json-string-value(json-object-get(request,"enquiry_kind")) : "";
   def fcnv-recorded-at(runPath,coveragePath,packet,request,result,wallMs) {
    let kind = qc-kind-named(fcnv-enquiry(packet,request),fcnv-named-kind(request));
-   let kept = local-run-record-kinded-at(runPath,result,wallMs,fcnv-prefill-ms(result),fcnv-decode-ms(result),fcnv-admission-ms(result),fcnv-open-ms(result),qc-traffic?(kind) ? nothing() : kind);
+   let kept = local-run-record-kinded-at(runPath,fcnv-current-usage(result),wallMs,fcnv-resumed?(result) ? 0 : fcnv-prefill-ms(result),fcnv-resumed?(result) ? 0 : fcnv-decode-ms(result),fcnv-resumed?(result) ? 0 : fcnv-admission-ms(result),fcnv-resumed?(result) ? 0 : fcnv-open-ms(result),qc-traffic?(kind) ? nothing() : kind);
    let covered = fcnv-after-verdict?(request) ? "after-verdict" : qc-record-at(coveragePath,kind,"fkwu-model-session",lrun-lane(result),result[4],(String) result[0] == "answered" ? 1 : 0,0,wallMs);
    result;
   }
   // a request naming coverage "after-verdict" is answered by its caller's verdict, which lands the coverage row itself (the planner: a plan is answered once verified)
   def fcnv-after-verdict?(request) = json-object-has?(request,"coverage") && (String) json-string-value(json-object-get(request,"coverage")) == "after-verdict";
   def fcnv-ask-run(packet,request) {
-   if ((String) fcnv-lane(request) == "lora") then fcnv-lora(packet,fcnv-adapter(request),fcnv-number(request,"max_reply_tokens",fcnv-limit())) else {
+   if ((String) fcnv-lane(request) == "lora") then fcnv-lora(packet,fcnv-adapter(request),fcnv-budget(request)) else {
     let model = if json-object-has?(request,"model") then json-string-value(json-object-get(request,"model")) else fcnv-default-model();
     fcnv-run-held(packet,mr-path(mr-find(model)),fcnv-number(request,"context",nothing()),fcnv-number(request,"max_reply_tokens",fcnv-limit()),fcnv-wear(request,model),fcnv-budget(request),fcnv-envelope(request));
    };
@@ -440,7 +567,7 @@ section [form.bml] {
   def fcnv-wear-of(rows) = nil?(rows) ? nothing() : qlbj-is?(qlbj-int(rows[-1],"wear"),1) ? [qlbj-str(rows[-1],"adapter") ?? "",nothing(),qlbj-str(rows[-1],"adapter_sha256") ?? ""] : nothing();
   def fcnv-wear-why(wear) = len(qlbj-present-why("worn",wear[0])) > 0 ? qlbj-present-why("worn",wear[0]) : len(wear) > 2 ? fcnv-wear-digest-why(wear[0],wear[2],hex-encode(sha256-stream-string(read_file(qlbj-st(wear[0])) ?? ""))) : "";
   def fcnv-wear-digest-why(dir,want,read) = (String) want == read ? "" : "worn adapter " ++ qlbj-st(dir) ++ " reads sha256 " ++ read ++ "; the registry row witnessed \"" ++ want ++ "\"";
-  def fcnv-metadata(result) = json-node-object([oh-s("source","fkwu-model-session"),oh-s("lane",if ((String) result[10] == "") then "registry-weights" else "native-metal-lora"),oh-s("adapter",result[10]),oh-s("status",result[0]),oh-s("model_path",result[4]),oh-n("prompt_ids",result[2]),oh-n("generated_ids",result[3]),oh-n("complete",result[5]),oh-n("release_ok",result[6]),oh-s("ownership",fcnv-ownership(result)),oh-n("reused_prefix_ids",fcnv-reused-ids(result)),oh-s("reason",result[7]),oh-n("model_server_calls",0),oh-n("provider_calls",0)]);
+  def fcnv-metadata(result) = json-node-object([oh-s("source","fkwu-model-session"),oh-s("lane",if ((String) result[10] == "") then "registry-weights" else "native-metal-lora"),oh-s("adapter",result[10]),oh-s("status",result[0]),oh-s("model_path",result[4]),oh-n("prompt_ids",result[2]),oh-n("generated_ids",result[3]),oh-n("complete",result[5]),oh-n("release_ok",result[6]),oh-s("ownership",fcnv-ownership(result)),oh-n("reused_prefix_ids",fcnv-reused-ids(result)),oh-s("continuation",fcnv-continuation(result)),oh-n("release_resumed",fcnv-resumed?(result) ? 1 : 0),oh-n("current_prompt_ids",fcnv-current-usage(result)[2]),oh-n("current_generated_ids",fcnv-current-usage(result)[3]),oh-s("reason",result[7]),oh-n("model_server_calls",0),oh-n("provider_calls",0)]);
   def fcnv-retain(job,result) {
    let metadata = (job + "/native-generation.json");
    let raw = write_file_text((job + "/native-generation.txt"),result[8]);

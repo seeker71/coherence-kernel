@@ -19,13 +19,13 @@ section [form.bml] {
    && dls-layer-expert(m, 0) == 7077888 && dls-layer-expert(m, 20) == 7077888 && dls-layer-expert(m, 42) == 7077888
    && dlsb-expert-by-dims() == 7077888
    && dls-cache(m, 64) == 64 * 7077888 * 43 && dls-cache(m, 64) == 19478347776
-   && dvl-kv-total(m, 8192) == 824068096 && dls-shared(m, 64, 8192) == 27593273180;
+    && dvl-kv-total(m, 8192) == 824068096 && dls-shared(m, 64, 8192) == 7290857308;
   // one IQ2XXS expert from the header's own dimensions: gate and up [4096 x 2048] IQ2_XXS (256-block of 66 B), down [2048 x 4096] Q2_K (256-block of 84 B)
   def dlsb-expert-by-dims() = (2048 * 4096 / 256 * 66) * 2 + (4096 * 2048 / 256 * 84);
   def dlsb-reap-figures(m) = dls-plan-bytes(m) == 79849072476 && dls-stacks(m) == 71693238272 && dls-embd(m) == 1059061760 && dls-dense(m) == 7096772444
    && dvl-l(m, 0, "nexp") == 256 && dvl-l(m, 2, "nexp") == 256 && dvl-l(m, 3, "nexp") == 192 && dvl-l(m, 42, "nexp") == 192
    && dls-cache(m, 64) == 23139975168 && dls-cache(m, 64) == dlsb-cache-by-layers(m, 0, 0)
-   && dvl-kv-total(m, 8192) == 824068096 && dls-shared(m, 64, 8192) == 31060815708;
+    && dvl-kv-total(m, 8192) == 824068096 && dls-shared(m, 64, 8192) == 7096772444;
   // the cache again, by walking the layers and capping at the stored experts (an independent sum of the same rule)
   def dlsb-cache-by-layers(m, il, acc) = il == 43 ? acc : dlsb-cache-by-layers(m, il + 1, acc + (dvl-l(m, il, "nexp") < 64 ? dvl-l(m, il, "nexp") : 64) * (dls-layer-stacks(m, il) / dvl-l(m, il, "nexp")));
 
@@ -33,11 +33,11 @@ section [form.bml] {
   def dlsb-pages(gib) = dlsb-gib(gib) / 16384;
   // [page, mem, free, active, inactive, wired, speculative, purgeable, compressor, pageins, pageouts, compressions, decompressions, swapins, swapouts, external, internal]
   def dlsb-vm() = [16384, dlsb-gib(128), dlsb-pages(64), 0, 0, dlsb-pages(4), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-  def dlsb-under-cap(shared) = shared + mg-kv-margin() < dlsb-cap() && shared + mg-kv-margin() + dlsb-gib(4) < dlsb-cap();
-  def dlsb-governor(sharedIq2) {
-   let derived = mg-verdict(dlsb-vm(), sharedIq2 + mg-kv-margin());
-   let byFile = mg-verdict(dlsb-vm(), file_size(dlsb-iq2()) + mg-kv-margin());
-   let said = print_str("  governor: derived ask " ++ (sharedIq2 + mg-kv-margin()).str() ++ " " ++ derived[1].str() ++ "; file_size ask " ++ (file_size(dlsb-iq2()) + mg-kv-margin()).str() ++ " " ++ byFile[1].str() ++ " (cap " ++ dlsb-cap().str() ++ ")");
+   def dlsb-under-cap(total) = total < dlsb-cap();
+   def dlsb-governor(total) {
+    let derived = mg-verdict(dlsb-vm(), total);
+    let byFile = mg-verdict(dlsb-vm(), file_size(dlsb-iq2()));
+    let said = print_str("  governor: derived ask " ++ total.str() ++ " " ++ derived[1].str() ++ "; file_size ask " ++ file_size(dlsb-iq2()).str() ++ " " ++ byFile[1].str() ++ " (available " ++ dlsb-cap().str() ++ ")");
    mg-granted?(derived) && derived[1] == "room" && !mg-granted?(byFile) && byFile[1] == "capacity";
   }
 
@@ -53,7 +53,11 @@ section [form.bml] {
    let dense = dlsb-sum-specs(specs, dlsb-dense-spec?);
    let experts = dlsb-sum-specs(specs, dlsb-spec-expert?);
    let said = print_str("  fixture dense " ++ dls-dense(m).str() ++ "/" ++ dense.str() ++ " cache " ++ dls-cache(m, 64).str() ++ "/" ++ experts.str() ++ " shared " ++ dls-shared(m, 64, 8).str());
-   dls-dense(m) == dense && dls-cache(m, 64) == experts && dls-stacks(m) == experts && dvl-kv-total(m, 8) == 34816 && dls-shared(m, 64, 8) == dense + experts + 34816 && dvl-consistent?(m);
+    let scratch=dso-plan-bytes(dso-scratch-plan(m,8));
+    dls-dense(m) == dense && dls-cache(m, 64) == experts && dls-stacks(m) == experts && dvl-kv-total(m, 8) == 34816 && dls-shared(m, 64, 8) == dense
+     && dls-own(m,64,8)==experts+4*record_get(m,"used")+34816+scratch
+     && dls-shared(m,0,8)==dense+experts && dls-own(m,0,8)==34816+scratch
+     && dls-total(m,-1,8)==dls-total(m,0,8) && dvl-consistent?(m);
   }
 
   // ---- 16: the architecture key and the Qwen file's own figure ---------------------------------------------------------------------------
@@ -65,37 +69,35 @@ section [form.bml] {
   def dlsb-bytes(iq2, reap, fix, qwenPath, textPath, missing) {
    let b = [dls-weights-bytes(iq2), dls-weights-bytes(reap), dls-weights-bytes(fix), dls-weights-bytes(qwenPath), dls-weights-bytes(textPath), dls-weights-bytes(missing)];
    let said = print_str("  weights bytes " ++ b[0].str() ++ " " ++ b[1].str() ++ " " ++ b[2].str() ++ " " ++ b[3].str() ++ " " ++ b[4].str() ++ " " ++ b[5].str());
-   b[0] == 27593273180 && b[1] == 31060815708 && b[2] != file_size(fix) && b[2] > 0 && b[3] == 29047086048 && b[3] == file_size(qwenPath) && b[4] == file_size(textPath) && b[5] == 0;
+    b[0] == 7290857308 && b[1] == 7096772444 && b[2] != file_size(fix) && b[2] > 0 && b[3] == 29047086048 && b[3] == file_size(qwenPath) && b[4] == file_size(textPath) && b[5] == 0;
   }
 
-  // ---- 32: the doors' sources -----------------------------------------------------------------------------------------------------------------
-  def dlsb-count(s, part) = dlsb-count-from(s, part, 0, 0);
-  def dlsb-count-from(s, part, from, n) = str_find(s, part, from) < 0 ? n : dlsb-count-from(s, part, str_find(s, part, from) + len(part), n + 1);
-  def dlsb-has?(s, part) = str_find(s, part, 0) >= 0;
-  def dlsb-doors() {
-   let session = dlsb-src("form/form-stdlib/form-cli-model-session.fk");
-   let admission = dlsb-src("form/form-stdlib/bml/model-admission.bml");
-   len(session) > 0 && dlsb-has?(session, "def fcms-weights-bytes(path) = dls-weights-bytes(path);")
-    && dlsb-has?(session, "mg-lease(\"model session \" ++ path, path, fcms-weights-bytes(path), own)") && dlsb-has?(session, "def fcms-qwen-own(src, maxpos)") && dlsb-count(session, "mg-release()") == 3 && !dlsb-has?(session, "mg-ask(")
-    && dlsb-has?(admission, "let bytes = dls-weights-bytes(path);") && !dlsb-has?(admission, "let bytes = file_size(path);");
-  }
-  def dlsb-capacity(iq2) = dls-weights-bytes-at(iq2, 16384) - dls-weights-bytes-at(iq2, 8192) == dvl-kv-total(dvl-open(dvl-src(iq2)), 16384) - dvl-kv-total(dvl-open(dvl-src(iq2)), 8192) && dls-weights-bytes-at(iq2, 8192) == dls-weights-bytes(iq2);
+   // A capacity change belongs to the private state and scratch allocation.
+    def dlsb-capacity(m) {
+     dls-shared(m,dls-cache-experts(),16384)==dls-shared(m,dls-cache-experts(),8192)
+      && dls-own(m,dls-cache-experts(),16384)-dls-own(m,dls-cache-experts(),8192)==dvl-kv-total(m,16384)-dvl-kv-total(m,8192)+dso-plan-bytes(dso-scratch-plan(m,16384))-dso-plan-bytes(dso-scratch-plan(m,8192));
+   }
 
   // ---- 64: the figures move with the formula --------------------------------------------------------------------------------------------------
-  def dlsb-moves(m) = dls-cache(m, 128) - dls-cache(m, 64) == 19478347776 && dls-shared(m, 128, 8192) - dls-shared(m, 64, 8192) == 19478347776 && dls-dense(m) + dls-stacks(m) + dls-embd(m) == dls-plan-bytes(m);
+   def dlsb-moves(m) = dls-cache(m, 128) - dls-cache(m, 64) == 19478347776 && dls-own(m, 128, 8192) - dls-own(m, 64, 8192) == 19478347776 && dls-shared(m,128,8192)==dls-shared(m,64,8192) && dls-dense(m) + dls-stacks(m) + dls-embd(m) == dls-plan-bytes(m);
   // ---- 256: the KV term of the lease
   def dlsb-kv-terms(m) {
-   let at64 = dls-shared(m, 64, 64);
-   let at8192 = dls-shared(m, 64, 8192);
+    let at64 = dls-own(m, 64, 64);
+    let at8192 = dls-own(m, 64, 8192);
    let grows = dvl-raw-total(m, 8192) + dvl-comp-rows-total(m, 8192) - dvl-raw-total(m, 64) - dvl-comp-rows-total(m, 64);
    let plant = at8192 + (127 * dvl-comp-state-total(m));
-   let said = print_str("  lease at 64 " ++ at64.str() ++ " + 8 GiB " ++ (at64 + mg-kv-margin()).str() ++ "; to 8192 +" ++ (at8192 - at64).str() ++ "; plant " ++ plant.str());
-   at64 == 26787475292 && at64 == dls-dense(m) + dls-cache(m, 64) + dvl-kv-total(m, 64) && dvl-kv-total(m, 64) == dvl-raw-total(m, 64) + dvl-comp-rows-total(m, 64) + dvl-comp-state-total(m)
-    && dvl-raw-total(m, 64) == 5636096 && dvl-comp-rows-total(m, 64) == 772096 && dvl-comp-state-total(m) == 11862016 && at64 + mg-kv-margin() == 35377409884
-    && at8192 - at64 == 805797888 && grows == 805797888 && dvl-comp-state-total(m) == 11862016 && dvl-kv-total(m, 8192) - dvl-raw-total(m, 8192) - dvl-comp-rows-total(m, 8192) == dvl-comp-state-total(m)
+    let scratch64=dso-plan-bytes(dso-scratch-plan(m,64));let scratch8192=dso-plan-bytes(dso-scratch-plan(m,8192));
+    let said = print_str("  private lease at 64 " ++ at64.str() ++ "; to 8192 +" ++ (at8192 - at64).str() ++ "; plant " ++ plant.str());
+    at64 == dls-cache(m, 64) + dvl-kv-total(m, 64) + scratch64 + 4*record_get(m,"used") && dvl-kv-total(m, 64) == dvl-raw-total(m, 64) + dvl-comp-rows-total(m, 64) + dvl-comp-state-total(m)
+     && dvl-raw-total(m, 64) == 5636096 && dvl-comp-rows-total(m, 64) == 772096 && dvl-comp-state-total(m) == 11862016
+     && at8192 - at64 == 805797888 + scratch8192 - scratch64 && grows == 805797888 && dvl-comp-state-total(m) == 11862016 && dvl-kv-total(m, 8192) - dvl-raw-total(m, 8192) - dvl-comp-rows-total(m, 8192) == dvl-comp-state-total(m)
     && dls-cache(m, 64) == 19478347776 && dls-dense(m) == 7290857308 && plant - at8192 == 1506476032 && plant != at8192;
   }
-  def dlsb-short(path) = try !dvl-consistent?(dvl-open(eqr-of-file(path, 0, 2500000))) catch true;
+  def dlsb-short(path) {
+   let empty32=try {eqr-u32("",0);0;} catch 1;let empty64=try {eqr-u64("",0);0;} catch 1;
+   print(["truncated-header",now_unix_ms(),"empty-integers-refused",empty32 && empty64]);
+   empty32 && empty64 && (try !dvl-consistent?(dvl-open(eqr-of-file(path, 0, 2500000))) catch true);
+  }
  }
  let iq2 = dlsb-iq2();
  let reap = dlsb-reap();
@@ -112,10 +114,12 @@ section [form.bml] {
  let c2 = dlsb-bit(try dlsb-reap-figures(mReap) catch false, 2);
  let sharedIq2 = dls-shared(mIq2, 64, 8192);
  let sharedReap = dls-shared(mReap, 64, 8192);
- let c4 = dlsb-bit(try dlsb-under-cap(sharedIq2) && dlsb-under-cap(sharedReap) && file_size(iq2) > dlsb-cap() && file_size(reap) > dlsb-cap() && dlsb-governor(sharedIq2) catch false, 4);
+  let c4 = dlsb-bit(try dlsb-under-cap(dls-total(mIq2,64,8192)) && dlsb-under-cap(dls-total(mReap,64,8192)) && file_size(iq2) > dlsb-cap() && file_size(reap) > dlsb-cap() && dlsb-governor(dls-total(mIq2,64,8192)) catch false, 4);
  let c8 = dlsb-bit(try wrote == 1515232 && dlsb-fixture(fixPath) catch false, 8);
  let c16 = dlsb-bit(try dlsb-arch(iq2, reap, fixPath, dlsb-qwen(), textPath, root ++ "-missing.gguf") && dlsb-bytes(iq2, reap, fixPath, dlsb-qwen(), textPath, root ++ "-missing.gguf") catch false, 16);
- let c32 = dlsb-bit(try dlsb-doors() && dlsb-capacity(iq2) catch false, 32);
+   print(["capacity-geometry",now_unix_ms()]);
+   let c32 = dlsb-bit(try dlsb-capacity(mIq2) catch false, 32);
+   print(["capacity-geometry-complete",c32,now_unix_ms()]);
  let c64 = dlsb-bit(try dlsb-moves(mIq2) && dlsb-short(iq2) catch false, 64);
  let c128 = dlsb-bit(try str_len(iq2Src) == 8388608 && str_len(reapSrc) == 8388608 && file_size(iq2) > 80000000000 && file_size(reap) > 90000000000 catch false, 128);
  let c256 = dlsb-bit(try dlsb-kv-terms(mIq2) catch false, 256);

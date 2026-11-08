@@ -175,21 +175,38 @@ section [form.bml] {
     // ── the MTP head's tensors, the spec scratch, the snapshots ──
     // src is the file's bundle [source, where the tensor table begins, how many tensors] (q38s-mtp-tensors): egg-find-tensor walks the whole metadata (the tokenizer's
     // vocabulary) to find the table's start on every call, 0.3 s a name; the bundle walks it once
-    def q38s-find(src, base, path, name) = kth-tv-at(src[0], base, path, egg-find(src[0], src[1], src[2], name));
+    def q38s-find-by(src,base,path,name,from-file) = kth-tv-at-by(src[0],base,path,egg-find(src[0],src[1],src[2],name),from-file);
     def q38s-bname(l, sfx) = ("blk." + (l.str() + sfx));
     // [eh_proj, enorm, hnorm, shared_head_norm, layer(11 tensors in the lane's full-layer order)]
-    def q38s-mtp-tensors(src, base, path, l) = q38s-mtp-tensors-of([src, egg-tinfo-start(src), egg-tensor-count(src)], base, path, l);
-    def q38s-mtp-tensors-of(src, base, path, l) = [q38s-find(src, base, path, q38s-bname(l, ".nextn.eh_proj.weight")), q38s-find(src, base, path, q38s-bname(l, ".nextn.enorm.weight")), q38s-find(src, base, path, q38s-bname(l, ".nextn.hnorm.weight")), q38s-find(src, base, path, q38s-bname(l, ".nextn.shared_head_norm.weight")), [q38s-find(src, base, path, q38s-bname(l, ".attn_norm.weight")), q38s-find(src, base, path, q38s-bname(l, ".post_attention_norm.weight")), q38s-find(src, base, path, q38s-bname(l, ".ffn_gate.weight")), q38s-find(src, base, path, q38s-bname(l, ".ffn_up.weight")), q38s-find(src, base, path, q38s-bname(l, ".ffn_down.weight")), q38s-find(src, base, path, q38s-bname(l, ".attn_q.weight")), q38s-find(src, base, path, q38s-bname(l, ".attn_k.weight")), q38s-find(src, base, path, q38s-bname(l, ".attn_v.weight")), q38s-find(src, base, path, q38s-bname(l, ".attn_q_norm.weight")), q38s-find(src, base, path, q38s-bname(l, ".attn_k_norm.weight")), q38s-find(src, base, path, q38s-bname(l, ".attn_output.weight"))]];
-    def q38s-snaps-go(l, n, interval, convn, deltan, kmax, acc) = l >= n ? acc : q38s-snaps-go(l + 1, n, interval, convn, deltan, kmax, append(acc, kth-full?(l, interval) ? [[0, 0]] : [[metal_buf_alloc(kmax * convn * 4), metal_buf_alloc(kmax * deltan * 4)]]));
+    def q38s-mtp-tensors-by(src,base,path,l,from-file) = q38s-mtp-tensors-of-by([src,egg-tinfo-start(src),egg-tensor-count(src)],base,path,l,from-file);
+    def q38s-mtp-tensors-of-by(src,base,path,l,from-file) = {
+        let fetch=sfx=>q38s-find-by(src,base,path,q38s-bname(l,sfx),from-file);
+        append(map(fetch,[".nextn.eh_proj.weight",".nextn.enorm.weight",".nextn.hnorm.weight",".nextn.shared_head_norm.weight"]),[map(fetch,[".attn_norm.weight",".post_attention_norm.weight",".ffn_gate.weight",".ffn_up.weight",".ffn_down.weight",".attn_q.weight",".attn_k.weight",".attn_v.weight",".attn_q_norm.weight",".attn_k_norm.weight",".attn_output.weight"])]);
+    };
+    def q38s-snap-sizes(l,n,interval,convn,deltan,kmax) = l>=n ? [] : cons(kth-full?(l,interval) ? [0,0] : [kmax*convn*4,kmax*deltan*4],q38s-snap-sizes(l+1,n,interval,convn,deltan,kmax));
     // sx: 0 tok ids (device) 1 logits 2 argmax part idx 3 part val 4 verified ids 5 verified vals 6 main hidden rows (after output_norm)
     //     7 chain hidden 8 zero row 9 snapshots per layer 10 mtp tensors 11 mtp state [0 0 K V] 12 kmax 13 chain argmax vals
-    def q38s-open(ctx, kmax, span) {
+    def q38s-plan(ctx,kmax,span) {
         let geo = ctx[2];
         let d = geo[0];
         let vocab = geo[19];
         let nt = q38s-nt-max();
         let kvb = geo[20] * geo[18] * 4;
-        [metal_buf_alloc((span + 16) * 4), metal_buf_alloc(nt * vocab * 4), metal_buf_alloc(nt * 1024 * 4), metal_buf_alloc(nt * 1024 * 4), metal_buf_alloc(64), metal_buf_alloc(64), metal_buf_alloc(span * d * 4), metal_buf_alloc(d * 4), metal_buf_alloc(d * 4), q38s-snaps-go(0, geo[21], geo[22], q38-recur-conv-n(geo), q38-recur-delta-n(geo), kmax, []), q38s-mtp-tensors(ctx[7], ctx[8], ctx[9], geo[21]), [0, 0, metal_buf_alloc(kvb), metal_buf_alloc(kvb)], kmax, metal_buf_alloc(64)];
+        [[(span+16)*4,nt*vocab*4,nt*1024*4,nt*1024*4,64,64,span*d*4,d*4,d*4,kvb,kvb,64],q38s-snap-sizes(0,geo[21],geo[22],q38-recur-conv-n(geo),q38-recur-delta-n(geo),kmax),kmax];
+    }
+    def q38s-plan-bytes(plan) = sum(plan[0])+sum(foldl(append,[],plan[1]));
+    // DFlash supplies its own drafts. Its target verifier needs snapshots and
+    // logits, but neither the optional MTP tensors nor a second MTP KV stream.
+    def q38s-verify-plan(ctx,kmax,span) {
+        let plan=q38s-plan(ctx,kmax,span);
+        [append(take(9,plan[0]),[0,0,plan[0][11]]),plan[1],plan[2],"verify"];
+    }
+    def q38s-open(ctx,kmax,span) = q38s-open-plan(ctx,q38s-plan(ctx,kmax,span),bytes=>metal_buf_alloc(bytes),(p,o,n)=>metal_buf_from_file(p,o,n));
+    def q38s-open-plan(ctx,plan,allocate,from-file) {
+        let b=map(bytes=>bytes==0 ? 0 : allocate(bytes),plan[0]);
+        let snaps=map(row=>map(bytes=>bytes==0 ? 0 : allocate(bytes),row),plan[1]);
+        let mt=len(plan)>3 && plan[3]=="verify" ? [[0,0,0,0],[0,0,0,0],[0,0,0,0],[0,0,0,0],[]] : q38s-mtp-tensors-by(ctx[7],ctx[8],ctx[9],ctx[2][21],from-file);
+        append(take(9,b),[snaps,mt,[0,0,b[9],b[10]],plan[2],b[11]]);
     }
     def q38s-free-snap-row(row) = (Number) q38-free-handle(row[0]) + (Number) q38-free-handle(row[1]);
     def q38s-free-snaps(snps) = (Comparable) len(snps) == 0 ? 0 : (Number) q38s-free-snap-row(snps[0]) + (Number) q38s-free-snaps(snps[1:]);

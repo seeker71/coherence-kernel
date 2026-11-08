@@ -21,6 +21,7 @@ import native/metal/qwen35-dense-token-handle.fk;
 import native/metal/qwen35-crystal.fk;
 import native/metal/model-bandwidth.fk;
 import form-stdlib/form-cli-model-ds4.fk;
+import form-stdlib/form-cli-model-session.fk;
 import form-stdlib/form-cli-qwen-teach-layer.fk;
 import form-stdlib/knowledge-rest-answer.fk;
 import form-stdlib/language-template.fk;
@@ -35,6 +36,7 @@ import form-stdlib/bml/form-cli-model-admission.bml;
 import form-stdlib/bml/form-cli-source-affinity.bml;
 import form-stdlib/bml/form-token-decode-batch.bml;
 section [form.bml] {
+    let FCMG-RAW-OWNER=record_new(0);
     def fcmg-src(path) = eqr-of-file(path, 0, 40000000);
     // a file that is not a GGUF has no architecture: the metadata reader walks the bytes it is handed as key-value pairs and, over text, never returns (found 2026-10-04 by the lane band's text file), so the magic is read first
     def fcmg-arch(src) = egg-magic-ok?(src) == 1 ? gmt-str(src, "general.architecture") : "";
@@ -131,41 +133,71 @@ section [form.bml] {
     // read from it.  Nothing here is a mode or a switch — a caller that has no
     // residence hands `fcmr-none` and gets the old open-run-close exactly, and a
     // caller that keeps what it is handed back reuses it whenever the same file can
-    // still hold the next prompt.  The stream state is NOT part of it: state is what
-    // one conversation writes, so it is made and released per generation.
-    def fcmr-mark() = "fcmg-resident1";
-    def fcmr(path, maxpos, ctx, src, arch) = [fcmr-mark(), path, maxpos, ctx, src, arch];
+    // still hold the next prompt. Each generation owns a fresh stream; pending
+    // stream cleanup stays in the residence until every handle is released.
+    def fcmr-mark() = "raw-generation-context";
+    def fcmr(path, maxpos, ctx, src, arch) = fcms-session("live",fcmr-mark(),path,src,ctx,[],maxpos,0,-1,0,0,0,0,0);
     def fcmr-none() = [];
-    def fcmr-live?(r) = (Comparable) len(r) == 6 ? (String) r[0] == fcmr-mark() ? 1 : 0 : 0;
-    def fcmr-path(r) = r[1];
-    def fcmr-maxpos(r) = r[2];
-    def fcmr-ctx(r) = r[3];
-    def fcmr-src(r) = r[4];
-    def fcmr-arch(r) = r[5];
-    // The same file, and a ceiling this residence can still reach.  A longer prompt
-    // than the one it was opened for is not refused — it reopens, because the KV
-    // extent was derived from that first need and there is no knob to raise.
-    def fcmr-fits?(r, path, need) = (Comparable) fcmr-live?(r) == 1 ? (String) fcmr-path(r) == path ? need <= fcmr-maxpos(r) ? 1 : 0 : 0 : 0;
-    def fcmr-release-ok?(r) = (Comparable) fcmr-live?(r) == 1 ? {
-        let freed = adm-drop(fcmr-path(r));
-        (Comparable) q38-close(fcmr-ctx(r), []) == q38-close-expected(fcmr-ctx(r), []) ? 1 : 0;
+    def fcmr-live?(r) = fcmr-session-owner?(r) && fcms-reason(r)==fcmr-mark() && fcms-live?(r) && fcms-resident?(r) && record_get(fcms-release-ledger(r),"raw-release-started") != 1;
+    def fcmr-session-owner?(r) = value_kind(r)=="list" && len(r)>22 && r[0]=="form-cli-model-session-v1";
+    def fcmr-path(r) = fcms-path(r);
+    def fcmr-maxpos(r) = fcms-maxpos(r);
+    def fcmr-ctx(r) = fcms-ctx(r);
+    def fcmr-src(r) = fcms-src(r);
+    def fcmr-arch(r) = fcmg-arch(fcms-src(r));
+    def fcmr-release-ok?(r) = fcmr-session-owner?(r) ? {
+        record_set(fcms-release-ledger(r),"raw-release-started",1);
+        let released=fcms-release-ok?(r);
+        if released then record_set(fcms-release-ledger(r),"raw-released",1) else 0;released;
     } : 1;
-    // Closing is part of the result.  A run that generated text but did not
-    // release every model/state handle is reported as refused, never hidden.
-    def fcmg-close-result(ctx, sts, report) = {
-        let expected = q38-close-expected(ctx, sts);
-        let closed = q38-close(ctx, sts);
-        (Comparable) closed == expected ? report : ("generation refused: model handle close mismatch; closed=" + (closed.str() + (";expected=" + expected.str())));
+    // The queue orders known weight loads. The same FCMS owner retains exact
+    // reservations, partial context handles and residency before generation.
+    def fcmg-open-raw(path,src,maxpos,span,x,iced) = !fcms-release-in(FCMG-RAW-OWNER,"session") ? fcms-refuse(record_get(FCMG-RAW-OWNER,"session"),"previous-raw-context-release-incomplete") : {
+        let claim=adm-admit("raw generation",path,adm-wait-ms());
+        claim[0] != 1 ? fcms-none("model-queued: "+claim[1]) : {
+            defer adm-loaded(claim[2]);
+            let owner=fcmr(path,maxpos,[],src,fcmg-arch(src));let ledger=fcms-release-ledger(owner);
+            fcms-retain-in(FCMG-RAW-OWNER,"session",owner);
+            record_set(ledger,"residency-owned",len(claim)>3 && claim[3]==1);record_set(ledger,"residency-path",path);
+            let opened=try {
+                let geo=q38-geo(src,maxpos);
+                geo[0]<=0 || geo[21]<=0 ? fcms-refuse(owner,"model-geometry-unavailable") : {
+                    let parts=filter(part=>part[0]=="scratch" || part[0]=="position-scratch",q38-session-parts(geo,span,0));
+                    let grant=mg-lease("raw generation context",path,fcms-weights-bytes(path),sum(map(part=>part[1],parts)));
+                    let reservation=fcms-reservation(ledger,grant,parts);
+                    !record_get(reservation,"ready") ? fcms-refuse(owner,"host-memory-held:"+grant[1]) : {
+                        // The live context is not a retired stream. Keep it out
+                        // of the stream preflight's pending-release queue.
+                        let constructing=record_new(0,"on",0,"release-handles",[],"lease-parts",record_get(reservation,"parts"));record_set(ledger,"context",constructing);
+                        let allocate=bytes=>q38x-alloc(constructing,bytes);let from-file=(file,offset,bytes)=>q38x-map(constructing,file,offset,bytes);
+                        let ctx=iced==1 ? qsx-open-span-by(path,maxpos,x,span,allocate,from-file) : q38-open-span-by(path,maxpos,span,allocate,from-file);
+                        record_set(ledger,"active-context",ctx);
+                        let held=fcms-with-release-ledger(fcmr(path,maxpos,ctx,src,fcmg-arch(src)),ledger);
+                        q38-context-ok?(ctx)==1 && fcms-reservation-ack(reservation,["scratch","position-scratch"]) ? held : fcms-refuse(held,"model-context-open-refused");
+                    };
+                };
+            } catch fcms-refuse(fcms-with-release-ledger(fcmr(path,maxpos,record_get(ledger,"active-context") ?? [],src,fcmg-arch(src)),ledger),"model-context-open-stopped");
+            fcms-retain-in(FCMG-RAW-OWNER,"session",opened);
+        };
     };
-    def fcmg-open-refusal(ctx, detail) = fcmg-close-result(ctx, [], ("generation refused: " + (detail + ("; " + metal_status()))));
-    // The state half of the same honesty: a generation that ran but did not release
-    // every state handle is reported as refused.  The model handles are not touched
-    // here — they belong to the residence, which outlives this sentence.
-    def fcmg-state-close-result(sts, report) = {
-        let expected = q38-state-handle-count(sts);
-        let closed = q38-free-state(sts);
-        let release-report = ("\nstate_released=" + (((Comparable) closed == expected ? "1" : "0") + ("\nstate_handles_closed=" + (closed.str() + ("\nstate_handles_expected=" + (expected.str() + "\n"))))));
-        (Comparable) closed == expected ? ((String) release-report + report) : (release-report + ("generation refused: state handle close mismatch; closed=" + (closed.str() + (";expected=" + expected.str()))));
+    // Every raw generation owns a fresh stream. A failed release stays in the
+    // residence's pending owners; a later generation must settle it first.
+    def fcmg-open-stream(owner) = !fcms-pending-releases(owner) ? [[],nothing(),"prior-state-release-incomplete"] : {
+        let geo=fcms-ctx(owner)[2];let parts=filter(part=>part[0]=="full-kv" || part[0]=="recurrent",q38-session-parts(geo,q38-ctx-span(fcms-ctx(owner)),0));
+        let grant=mg-lease("raw generation stream","",0,sum(map(part=>part[1],parts)));
+        let reservation=fcms-reservation(fcms-release-ledger(owner),grant,parts);
+        !record_get(reservation,"ready") ? [[],nothing(),"host-memory-held:"+grant[1]] : {
+            let pending=fcms-retain-owned-release(owner,[],record_get(reservation,"parts"));
+            let sts=q38-new-state-by(geo,bytes=>q38x-alloc(pending,bytes));
+            let ready=q38-state-complete?(sts,geo) && fcms-reservation-ack(reservation,["full-kv","recurrent"]);
+            [sts,pending,ready ? "" : "state-allocation-observation-incomplete"];
+        };
+    };
+    def fcmg-state-close-result(pending,report) = fcmg-state-close-result-by(pending,report,fcms-pending-release);
+    def fcmg-state-close-result-by(pending, report, close) = nothing?(pending) ? report : {
+        let expected=q38x-owned(pending);let released=close(pending);let remaining=q38x-owned(pending);let closed=expected - remaining;
+        let releaseReport="\nstate_released="+(released ? "1" : "0")+"\nstate_handles_closed="+closed.str()+"\nstate_handles_expected="+expected.str()+"\n";
+        releaseReport+report+(released ? "" : "\ngeneration release incomplete: retained state cleanup continuation\n");
     };
     // Encode every evaluated thought into tokenizer ids (left-to-right).
     def fcmg-encode-thoughts(src, thoughts, acc) = (Comparable) len(thoughts) == 0 ? lg-rev(acc, []) : fcmg-encode-thoughts(src, thoughts[1:], cons(q35-encode(src, lg-thought-text(thoughts[0])), acc));
@@ -241,10 +273,10 @@ src, source-hint, 0, tfx);
             nothing?(w) ? nothing() : ["hit", w, "corpus-rest-answer"];
         };
     };
-    def fcmg-heed-lookup(ctx, surface, local-ready) = {
+    def fcmg-heed-lookup(ctx, surface, local-ready) = fcmg-heed-lookup-source(ctx, surface, local-ready, fcmg-heed-source-affinity(ctx));
+    def fcmg-heed-lookup-source(ctx, surface, local-ready, source) = {
         let rest = fcmg-heed-rest-honor(surface);
         (Comparable) nothing?(rest) == 0 ? rest : {
-            let source = fcmg-heed-source-affinity(ctx);
             fcmg-heed-bound-honor(fcsa-lookup(ctx, surface, local-ready, source));
         };
     };
@@ -367,13 +399,11 @@ src, source-hint, 0, tfx);
                 let t-pre-open = now_unix_ms();
                 // a layer-major walk holds every position of the span
                 let span = chunk < 0 - 1 ? 512 : 1;
-                let turn = adm-admit("heed", path, adm-wait-ms());
-                let ctx = (Comparable) turn[0] == 1 ? q38-open-span(path, maxpos, span) : [];
-                let freed = adm-loaded(turn[2]);
+                let owner=fcmg-open-raw(path,src,maxpos,span,[],0);let ctx=fcms-ctx(owner);
                 let t-opened = now_unix_ms();
-                len(ctx) < 10 ? fcmg-heed-line("refused", ((Comparable) turn[0] == 1 ? ("model context did not open; " + metal_status()) : turn[1])) : {
-                    let sts = q38-new-state(ctx[2]);
-                    !((Comparable) q38-state-ok?(sts) == 1) ? fcmg-heed-line("refused", ("state allocation failed; " + metal_status())) : {
+                let ran=try !fcmr-live?(owner) ? fcmg-heed-line("refused",fcms-reason(owner)) : {
+                    let stream=fcmg-open-stream(owner);let sts=stream[0];
+                    stream[2] != "" ? fcmg-heed-line("refused",stream[2]) : {
                         fcmg-heed-int("prompt-tokens", len(ids));
                         fcmg-heed-int("query-budget", query);
                         fcmg-heed-int("answer-reserve", reserve);
@@ -402,10 +432,11 @@ src, source-hint, 0, tfx);
                         fcmg-heed-int("carrier-syncs", mbw-status-int(metal_status(), "total_sync") - syncs-pre-run);
                         fcmg-heed-int("carrier-dispatches", mbw-status-int(metal_status(), "total_dispatch") - disp-pre-run);
                         fcmg-heed-int("positions-walked", fhc-pos(r));
-                        q38-free-state(sts);
                         0;
                     };
-                };
+                } catch fcmg-heed-line("stopped","execution stopped; retained context and stream cleanup");
+                let released=fcmr-release-ok?(owner);fcmg-heed-int("release-ok",released);
+                released ? 0 : owner;
             };
         };
     };
@@ -466,16 +497,17 @@ src, source-hint, 0, tfx);
             pf[0] < 0 || (Comparable) pf[1] != len(ids) ? fcmg-live-pf("nothing", -1, pf[1], walked[1], "model-prefill-refused") : fcmg-live-pf("ok", pf[0], pf[1], walked[1], "complete");
         };
     };
-    def fcmg-run-context-cursor-budgeted(src, arch, model, cursor, thought-lists, thought-eval, ctx, n, query, reserve, gap-n, source-hint, tfx) = {
+    def fcmg-run-context-cursor-budgeted(src, arch, model, cursor, thought-lists, thought-eval, owner, n, query, reserve, gap-n, source-hint, tfx) = {
+        let ctx=fcms-ctx(owner);
         let geo = ctx[2];
         let _state-begin = fcmg-live-stage("model-state-begin", 4456449);
-        let sts = q38-new-state(geo);
-        !((Comparable) q38-state-ok?(sts) == 1) ? fcmg-state-close-result(sts, ("generation refused: state allocation failed; " + metal_status())) : {
+        let stream=fcmg-open-stream(owner);let sts=stream[0];
+        let report=stream[2] != "" ? "generation refused: "+stream[2] : try {
             let before-status = metal_status();
             let _prefill-begin = fcmg-live-stage("model-prefill-begin", 4587521);
             let live-pf = fcmg-live-prefill-span(ctx, sts, cursor);
             let _prefill-complete = fcmg-live-stage("model-prefill-complete", 4653057);
-            !((String) live-pf[1] == "ok") ? fcmg-state-close-result(sts, ("generation refused: live prompt cursor=" + (live-pf[1] + (";reason=" + live-pf[5])))) : {
+            !((String) live-pf[1] == "ok") ? "generation refused: live prompt cursor=" + live-pf[1] + ";reason=" + live-pf[5] : {
                 let final-cursor = live-pf[4];
                 let prompt-n = qtlc-token-count(final-cursor);
                 let stops = fcmg-q35-stops(src);
@@ -501,14 +533,16 @@ src, source-hint, 0, tfx);
                 let decode-us = mbw-status-int(after-status, "gpu_busy_us_total") - mbw-status-int(prefill-status, "gpu_busy_us_total");
                 let forwards = prompt-n + thought-n + (model-extra + len(model-tail) > 0 ? model-extra + len(model-tail) - 1 : 0) + (fhc-injected(heed) + (fhc-close-commits(heed) + fhc-terminal-forwards(heed)));
                 let weight-bytes = q38-forward-weight-bytes(ctx);
-                fcmg-state-close-result(sts, ((String) fcmg-line("prompt_cursor", "bmf-qtf2-live-v1") + fcmg-report-count(model, arch, prompt-n, out, ftdb-text(src, out), thought-eval, offers, thought-n, forwards, busy-us, prefill-us, decode-us, weight-bytes, heed)));
+                (String) fcmg-line("prompt_cursor", "bmf-qtf2-live-v1") + fcmg-report-count(model, arch, prompt-n, out, ftdb-text(src, out), thought-eval, offers, thought-n, forwards, busy-us, prefill-us, decode-us, weight-bytes, heed);
             };
-        };
+        } catch "generation stopped: retained context and stream cleanup";
+        fcmg-state-close-result(stream[1],report);
     };
-    def fcmg-run-context-budgeted(src, arch, model, ids, thought-lists, thought-eval, ctx, n, query, reserve, gap-n, source-hint, tfx) = {
+    def fcmg-run-context-budgeted(src, arch, model, ids, thought-lists, thought-eval, owner, n, query, reserve, gap-n, source-hint, tfx) = {
+        let ctx=fcms-ctx(owner);
         let geo = ctx[2];
-        let sts = q38-new-state(geo);
-        !((Comparable) q38-state-ok?(sts) == 1) ? fcmg-state-close-result(sts, ("generation refused: state allocation failed; " + metal_status())) : {
+        let stream=fcmg-open-stream(owner);let sts=stream[0];
+        let report=stream[2] != "" ? "generation refused: "+stream[2] : try {
             let before-status = metal_status();
             let pf = q38-prefill(ctx[0], ctx[1], geo, ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0);
             let stops = fcmg-q35-stops(src);
@@ -532,12 +566,10 @@ src, source-hint, 0, tfx);
             let decode-us = mbw-status-int(after-status, "gpu_busy_us_total") - mbw-status-int(prefill-status, "gpu_busy_us_total");
             let forwards = len(ids) + thought-n + (model-extra + len(model-tail) > 0 ? model-extra + len(model-tail) - 1 : 0) + (fhc-injected(heed) + (fhc-close-commits(heed) + fhc-terminal-forwards(heed)));
             let weight-bytes = q38-forward-weight-bytes(ctx);
-            fcmg-state-close-result(sts, fcmg-report(model, arch, ids, out, ftdb-text(src, out), thought-eval, offers, thought-n, forwards, busy-us, prefill-us, decode-us, weight-bytes, heed));
-        };
+            fcmg-report(model, arch, ids, out, ftdb-text(src, out), thought-eval, offers, thought-n, forwards, busy-us, prefill-us, decode-us, weight-bytes, heed);
+        } catch "generation stopped: retained context and stream cleanup";
+        fcmg-state-close-result(stream[1],report);
     };
-    // Compatibility: every existing caller remains on the fungible tail.
-    def fcmg-run-context(src, arch, model, ids, thought-lists, thought-eval, ctx, n, gap-n) = fcmg-run-context-budgeted(src, arch, model, ids, thought-lists, thought-eval, ctx, n, 0, 0, gap-n, "", qtf2-index-empty("absent", "unthreaded", ""));
-    def fcmg-run-context-2p(src, arch, model, ids, thought-lists, thought-eval, ctx, query, reserve, gap-n) = fcmg-run-context-budgeted(src, arch, model, ids, thought-lists, thought-eval, ctx, 0, query, reserve, gap-n, "", qtf2-index-empty("absent", "unthreaded", ""));
     def fcmg-chat-ids(src, prompt) = (Comparable) ftl-armed?() == 1 ? {
         let ims = q35-special-id(src, "<|im_start|>");
         let ime = q35-special-id(src, "<|im_end|>");
@@ -568,15 +600,23 @@ src, source-hint, 0, tfx);
     def fcmg-ds4-door?(path) = fcmg-ds4-door-with?(path, fcds-lane-wired?());
     def fcmg-ds4-tokens(n, query) = n > 0 ? n : query;
     def fcmg-ds4-report(model, arch, run) = (fcmg-line("backend", "form-native-metal-dsv4-driver") + (fcmg-line("model", model) + (fcmg-line("architecture", arch) + (fcmg-line("mode", lmc-mode(arch)) + (fcmg-line("prompt_tokens", run[1].str()) + (fcmg-line("generated_tokens", len(run[2]).str()) + (fcmg-line("ending", run[4]) + (fcmg-line("capacity", run[5].str()) + (fcmg-line("position_limit", run[6].str()) + ("text:\n" + run[3]))))))))));
+    def fcmg-ds4-run-session(opened,n) = fcmg-ds4-complete-generation(fcms-generate(opened,n));
+    def fcmg-ds4-complete-generation(generation) {
+        let last=fcms-generation-session(generation);
+        let released=fcms-release-ok?(last);
+        let run=fcms-live?(last) ? ["ok",fcms-prompt-ids(last),fcms-generation-ids(generation),fcms-generation-text(generation),fcms-ending(last),fcms-maxpos(last),fcds-driver-limit(fcms-src(last))] : ["refused",fcms-reason(last),fcms-generation-ids(generation),fcms-generation-text(generation),fcms-ending(last),fcms-maxpos(last)];
+        [run,last,released,generation];
+    }
     def fcmg-ds4-door(path, prompt, n) {
         let src = fcmg-src(path);
         let arch = fcmg-arch(src);
         let model = fcmg-name(src);
-        let turn = adm-admit("generate", path, adm-wait-ms());
-        (Comparable) turn[0] != 1 ? [fcmg-noted(prompt, arch, model, ("generation refused: model admission; " + turn[1])), fcmr-none()] : {
-            let run = fcds-run(path, prompt, n, () => adm-loaded(turn[2]));
-            let dropped = adm-drop(path);
-            (String) run[0] == "ok" ? [fcmg-noted(prompt, arch, model, fcmg-ds4-report(model, arch, run)), fcmr-none()] : [fcmg-noted(prompt, arch, model, ("generation refused: " + run[1])), fcmr-none()];
+        n<=0 ? [fcmg-noted(prompt,arch,model,"generation refused: positive output allowance required"),fcmr-none()] : {
+            let opened=fcms-open-reserved(path,prompt,n+1,"full");
+            let completed=fcmg-ds4-run-session(opened,n);
+            let run=completed[0];let last=completed[1];let released=completed[2];
+            let report=fcms-live?(last) ? fcmg-ds4-report(model,arch,run) : "generation unfinished: "+fcms-reason(last)+"\ngenerated_tokens: "+len(run[2]).str()+"\nending: "+run[4]+"\ntext:\n"+run[3];
+            [fcmg-noted(prompt,arch,model,report)+"\ncomplete="+(fcms-live?(last) && fcms-ending(last)=="eos" ? "1" : "0")+"\nrelease_ok="+released.str(),released ? fcmr-none() : last];
         };
     }
     def fcmg-ds4-sealed(path, prompt, n) {
@@ -626,11 +666,9 @@ src, source-hint, 0, tfx);
                 let _open-begin = fcmg-live-stage("model-open-begin", 6356993);
                 let span = (Comparable) live-cursor == 1 ? fcma-span(prompt-bound) : 1;
                 let _span = q38oo-stage(("model-prefill-span-" + span.str()), 8388624);
-                let turn = adm-admit("generate", path, adm-wait-ms());
-                let ctx = (Comparable) turn[0] != 1 ? [] : (Comparable) iced == 1 ? qsx-open-span(path, maxpos, x, span) : q38-open-span(path, maxpos, span);
-                let freed = adm-loaded(turn[2]);
+                let owner=fcmg-open-raw(path,src,maxpos,span,x,iced);
                 let _open-complete = fcmg-live-stage("model-open-complete", 6422529);
-                len(ctx) < 10 ? [fcmg-noted(prompt, arch, model, ("generation refused: model context did not open; " + ((Comparable) turn[0] == 1 ? metal_status() : turn[1]))), fcmr-none()] : !((Comparable) q38-context-ok?(ctx) == 1) ? [fcmg-noted(prompt, arch, model, fcmg-open-refusal(ctx, "model context contains an invalid handle")), fcmr-none()] : [fcmg-noted(prompt, arch, model, (Comparable) live-cursor == 1 ? fcmg-run-context-cursor-budgeted(src, arch, model, cursor, thought-lists, thought-eval, ctx, n, query, reserve, gap-n, source-hint, tfx) : fcmg-run-context-budgeted(src, arch, model, ids, thought-lists, thought-eval, ctx, n, query, reserve, gap-n, source-hint, tfx)), fcmr(path, maxpos, ctx, src, arch)];
+                !fcmr-live?(owner) ? [fcmg-noted(prompt,arch,model,"generation refused: "+fcms-reason(owner)),owner] : fcmg-owned-run(owner,held=>fcmg-noted(prompt, arch, model, (Comparable) live-cursor == 1 ? fcmg-run-context-cursor-budgeted(src, arch, model, cursor, thought-lists, thought-eval, held, n, query, reserve, gap-n, source-hint, tfx) : fcmg-run-context-budgeted(src, arch, model, ids, thought-lists, thought-eval, held, n, query, reserve, gap-n, source-hint, tfx)));
             };
         };
     };
@@ -647,12 +685,18 @@ src, source-hint, 0, tfx);
     // later fitting capsule then reuses the exact sealed residence instead of
     // paying a second seal/open merely because it is longer than the first.
     def fcmg-open-ceiling(profile, required, artifact-declared) = (Comparable) frc-is-agent-profile?(profile) == 1 ? artifact-declared : required < artifact-declared ? required : artifact-declared;
-    def fcmg-stale-close() = ["generation refused: previous model handle close mismatch", fcmr-none()];
+    def fcmg-stale-close(owner) = ["generation refused: previous model handle close mismatch",owner];
+    // Setup can stop after context admission, before a stream report exists.
+    // The original owner remains reachable and is released before another use.
+    def fcmg-owned-run(owner,run) = [try {run(owner);} catch {
+        record_set(fcms-release-ledger(owner),"raw-release-started",1);
+        "generation stopped: admitted context and pending stream cleanup retained\ncomplete=0\n";
+    },owner];
     // Generation against whatever the caller is already holding.  An empty
     // residence, a residence for a different file, or a prompt that outgrows the
     // ceiling this one was opened for all end in the same place — release, then
     // admit — so there is one path and no mode to be in.
-    def fcmg-generate-with-at-budgeted-hinted(r, path, prompt, n, query, reserve, profile, source-hint) = (Comparable) fcmr-live?(r) == 0 ? fcmg-fresh-at-budgeted-hinted(path, prompt, n, query, reserve, profile, source-hint) : !((String) fcmr-path(r) == path) ? (Comparable) fcmr-release-ok?(r) == 1 ? fcmg-fresh-at-budgeted-hinted(path, prompt, n, query, reserve, profile, source-hint) : fcmg-stale-close() : {
+    def fcmg-generate-with-at-budgeted-hinted(r, path, prompt, n, query, reserve, profile, source-hint) = fcmr-session-owner?(r) && !fcmr-live?(r) ? (fcmr-release-ok?(r) ? fcmg-fresh-at-budgeted-hinted(path,prompt,n,query,reserve,profile,source-hint) : fcmg-stale-close(r)) : (Comparable) fcmr-live?(r) == 0 ? fcmg-fresh-at-budgeted-hinted(path, prompt, n, query, reserve, profile, source-hint) : !((String) fcmr-path(r) == path) ? (Comparable) fcmr-release-ok?(r) == 1 ? fcmg-fresh-at-budgeted-hinted(path, prompt, n, query, reserve, profile, source-hint) : fcmg-stale-close(r) : {
         let src = fcmr-src(r);
         let arch = fcmr-arch(r);
         let model = fcmg-name(src);
@@ -671,18 +715,25 @@ src, source-hint, 0, tfx);
         let prompt-bound = (Comparable) live-cursor == 1 ? qtlc-segments-upper-bound(segments, 0) : len(ids);
         let model-max = gmt-u32(src, q38-key(arch, "context_length"));
         let need = fcmg-context-need(prompt-bound, thought-n, gap-n * (len(thoughts) > 1 ? len(thoughts) - 1 : 0), n, query, reserve);
-        prompt-bound <= 0 ? [fcmg-noted(prompt, arch, model, "generation refused: tokenizer produced no prompt tokens"), r] : (Comparable) fcmg-tail-budget-ok?(n, query, reserve) == 0 || need > model-max ? [fcmg-noted(prompt, arch, model, ("generation refused: requested context exceeds model limit=" + model-max.str())), r] : need <= fcmr-maxpos(r) ? [fcmg-noted(prompt, arch, model, (Comparable) live-cursor == 1 ? fcmg-run-context-cursor-budgeted(src, arch, model, cursor, thought-lists, thought-eval, fcmr-ctx(r), n, query, reserve, gap-n, source-hint, tfx) : fcmg-run-context-budgeted(src, arch, model, ids, thought-lists, thought-eval, fcmr-ctx(r), n, query, reserve, gap-n, source-hint, tfx)), r] : (Comparable) fcmr-release-ok?(r) == 1 ? fcmg-fresh-at-budgeted-hinted(path, prompt, n, query, reserve, profile, source-hint) : fcmg-stale-close();
+        prompt-bound <= 0 ? [fcmg-noted(prompt, arch, model, "generation refused: tokenizer produced no prompt tokens"), r] : (Comparable) fcmg-tail-budget-ok?(n, query, reserve) == 0 || need > model-max ? [fcmg-noted(prompt, arch, model, ("generation refused: requested context exceeds model limit=" + model-max.str())), r] : need <= fcmr-maxpos(r) ? fcmg-owned-run(r,held=>fcmg-noted(prompt, arch, model, (Comparable) live-cursor == 1 ? fcmg-run-context-cursor-budgeted(src, arch, model, cursor, thought-lists, thought-eval, held, n, query, reserve, gap-n, source-hint, tfx) : fcmg-run-context-budgeted(src, arch, model, ids, thought-lists, thought-eval, held, n, query, reserve, gap-n, source-hint, tfx))) : (Comparable) fcmr-release-ok?(r) == 1 ? fcmg-fresh-at-budgeted-hinted(path, prompt, n, query, reserve, profile, source-hint) : fcmg-stale-close(r);
     };
     def fcmg-generate-with-at-budgeted(r, path, prompt, n, query, reserve, profile) = fcmg-generate-with-at-budgeted-hinted(r, path, prompt, n, query, reserve, profile, fcsa-infer(prompt));
     def fcmg-generate-with-at(r, path, prompt, n, profile) = fcmg-generate-with-at-budgeted(r, path, prompt, n, 0, 0, profile);
     def fcmg-generate-with-at-2p(r, path, prompt, query, reserve, profile) = fcmg-generate-with-at-budgeted(r, path, prompt, 0, query, reserve, profile);
     def fcmg-generate-with(r, path, prompt, n) = fcmg-generate-with-at(r, path, prompt, n, "full");
-    // The one-shot door, byte-identical in what it answers: admit, generate,
-    // release.  A caller with nothing to hold on to loses nothing and keeps the
-    // close check that was always here.
+    // A one-shot result has the same report/owner contract as a resident result.
+    // Completed release leaves no owner; incomplete cleanup remains reachable.
+    def fcmg-finish(out) = fcmg-finish-by(out,fcmr-release-ok?);
+    def fcmg-finish-by(out,release) = nil?(out[1]) ? out : {
+        let owner=out[1];let ledger=fcmr-session-owner?(owner) ? fcms-release-ledger(owner) : record_new(0);
+        let held=record_get(ledger,"one-shot-report");let report=value_kind(held)=="string" ? held : out[0];
+        release(owner) ? {record_set(ledger,"one-shot-report",nothing());[report+"\nrelease_ok=1\ncleanup=released\n",[]];} : {
+            record_set(ledger,"one-shot-report",report);[report+"\nrelease_ok=0\ncleanup=retained-owner\n",owner];
+        };
+    };
     def fcmg-q35-run(path, prompt, n) = {
         let out = fcmg-generate-with(fcmr-none(), path, prompt, n);
-        (Comparable) fcmr-release-ok?(out[1]) == 1 ? out[0] : "generation refused: model handle close mismatch";
+        fcmg-finish(out);
     };
     // The generate door carries the Form teach overlay. Raw fcmg-q35-run
     // stays for probes that need an exact prompt.
@@ -764,7 +815,7 @@ src, source-hint, 0, tfx);
     def fcmg-generate(path, prompt, n) = {
         let out = fcmg-generate-resident(fcmr-none(), path, prompt, n);
         let _turn-returned = fcmg-live-stage("model-turn-returned", 7864321);
-        (Comparable) fcmr-release-ok?(out[1]) == 1 ? out[0] : "generation refused: model handle close mismatch";
+        fcmg-finish(out);
     };
     // Compact current-source door for held-out evaluation and direct knowledge
     // questions. Same resident model, cursor, lookup budget and KV injection;
@@ -779,7 +830,7 @@ src, source-hint, 0, tfx);
     def fcmg-generate-current-source-resident-at(r, path, prompt, source-hint) = fcmg-generate-knowledge-resident-2p-hinted(r, path, prompt, fcmg-current-source-query-budget(), fcmg-current-source-answer-reserve(), source-hint);
     def fcmg-generate-knowledge(path, prompt, n) = {
         let out = fcmg-generate-knowledge-resident(fcmr-none(), path, prompt, n);
-        (Comparable) fcmr-release-ok?(out[1]) == 1 ? out[0] : "generation refused: model handle close mismatch";
+        fcmg-finish(out);
     };
     // Soft mouth: Metal proposes text; kernel parses Form cells and admits only
     // when held-out structure is equivalent. Empty held-out does not authorize.
@@ -788,16 +839,18 @@ src, source-hint, 0, tfx);
     // admitted cells so those tokens enter the Metal offer stream.
     def fcmg-soft-invite(prompt) = ("Emit one Form call. Operator word mul. Both operands the digit seven. Use call parentheses around operator and operands. One cell only. No prose. No bare result.\n" + prompt);
     def fcmg-soft-tail(soft, injected) = (fcmg-line("soft-status", lg-soft-status(soft)) + (fcmg-line("soft-equivalent", lg-soft-equivalent(soft).str()) + (fcmg-line("soft-eval", lg-values-line(lg-soft-thoughts(soft))) + (fcmg-line("soft-commit", lg-soft-commit?(soft).str()) + ((String) fcmg-line("soft-wins", ll-wins(lg-soft-events(soft), lg-cand-soft()).str()) + fcmg-line("soft-injected", injected.str()))))));
-    def fcmg-soft-inject(path, soft, n) = (Comparable) lg-soft-commit?(soft) == 0 ? fcmg-soft-tail(soft, 0) : {
+    def fcmg-soft-inject(path, soft, n) = (Comparable) lg-soft-commit?(soft) == 0 ? [fcmg-soft-tail(soft, 0),[]] : {
         let cells = lg-cells-prompt(lg-soft-thoughts(soft));
         let inject-report = fcmg-q35-run(path, cells, n);
-        (inject-report + ("\n" + fcmg-soft-tail(soft, 1)));
+        [inject-report[0]+"\n"+fcmg-soft-tail(soft,1),inject-report[1]];
     };
     def fcmg-soft-mouth(path, prompt, heldout, n) = {
         let propose-report = fcmg-q35-run(path, fcmg-soft-invite(prompt), n);
-        let proposal = fcmg-local-plan-text(propose-report);
-        let soft = lg-soft(proposal, heldout);
-        (Comparable) lg-soft-commit?(soft) == 0 ? (propose-report + ("\n" + fcmg-soft-tail(soft, 0))) : fcmg-soft-inject(path, soft, n);
+        !nil?(propose-report[1]) ? propose-report : {
+            let proposal = fcmg-local-plan-text(propose-report[0]);
+            let soft = lg-soft(proposal, heldout);
+            (Comparable) lg-soft-commit?(soft) == 0 ? [propose-report[0]+"\n"+fcmg-soft-tail(soft,0),[]] : fcmg-soft-inject(path, soft, n);
+        };
     };
     def fcmg-bandwidth(path) = (String) path == "" ? "no model is picked — run `models <dir>`, then `use <n>`, then `model-bandwidth`" : (Comparable) qaf-verify-sealed-file(path) == 1 ? mbw-run(path) : "bandwidth refused: selected artifact has no current Form-native SHA-256 seal";
     // The default witness answers `nothing` for every envelope — an unconfigured

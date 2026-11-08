@@ -37,6 +37,7 @@ import form-stdlib/bml/memory-governor.bml;
 import form-stdlib/bml/host-child.bml;
 import form-stdlib/bml/string-join.bml;
 import form-stdlib/bml/door-options.bml;
+import form-stdlib/bml/formbin-codec.bml;
 section [form.bml] {
  class DraftNativeReading {
   def dnr-door() = "draft-native-reading";
@@ -45,7 +46,6 @@ section [form.bml] {
   def dnr-grader() = "observe/alignment-read-run.bml";
   def dnr-work() = ".hearth/draft-native-reading";
   def dnr-rules() = ["as-written", "minus-given", "each-named-path", "when-given-no-number"];
-  def dnr-grade-ms() = 600000;
   def dnr-has?(xs, x) = any?(y => (String) y == x, xs);
   def dnr-starts?(s, p) = (len(s) >= len(p)) && ((String) substring(s, 0, len(p)) == p);
   def dnr-in?(c, set) = str_find(set, c, 0) >= 0;
@@ -217,7 +217,7 @@ section [form.bml] {
    let made = hch-mkdirs(work);
    let fx = write_file_text(work ++ "/covenant-fixtures.jsonl", str-join(map(it => dnr-fixture(it), items)));
    let an = write_file_text(work ++ "/covenant-answers.jsonl", str-join(map(it => dnr-answers(it), items)));
-   hch-cell-in(work, "covenant", dnr-grader(), json-emit(json-node-object([fhn-s("answers", work ++ "/covenant-answers.jsonl"), fhn-s("fixtures", work ++ "/covenant-fixtures.jsonl")])), hch-by(dnr-grade-ms()));
+    hch-cell-in(work, "covenant", dnr-grader(), json-emit(json-node-object([fhn-s("answers", work ++ "/covenant-answers.jsonl"), fhn-s("fixtures", work ++ "/covenant-fixtures.jsonl")])), nothing());
   }
   def dnr-graded-ok?(graded) = ((Comparable) (graded[0] ?? 1) == 0) && (str_find(graded[1], "[alignment] mode=grade ", 0) >= 0);
   def dnr-line-of(text, sid) = foldl((acc, l) => ((Comparable) len(acc) == 0) && dnr-starts?(l, sid ++ "\t") ? l : acc, "", split-on(text, "\n"));
@@ -261,34 +261,45 @@ section [form.bml] {
   // was the drafter's alone and the draft file does not hold it; the packet says so
   def dnr-files-shown(sec) = (Comparable) len(sec[3]) == 0 ? "" : ("\n\nThe files the drafter read (their text is not shown here):\n" ++ sec[3]);
   def dnr-packet(sec) = rp-sema() ++ "\n---\n" ++ dnr-frame() ++ "\n\nThe person asked:\n" ++ sec[0] ++ ((Comparable) len(sec[2]) == 0 ? "" : ("\n\nThe turn before the draft:\n" ++ sec[2])) ++ dnr-files-shown(sec) ++ "\n\nThe draft:\n" ++ sec[1] ++ "\n\nYour reading:";
-  // the voice the governor's room allows: the model the request names; else the registry's review role when it fits over the live
-  // leases, else its fast-answer role when that fits; else none, and the door says why. ask(need) answers the governor's verdict
-  // (the band hands a stub). Answers [model, line]: model "" is no voice, and the line is the governor's own word
-  def dnr-voice-need(r) = (file_size(mr-path(r)) > 0 ? file_size(mr-path(r)) : 26 * mg-gib()) + mg-kv-margin();
+   // The actual packet and allocation boundary decide admission. The caller's
+   // explicit model stays authoritative; a default review may offer fast-answer
+   // after an observed memory refusal whose resources have all released.
   def dnr-review() = mr-for-role("review");
   def dnr-fast() = mr-for-role("fast-answer");
-  def dnr-voice-by(first, fast, ask) {
-   let v = ask(dnr-voice-need(first));
-   let line = mg-line("native reading", dnr-voice-need(first), v) ++ mg-lease-note(v);
-   mg-granted?(v) ? [mr-name(first), line] : ((String) mr-name(fast) != mr-name(first)) && ((Comparable) mr-file?(mr-path(fast)) == 1) ? dnr-voice-fast(fast, line, ask(dnr-voice-need(fast))) : ["", line];
-  }
-  def dnr-voice-fast(fast, line, v) = [mg-granted?(v) ? mr-name(fast) : "", line ++ "; " ++ mg-line("native reading", dnr-voice-need(fast), v) ++ mg-lease-note(v)];
   def dnr-named-model(opts) = (Comparable) len(fcgp-str(opts, "model")) > 0 ? fcgp-str(opts, "model") : mr-name(dnr-review());
-  def dnr-voice(opts) = fcgp-present?(opts, "voice_lines") || dnr-only?(opts) || ((Comparable) len(fcgp-str(opts, "model")) > 0) ? [dnr-named-model(opts), ""] : dnr-voice-by(dnr-review(), dnr-fast(), need => mg-lease-ask-read(mg-lease-dir(), need));
+   def dnr-voice(opts) = [dnr-named-model(opts),""];
+   def dnr-candidates(opts,first,fast) = [first] + (len(fcgp-str(opts,"model"))==0 && !fcgp-present?(opts,"voice_lines") && !dnr-only?(opts) && mr-name(fast) != "" && mr-name(fast) != first && mr-file?(mr-path(fast))==1 ? [mr-name(fast)] : []);
   // the window: until_ms is a time on host_monotonic_ms; an ask begins only with its floor left (a Q8 ask at a shared GPU, measured)
   def dnr-ask-floor-ms() = 300000;
   def dnr-minutes(ms) = (ms < 0 ? 0 : ms / 60000).str() ++ " min";
   def dnr-window-why-at(until, now) = nothing?(until) || (until - now >= dnr-ask-floor-ms()) ? "" : "the window: " ++ dnr-minutes(until - now) ++ " left cannot hold an ask of " ++ dnr-minutes(dnr-ask-floor-ms());
   def dnr-window-why(opts) = dnr-window-why-at(fcgp-num(opts, "until_ms"), host_monotonic_ms());
   def dnr-ask(model, packet) = fcnv-ask(packet, json-node-object([fhn-s("model", model), fhn-n("max_reply_tokens", 128), fhn-s("enquiry", "a reading of a draft beside the words it answers")]));
-  // what a voice said: [status, text, reason, generated, prefill ms, decode ms, wall ms]
+   // Said: status, text, reason, generated, prefill/decode/wall ms, actual model,
+   // released, ownership, attempts. Each attempt retains its own first ten fields.
   def dnr-no-voice() = ["", "", "", 0, 0, 0, 0];
-  def dnr-said-voice(v, wall) = [v[0], v[1], v[7] ?? "", v[3], fcnv-prefill-ms(v), fcnv-decode-ms(v), wall];
+   def dnr-said-voice(v, wall) = [v[0], v[1], v[7] ?? "", fcnv-current-usage(v)[3], fcnv-resumed?(v) ? 0 : fcnv-prefill-ms(v), fcnv-resumed?(v) ? 0 : fcnv-decode-ms(v), wall,v[4],v[6],fcnv-ownership(v),v[5],v];
   def dnr-asked-voice(model, packet) {
    let began = host_monotonic_ms();
    let v = dnr-ask(model, packet);
    dnr-said-voice(v, host_monotonic_ms() - began);
   }
+   def dnr-attempts(said) = len(said)>10 ? said[10] : [];
+   def dnr-actual-model(said,fallback) = len(said)>7 && said[7] != "" ? said[7] : fallback;
+   def dnr-memory-refusal?(said) = said[0]=="unavailable" && len(said)>9 && said[8]==1 && said[9]=="released" && mg-memory-ending?(said[2]);
+   def dnr-combined(attempts,last) = append([last[0],last[1],last[2]],append(map(k=>foldl((n,a)=>n+a[k],0,attempts),[3,4,5,6]),[last[7],last[8],last[9],attempts,len(last)>10 ? last[10] : nothing()]));
+   def dnr-asks(models,packet,ask,window,attempts) {
+    let why=window();
+    if why != "" then {
+     let last=nil?(attempts) ? ["held","",why,0,0,0,0,"",1,"released"] : append(["held",attempts[-1][1],attempts[-1][2]+"; "+why],attempts[-1][3:]);
+     dnr-combined(attempts,last);
+    } else {
+     let said=ask(models[0],packet);let retained=append(attempts,[said]);
+     len(models)>1 && dnr-memory-refusal?(said) ? dnr-asks(models[1:],packet,ask,window,retained) : dnr-combined(retained,said);
+    };
+   }
+   def dnr-attempt-node(said) = json-node-object([fhn-s("status",said[0]),fhn-s("text",said[1]),fhn-s("reason",said[2]),fhn-n("generated",said[3]),fhn-n("prefill_ms",said[4]),fhn-n("decode_ms",said[5]),fhn-n("wall_ms",said[6]),fhn-s("model",said[7]),fhn-n("released",said[8]),fhn-s("ownership",said[9]),fcgp-maybe("complete",len(said)>10 ? said[10] : nothing())]);
+   def dnr-attempt-nodes(said) = json-node-array(map(dnr-attempt-node,dnr-attempts(said)));
   // the band's lane: {"draft","line"} rows read in place of the voice; a row may name "status" ("unavailable"), as a voice that did not answer
   def dnr-fixture-row(rows, id) = foldl((acc, r) => (String) fcgp-str(r, "draft") == id ? r : acc, nothing(), rows);
   def dnr-said-fixture(rows, id) { let r = dnr-fixture-row(rows, id); nothing?(r) ? ["unavailable", "", "no voice line for this draft in the fixture", 0, 0, 0, 0] : (Comparable) len(fcgp-str(r, "status")) > 0 ? [fcgp-str(r, "status"), "", "fixture", 0, 0, 0, 0] : ["answered", fcgp-str(r, "line"), "fixture", 0, 0, 0, 0]; }
@@ -303,21 +314,22 @@ section [form.bml] {
   }
   // ---- one draft read: [id, its reading or "refused" or "held", the voice, the ledger's answer, voice asks, why the voice closed ("" while it stands), what the voice said]
   // ctx: [options, ledger, work, model, fixture lines]
-  def dnr-row-after(t, model, said) = [fhn-s("reader", dl-native()), fhn-n("predicates_passed", t[0]), fhn-n("predicates_total", t[1]), json-node-pair("predicates_failed", dnr-strs(map(i => i[0] ++ " " ++ i[1], t[2]))), fhn-s("model", model), fhn-n("generated", said[3]), fhn-n("prefill_ms", said[4]), fhn-n("decode_ms", said[5]), fhn-n("wall_ms", said[6])];
+  def dnr-row-after(t, model, said) = [fhn-s("reader", dl-native()), fhn-n("predicates_passed", t[0]), fhn-n("predicates_total", t[1]), json-node-pair("predicates_failed", dnr-strs(map(i => i[0] ++ " " ++ i[1], t[2]))), fhn-s("model", model), fhn-n("generated", said[3]), fhn-n("prefill_ms", said[4]), fhn-n("decode_ms", said[5]), fhn-n("wall_ms", said[6]),json-node-pair("voice_attempts",dnr-attempt-nodes(said)),fhn-s("attempt_evidence",len(said)>12 ? said[12] : "")];
   def dnr-only?(opts) = (Comparable) (fcgp-num(opts, "covenant_only") ?? 0) == 1;
   def dnr-unapplied-text(item) = nil?(item[3]) ? "" : " unapplied=" ++ str-join-with(item[3], ",");
   // generated per second of decode, in tenths; a voice that ran no clock reads "unread", never a rate
   def dnr-rate(generated, ms) = ms <= 0 ? "unread" : ((generated * 1000) / ms).str() ++ "." ++ (((generated * 10000) / ms) % 10).str();
   def dnr-voice-account(said) = said[6] <= 0 ? "" : " generated=" ++ said[3].str() ++ " wall_ms=" ++ said[6].str() ++ " tok_s=" ++ dnr-rate(said[3], said[5]);
   def dnr-landing(ctx, item, word, note, t, voice, asked, said) {
-   let landed = dnr-only?(ctx[0]) ? "covenant-only" : dl-land(ctx[1], item[0], word, note, dnr-row-after(t, (String) voice == "not-asked" ? "" : ctx[3], said));
+    let landed = dnr-only?(ctx[0]) ? "covenant-only" : dl-land(ctx[1], item[0], word, note, dnr-row-after(t, (String) voice == "not-asked" ? "" : dnr-actual-model(said,ctx[3]), said));
    let shown = print_str(dnr-prefix() ++ item[0] ++ " " ++ word ++ " voice=" ++ voice ++ " covenant=" ++ t[0].str() ++ "/" ++ t[1].str() ++ dnr-unapplied-text(item) ++ dnr-voice-account(said) ++ " ledger=" ++ landed ++ " note=" ++ note);
    [item[0], word, voice, landed, asked, "", said];
   }
-  def dnr-held(ctx, item, t, why) {
+   def dnr-held(ctx,item,t,why) = dnr-held-after(ctx,item,t,why,0,dnr-no-voice());
+   def dnr-held-after(ctx, item, t, why, asked, heard) {
    let ledger = dnr-only?(ctx[0]) ? "covenant-only" : "not-landed";
-   let said = print_str(dnr-prefix() ++ item[0] ++ " held voice=not-asked covenant=" ++ t[0].str() ++ "/" ++ t[1].str() ++ dnr-unapplied-text(item) ++ " ledger=" ++ ledger ++ ((Comparable) len(why) == 0 ? "" : " why=" ++ why));
-   [item[0], "held", "not-asked", ledger, 0, why, dnr-no-voice()];
+   let said = print_str(dnr-prefix() ++ item[0] ++ " held voice=" ++ (asked>0 ? "held" : "not-asked") ++ " covenant=" ++ t[0].str() ++ "/" ++ t[1].str() ++ dnr-unapplied-text(item) ++ " ledger=" ++ ledger ++ ((Comparable) len(why) == 0 ? "" : " why=" ++ why));
+    [item[0], "held", asked>0 ? "held" : "not-asked", ledger, asked, why, heard];
   }
   def dnr-refused(id, why, asked, closing, heard) {
    let said = print_str(dnr-prefix() ++ id ++ " refused: " ++ why);
@@ -327,12 +339,17 @@ section [form.bml] {
    let fixture = fcgp-present?(ctx[0], "voice_lines");
    let packet = dnr-packet(item[1]);
    let shown = write_file_text(ctx[2] ++ "/" ++ item[0] ++ ".packet.txt", packet);
-   let said = fixture ? dnr-said-fixture(ctx[4], item[0]) : dnr-asked-voice(ctx[3], packet);
-   let kept = write_file_text(ctx[2] ++ "/" ++ item[0] ++ ".voice.txt", "[" ++ said[0] ++ "] " ++ said[1]);
+    let answer = fixture ? dnr-said-fixture(ctx[4], item[0]) : dnr-asks(dnr-candidates(ctx[0],ctx[3],dnr-fast()),packet,dnr-asked-voice,()=>dnr-window-why(ctx[0]),[]);
+    let evidence=ctx[2]+"/"+item[0]+"-"+host_pid().str()+"-"+now_unix_ms().str()+".attempts.fkb";
+    let retained=fixture ? nothing() : fbc-dump(evidence,fbc-data([packet,dnr-attempts(answer)]));
+    !fixture && !fbc-good(retained) ? form_error("native reading attempt retention failed") : 0;
+    let said=fixture ? answer : append(answer,[evidence]);
+    let kept = write_file_text(ctx[2] ++ "/" ++ item[0] ++ ".voice.txt", "[" ++ said[0] ++ "] " ++ said[1]+(fixture ? "" : "\nEvidence: "+evidence));
    let line = dnr-first-line(said[1]);
    let parsed = (String) said[0] == "answered" ? dnr-parse(line) : nothing();
-   let asked = fixture ? 0 : 1;
-   !((String) said[0] == "answered") ? dnr-refused(item[0], "the voice answered " ++ said[0] ++ " (" ++ said[2] ++ ")", asked, "the voice answered " ++ said[0] ++ " (" ++ said[2] ++ ")", said)
+    let asked = fixture ? 0 : len(dnr-attempts(said));
+    said[0]=="held" ? dnr-held-after(ctx,item,t,said[2],asked,said)
+    : !((String) said[0] == "answered") ? dnr-refused(item[0], "the voice answered " ++ said[0] ++ " (" ++ said[2] ++ ")", asked, "the voice answered " ++ said[0] ++ " (" ++ said[2] ++ ")", said)
    : nothing?(parsed) ? dnr-refused(item[0], "the voice's line does not read as accepted|revised|rejected: <note>: " ++ line, asked, "", said)
    : dnr-landing(ctx, item, parsed[0], parsed[1], t, fixture ? "fixture" : "answered", asked, said);
   }
@@ -365,8 +382,12 @@ section [form.bml] {
   def dnr-gather-at(it, rest, cov, work, tree, n, acc, over) = dnr-readable?(it) ? dnr-gather(rest, cov, work, tree, n - 1, cons(it, acc), over) : dnr-gather(rest, cov, work, tree, n, acc, cons(it, over));
   def dnr-count(results, w) = len(filter(r => (String) r[1] == w, results));
   def dnr-sum(results, k) = foldl((n, r) => n + r[6][k], 0, results);
+   def dnr-models(results,fallback) {
+    let models=foldl((names,r)=>foldl((names,a)=>dnr-has?(names,a[7]) ? names : append(names,[a[7]]),names,dnr-attempts(r[6])),[],results);
+    nil?(models) ? fallback : str-join-with(models,", ");
+   }
   def dnr-closed-text(results) { let why = foldl((acc, r) => (Comparable) len(acc) > 0 ? acc : r[5], "", results); (Comparable) len(why) == 0 ? "" : "; the voice closed: " ++ why; }
-  def dnr-summary(results, pending, ledger, model) = dnr-prefix() ++ "read " ++ len(results).str() ++ " of " ++ pending.str() ++ " pending: accepted " ++ dnr-count(results, "accepted").str() ++ ", revised " ++ dnr-count(results, "revised").str() ++ ", rejected " ++ dnr-count(results, "rejected").str() ++ ", refused " ++ dnr-count(results, "refused").str() ++ ", held " ++ dnr-count(results, "held").str() ++ "; voice asks " ++ foldl((n, r) => n + r[4], 0, results).str() ++ " (" ++ ((Comparable) len(model) == 0 ? "no voice" : model) ++ ", rp-sema " ++ substring(hex-encode(sha256-stream-string(rp-sema())), 0, 12) ++ ") generated " ++ dnr-sum(results, 3).str() ++ " wall_ms " ++ dnr-sum(results, 6).str() ++ " tok_s " ++ dnr-rate(dnr-sum(results, 3), dnr-sum(results, 5)) ++ dnr-closed-text(results) ++ "; rent_tokens 0; ledger " ++ ledger;
+  def dnr-summary(results, pending, ledger, model) = dnr-prefix() ++ "read " ++ len(results).str() ++ " of " ++ pending.str() ++ " pending: accepted " ++ dnr-count(results, "accepted").str() ++ ", revised " ++ dnr-count(results, "revised").str() ++ ", rejected " ++ dnr-count(results, "rejected").str() ++ ", refused " ++ dnr-count(results, "refused").str() ++ ", held " ++ dnr-count(results, "held").str() ++ "; voice asks " ++ foldl((n, r) => n + r[4], 0, results).str() ++ " (" ++ ((Comparable) len(model) == 0 ? "no voice" : dnr-models(results,model)) ++ ", rp-sema " ++ substring(hex-encode(sha256-stream-string(rp-sema())), 0, 12) ++ ") generated " ++ dnr-sum(results, 3).str() ++ " wall_ms " ++ dnr-sum(results, 6).str() ++ " tok_s " ++ dnr-rate(dnr-sum(results, 3), dnr-sum(results, 5)) ++ dnr-closed-text(results) ++ "; rent_tokens 0; ledger " ++ ledger;
   // ---- the door
   def dnr-spec() = [["count", "int"], ["ids", "strs"], ["ledger", "str"], ["covenant", "str"], ["voice_lines", "str"], ["model", "str"], ["work", "str"], ["covenant_only", "int"], ["tree", "str"], ["until_ms", "int"], ["newest", "int"]];
   def dnr-or(v, d) = (String) v == "" ? d : v;

@@ -3,7 +3,10 @@
 // A rename publishes a complete file. OS sync requests writeback before publication.
 import form-stdlib/native-llama-backward.bml;
 import form-stdlib/form-fs.fk;
+import form-stdlib/bml/native-posix.bml;
+import form-stdlib/bml/native-owner-clock.bml;
 section [form.bml] {
+ let NLC-OWNED=record_new(0,"saves",[],"restores",[]);
  class NativeLoraCheckpoint {
   def nlc-msl() = "#include <metal_stdlib>\nusing namespace metal;\nkernel void nlc_copy(device const uchar* src [[buffer(0)]],device uchar* dst [[buffer(1)]],constant uint& offset [[buffer(2)]],constant uint& bytes [[buffer(3)]],uint i [[thread_position_in_grid]]){if(i<bytes)dst[offset+i]=src[i];}\nkernel void nlc_equal(device const uchar* src [[buffer(0)]],device const uchar* dst [[buffer(1)]],device uint* out [[buffer(2)]],constant uint& offset [[buffer(3)]],constant uint& bytes [[buffer(4)]],uint lane [[thread_index_in_simdgroup]]){uint bad=0;for(uint i=lane;i<bytes;i+=32)bad+=uint(src[i]!=dst[offset+i]);bad=simd_sum(bad);if(lane==0)out[0]=bad;}\n";
   // tensor row: name, handle, dimensions, optional dtype (F32 by default).
@@ -31,38 +34,91 @@ section [form.bml] {
    nil?(rows) ? 1 : nlc-equal-next(rows,dest,offset,pipeline,out,metal_enqueue(pipeline,md-bind16([rows[0][1],dest,out],[offset,nlc-bytes(rows[0])],32,0,1,0),1));
   }
   def nlc-equal-next(rows,dest,offset,pipeline,out,rc) = rc < 0 ? form_error("native checkpoint verification dispatch refused") : !((Comparable) ln-u32-le(metal_buf_read(out,0,4),0) == 0) ? form_error("native checkpoint byte verification failed") : nlc-equal(rows[1:],dest,offset + nlc-bytes(rows[0]),pipeline,out);
-  def nlc-save(path,rows,base,step) {
-   let candidate = path + (".candidate-" + host_pid().str());
+   def nlc-save(path,rows,base,step) = nlc-save-by(path,rows,base,step,nothing());
+   def nlc-save-by(path,rows,base,step,parent) = nlc-save-held(path,rows,base,step,parent,nothing());
+   // An enclosing checkpoint can retain this exact save across its later
+   // effects. Ordinary saves still recapture buffers after a delivered call.
+   def nlc-save-held(path,rows,base,step,parent,holder) {
+    let request=[path,rows,base,step];let remembered=record?(holder) ? record_get(holder,"operation") : nothing();
+    if record?(remembered) && (record_get(remembered,"request") != request || record_get(remembered,"parent") != parent) then form_error("native checkpoint retained save request or owner changed") else 0;
+    let previous=record?(remembered) ? [remembered] : filter(o=>record_get(o,"request")==request && record_get(o,"parent")==parent && record_get(o,"phase") != "delivered",record_get(NLC-OWNED,"saves"));
+    let conflicting=filter(o=>record_get(o,"request")[0]==path && (record_get(o,"request") != request || record_get(o,"parent") != parent) && record_get(o,"phase") != "delivered",record_get(NLC-OWNED,"saves"));
+    if !nil?(conflicting) then form_error("native checkpoint destination has a different pending save") else 0;
+    let operation=nil?(previous) ? record_new(0,"request",request,"parent",parent,"phase","new","candidate",path+".candidate-"+noc-open()) : previous[0];
+    if nil?(previous) then record_set(NLC-OWNED,"saves",append(record_get(NLC-OWNED,"saves"),[operation])) else 0;
+    if record?(holder) then record_set(holder,"operation",operation) else 0;
+    let result=(record_get(operation,"phase")=="published" || record_get(operation,"phase")=="delivered") ? (nlc-file-proof(path)==record_get(operation,"proof") && file_size(path)==record_get(operation,"result")[1] ? record_get(operation,"result") : form_error("native checkpoint published file changed")) : record_get(operation,"phase")=="verified" ? nlc-publish-owned(operation) : {
+     let old=record_get(operation,"owner");
+     record?(old) && !nll-release(old) ? form_error("native checkpoint prior buffers await release") : {
+      let owner=nll-group(parent,"llama-checkpoint-save");record_set(operation,"owner",owner);nlc-save-start(operation,path,rows,base,step);
+     };
+    };
+    record_set(operation,"phase","delivered");record_set(NLC-OWNED,"saves",filter(o=>o==operation || record_get(o,"phase") != "delivered",record_get(NLC-OWNED,"saves")));result;
+   }
+   def nlc-save-start(operation,path,rows,base,step) {
+   let candidate = record_get(operation,"candidate");
    let header = nlc-header(rows,base,step); let start = 8 + len(header);
+    record_set(operation,"candidate",candidate);record_set(operation,"size",start + nlc-total(rows));record_set(operation,"phase","writing");
    let written = write_file_text(candidate,md-le32(len(header)) + ((String) md-le32(0) + header));
-   !((Comparable) file_size(candidate) == start) ? form_error("native checkpoint metadata write incomplete") : nlc-save-mapped(path,candidate,rows,start,base,step);
+    !((Comparable) file_size(candidate) == start) ? form_error("native checkpoint metadata write incomplete") : nlc-save-mapped(operation,path,candidate,rows,start,base,step);
   }
-  def nlc-save-mapped(path,candidate,rows,start,base,step) {
+   def nlc-save-mapped(operation,path,candidate,rows,start,base,step) {
    let size = start + nlc-total(rows);
-   let dest = size >= 4294967296 ? form_error("native checkpoint file exceeds the current 32-bit payload offset; publication withheld") : nam-held(metal_buf_from_file(candidate,0,0 - size));
+    let owner=record_get(operation,"owner");
+    let admittedIdentity=nlc-file-identity(candidate);
+    let dest = size >= 4294967296 ? form_error("native checkpoint file exceeds the current 32-bit payload offset; publication withheld") : nll-map(owner,candidate,0,0 - size);
    let copied = nlc-copy(rows,dest,start,nam-held-pipe(metal_pipeline(nlc-msl(),"nlc_copy")));
    let done = nam-sync();
-   let out = nam-alloc(1);
+    let out = nll-allocate(owner,1);
    let equal = nlc-equal(rows,dest,start,nam-held-pipe(metal_pipeline(nlc-msl(),"nlc_equal")),out);
-   let released = nam-free([dest,out]);
+    nlc-sync-host(host_sync());let proof=nlc-file-proof(candidate);let identity=nlc-file-identity(candidate);
+    if nothing?(identity) || identity != admittedIdentity || nothing?(proof) then form_error("native checkpoint verified candidate identity changed") else {record_set(operation,"identity",identity);record_set(operation,"proof",proof);};
+    record_set(operation,"result",[path,size,len(rows),step,equal]);record_set(operation,"phase","verified");
+    nlc-publish-owned(operation);
+   }
+   def nlc-publish-owned(operation) {
+    let result=record_get(operation,"result");let path=result[0];let size=result[1];let candidate=record_get(operation,"candidate");
+    !nll-release(record_get(operation,"owner")) ? form_error("native checkpoint verified; buffer release incomplete") : {
    let synced = nlc-sync-host(host_sync());
-   let rename = fs-rename(candidate,path);
-   (!((Comparable) rename == 0)) || (!((Comparable) file_size(path) == size)) ? form_error("native checkpoint publication failed") : [path,size,len(rows),step,equal];
+    let present=nlc-file-identity(candidate);
+    let identity=record_get(operation,"identity");
+    let proof=record_get(operation,"proof");
+    let rename = !nothing?(present) && present==identity && nlc-file-proof(candidate)==proof ? fs-rename(candidate,path) : nothing?(present) && !nothing?(proof) && nlc-file-proof(path)==proof ? 0 : -1;
+    rename != 0 || file_size(path) != size || nothing?(identity) || nlc-file-identity(path) != identity || nlc-file-proof(path) != proof ? form_error("native checkpoint publication failed") : {record_set(operation,"phase","published");result;};
+    };
   }
+   def nlc-file-identity(path) {
+    let lease=nps-file-open(path,0);
+    value_kind(lease) != "list" ? nothing() : {defer nps-file-settle(lease);nps-file-identity(lease);};
+   }
+   def nlc-file-proof(path) {
+    let lease=nps-file-open(path,0);
+    value_kind(lease) != "list" ? nothing() : {defer nps-file-settle(lease);let stamp=nps-file-stamp(lease);value_kind(stamp)=="list" ? take(5,stamp) : nothing();};
+   }
   // `status` is what host_sync answered: 0 when the OS was asked to write back its buffers
   def nlc-sync-host(status) = nothing?(status) ? form_error("native checkpoint OS writeback door absent") : !((Comparable) status == 0) ? form_error("native checkpoint OS writeback failed") : 1;
-  def nlc-load-optimizer(state,path) = nlc-restore(nlc-optimizer-rows(state),sti-open(path));
-  def nlc-restore(rows,index) {
-   nil?(rows) ? 1 : nlc-restore-row(rows[0],rows[1:],index);
+   def nlc-load-optimizer(state,path) = nlc-restore-by(nlc-optimizer-rows(state),sti-open(path),nil?(state) ? nothing() : nll-owner(state[0]));
+   def nlc-restore(rows,index) = nlc-restore-by(rows,index,nothing());
+   def nlc-restore-by(rows,index,parent) {
+    let request=[rows,index];let previous=filter(o=>record_get(o,"request")==request && record_get(o,"phase") != "delivered",record_get(NLC-OWNED,"restores"));
+    let operation=nil?(previous) ? record_new(0,"request",request,"remaining",rows,"owner",nll-group(parent,"llama-checkpoint-restore")) : previous[0];
+    if nil?(previous) then record_set(NLC-OWNED,"restores",append(record_get(NLC-OWNED,"restores"),[operation])) else 0;
+    let restored=nlc-restore-next(operation,index);
+    if restored then {record_set(operation,"phase","delivered");record_set(NLC-OWNED,"restores",filter(o=>o==operation || record_get(o,"phase") != "delivered",record_get(NLC-OWNED,"restores")));} else 0;restored;
   }
-  def nlc-restore-row(row,rest,index) {
-   let mapped = sti-map(index,row[0]);
-   !(((String) mapped[2] == "F32") && ((Value) mapped[1] == row[2])) ? form_error("native optimizer checkpoint shape refused") : nlc-restore-shaped(row,rest,index,mapped);
+   def nlc-restore-next(operation,index) {
+    let owner=record_get(operation,"owner");let rows=record_get(operation,"remaining");
+    let cleared=nll-free(owner,record_get(owner,"release-handles"));
+    !cleared ? form_error("native optimizer checkpoint temporary mapping release incomplete") : nil?(rows) ? nll-release(owner) : nlc-restore-row(operation,rows[0],rows[1:],index);
   }
-  def nlc-restore-shaped(row,rest,index,mapped) {
+   def nlc-restore-row(operation,row,rest,index) {
+    let owner=record_get(operation,"owner");let mapped=sti-map-row-by(index,sti-find(index,row[0]),(p,o,n)=>nll-map(owner,p,o,n));
+    !(((String) mapped[2] == "F32") && ((Value) mapped[1] == row[2])) ? form_error("native optimizer checkpoint shape refused") : nlc-restore-shaped(operation,row,rest,index,mapped);
+   }
+   def nlc-restore-shaped(operation,row,rest,index,mapped) {
    let rc = nam-run("nam_cast",[mapped[0],row[1]],[sti-product(row[2]),0],sti-product(row[2]),0);
-   let done = nam-sync(); let freed = nam-free([mapped[0]]);
-   nlc-restore(rest,index);
+    let done = nam-sync();record_set(operation,"remaining",rest);
+    nlc-restore-next(operation,index);
   }
  }
  0;

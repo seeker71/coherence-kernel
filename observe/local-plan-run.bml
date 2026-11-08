@@ -134,10 +134,30 @@ section [form.bml] {
   // options of a walk the window ended land with the next walk
   def lpr-plan-row(r) = [fcgp-str(r, "request"), fcgp-num(r, "option") ?? 0, fcgp-str(r, "rung"), fcgp-str(r, "verdict"), fcgp-str(r, "voice"), fcgp-num(r, "at_unix_ms") ?? 0, fcgp-num(r, "wall_ms") ?? 0];
   def lpr-covered(walked) = qc-plan-covered-at(map(lpr-plan-row, fcgp-rows(flp-dir() ++ "/ledger.jsonl")), qc-ledger(), walked);
-  def lpr-heard(rid, name, n, lens, v, reply) = fhn-append(lpr-heard-path(), json-emit(json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("request", rid), fhn-n("option", n), fhn-s("voice", name), fhn-s("lens", lens), fhn-s("voice_status", v[0]), fhn-n("local_injected_ids", v[2]), fhn-n("local_generated_ids", v[3]), fhn-s("reply", reply)])) ++ "\n");
+  def lpr-heard(rid, name, n, lens, v, reply) = fhn-append(lpr-heard-path(), json-emit(json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("request", rid), fhn-n("option", n), fhn-s("voice", name), fhn-s("lens", lens), fhn-s("voice_status", v[0]), fhn-n("local_injected_ids", v[2]), fhn-n("local_generated_ids", v[3]), fhn-s("reply", reply),json-node-pair("admission",lpr-admission(v))])) ++ "\n");
   // The reply is asked inside its envelope and within its budget (flp-voice-request, form-cli-local-plan.bml); a reply
   // the envelope ended inside a block carries that refusal into its row.
-  def lpr-spoken(dir, id, rid, packet, name, n, lens, context, limit, budget) {
+   def lpr-admission(v) = json-node-object([fhn-s("status",v[0]),fhn-s("model",v[4]),fhn-n("complete",v[5]),fhn-n("released",v[6]),fhn-s("reason",v[7]),fhn-s("ownership",fcnv-ownership(v)),fhn-s("continuation",fcnv-continuation(v))]);
+   def lpr-release-said(req,row,n) {
+    let key=fcgp-str(flp-row-admission(row),"continuation");
+    let source=fcgp-str(row,"reply");let settled=fbc-load(source+".release.txt.fkb");
+    let saved=fbc-good(settled) ? settled : fbc-load(source+".fkb");
+    let retained=fbc-good(saved) ? fbc-data-value(fbc-value(saved)) : nothing();
+    let v=key=="" ? nothing() : fcnv-resume-retained(key,retained);
+    if nothing?(v) || fcnv-ownership(v)=="release-incomplete" then nothing() else {
+     let text=v[0]=="answered" ? v[1] : len(trim(v[8]))>0 ? trim(v[8]) : v[7];
+     let path=source+".release.txt";
+     write_file_text(path,text);
+     read_file(path)!=text ? form_error("native planner released-text retention failed") : 0;
+     let kept=fbc-dump(path+".fkb",fbc-data(v));
+     !fbc-good(kept) ? form_error("native planner released-result retention failed") : 0;
+     let accounted=append(append(take(2,v),[0,0]),v[4:]);
+     lpr-heard(flp-req-id(req),fcgp-str(row,"voice"),n,fcgp-str(row,"lens"),accounted,path);
+     fcnv-ack-release(v);
+     [v[0],text,0,0,path,flp-envelope-refusal(fcnv-envelope-of(v)),0,lpr-admission(v)];
+    };
+   }
+   def lpr-spoken(dir, id, rid, packet, name, n, lens, context, limit, budget) {
    let stem = mc-cat([dir, "/", id, "-", n.str(), "-", now_unix_ms().str()]);
    let kept = write_file_text(stem ++ ".packet.txt", packet);
    let request = flp-voice-request(name, limit, budget, lpr-enquiry(rid,n), context);
@@ -146,9 +166,13 @@ section [form.bml] {
    let v = (String) asked[7] == ftg-window-end() ? append([ftg-window-end()], asked[1:]) : asked;
    let text = v[0] == "answered" ? v[1] : len(trim(v[8])) > 0 ? trim(v[8]) : v[7];
    let heard = write_file_text(stem ++ ".reply.txt", text);
-   let owned = lpr-heard(rid, name, n, lens, v, stem ++ ".reply.txt");
+   read_file(stem+".reply.txt")!=text ? form_error("native planner reply retention failed") : 0;
+   let evidence=fbc-dump(stem+".reply.txt.fkb",fbc-data(v));
+   !fbc-good(evidence) ? form_error("native planner result retention failed") : 0;
+   let accounted=fcnv-current-usage(v);
+   let owned = lpr-heard(rid, name, n, lens, accounted, stem ++ ".reply.txt");
    let said = print_str(mc-cat(["[local-plan:voice] ", name, " option ", n.str(), " ", v[0], " prompt_ids=", v[2].str(), " generated_ids=", v[3].str(), " reply=", stem, ".reply.txt"]));
-   [v[0], text, v[2], v[3], stem ++ ".reply.txt", flp-envelope-refusal(fcnv-envelope-of(v))];
+    [v[0], text, accounted[2], accounted[3], stem ++ ".reply.txt", flp-envelope-refusal(fcnv-envelope-of(v)),0,lpr-admission(v)];
   }
   def lpr-voice(dir, id, rid, context, limit, budget, until) = (packet, name, n, lens) => lpr-ask(dir, id, rid, packet, name, n, lens, context, limit, budget, until);
   def lpr-read(path) = if ((String) path == "") then "" else fhn-read(path);
@@ -176,7 +200,7 @@ section [form.bml] {
    let spent = if ((Comparable) lpr-int(opts, "fresh", 0) == 1) then 0 else lpr-spent(lpr-tried(attempts), flp-req-id(req));
    let left = json-object-has?(opts,"attempts") ? lpr-left(attempts, spent) : nothing();
     let base = flp-ctx(lpr-voice(flp-dir(), flp-safe-id(req), flp-req-id(req), lpr-int(opts, "context", nothing()), lpr-int(opts, "max_reply_tokens", 3072), lpr-int(opts, "reply_budget", flp-reply-budget()), fcgp-num(opts, "until_ms")), voices, left, queue, "", flp-dir() ++ "/scratch", flp-dir() ++ "/ledger.jsonl", lpr-int(opts, "deadline_ms", flp-deadline-ms()));
-    let ctx=flp-with-reference-care(base,(request,context,said,refusal)=>lpr-closed?(fcgp-num(opts,"until_ms"),lpr-floor(opts)) ? nothing() : lrpr-repair(request,context,said,refusal,opts));
+     let ctx=flp-with-admission-care(flp-with-reference-care(base,(request,context,said,refusal)=>lpr-closed?(fcgp-num(opts,"until_ms"),lpr-floor(opts)) ? nothing() : lrpr-repair(request,context,said,refusal,opts)),lpr-release-said);
    let resumed = if ((spent == 0) && nil?(memory)) then 0 else print_str(mc-cat(["[local-plan] resuming ", flp-req-id(req), ": ", spent.str(), " option(s) spent, ", len(memory).str(), " refused row(s) retained; ", nothing?(left) ? "native choices continue" : left.str()+" caller option(s) left"]));
    let care=parked ? nothing() : lrpr-resume(req,ctx,memory);
    let r=nothing?(care) ? flp-walk-from(req,ctx,memory) : care[0]==1 ? flp-ended(["queued",care[1]],memory) : care[0]==3 ? flp-ended(["moot",care[1]],memory) : flp-walk-from(req,ctx,append(memory,[care[1]]));

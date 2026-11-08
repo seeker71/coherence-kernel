@@ -202,6 +202,7 @@ section [form.bml] {
   }
   def ftw-lock-found(lock, deadline, tries, text) = ftw-lock-stale?(lock, deadline, text) ? ftw-lock-takeover(lock, deadline, tries, text) : ftw-lock-again(lock, deadline, tries);
   def ftw-lock-again(lock, deadline, tries) {
+   if host_monotonic_ms()>=deadline then form_error("token workspace lock remains owned or unobserved; no write was admitted") else 0;
    host_sleep_ms(ftw-lock-backoff(tries));
    ftw-lock-take(lock, deadline, tries + 1);
   }
@@ -212,9 +213,8 @@ section [form.bml] {
   def ftw-lock-stale?(lock, deadline, text) {
    let pid = ftw-lock-field(text, "pid=");
    let at = ftw-lock-field(text, " at=");
-   if host_monotonic_ms() >= deadline then 1
-   else if nothing?(pid) || nothing?(at) then ((now_unix_ms() / 1000) - file_mtime(lock)) * 1000 > ftw-lock-patience-ms() / 5
-   else host_alive(pid) != 1 || ((now_unix_ms() - at) > ftw-lock-patience-ms());
+   if nothing?(pid) || nothing?(at) then ((now_unix_ms() / 1000) - file_mtime(lock)) * 1000 > ftw-lock-patience-ms() / 5
+   else host_alive(pid)==0;
   }
   def ftw-lock-takeover(lock, deadline, tries, text) {
    let pid = ftw-lock-field(text, "pid=");
@@ -332,8 +332,7 @@ section [form.bml] {
   def ftw-field-node(coord, parts) {
    if (parts[0] == 1) && (parts[1] == 1) && (parts[2] == 1) then ftw-same(coord, intern_trivial_int(parts[3]))
    else if (parts[0] == 1) && (parts[1] == 1) && (parts[2] == 3) && (parts[3] <= 1) then ftw-same(coord, intern_trivial_bool(parts[3]))
-   else if parts[3] >= 1 then ftw-same(coord, node_at(parts[3]))
-   else nothing();
+   else ftw-same(coord, node_at(parts));
   }
   def ftw-same(coord, node) = nothing?(node) ? nothing() : ftw-coord(node) == coord ? node : nothing();
   // the newest visible cell spoken at coord: this reply's, then this lineage's, then the global one
@@ -415,13 +414,9 @@ section [form.bml] {
    f(vals);
   }
   def ftw-door-names() = record_keys(ftw-doors());
-  // The host field is every live kernel's: field_reset resets it only when the body's own roster
-  // holds no other living kernel, and otherwise answers [field-shared, the pids that hold it] and
-  // leaves it untouched.
-  def ftw-field-reset() {
-   let others = filter(p => p != host_pid(), kernel_live_pids() ?? []);
-   nil?(others) ? field_reset() : ["field-shared", others];
-  }
+  // The field owner admits and commits a logical epoch under one journal
+  // lease. Unknown and forgotten live owners remain blockers there.
+  def ftw-field-reset() = field_reset();
   def ftw-doors-0() = [
    ["read_line", 0, v => read_line()], ["isatty", 0, v => isatty()], ["self_source", 0, v => self_source()],
    ["framebuffer-events", 0, v => framebuffer-events()], ["framebuffer-clear", 0, v => framebuffer-clear()],
@@ -629,7 +624,7 @@ section [form.bml] {
   def ftw-native-call(name, vals, deadline) = ftw-door-reason(name, ftw-body-call-homes(name, vals, ftw-lean-carrier(), [""], deadline));
   def ftw-door-reason(name, answer) = answer[0] == 1 ? answer : [0, ftw-starts?(answer[1], "body-call-timeout") ? "door-timeout:" ++ name : answer[1], answer[2]];
   def ftw-body-alt(name, vals, carrier, home, deadline, last) {
-   let answer = host_monotonic_ms() >= deadline ? [0, "body-call-timeout", ""] : ftw-body-run(name, vals, carrier, home, deadline);
+    let answer = !nothing?(deadline) && host_monotonic_ms() >= deadline ? [0, "body-call-timeout", ""] : ftw-body-run(name, vals, carrier, home, deadline);
    answer[0] == 1 ? answer : ftw-body-failed(last, answer[1] ++ ":" ++ name, answer[2]);
   }
   def ftw-body-failed(last, why, printed) {
@@ -663,8 +658,8 @@ section [form.bml] {
   // the pid the last body call ran in
   def ftw-last-child() = ftw-get(FTW-HELD, "child") ?? 0;
   // 1 once the child has ended and been reaped, 0 at the deadline: host_wait [pid, ms] wakes at the child's end
-  def ftw-wait-child(pid, deadline) = nothing?(host_wait([pid, ftw-left(deadline)])) ? 0 : 1;
-  def ftw-left(deadline) = (deadline - host_monotonic_ms()) < 1 ? 1 : deadline - host_monotonic_ms();
+   def ftw-wait-child(pid, deadline) = nothing?(host_wait(nothing?(deadline) ? pid : [pid, ftw-left(deadline)])) ? 0 : 1;
+   def ftw-left(deadline) = nothing?(deadline) ? nothing() : (deadline - host_monotonic_ms()) < 1 ? 1 : deadline - host_monotonic_ms();
   // stopped and reaped: TERM, two seconds, then KILL
   def ftw-stop-child(pid) {
    let asked = host_kill(pid);
@@ -722,7 +717,7 @@ section [form.bml] {
    let moved = fs_rename(stem ++ ".out.part", stem ++ ".out.fkb");
    0;
   }
-  def ftw-wait-file(path, deadline) = file_size(path) > 0 ? 1 : host_monotonic_ms() >= deadline ? 0 : ftw-wait-file-again(path, deadline);
+   def ftw-wait-file(path, deadline) = file_size(path) > 0 ? 1 : !nothing?(deadline) && host_monotonic_ms() >= deadline ? 0 : ftw-wait-file-again(path, deadline);
   def ftw-wait-file-again(path, deadline) {
    host_sleep_ms(2);
    ftw-wait-file(path, deadline);

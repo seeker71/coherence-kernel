@@ -47,16 +47,19 @@ section [form.bml] {
     def egg-magic(src) = egg-u32(src, 0);
     def egg-magic-ok?(src) = (Comparable) egg-u32(src, 0) == 1179993927 ? 1 : 0;
     def egg-version(src) = egg-u32(src, 4);
-    def egg-tensor-count(src) = egg-u64(src, 8);
-    def egg-kv-count(src) = egg-u64(src, 16);
+    def egg-count(src,off) {let n=egg-u64(src,off);n<0 || n>len(src) ? form_error("GGUF count exceeds its available header bytes") : n;}
+    def egg-span-end(src,off,n) = eqr-span?(src,off,n) ? off+n : form_error("GGUF field exceeds its available header bytes");
+    def egg-fixed-end(src,off,count,width) = count<0 || width<=0 || !eqr-span?(src,off,0) || count>(len(src) - off)/width ? form_error("GGUF array geometry exceeds its available header bytes") : off+count*width;
+    def egg-tensor-count(src) = egg-count(src, 8);
+    def egg-kv-count(src) = egg-count(src, 16);
     // a GGUF string is (u64 length, then `length` bytes)
     def egg-str-len(src, off) = egg-u64(src, off);
-    def egg-str-next(src, off) = off + 8 + egg-u64(src, off);
+    def egg-str-next(src, off) = egg-span-end(src,off+8,egg-u64(src,off));
     // --- metadata KV walk (same value-type sizes and the same O(1) fixed-width array skip) ---
-    def egg-vtype-size(t) = (Comparable) t == 0 || ((Comparable) t == 1 || (Comparable) t == 7) ? 1 : (Comparable) t == 2 || (Comparable) t == 3 ? 2 : (Comparable) t == 4 || ((Comparable) t == 5 || (Comparable) t == 6) ? 4 : 8;
-    def egg-val-next(src, off, t) = (Comparable) t == 8 ? egg-str-next(src, off) : (Comparable) t == 9 ? egg-arr-skip(src, off + 12, egg-u32(src, off), egg-u64(src, off + 4)) : off + egg-vtype-size(t);
-    def egg-arr-skip-var(src, off, et, count) = (Comparable) count == 0 ? off : egg-arr-skip-var(src, egg-val-next(src, off, et), et, count - 1);
-    def egg-arr-skip(src, off, et, count) = (Comparable) et == 8 || (Comparable) et == 9 ? egg-arr-skip-var(src, off, et, count) : off + count * egg-vtype-size(et);
+    def egg-vtype-size(t) = (Comparable) t == 0 || ((Comparable) t == 1 || (Comparable) t == 7) ? 1 : (Comparable) t == 2 || (Comparable) t == 3 ? 2 : (Comparable) t == 4 || ((Comparable) t == 5 || (Comparable) t == 6) ? 4 : t==10 || t==11 || t==12 ? 8 : form_error("GGUF fixed-width value type is unavailable");
+    def egg-val-next(src, off, t) = (Comparable) t == 8 ? egg-str-next(src, off) : (Comparable) t == 9 ? egg-arr-skip(src, off + 12, egg-u32(src, off), egg-u64(src, off + 4)) : egg-span-end(src,off,egg-vtype-size(t));
+    def egg-arr-skip-var(src, off, et, count) = count<0 || !eqr-span?(src,off,0) || count>len(src) - off ? form_error("GGUF variable array count exceeds its header window") : (Comparable) count == 0 ? off : egg-arr-skip-var(src, egg-val-next(src, off, et), et, count - 1);
+    def egg-arr-skip(src, off, et, count) = (Comparable) et == 8 || (Comparable) et == 9 ? egg-arr-skip-var(src, off, et, count) : egg-fixed-end(src,off,count,egg-vtype-size(et));
     def egg-kv-next(src, off) = egg-val-next(src, egg-str-next(src, off) + 4, egg-u32(src, egg-str-next(src, off)));
     def egg-kv-skip(src, off, n) = (Comparable) n == 0 ? off : egg-kv-skip(src, egg-kv-next(src, off), n - 1);
     def egg-tinfo-start(src) = egg-kv-skip(src, 24, egg-kv-count(src));
@@ -64,10 +67,10 @@ section [form.bml] {
     def egg-ti-ndims(src, off) = egg-u32(src, egg-str-next(src, off));
     def egg-ti-dim(src, off, k) = egg-u64(src, egg-str-next(src, off) + 4 + k * 8);
     def egg-ti-dim0(src, off) = egg-ti-dim(src, off, 0);
-    def egg-ti-tail(src, off) = egg-str-next(src, off) + 4 + egg-ti-ndims(src, off) * 8;
+    def egg-ti-tail(src, off) = egg-fixed-end(src,egg-str-next(src,off)+4,egg-ti-ndims(src,off),8);
     def egg-ti-type(src, off) = egg-u32(src, egg-ti-tail(src, off));
     def egg-ti-dataoff(src, off) = egg-u64(src, egg-ti-tail(src, off) + 4);
-    def egg-ti-next(src, off) = egg-ti-tail(src, off) + 12;
+    def egg-ti-next(src, off) = egg-span-end(src,egg-ti-tail(src,off),12);
     def egg-ti-namelen(src, off) = egg-str-len(src, off);
     // --- find a tensor by NAME. The target is a host string, so both sides of the comparison are
     // equireach and the walk never builds a list. -1 means absent; the engine never invents a match. ---

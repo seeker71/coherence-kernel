@@ -33,7 +33,7 @@
 ;   2048  the unwind: a step that raises inside the walk answers a session that is not resident, named walk-stopped, with the live handles back at rest, no lease file and no residency note, and its release reads 1; the
 ;         same walk without the unwind raises with the handles and the lease still held (they are given back after, by the release)
 ;
-; REQUIRES: a live Metal device -- needs one behind the handle door; plain fkwu reads 0. The memory governor must read room for the session's private margin (8 GiB) twice; the band takes real leases and gives them back. Light GPU: the
+; REQUIRES: a live Metal device -- needs one behind the handle door; plain fkwu reads 0. The memory governor must read room for the sessions' derived allocation geometry; the band takes real leases and gives them back. Light GPU: the
 ; 1.7 MB fixtures, a few hundred positions. Writes only under temp_dir (the fixtures, their seals and the seal's verified note) and removes what it made; the model admission queue's note for the fixture path is dropped by the release.
 // preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/gguf-manifest.fk form-stdlib/dsv4-fixture-gguf.fk form-stdlib/dsv4-layout.fk native/metal/dsv4-bind.fk form-stdlib/dsv4-kernels.fk native/metal/dsv4-open.fk native/metal/dsv4-layer.fk native/metal/dsv4-token-handle.fk form-stdlib/dsv4-compressor.fk form-stdlib/f16-decode.fk form-stdlib/dsv4-lease.fk form-stdlib/dsv4-tokenizer.fk form-stdlib/bml/memory-governor.bml form-stdlib/form-cli-model-ds4.fk form-stdlib/model-registry.bml form-stdlib/form-cli-model-session.fk form-stdlib/bml/form-cli-model-renew.bml form-stdlib/bml/dsv4-session-ask.bml form-stdlib/qwen35-artifact-seal-reader.fk
 section [form.bml] {
@@ -54,14 +54,14 @@ section [form.bml] {
   // the seal as the fetch organ writes it: the size and the SHA-256 of the file
   def dlb-seal(path) = write_file_text(qaf-seal-path-for(path), "qaf-seal1:" ++ int_to_str(file_size(path)) ++ ":" ++ qaf-string-hex(saj-file-digest(path, file_size(path))));
   def dlb-unseal(path) = host_path_remove(qaf-seal-path-for(path)) + host_path_remove(qaf-verified-path-for(path));
-  def dlb-lease-path() = mg-lease-path(mg-lease-dir(), host_pid());
-  def dlb-lease-held?() = file_size(dlb-lease-path()) > 0;
-  def dlb-lease-keyed?(path) = dlb-has?(read_file(dlb-lease-path()) ?? "", path);
+   def dlb-own-leases() = filter(row=>row[0]==host_pid(),mg-lease-view(mg-lease-dir()));
+   def dlb-lease-held?() = !nil?(dlb-own-leases());
+   def dlb-lease-keyed?(path) = any?(row=>row[2]==path,dlb-own-leases());
   def dlb-noted?(path) = len(filter(line => trim(line) == path, adm-note-lines(adm-root(), host_pid()))) > 0;
   // ---- the token walk the lane must equal: the shared functions, no door ----------------------------------------------------------------------------
   def dlb-walk(path, ids, cap, n, stops) {
    let ctx = dsv4-open-arena(path, cap, 1, dls-cache-experts());
-   let prepared = len(ctx) == 13 ? dsv4-prepare(ctx) : 0;
+    let prepared = dso-open-ok?(ctx) ? dsv4-prepare(ctx) : 0;
    let sts = prepared == 1 ? dsv4-new-state(ctx[2], ctx[0], cap) : nothing();
    let pf = nothing?(sts) ? nothing() : dsv4-prefill-span-sliced(ctx, sts, ids, 0);
    let more = nothing?(pf) ? [] : dsv4-generate(ctx, sts, pf[0], pf[1], n - 1, stops, []);
@@ -74,7 +74,7 @@ section [form.bml] {
   // ---- the plants ---------------------------------------------------------------------------------------------------------------------------------
   def dlb-twin?(flag, row) = flag == row;
   // the door's source calls the shared token functions (the arena open, prepare, state, prefill, decode, close) and none of the layer-level or whole-stack ones
-  def dlb-shared-calls?(src) = dlb-has?(src, "dsv4-open-arena(") && dlb-has?(src, "dsv4-prepare(") && dlb-has?(src, "dsv4-new-state(") && dlb-has?(src, "dsv4-prefill-span-sliced(") && dlb-has?(src, "dsv4-decode(") && dlb-has?(src, "dsv4-close(")
+   def dlb-shared-calls?(src) = dlb-has?(src, "dsv4-open-arena(") && dlb-has?(src, "dsv4-prepare(") && dlb-has?(src, "dsv4-new-state(") && dlb-has?(src, "dsv4-prefill-span-sliced(") && dlb-has?(src, "dsv4-decode(") && dlb-has?(src, "fcds-release-with(ctx,sts,dsv4-close,")
    && !dlb-has?(src, "dth-stage(") && !dlb-has?(src, "dsv4-forward-state(") && !dlb-has?(src, "metal_enqueue(") && !dlb-has?(src, "dkr-go(") && !dlb-has?(src, "dxa-open(") && !dlb-has?(src, "dsv4-open-span(");
   // fcds-gen without its position check: the driver's refusal at the limit reads as a refused step
   def dlb-gen-nolimit(ctx, sts, id, pos, n, stops, acc) = n <= 0 ? [acc, "max-tokens"] : fcds-gen-step(ctx, sts, id, pos, n, stops, acc, dsv4-decode(ctx, sts, id, pos));
@@ -82,6 +82,22 @@ section [form.bml] {
   def dlb-live-held?(s) = fcms-live?(s) == 1 && fcms-resident?(s) == 1;
   // a step that raises (a stop inside the walk), and a prefill that raises (an id that is no number)
   def dlb-raising-step() = (s, id, pos) => form_error("planted decode stop");
+   def dlb-delayed-step(start) = (s,id,pos)=>pos>=start+2 ? form_error("planted decode stop after two committed steps") : fcms-forward(s,id,pos);
+   def dlb-release-continuation() {
+    let ctx=[0,0,record_new(0)];let seen=record_new(0,"closes",0,"retried",[],"unleases",0);
+    let close=(c,s)=>{record_set(seen,"closes",record_get(seen,"closes")+1);[41,42];};
+    let retry=hs=>{record_set(seen,"retried",append(record_get(seen,"retried"),[hs]));hs==[41,42] ? [42] : [];};
+    let unlease=()=>{let n=record_get(seen,"unleases")+1;record_set(seen,"unleases",n);n>1;};
+    let a=fcds-release-with(ctx,[],close,retry,unlease);let first=record_get(fcds-release-state(ctx),"remaining");
+    let b=fcds-release-with(ctx,[],close,retry,unlease);
+    let c=fcds-release-with(ctx,[],close,retry,unlease);let held=record_get(fcds-release-state(ctx),"reason");
+    let d=fcds-release-with(ctx,[],close,retry,unlease);let e=fcds-release-with(ctx,[],close,retry,unlease);
+    let cold=fcds-unleased-with("model-context-open-refused",()=>0);
+    let coldSession=fcms-ds4-session("fixture","",cold);
+    let coldHeld=fcms-resident?(coldSession) && !fcms-live?(coldSession) && record_get(cold[2][2],"release-only")==1;
+    let coldReleased=fcds-release-with(cold[2],cold[3],(c,s)=>form_error("no cold handles"),hs=>form_error("no cold retry handles"),()=>1)==0;
+    [a,b,c,d,e]==[2,1,1,0,0] && first==[41,42] && held=="memory-lease-release-incomplete" && record_get(seen,"closes")==1 && record_get(seen,"retried")==[[41,42],[42]] && record_get(seen,"unleases")==2 && coldHeld && coldReleased;
+   }
   // the render without the incomplete-tail rule: what the text was before
   def dlb-plain-render(bs) = tkz-render-acc(bs, "");
   // the count of the second state's handles as the discard asked it before it knew nothing: a stop on nothing
@@ -197,12 +213,11 @@ section [form.bml] {
  let rel2 = fcms-release-ok?(s2d);
  let liveAfter2 = dvb-live();
  let runSrc = tkz-src(pathA);
- let runCalled = record_new(0, "n", 0);
- let shortRun = fcds-run-open(pathA, runSrc, idsA, 100, 50, () => record_set(runCalled, "n", record_get(runCalled, "n") + 1));
+   let shortDone=fcmg-ds4-run-session(fcms-open-ds4-ids(pathA,runSrc,idsA,50),100);let shortRun=shortDone[0];
  let said9 = print_str("one-shot at 50 positions: " ++ (String) shortRun[0] ++ " ids " ++ (len(shortRun) > 2 ? len(shortRun[2]).str() : "-") ++ " ending " ++ (len(shortRun) > 4 ? (String) shortRun[4] : "-") ++ " last position " ++ (len(shortRun) > 5 ? shortRun[5].str() : "-"));
  let r32 = try len(ctx2) == 13 && fcms-maxpos(s2) == 2048 && len(ids3) == 9 && (String) fcms-ending(s2c) == "context-limit" && fcms-pos(s2c) == 2049 && fcms-pending(s2c) == 0 - 1
   && (String) usage3 == "usage: prompt_tokens=" ++ len(idsA).str() ++ " generated_tokens=9 ending=context-limit position=2047 capacity=2048 position_limit=2047" && len(fcms-generation-ids(g4)) == 0 && (String) fcms-ending(s2d) == "context-limit"
-  && pinOk && rel2 == 1 && liveAfter2 == live0 && (String) shortRun[0] == "ok" && len(shortRun[2]) == 8 && (String) shortRun[4] == "context-limit" && shortRun[5] == 50 && shortRun[6] == 2047 && record_get(runCalled, "n") == 1
+   && pinOk && rel2 == 1 && liveAfter2 == live0 && (String) shortRun[0] == "ok" && len(shortRun[2]) == 8 && (String) shortRun[4] == "context-limit" && shortRun[5] == 50 && shortRun[6] == 2047 && shortDone[2] && fcms-release-ok?(shortDone[1])
   && fcds-capacity(srcA, 100000) == 2048 && fcds-capacity(srcA, 40) == 40 && fcds-served-positions(srcA) == 2048 catch false;
  // 64: the stop id
  let kStop = dlb-novel(walkA, 1);
@@ -214,15 +229,20 @@ section [form.bml] {
  let g5 = fcms-live?(s3) == 1 ? fcms-generate(s3, dlb-n()) : fcms-generation("", [], s3);
  let ids5 = fcms-generation-ids(g5);
  let s3b = fcms-generation-session(g5);
- let oneStop = fcds-run(pathB, dlb-prompt(), dlb-n(), () => 0);
+  let stopDone=fcmg-ds4-run-session(fcms-open-reserved(pathB,dlb-prompt(),dlb-n()+1,"full"),dlb-n());let oneStop=stopDone[0];
  let rel3 = fcms-release-ok?(s3b);
  let liveAfter3 = dvb-live();
+  let sOpen = fcms-open-reserved(pathB, dlb-prompt(), dlb-n(), "full");
+  let gOpen = fcms-generate(sOpen, nothing());
+  let sOpenDone = fcms-generation-session(gOpen);
+  let relOpen = fcms-release-ok?(sOpenDone);
  // the same token walk with the stop id honoured and with it ignored (the plant)
  let walkStopped = dlb-walk(pathB, idsA, len(idsA) + dlb-n(), dlb-n(), fcds-stops(srcB));
  let walkIgnored = dlb-walk(pathB, idsA, len(idsA) + dlb-n(), dlb-n(), []);
  let said10 = print_str("stop id " ++ stopId.str() ++ " at index " ++ kStop.str() ++ ": session ids " ++ ids5.str() ++ " ending " ++ (String) fcms-ending(s3b) ++ " pending " ++ fcms-pending(s3b).str() ++ " one-shot " ++ (String) oneStop[0] ++ " " ++ (len(oneStop) > 2 ? oneStop[2].str() : "-") ++ " " ++ (len(oneStop) > 4 ? (String) oneStop[4] : "-") ++ " token walk " ++ walkStopped.str() ++ " ignoring the stop " ++ walkIgnored.str());
  let r64 = try kStop > 0 && stopId >= 0 && stopId < 32 && fcds-stops(srcB) == [stopId] && ids5 == walkA[0:kStop] && (String) fcms-ending(s3b) == "eos" && fcms-pending(s3b) == stopId && fcms-live?(s3b) == 1 && (String) oneStop[0] == "ok" && oneStop[2] == walkA[0:kStop] && (String) oneStop[4] == "eos"
-  && walkStopped == ids5 && rel3 == 1 && liveAfter3 == live0 catch false;
+    && walkStopped == ids5 && rel3 == 1 && liveAfter3 == live0 && stopDone[2] && fcms-release-ok?(stopDone[1])
+   && fcms-generation-ids(gOpen)==ids5 && fcms-ending(sOpenDone)=="eos" && fcms-stopped?(sOpenDone) && relOpen && dvb-live()==live0 catch false;
  // 256: the checks can fail
  let doorSrc = read_file("form/form-stdlib/form-cli-model-ds4.fk") ?? "";
  let r256 = try !dlb-twin?(1, 0) && !dlb-twin?(0, 1) && dlb-twin?(1, 1) && fcds-route("deepseek4", 0) == "refuse" && fcds-route("deepseek4", 1) == "deepseek4"
@@ -247,13 +267,15 @@ section [form.bml] {
  let sR = fcms-open-reserved(pathA, dlb-prompt(), dlb-n(), "full");
  let liveR = dvb-live();
  let readingR = fcmr-reading("dsv4-lane-band", "independent-stream-needed", 0, json-node-string("fresh conversation state"), json-node-string("existing conversation state"));
- let leaseR = mg-lease("renewal second KV state", "", 0, mg-kv-margin());
- let refusedState = fcmr-allocated("dsv4-lane-band", sR, ids2src, readingR, nothing());
+  let leaseR = mg-lease("renewal second KV state", "", 0, fcmr-stream-bytes(sR));
+  let reservationR=fcms-reservation(fcms-release-ledger(sR),leaseR,fcmr-parts(sR));
+  let refusedState = fcmr-allocated("dsv4-lane-band", sR, ids2src, readingR, nothing(),reservationR);
  let liveR1 = dvb-live();
- let leaseR2 = mg-lease("renewal second KV state", "", 0, mg-kv-margin());
+  let leaseR2 = mg-lease("renewal second KV state", "", 0, fcmr-stream-bytes(sR));
+  let reservationR2=fcms-reservation(fcms-release-ledger(sR),leaseR2,fcmr-parts(sR));
  let freshR = fcds-fresh-state(fcms-ctx(sR));
  let liveR2 = dvb-live();
- let stoppedPrefill = fcmr-allocated("dsv4-lane-band", sR, ["x"], readingR, freshR);
+  let stoppedPrefill = fcmr-allocated("dsv4-lane-band", sR, ["x"], readingR, freshR,reservationR2);
  let liveR3 = dvb-live();
  let sRkept = fcmr-session(stoppedPrefill);
  let freshP = fcds-fresh-state(fcms-ctx(sRkept));
@@ -281,12 +303,22 @@ section [form.bml] {
  let leaseBare = dlb-lease-held?();
  let relBare = fcms-release-ok?(s6);
  let liveEnd = dvb-live();
+  let sOpenStop = fcms-open-reserved(pathA, dlb-prompt(), dlb-n(), "full");
+  let gOpenStop = fcms-generate-open-with(owner=>dlb-delayed-step(fcms-pos(owner)),sOpenStop);
+  let sOpenStopped = fcms-generation-session(gOpenStop);
+  let openReleased = fcms-release-ok?(sOpenStopped);
+  let openUnwound = fcms-reason(sOpenStopped)=="walk-stopped" && !fcms-resident?(sOpenStopped) && !fcms-stopped?(sOpenStopped) && fcms-generation-ids(gOpenStop)==walkA[0:3] && fcms-generated-ids(sOpenStopped)==3 && fcms-pos(sOpenStopped)==fcms-pos(sOpenStop)+2 && openReleased && !dlb-lease-held?() && !dlb-noted?(pathA) && dvb-live()==live0;
+  let sFiniteStop=fcms-open-reserved(pathA,dlb-prompt(),dlb-n(),"full");
+  let gFiniteStop=fcms-generate-ds4-with(dlb-delayed-step(fcms-pos(sFiniteStop)),sFiniteStop,dlb-n());
+  let sFiniteStopped=fcms-generation-session(gFiniteStop);
+   let finiteComplete=fcmg-ds4-complete-generation(gFiniteStop);
+  let finiteUnwound=fcms-generation-ids(gFiniteStop)==walkA[0:3] && fcms-generated-ids(sFiniteStopped)==3 && fcms-pos(sFiniteStopped)==fcms-pos(sFiniteStop)+2 && !fcms-stopped?(sFiniteStopped) && fcms-reason(sFiniteStopped)=="walk-stopped" && !fcms-resident?(sFiniteStopped) && fcms-release-ok?(sFiniteStopped) && dvb-live()==live0;
  let said13 = print_str("unwind: reason " ++ (String) fcms-reason(s5b) ++ " live " ++ liveU1.str() ++ " lease " ++ leaseU1.str() ++ "; without it: " ++ bare.str() ++ " live " ++ liveBare.str() ++ " lease " ++ leaseBare.str());
- let r2048 = try len(fcms-generation-ids(unwound)) == 0 && fcms-live?(s5b) == 0 && fcms-resident?(s5b) == 0 && (String) fcms-reason(s5b) == "walk-stopped" && liveU1 == live0 && !leaseU1 && relU == 1 && !notedU
-  && (String) bare == "stopped" && liveBare > live0 && leaseBare && relBare == 1 && liveEnd == live0 catch false;
+  let r2048 = try fcms-generation-ids(unwound)==walkA[0:1] && fcms-live?(s5b) == 0 && !fcms-stopped?(s5b) && fcms-resident?(s5b) == 0 && (String) fcms-reason(s5b) == "walk-stopped" && liveU1 == live0 && !leaseU1 && relU == 1 && !notedU
+    && (String) bare == "stopped" && liveBare > live0 && leaseBare && relBare == 1 && liveEnd == live0 && openUnwound && finiteUnwound && dlb-release-continuation()
+    && finiteComplete[0][0]=="refused" && finiteComplete[0][2]==walkA[0:3] && finiteComplete[0][3]==fcms-generation-text(gFiniteStop) && finiteComplete[2] && fcms-generation-ids(finiteComplete[3])==walkA[0:3] catch false;
  // clean up
  let removed = host_path_remove(pathA) + host_path_remove(pathB) + host_path_remove(pathG) + host_path_remove(pathU) + host_path_remove(pathT) + dlb-unseal(pathA) + dlb-unseal(pathB) + dlb-unseal(pathG) + dlb-unseal(pathT);
- let freed = mg-release();
  let c1 = dlb-bit(r1, 1);
  let c2 = dlb-bit(r2, 2);
  let c4 = dlb-bit(r4, 4);

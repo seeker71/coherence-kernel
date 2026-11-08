@@ -1,93 +1,86 @@
-// dir-lock.bml — one process at a time, by a directory only one maker makes.
-//
-// The lock is a directory (host_dir_mkdir makes one level, for one maker only) holding its holder's owner file,
-// "pid=<pid> at=<unix ms>". A waiter backs off (host_sleep_ms: 1, 2, 4 ... 32 ms) and tries again. A lock is stale
-// when its holder is gone (host_alive) or is a pid the host handed out again since the stamp (it began after it): it
-// is taken over at once. A holder that is alive is waited for, slow or not, until its own stamp is a minute old
-// (dl-live-ms); a lock that names no holder yet reads its own age (two seconds). A stale lock is taken through a mark
-// inside it that only one taker can make (<lock>/took-<holder>), and only while the lock still names that holder; a
-// mark older than ten seconds (a taker that ended) is removed. A lock is released only by the pid it names, so a
-// holder that was taken over from never removes the taker's lock (nor does a take whose owner file did not read back
-// remove a lock another pid owns), and the release removes the marks with it. dl-take gives up (answers 0) when its
-// patience is spent on a live holder, or when the lock's directory cannot be made at all (its parent is not there, or
-// not writable): a lock that cannot be had is a held answer for the caller to meet, never a loop and never a theft
-// from a holder that is only slow.
-//
-// The same pattern keeps form-token-workspace.bml's ftw-lock-* (one writer per store) and host-walk.bml's hw-claim-at
-// (one walk per checkout, which names its holder to the person who started the second walk); this one is the small
-// door a lib with no other imports takes (memory-governor.bml, the cross-process leases).
-//
-// PROOF: form-stdlib/tests/memory-governor-band.bml (claim "lock").
+// A lock belongs to one callback and its native file lease. Cell deadlines
+// close that lease even when Form defer cannot run. The owner directory keeps
+// the held identity visible; an exclusive successor can retire its residue.
+// Named legacy owners remain held until their process is observed to end.
+import form-stdlib/bml/native-posix.bml;
 section [form.bml] {
  class DirLock {
-  def dl-owner-path(lock) = lock ++ "/owner";
+  def dl-owner-path(lock) = lock+"/owner";
   def dl-owner(lock) = read_file(dl-owner-path(lock)) ?? "";
-  def dl-text(pid, now) = "pid=" ++ pid.str() ++ " at=" ++ now.str();
-  def dl-digits(text, from, i) = (i < len(text)) && (str_byte_at(text, i) >= 48) && (str_byte_at(text, i) <= 57) ? dl-digits(text, from, i + 1) : i > from ? str_to_int(substring(text, from, i)) : nothing();
-  def dl-field(text, key) {
-   let at = str_find(text, key, 0);
-   at < 0 ? nothing() : dl-digits(text, at + len(key), at + len(key));
-  }
-  // seconds since a path last changed; a path that is not there (or reads no time) is no age at all
-  def dl-age-of(at, now) = (String) value_kind(at) != "int" ? 0 : at <= 0 ? 0 : (now / 1000) - at;
-  def dl-age-ms(path) = dl-age-of(file_mtime(path), now_unix_ms()) * 1000;
-  // the unix ms a pid's process began, or nothing when the host does not say
+  def dl-text(pid,now) = "pid="+pid.str()+" at="+now.str();
+  def dl-digits(text,from,i) = i<len(text) && str_byte_at(text,i)>=48 && str_byte_at(text,i)<=57 ? dl-digits(text,from,i+1) : i>from ? str_to_int(substring(text,from,i)) : nothing();
+  def dl-field(text,key) {let at=str_find(text,key,0);at<0 ? nothing() : dl-digits(text,at+len(key),at+len(key));}
+  def dl-age-of(at,now) = value_kind(at)!="int" ? 0 : at<=0 ? 0 : (now/1000)-at;
+  def dl-age-ms(path) = dl-age-of(file_mtime(path),now_unix_ms())*1000;
   def dl-began(pid) {
-   let row = host_process(pid);
-   (String) value_kind(row) != "list" ? nothing() : len(row) < 6 ? nothing() : (String) value_kind(row[5]) != "int" ? nothing() : row[5];
+   let row=host_process(pid);
+   value_kind(row)!="list" ? nothing() : len(row)<6 ? nothing() : value_kind(row[5])!="int" ? nothing() : row[5];
   }
-  def dl-holds?(pid, at) = (Comparable) host_alive(pid) != 1 ? false : nothing?(at) ? true : nothing?(dl-began(pid)) ? true : dl-began(pid) <= at + 1000;
-  // 1 when this process holds the lock, 0 when it gave up
-  def dl-take(lock, patience) = dl-take-by(lock, patience, host_monotonic_ms() + patience, host_monotonic_ms() + patience, 0);
-  def dl-take-by(lock, patience, deadline, giveup, tries) = (Comparable) host_dir_mkdir(lock) == 1 ? dl-own(lock)
-   : (Comparable) host_path_is_dir(lock) != 1 ? dl-gone(lock, patience, deadline, giveup, tries)
-   : host_monotonic_ms() >= giveup ? 0
-   : dl-found(lock, patience, deadline, giveup, tries, dl-owner(lock));
-  // the make was refused and no lock stands: the holder released between the two, so the make goes again; three
-  // refusals in a row are a directory that cannot be made (its parent is not there, or not writable)
-  def dl-gone(lock, patience, deadline, giveup, tries) = tries >= 3 ? 0 : dl-again(lock, patience, deadline, giveup, tries);
-  def dl-own(lock) {
-   let text = dl-text(host_pid(), now_unix_ms());
-   let wrote = write_file_text(dl-owner-path(lock), text);
-   (String) dl-owner(lock) == text ? 1 : dl-unmade(lock);
+  def dl-holds?(pid,at) {
+   let alive=host_alive(pid);let began=dl-began(pid);
+   alive==0 ? false : nothing?(alive) || nothing?(at) || nothing?(began) || began<=0 ? nothing() : began<=at+1000;
   }
-  // the owner file did not read back: the lock is removed only when no other pid owns it (a lock another pid took in
-  // between is theirs)
-  def dl-unmade(lock) = nothing?(dl-field(dl-owner(lock), "pid=")) || ((Comparable) dl-field(dl-owner(lock), "pid=") == host_pid()) ? dl-removed(host_dir_rmdir(lock)) : 0;
-  def dl-removed(gone) = 0;
-  def dl-found(lock, patience, deadline, giveup, tries, text) = dl-stale?(lock, patience, deadline, text) ? dl-takeover(lock, patience, deadline, giveup, tries, text) : dl-again(lock, patience, deadline, giveup, tries);
-  def dl-again(lock, patience, deadline, giveup, tries) {
-   let rested = host_sleep_ms(dl-backoff(tries));
-   dl-take-by(lock, patience, deadline, giveup, tries + 1);
+  def dl-backoff(tries) = tries>=5 ? 32 : [1,2,4,8,16][tries];
+  def dl-file(lock) = lock+".scoped-v1";
+  def dl-expired(deadline) = !nothing?(deadline) && host_monotonic_ms()>=deadline;
+  def dl-current(lease,path) {
+   let current=nps-file-open(path,0);
+   value_kind(current)!="list" ? 0 : {
+    defer nps-file-settle(current);
+    let held=nps-file-identity(lease);let seen=nps-file-identity(current);
+    !nothing?(held) && !nothing?(seen) && take(2,held)==take(2,seen);
+   };
   }
-  // 1, 2, 4 ... 32 ms
-  def dl-backoff(tries) = tries >= 5 ? 32 : [1, 2, 4, 8, 16][tries];
-  // a holder that is gone is taken over at once; one that is alive is waited for (a slow holder is not a dead one)
-  // until its own stamp is a minute old; a lock that names no holder yet reads its own age
-  def dl-live-ms() = 60000;
-  def dl-unowned-ms() = 2000;
-  def dl-mark-ms() = 10000;
-  def dl-stale?(lock, patience, deadline, text) {
-   let pid = dl-field(text, "pid=");
-   let at = dl-field(text, " at=");
-   (nothing?(pid) || nothing?(at)) ? dl-age-ms(lock) > dl-unowned-ms()
-   : !dl-holds?(pid, at) || ((now_unix_ms() - at) > dl-live-ms());
+  def dl-owned?(owner) = dl-owner(owner[0])==owner[2] && dl-current(owner[1],dl-file(owner[0]));
+  def dl-finish(owner) {
+   let removed=dl-owned?(owner) ? host_dir_rmdir(owner[0]) : -1;
+   nps-file-settle(owner[1]);removed;
   }
-  def dl-takeover(lock, patience, deadline, giveup, tries, text) {
-   let pid = dl-field(text, "pid=");
-   let mark = lock ++ "/took-" ++ (nothing?(pid) ? "unowned" : pid.str());
-   ((Comparable) host_dir_mkdir(mark) == 1) && ((String) dl-owner(lock) == text) ? dl-own(lock) : dl-unmark(lock, mark, patience, deadline, giveup, tries);
+   // The operation record survives a callback or finalizer refusal. Callers
+   // that retain effects can carry this same owner into their continuation.
+   def dl-settle-operation(operation) {
+    let lease=record_get(operation,"lease");let owner=record_get(operation,"owner");
+    let released=try {nothing?(lease) ? 1 : {nothing?(owner) ? nps-file-settle(lease) : dl-finish(owner);nps-file-held(lease)==0;};} catch 0;
+    record_set(operation,"released",released);released;
+   }
+   def dl-with-lock(lock,patience,body) {
+    let operation=record_new(0);
+    let result=dl-with-lock-owned(lock,patience,body,operation);
+    record_get(operation,"released")==1 ? result : form_error("directory lock release incomplete");
+   }
+   def dl-with-lock-owned(lock,patience,body,operation) {
+   let lease=nps-file-open(dl-file(lock),1);
+    value_kind(lease)!="list" ? {record_set(operation,"released",1);nothing();} : {
+     record_set(operation,"lease",lease);record_set(operation,"released",0);
+     defer dl-settle-operation(operation);
+    let deadline=nothing?(patience) ? nothing() : host_monotonic_ms()+patience;
+    let owner=dl-acquire(lock,lease,deadline,0);
+    nothing?(owner) ? nothing() : {
+      record_set(operation,"owner",owner);
+     body(owner);
+    };
+   };
   }
-  def dl-unmark(lock, mark, patience, deadline, giveup, tries) {
-   let cleared = dl-age-ms(mark) > dl-mark-ms() ? host_dir_rmdir(mark) : 0;
-   dl-again(lock, patience, deadline, giveup, tries);
+  def dl-acquire(lock,lease,deadline,tries) {
+   let locked=nps-file-try-exclusive(lease[1]);
+   locked==0 ? dl-current(lease,dl-file(lock)) ? dl-admit(lock,lease,deadline,0) : nothing()
+    : locked != -11 || dl-expired(deadline) ? nothing() : {host_sleep_ms(dl-backoff(tries));dl-acquire(lock,lease,deadline,tries+1);};
   }
-  // released by the pid the lock names, and by no other: 0 when removed, -1 when it stays
-  def dl-release-as(lock, pid) {
-   let holder = dl-field(dl-owner(lock), "pid=");
-   !nothing?(holder) && ((Comparable) holder == pid) ? host_dir_rmdir(lock) : -1;
+  def dl-admit(lock,lease,deadline,tries) {
+   let made=host_dir_mkdir(lock);
+   made==1 ? dl-own(lock,lease) : host_path_is_dir(lock)!=1 ? nothing() : {
+    let text=dl-owner(lock);let pid=dl-field(text,"pid=");let at=dl-field(text," at=");
+    // Holding the persistent file excludes any live scoped callback. An
+    // unknown legacy owner is not made dead by the passage of time.
+    !nothing?(dl-field(text," scoped=")) || (!nothing?(pid) && dl-holds?(pid,at)==false) ? dl-own(lock,lease)
+     : dl-expired(deadline) ? nothing() : {host_sleep_ms(dl-backoff(tries));dl-admit(lock,lease,deadline,tries+1);};
+   };
   }
-  def dl-release(lock) = dl-release-as(lock, host_pid());
+  def dl-own(lock,lease) {
+   let text=dl-text(host_pid(),now_unix_ms())+" scoped="+lease[0].str();
+   write_file_text(dl-owner-path(lock),text);
+   dl-owner(lock)==text ? [lock,lease,text] : nothing();
+  }
  }
  0;
 }

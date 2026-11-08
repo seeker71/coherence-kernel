@@ -32,10 +32,44 @@
 ;
 ; REQUIRES: a live Metal device -- every bit needs one behind the handle door (metal_pipeline, metal_buf_alloc, metal_buf_from_file, metal_buf_read, metal_buf_free, metal_live).
 ; The band writes only under temp_dir and removes what it made.
-// preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/gguf-manifest.fk form-stdlib/dsv4-fixture-gguf.fk form-stdlib/dsv4-layout.fk native/metal/dsv4-bind.fk form-stdlib/dsv4-kernels.fk native/metal/dsv4-open.fk native/metal/qwen35-dense-token-handle.fk
+// preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/gguf-manifest.fk form-stdlib/dsv4-fixture-gguf.fk form-stdlib/dsv4-layout.fk native/metal/dsv4-bind.fk form-stdlib/dsv4-kernels.fk native/metal/dsv4-open.fk native/metal/dsv4-arena.fk native/metal/qwen35-dense-token-handle.fk
 section [form.bml] {
  class Dsv4OpenBand {
   def dob-bit(held, bit) = held ? bit : 0;
+  def dob-owned-alloc(owner,bytes) {
+   let h=metal_buf_alloc([bytes,owner,"handles"]);let n=record_get(owner,"allocations")+1;record_set(owner,"allocations",n);
+   n==record_get(owner,"stop-allocation") ? form_error("planted DS4 allocation interruption") : h;
+  }
+  def dob-owned-map(owner,path,offset,bytes) {
+   let h=metal_buf_from_file([path,owner,"handles"],offset,bytes);let n=record_get(owner,"maps")+1;record_set(owner,"maps",n);
+   n==record_get(owner,"stop-map") ? form_error("planted DS4 mapping interruption") : h;
+  }
+  def dob-owned-close(owner,refuse) {
+   metal_sync();let held=record_get(owner,"handles");
+   map(h=>h==refuse ? 0 : metal_buf_free([h,owner,"handles"]),held);
+   record_get(owner,"handles");
+  }
+  def dob-owned-case(path,phase) {
+   let live=dvb-live();let mapped=dvb-mapped();
+   let scratch=len(dso-scratch-plan(dvl-open(dvl-src(path)),8));
+   let context=record_new(0,"handles",[],"maps",0,"allocations",0,"stop-map",phase=="map" ? 3 : 0,"stop-allocation",phase=="scratch" ? 2 : phase=="arena" ? scratch+1 : 0);
+   let state=record_new(0,"handles",[],"maps",0,"allocations",0,"stop-allocation",phase=="state" ? 2 : 0);
+   let ports=record_new(0,"allocate",bytes=>dob-owned-alloc(context,bytes),"from-file",(p,o,b)=>dob-owned-map(context,p,o,b),"free",h=>metal_buf_free([h,context,"handles"]));
+   let outcome=try {
+    let ctx=dsv4-open-arena-by(path,8,1,4,ports);
+    let sts=dso-open-ok?(ctx) ? dsv4-new-state-by(ctx[2],ctx[0],8,bytes=>dob-owned-alloc(state,bytes)) : nothing();
+    if phase=="complete" && !nothing?(sts) then {
+     let ar=dxa-of(ctx);let copied=dxa-fill-view(ar,0,0,0,0,record_get(ar,"eb")[0][0]);
+     metal_sync();copied==1 && dxa-free-pending(ar)==0;
+    } else 0;
+   } catch nothing();
+   let handles=record_get(context,"handles");let first=nil?(handles) ? 0 : handles[0];
+   let partial=dob-owned-close(context,first);
+   let kept=first>0 && partial==[first] && dvb-live()==live+1+len(record_get(state,"handles"));
+   let final=dob-owned-close(context,0);let stateFinal=dob-owned-close(state,0);
+   kept && nil?(final) && nil?(stateFinal) && nil?(dob-owned-close(context,0)) && dvb-live()==live && dvb-mapped()==mapped && (phase=="complete" ? outcome==1 : nothing?(outcome));
+  }
+  def dob-owned(path) = all?(ok=>ok,map(phase=>{let ok=dob-owned-case(path,phase);print(["ds4-owned-construction",phase,ok]);ok;},["map","scratch","arena","state","complete"]));
   def dob-g(ctx, i) = ctx[i];
   def dob-distinct(hs) = len(hs) == 0 ? true : (hs[0] > 0 && !dob-member(hs[0], hs[1:]) && dob-distinct(hs[1:]));
   def dob-member(x, xs) = len(xs) == 0 ? false : (xs[0] == x || dob-member(x, xs[1:]));
@@ -171,7 +205,7 @@ section [form.bml] {
  let stateLeft = nothing?(sts) ? [0] : dsv4-free-state(sts);
  let live4 = dvb-live();
  let c128 = dob-bit(try blind && len(noState) == 0 && leaked && len(stateLeft) == 0 && live4 == live0 catch false, 128);
- // 32: close in synced rounds (a fresh open: the first was closed above), then Qwen's own q38-close on a second one
+  // 32: the owning DS4 closer releases both fresh contexts and repeats safely.
  let ctxB = dsv4-open-span(path, 8, 1);
  let stsB = len(ctxB) == 13 ? dsv4-new-state(ctxB[2], ctxB[0], 8) : nothing();
  let liveB = dvb-live();
@@ -179,10 +213,12 @@ section [form.bml] {
  let afterB = dvb-live() == live0 && dvb-mapped() == mapped0 && len(leftB) == 0 && liveB == live0 + 147;
  let ctxC = dsv4-open-span(path, 8, 1);
  let stsC = len(ctxC) == 13 ? dsv4-new-state(ctxC[2], ctxC[0], 8) : nothing();
- let expectC = len(ctxC) == 13 ? q38-close-expected(ctxC, stsC) : 0;
- let freedC = len(ctxC) == 13 ? q38-close(ctxC, stsC) : 0;
- let afterC = freedC == expectC && expectC == 147 && dvb-live() == live0 && dvb-mapped() == mapped0;
- let c32 = dob-bit(try afterB && afterC catch false, 32);
+  let expectC = len(ctxC) == 13 ? dsv4-ctx-handle-count(ctxC)+len(dsv4-state-handles(stsC)) : 0;
+  let leftC = len(ctxC) == 13 ? dsv4-close(ctxC, stsC) : [0];
+  let freedC = expectC - len(leftC);
+  let repeatedC = len(ctxC) == 13 ? dsv4-close(ctxC, stsC) : [0];
+  let afterC = freedC == expectC && expectC == 147 && nil?(repeatedC) && dvb-live() == live0 && dvb-mapped() == mapped0;
+  let c32 = dob-bit(try afterB && afterC && dob-owned(path) catch false, 32);
  let refusedP = try dob-pipe-refused(path, live0, mapped0) catch false;
  let ctxD = dsv4-open-span-with(path, 8, 1, dkr-graph-units());
  let openedD = len(ctxD) == 13;

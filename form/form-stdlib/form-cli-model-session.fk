@@ -42,7 +42,31 @@ import form-stdlib/form-cli-model-spec.fk;
 section [form.bml] {
     // session = tag status reason path src ctx sts maxpos pos pending
     //           stopped prompt-ids generated-ids injected-ids observation-count
-    def fcms-session(status, reason, path, src, ctx, sts, maxpos, pos, pending, stopped, prompt-ids, generated-ids, injected-ids, observations) = ["form-cli-model-session-v1", status, reason, path, src, ctx, sts, maxpos, pos, pending, stopped, prompt-ids, generated-ids, injected-ids, observations];
+    def fcms-base-session(status, reason, path, src, ctx, sts, maxpos, pos, pending, stopped, prompt-ids, generated-ids, injected-ids, observations) = ["form-cli-model-session-v1", status, reason, path, src, ctx, sts, maxpos, pos, pending, stopped, prompt-ids, generated-ids, injected-ids, observations];
+    def fcms-session(status, reason, path, src, ctx, sts, maxpos, pos, pending, stopped, prompt-ids, generated-ids, injected-ids, observations) = append(fcms-base-session(status,reason,path,src,ctx,sts,maxpos,pos,pending,stopped,prompt-ids,generated-ids,injected-ids,observations),[[],[],nothing(),nothing(),nothing(),nothing(),maxpos,record_new(0)]);
+    def fcms-release-ledger(s) = s[22];
+    def fcms-with-release-ledger(s,ledger) = append(take(22,s),[ledger]);
+    def fcms-retain-reservation(ledger,token) = !record?(ledger) || !record?(token) ? 0 : {
+        let held=record_get(ledger,"reservations") ?? [];
+        if !any?(prior=>prior==token,held) then record_set(ledger,"reservations",append(held,[token])) else 0;
+        record_set(ledger,"lease-released",0);1;
+    };
+    def fcms-reservation(ledger,grant,parts) = {
+        let token=mg-reservation-of(grant);
+        fcms-retain-reservation(ledger,token);
+        let ready=mg-granted?(grant) && record?(token) && mg-reservation-partition(token,parts);
+        record_new(0,"token",token,"ready",ready,"parts",map(p=>{let part=mg-reservation-part(token,p[0]);record_set(part,"bytes",p[1]);part;},parts));
+    };
+    def fcms-reservation-ack(owner,names) = all?(ok=>ok,map(part=>mg-reservation-ack(part,record_get(part,"bytes")),filter(part=>any?(name=>name==record_get(part,"part"),names),record_get(owner,"parts"))));
+    def fcms-activate-parts(ledger,owner) = {
+        let active=record_get(ledger,"active-parts") ?? record_new(0);
+        map(part=>record_set(active,record_get(part,"part"),part),record_get(owner,"parts"));
+        record_set(ledger,"active-parts",active);0;
+    };
+    def fcms-active-parts(s,names) = {
+        let active=record_get(fcms-release-ledger(s),"active-parts");
+        record?(active) ? filter(entry=>record?(entry),map(name=>record_get(active,name),names)) : [];
+    };
     def fcms-status(s) = s[1];
     def fcms-reason(s) = s[2];
     def fcms-path(s) = s[3];
@@ -62,10 +86,10 @@ section [form.bml] {
     // Status and ownership are deliberately separate. A context-window refusal
     // can make the conversational operation `nothing` while the already-opened
     // context and stream state still need their physical release.
-    def fcms-resident?(s) = len(fcms-ctx(s)) > 0 && len(fcms-sts(s)) > 0 ? 1 : 0;
+    def fcms-resident?(s) = len(fcms-ctx(s)) > 0 ? 1 : 0;
     def fcms-none(reason) = fcms-session("nothing", reason, "", "", [], [], 0, 0, -1, 0, 0, 0, 0, 0);
-    def fcms-with-stream(s, pos, pending, stopped, generated, injected, observations) = fcmd-inherit(s, fcms-session(fcms-status(s), fcms-reason(s), fcms-path(s), fcms-src(s), fcms-ctx(s), fcms-sts(s), fcms-maxpos(s), pos, pending, stopped, fcms-prompt-ids(s), generated, injected, observations));
-    def fcms-refuse(s, reason) = fcmd-inherit(s, fcms-session("nothing", reason, fcms-path(s), fcms-src(s), fcms-ctx(s), fcms-sts(s), fcms-maxpos(s), fcms-pos(s), fcms-pending(s), fcms-stopped?(s), fcms-prompt-ids(s), fcms-generated-ids(s), fcms-injected-ids(s), fcms-observations(s)));
+    def fcms-with-stream(s, pos, pending, stopped, generated, injected, observations) = fcmd-inherit(s, fcms-base-session(fcms-status(s), fcms-reason(s), fcms-path(s), fcms-src(s), fcms-ctx(s), fcms-sts(s), fcms-maxpos(s), pos, pending, stopped, fcms-prompt-ids(s), generated, injected, observations));
+    def fcms-refuse(s, reason) = fcmd-inherit(s, fcms-base-session("nothing", reason, fcms-path(s), fcms-src(s), fcms-ctx(s), fcms-sts(s), fcms-maxpos(s), fcms-pos(s), fcms-pending(s), fcms-stopped?(s), fcms-prompt-ids(s), fcms-generated-ids(s), fcms-injected-ids(s), fcms-observations(s)));
     // A DeepSeek-V4 session holds the driver's context (thirteen slots, the layout RECORD in slot 2; Qwen's slot 2 is a list) and the driver's state rows: its step is the driver's decode
     // (form-cli-model-ds4.fk). Every other session takes the step it always took.
     def fcms-ds4?(s) = len(fcms-ctx(s)) == 13 && (String) value_kind(fcms-ctx(s)[2]) == "record";
@@ -81,6 +105,13 @@ section [form.bml] {
     def fcms-clock-of(s) = !nothing?(fcms-clock(s)) && (String) value_kind(fcms-clock(s)) == "record" ? fcms-clock(s) : nothing();
     def fcms-clock-pad(s) = len(s) >= fcms-clock-slot() ? s : fcms-clock-pad(append(s, [len(s) >= 17 ? nothing() : []]));
     def fcms-with-clock(s, clock) = append(take(fcms-clock-slot(), fcms-clock-pad(s)), cons(clock, drop(fcms-clock-slot() + 1, s)));
+    // The caller's context boundary is distinct from current allocation. Zero
+    // leaves admission/growth to observed demand within the artifact geometry.
+    def fcms-context-slot() = 21;
+    def fcms-context-limit(s) = len(s)>fcms-context-slot() ? s[fcms-context-slot()] : fcms-maxpos(s);
+    def fcms-context-pad(s) = len(s)>=fcms-context-slot() ? s : fcms-context-pad(append(s,[len(s)<17 ? [] : nothing()]));
+    def fcms-with-context-limit(s,limit) = append(take(fcms-context-slot(),fcms-context-pad(s)),cons(limit,drop(fcms-context-slot()+1,s)));
+    def fcms-context-capacity(s) = fcms-context-limit(s)>0 ? min2(fcms-context-limit(s),fcms-artifact-context-capacity-from-src(fcms-src(s))) : fcms-artifact-context-capacity-from-src(fcms-src(s));
     def fcms-clock-new() = record_new(0, "decode-ms", 0, "decode-ids", 0);
     def fcms-clock-stamp-at(clock, phase, ms) = nothing?(clock) ? 0 : { record_set(clock, phase, ms); 0; };
     def fcms-clock-stamp(clock, phase) = fcms-clock-stamp-at(clock, phase, now_unix_ms());
@@ -127,9 +158,11 @@ section [form.bml] {
         pending < 0 ? fcms-refuse(next, "adapter-head-refused") : next;
     };
     def fcms-attach-adapter(s, path) = !fcms-live?(s) ? s : !nil?(fcmd-carrier(s)) ? fcms-refuse(s, "adapter-already-attached") : fcms-generated-ids(s) > 0 || fcms-observations(s) > 0 ? fcms-refuse(s, "adapter-admission-requires-fresh-session") : {
-        let admitted = fcmd-admit(fcms-ctx(s), path);
+        let owner=fcms-phase-open(s,"qwen head adapter",[["adapter",qlh-width()*8+4]]);
+        record_set(fcms-release-ledger(s),"adapter",owner);
+        let admitted = fcmd-admit-by(fcms-ctx(s), path,bytes=>q38x-alloc(owner,bytes));
         let owned = fcmd-with-carrier(s, admitted[2]);
-        (Comparable) admitted[0] == 1 ? fcms-refresh-head(owned) : fcms-refuse(owned, admitted[1]);
+        admitted[0]==1 && fcms-phase-ready(owner) ? fcms-refresh-head(owned) : fcms-refuse(owned,admitted[0]==1 ? "adapter-allocation-observation-incomplete" : admitted[1]);
     };
     def fcms-open-adapted(path, prompt, maxpos, profile, adapter-path) = fcms-attach-adapter(fcms-open-with-profile(path, prompt, maxpos, profile), adapter-path);
     // The API names what is and is not encoded. A live observation can report
@@ -142,58 +175,84 @@ section [form.bml] {
     // position-indexed KV and attention scratch; weights and recurrent state stay.
     def fcms-capacity-bytes(s, positions) = {
         let geo = fcms-ctx(s)[2];
-        positions * 8 * (q38-full-layers(geo[21], geo[22]) * geo[20] + geo[12] * q38-ctx-span(fcms-ctx(s)));
+        sum(map(p=>p[1],fcms-capacity-parts(s,positions)));
+    };
+    def fcms-capacity-parts(s,positions) = {
+        let geo=append(take(18,fcms-ctx(s)[2]),cons(positions,drop(19,fcms-ctx(s)[2])));
+        [["position-scratch",q38-position-scratch-bytes(geo,q38-ctx-span(fcms-ctx(s)))],["full-kv",q38-full-kv-bytes(geo)]];
     };
     def fcms-capacity-handles(s) = {
         let geo = fcms-ctx(s)[2];
         foldl((out,i) => kth-full?(i,geo[22]) ? append(out,fcms-sts(s)[i][2:]) : out,[fcms-ctx(s)[1][27]],range(0,len(fcms-sts(s))));
     };
-    def fcms-capacity-owner(s, ctx, sts, positions) = fcmd-inherit(s, fcms-session(fcms-status(s), fcms-reason(s), fcms-path(s), fcms-src(s), ctx, sts, positions, fcms-pos(s), fcms-pending(s), fcms-stopped?(s), fcms-prompt-ids(s), fcms-generated-ids(s), fcms-injected-ids(s), fcms-observations(s)));
+    def fcms-capacity-owner(s, ctx, sts, positions) = {
+        record_set(fcms-release-ledger(s),"active-context",ctx);
+        record_set(fcms-release-ledger(s),"active-state",sts);
+        fcmd-inherit(s, fcms-base-session(fcms-status(s), fcms-reason(s), fcms-path(s), fcms-src(s), ctx, sts, positions, fcms-pos(s), fcms-pending(s), fcms-stopped?(s), fcms-prompt-ids(s), fcms-generated-ids(s), fcms-injected-ids(s), fcms-observations(s)));
+    };
     def fcms-capacity-signal(s, reason, positions) = oh-voice(oh-reading("model-session", host_pid().str(), "context-growth", json-node-int(positions), json-node-int(fcms-maxpos(s)), json-node-null(), [oh-need(reason, json-node-int(fcms-pos(s)))], ["grow-context", "retain-work"], json-node-object([oh-n("generated_ids", fcms-generated-ids(s)), oh-n("position", fcms-pos(s))])));
     def fcms-ensure-room(s, needed) = !fcms-live?(s) || fcms-pos(s) + needed < fcms-maxpos(s) ? s : fcms-ensure-room(fcms-grow(s),needed);
     def fcms-grow(s) = !fcms-live?(s) ? s : !fcms-resident?(s) ? fcms-refuse(s,"context-growth-needs-resident-owner") : {
-        let capacity = fcms-artifact-context-capacity-from-src(fcms-src(s));
+        let capacity = fcms-context-capacity(s);
         let positions = min2(capacity, fcms-maxpos(s) * 2);
         let signal = fcms-capacity-signal(s, "context-growth", positions);
-        fcms-ds4?(s) || positions <= fcms-maxpos(s) ? fcms-refuse(s, "model-context-capacity-needs-continuation") : fcms-grow-admitted(s, positions, signal, mg-lease("context growth", "", 0, fcms-capacity-bytes(s, positions)));
+        fcms-ds4?(s) || positions <= fcms-maxpos(s) ? fcms-refuse(s, "model-context-capacity-needs-continuation") : {
+            let owner=fcms-grow-owner(s);
+            !fcms-live?(owner) ? owner : fcms-grow-admitted(owner,positions,signal,mg-lease-retaining("context growth","",0,fcms-capacity-bytes(owner,positions),token=>fcms-retain-reservation(fcms-release-ledger(owner),token)));
+        };
     };
-    def fcms-grow-admitted(s, positions, signal, grant) = !mg-granted?(grant) ? {
-        let heard = fcms-capacity-signal(s, "host-memory-held:" + grant[1], positions);
-        fcms-grow-admitted(s,positions,signal,mg-lease-wait("context growth","",0,fcms-capacity-bytes(s,positions),nothing()));
-    } : {
+    // The speculative drafter retains position-sized buffers and its original
+    // target context. Retire it before resizing; verified target state continues
+    // token-wise, with its sampler and prompt-lookup draft owner intact.
+    def fcms-grow-owner(s) = fcms-grow-owner-by(s,fcsp-close,bytes=>fcsp-release-reservation(fcsp-owner(s)) ? 0 : -1);
+    def fcms-grow-owner-by(s,close,return-lease) = !fcsp-has?(s) ? s : {
+        let owned=fcsp-owned(s);let spec=fcsp-owner(s);let closed=close(s);
+        closed != owned || fcsp-owned(s)>0 ? fcms-refuse(s,"context-growth-spec-release-incomplete") : {
+            let bytes=record_get(spec,"lease-bytes") ?? 0;
+            let returned=bytes>0 ? return-lease(bytes) : 0;
+            returned != 0 ? fcms-refuse(s,"context-growth-spec-lease-release-incomplete") : {
+                record_set(spec,"lease-bytes",0);
+                fcsp-with-owner(s,q38x-off("spec-off:context-growth-retired"));
+            };
+        };
+    };
+    def fcms-grow-admitted(s, positions, signal, grant) = {
+        let owner=fcms-reservation(fcms-release-ledger(s),grant,fcms-capacity-parts(s,positions));
+        !mg-granted?(grant) ? fcms-refuse(s,"host-memory-held:"+grant[1])
+         : !record_get(owner,"ready") ? fcms-refuse(s,"context-growth-reservation-incomplete") : fcms-grow-allocated(s,positions,signal,owner);
+    };
+    def fcms-grow-allocated(s,positions,signal,owner) = {
         let ctx = fcms-ctx(s); let geo = ctx[2];
-        let scratch = metal_buf_alloc(positions * 8 * geo[12] * q38-ctx-span(ctx));
-        let states = range(0, len(fcms-sts(s))) |> map(i => kth-full?(i, geo[22]) ? [0, 0, metal_buf_alloc(geo[20] * positions * 4), metal_buf_alloc(geo[20] * positions * 4)] : fcms-sts(s)[i]);
+        map(row=>fcms-buffer-owner(fcms-release-ledger(s),row),fcms-release-rows(s));
+        let constructing=fcms-retain-owned-release(s,[],record_get(owner,"parts"));
+        record_set(owner,"allocation-owner",constructing);
+        let scratch = q38x-alloc(constructing,positions * 8 * geo[12] * q38-ctx-span(ctx));
+        let states = range(0, len(fcms-sts(s))) |> map(i => kth-full?(i, geo[22]) ? [0, 0, q38x-alloc(constructing,geo[20] * positions * 4), q38x-alloc(constructing,geo[20] * positions * 4)] : fcms-sts(s)[i]);
         let handles = foldl((out,i) => kth-full?(i,geo[22]) ? append(out,states[i][2:]) : out,[scratch],range(0,len(states)));
-        all?(h => h > 0, handles) ? fcms-grow-copied(s, positions, signal, scratch, states) : fcms-grow-discard(s,positions,handles,"context-growth-allocation-held");
+        all?(h => h > 0, handles) && fcms-reservation-ack(owner,["position-scratch","full-kv"]) ? fcms-grow-copied(s, positions, signal, scratch, states,owner) : fcms-grow-discard(s,handles,owner,"context-growth-allocation-held");
     };
-    def fcms-grow-discard(s, positions, handles, reason) = {
-        let settled = metal_sync();
-        let freed = handles |> map(h => h > 0 ? metal_buf_free(h) : 0);
-        let retained = range(0,len(handles)) |> filter(i => handles[i] > 0 && freed[i] <= 0) |> map(i => handles[i]);
-        let returned = nil?(retained) ? mg-lease-return(fcms-capacity-bytes(s,positions)) : 0;
-        let ctx = fcms-ctx(s);
-        let owned = fcms-capacity-owner(s, append(take(1,ctx), cons(append(ctx[1],retained),drop(2,ctx))), fcms-sts(s), fcms-maxpos(s));
-        fcms-refuse(owned, reason);
+    def fcms-grow-discard(s,handles,reservation,reason) = {
+        let owner=record_get(reservation,"allocation-owner") ?? fcms-retain-owned-release(s,handles,record_get(reservation,"parts"));
+        let complete=fcms-pending-release(owner);
+        fcms-refuse(s,complete ? reason : reason+"-release-incomplete");
     };
-    def fcms-grow-copied(s, positions, signal, scratch, states) = {
+    def fcms-grow-copied(s, positions, signal, scratch, states,owner) = {
         let ctx = fcms-ctx(s); let geo = ctx[2];
         let copies = range(0, len(states)) |> filter(i => kth-full?(i, geo[22])) |> map(i => [q38-copy-buf(ctx[0], fcms-sts(s)[i][2], states[i][2], fcms-pos(s) * geo[20]), q38-copy-buf(ctx[0], fcms-sts(s)[i][3], states[i][3], fcms-pos(s) * geo[20])]);
         let settled = metal_sync();
         let handles = foldl((out,i) => kth-full?(i,geo[22]) ? append(out,states[i][2:]) : out,[scratch],range(0,len(states)));
-        all?(pair => all?(rc => rc > 0,pair),copies) && fcmo-settled(metal_live()) ? fcms-grow-commit(s,positions,signal,scratch,states) : fcms-grow-discard(s,positions,handles,"context-growth-copy-incomplete");
+        all?(pair => all?(rc => rc > 0,pair),copies) && fcmo-settled(metal_live()) ? fcms-grow-commit(s,positions,signal,scratch,states,owner) : fcms-grow-discard(s,handles,owner,"context-growth-copy-incomplete");
     };
-    def fcms-grow-commit(s, positions, signal, scratch, states) = {
+    def fcms-grow-commit(s, positions, signal, scratch, states,owner) = {
         let ctx = fcms-ctx(s); let geo = ctx[2];
-        let old = fcms-capacity-handles(s);
-        let freed = old |> map(h => metal_buf_free(h));
-        let retained = range(0,len(old)) |> filter(i => freed[i] <= 0) |> map(i => old[i]);
-        let bufs = append(append(take(27, ctx[1]), cons(scratch, drop(28, ctx[1]))), retained);
+        let retired=fcms-retain-selection(s,fcms-capacity-handles(s),fcms-active-parts(s,["position-scratch","full-kv"]));
+        let bufs = append(take(27, ctx[1]), cons(scratch, drop(28, ctx[1])));
         let geometry = append(take(18, geo), cons(positions, drop(19, geo)));
         let context = append(take(1, ctx), cons(bufs, cons(geometry, drop(3, ctx))));
         let next = fcms-capacity-owner(s, context, states, positions);
-        let returned = nil?(retained) ? mg-lease-return(fcms-capacity-bytes(s, fcms-maxpos(s))) : 0;
-        let applied = oh-voice(oh-applied(signal, "grow-context", json-node-object([oh-n("positions", positions), oh-n("copied_positions", fcms-pos(s)), oh-n("retained_release_handles", len(retained)), oh-n("weight_admissions", 0)])));
+        fcms-activate-parts(fcms-release-ledger(s),owner);
+        let returned=fcms-pending-release(retired);
+        let applied = oh-voice(oh-applied(signal, "grow-context", json-node-object([oh-n("positions", positions), oh-n("copied_positions", fcms-pos(s)), oh-n("retained_release_handles", q38x-owned(retired)), oh-n("weight_admissions", 0)])));
         next;
     };
     def fcms-model-executed-form?() = 0;
@@ -219,78 +278,126 @@ section [form.bml] {
     // The shared bytes the lease promises: the file's size for every file but a DeepSeek-V4 GGUF (dsv4-lease.fk: that file is mapped and touched in part, so its figure is the derived working
     // set, derived and not measured). The call below keeps its text; what it is asked changes only for a deepseek4 file.
     def fcms-weights-bytes(path) = dls-weights-bytes(path);
-    // The bytes this Qwen open allocates besides the mapped file. An unreadable
-    // geometry keeps the unread margin, so a missing header never asks for less.
+    // Private allocation is derived from this model, span and capacity. An
+    // unreadable geometry refuses before allocation; it supplies no guessed size.
     def fcms-qwen-own(src, maxpos) = fcms-qwen-own-with(src, maxpos, fcma-span(maxpos));
     def fcms-qwen-own-with(src, maxpos, span) = {
         let geo = q38-geo(src, maxpos);
-        geo[0] <= 0 || geo[21] <= 0 ? mg-kv-margin() : q38-own-bytes(geo, span);
+        geo[0] <= 0 || geo[21] <= 0 ? form_error("Qwen allocation geometry unavailable") : q38-scratch-bytes(geo,span)+q38-stream-bytes(geo);
     };
-    def fcms-admit-own(path, maxpos) = maxpos <= 0 ? mg-kv-margin() : {
-        let src = fcmg-src(path);
-        // The load queue admits the existing minimum width. The final lease
-        // selects and accounts for the wider prefill before any allocation.
-        (String) fcmg-arch(src) == "" || (String) fcmg-arch(src) == "deepseek4" ? mg-kv-margin() : fcms-qwen-own-with(src, maxpos, fcma-floor(maxpos));
-    };
-    def fcms-memory-need(path) = fcms-weights-bytes(path) + mg-kv-margin();
     def fcms-memory-held(path, v, need) = {
         let said = print_str(mg-line("model session " ++ path, mg-need-of(v, need), v));
-        fcms-none("host-memory-held:" ++ v[1]);
+        let held=fcms-none("host-memory-held:" ++ v[1]);
+        fcms-reservation(fcms-release-ledger(held),v,[]);held;
     };
     def fcms-open-context(path, src, maxpos, prompt-count, cursor, ids, live-cursor, x, iced, clock, spec-open, span-lease, wear) = {
-        let choice = span-lease(span => fcms-lease-span(path,src,maxpos,span,wear),prompt-count);
+        let choice = span-lease(span => fcms-lease-span-retaining(path,src,maxpos,span,wear,token=>fcms-retain-reservation(record_get(clock,"release-ledger"),token)),prompt-count);
         let span = choice[0]; let granted = choice[1];
-        mg-granted?(granted) ? fcms-open-granted(path, src, maxpos, prompt-count, cursor, ids, live-cursor, x, iced, clock, spec-open, span, wear) : fcms-memory-held(path, granted, fcms-weights-bytes(path) + fcms-qwen-own-with(src,maxpos,span));
+        mg-granted?(granted) ? fcms-open-granted(path, src, maxpos, prompt-count, cursor, ids, live-cursor, x, iced, clock, spec-open, span, wear,granted) : fcms-memory-held(path, granted, nothing());
     };
-    def fcms-lease-span(path, src, maxpos, span, wear) = {
-        let own = fcms-qwen-own-with(src,maxpos,span) + qlwe-own-bytes(wear,span);
-        mg-lease("model session " ++ path, path, fcms-weights-bytes(path), own);
+    def fcms-lease-span(path,src,maxpos,span,wear) = fcms-lease-span-retaining(path,src,maxpos,span,wear,nothing());
+    def fcms-lease-span-retaining(path,src,maxpos,span,wear,retain) = {
+        let own = try fcms-qwen-own-with(src,maxpos,span) + qlwe-own-bytes(wear,span) catch nothing();
+        nothing?(own) ? mg-reservation-held(mg-verdict(mg-sense(),0),"model-geometry-unavailable",nothing(),0) : mg-lease-retaining("model session " ++ path,path,fcms-weights-bytes(path),own,retain);
     };
     // A DeepSeek-V4 file, reached past the lane gate below (mr-wired? reads the registry's row for the arch: deepseek4 dsv4, wired): the chat template's ids from the file's own tokenizer, the lease
     // for the derived working set at this session's capacity (cut to the positions the driver serves), the driver's arena open, state and prefill (form-cli-model-ds4.fk). A refusal before the context exists
     // gave the lease back there; after it, the context and state stay in the record for fcms-release-ok?, as the Qwen door leaves them.
     // The open is announced as the Qwen open is (the same two progress stages around the lease, the open and the prefill: print_str lines and framebuffer records, no prompt or path in them).
-    def fcms-open-ds4-staged(path, src, prompt, requested-maxpos, reserve) = {
+    def fcms-open-ds4-staged(path,src,prompt,requested-maxpos,reserve,clock) = {
         let _admit-begin = fcmg-live-stage("model-session-open-prefill-begin", 8388611);
-        let opened = fcms-open-ds4(path, src, prompt, requested-maxpos, reserve);
+        let opened=fcms-open-ds4-retaining(path,src,prompt,requested-maxpos,reserve,record_get(clock,"release-ledger"));
         let _admit-complete = fcmg-live-stage("model-session-open-prefill-complete", 8388612);
         opened;
     };
-    def fcms-open-ds4(path, src, prompt, requested-maxpos, reserve) = fcms-ds4-session(path, src, fcds-open-parts(path, src, prompt, requested-maxpos, reserve));
-    def fcms-ds4-session(path, src, parts) = (String) parts[0] == "live" ? fcms-session("live", parts[1], path, src, parts[2], parts[3], parts[4], parts[5], parts[6], 0, parts[7], 0, 0, 0) : len(parts[2]) > 0 ? fcms-session("nothing", parts[1], path, src, parts[2], parts[3], parts[4], parts[5], parts[6], 0, parts[7], 0, 0, 0) : fcms-none(parts[1]);
-    def fcms-open-granted(path, src, maxpos, prompt-count, cursor, ids, live-cursor, x, iced, clock, spec-open, span, wear) = {
+    def fcms-open-ds4(path,src,prompt,requested-maxpos,reserve) = fcms-open-ds4-retaining(path,src,prompt,requested-maxpos,reserve,record_new(0));
+    def fcms-open-ds4-retaining(path,src,prompt,requested-maxpos,reserve,ledger) = {
+        let lease=(who,key,shared,own)=>mg-lease-retaining(who,key,shared,own,token=>fcms-retain-reservation(ledger,token));
+        let parts=fcds-open-parts-owned(lease,(grant,parts)=>fcms-ds4-admit(ledger,grant,parts),path,src,prompt,requested-maxpos,reserve);
+        fcms-with-release-ledger(fcms-session(parts[0],parts[1],path,src,parts[2],parts[3],parts[4],parts[5],parts[6],0,parts[7],0,0,0),ledger);
+    };
+    def fcms-ds4-admit(ledger,grant,parts) = {
+        let reservation=fcms-reservation(ledger,grant,parts);
+        !record_get(reservation,"ready") ? nothing() : fcms-ds4-ports(ledger,reservation);
+    };
+    def fcms-ds4-ports(ledger,reservation) = {
+            let partial=fcms-with-release-ledger(fcms-none("ds4-context-opening"),ledger);
+            let context=fcms-retain-owned-release(partial,[],filter(part=>record_get(part,"part")!="full-kv",record_get(reservation,"parts")));
+            let state=fcms-retain-owned-release(partial,[],filter(part=>record_get(part,"part")=="full-kv",record_get(reservation,"parts")));
+            record_set(ledger,"context",context);record_set(ledger,"state",state);record_set(ledger,"ds4-owned",1);
+            fcms-activate-parts(ledger,reservation);
+            record_new(0,"allocate",bytes=>q38x-alloc(context,bytes),"from-file",(path,offset,bytes)=>q38x-map(context,path,offset,bytes),"free",handle=>q38x-free(context,handle),"state-allocate",bytes=>q38x-alloc(state,bytes),"retain-context",ctx=>record_set(ledger,"active-context",ctx),"retain-state",sts=>record_set(ledger,"active-state",sts));
+    };
+    def fcms-open-ds4-ids(path,src,ids,maxpos) = fcms-open-ds4-ids-retaining(path,src,ids,maxpos,nothing());
+    def fcms-open-ds4-ids-retaining(path,src,ids,maxpos,retain) = {
+        let ledger=record_new(0);
+        let partial=fcms-with-release-ledger(fcms-none("DS4-ID-admission"),ledger);
+        if value_kind(retain)=="closure" then retain(partial) else 0;
+        let lease=(who,key,shared,own)=>mg-lease-retaining(who,key,shared,own,token=>fcms-retain-reservation(ledger,token));
+        let opened=try {let parts=fcds-open-leased-owned(lease,(grant,parts)=>fcms-ds4-admit(ledger,grant,parts),path,ids,maxpos);
+        fcms-with-release-ledger(fcms-session(parts[0],parts[1],path,src,parts[2],parts[3],parts[4],parts[5],parts[6],0,parts[7],0,0,0),ledger);
+        } catch fcms-refuse(partial,"DS4-ID-admission-interrupted");
+        if value_kind(retain)=="closure" then retain(opened) else 0;opened;
+    };
+    def fcms-ds4-session(path, src, parts) = {
+        let session=fcms-session(parts[0],parts[1],path,src,parts[2],parts[3],parts[4],parts[5],parts[6],0,parts[7],0,0,0);
+        if len(parts)>9 then {
+            let reservation=fcms-reservation(fcms-release-ledger(session),parts[8],parts[9]);
+            fcms-activate-parts(fcms-release-ledger(session),reservation);
+        } else 0;session;
+    };
+    def fcms-open-granted(path, src, maxpos, prompt-count, cursor, ids, live-cursor, x, iced, clock, spec-open, span, wear,grant) = {
+        let ledger=record_get(clock,"release-ledger") ?? record_new(0);
+        let partial=fcms-with-release-ledger(fcms-none("model-context-opening"),ledger);
+        let retained=record_get(clock,"retain-session");
+        value_kind(retained)=="closure" ? retained(partial) : 0;
+        let reservation=fcms-reservation(ledger,grant,q38-session-parts(q38-geo(src,maxpos),span,qlwe-own-bytes(wear,span)));
+        !record_get(reservation,"ready") ? fcms-with-release-ledger(fcms-none("model-reservation-partition-incomplete"),ledger) : try {fcms-open-reserved-context(path,src,maxpos,prompt-count,cursor,ids,live-cursor,x,iced,clock,spec-open,span,wear,ledger,reservation);} catch fcms-with-release-ledger(fcms-none("model-context-open-stopped"),ledger);
+    };
+    def fcms-open-reserved-context(path,src,maxpos,prompt-count,cursor,ids,live-cursor,x,iced,clock,spec-open,span,wear,ledger,reservation) = {
         let leased = fcms-clock-stamp(clock, "model-session-lease-granted");
         let _span = fcms-open-stage(clock, ("model-session-prefill-span-" + span.str()), 8388624);
         let _open-begin = fcms-open-stage(clock, "model-session-context-open-begin", 8388620);
-        let ctx = (Comparable) iced == 1 ? qsx-open-span(path, maxpos, x, span) : q38-open-span(path, maxpos, span);
+        let partial=fcms-with-release-ledger(fcms-none("model-context-opening"),ledger);
+        let constructing=fcms-retain-owned-release(partial,[],filter(part=>any?(name=>name==record_get(part,"part"),["scratch","position-scratch","wear"]),record_get(reservation,"parts")));
+        record_set(ledger,"context",constructing);
+        let allocate=bytes=>q38x-alloc(constructing,bytes);let from-file=(file,offset,bytes)=>q38x-map(constructing,file,offset,bytes);
+        let ctx = (Comparable) iced == 1 ? qsx-open-span-by(path,maxpos,x,span,allocate,from-file) : q38-open-span-by(path,maxpos,span,allocate,from-file);
+        record_set(ledger,"active-context",ctx);
         let _open-ready = fcms-open-stage(clock, "model-session-context-open-ready", 8388620);
         // A request that names an adapter opens the same context and then wears it (form-stdlib/bml/qwen-last-block-wear.bml): the worn context is the opened one with the
         // adapted layer table, so every forward of this session wears the pair and the release frees it with the rest. A wear that does not stand closes what opened through
         // the open's own refusal and names why. A request that names none takes ["bare", ctx]: the context it always took.
-        let worn = nothing?(wear) || !((Comparable) q38-context-ok?(ctx) == 1) ? ["bare", ctx] : qlwe-open(ctx, wear);
+        let worn = nothing?(wear) || !((Comparable) q38-context-ok?(ctx) == 1) ? ["bare", ctx] : qlwe-open-by(ctx,wear,allocate,(rec,why)=>["refused",why]);
+        if worn[0]=="worn" then {
+            record_set(ledger,"active-context",worn[1]);
+        } else 0;
         let _worn = (String) worn[0] == "worn" ? fcms-open-stage(clock, "model-session-wear-ready", 8388620) : 0;
-        fcms-open-state(path, src, maxpos, prompt-count, cursor, ids, live-cursor, clock, spec-open, span, (String) worn[0] == "refused" ? ctx : worn[1], (String) worn[0] == "refused" ? worn[1] : "");
+        let context-observed=q38-context-ok?(ctx)==1 && fcms-reservation-ack(reservation,["scratch","position-scratch"]);
+        let wear-observed=nothing?(wear) || worn[0]=="worn" && fcms-reservation-ack(reservation,["wear"]);
+        let opened=fcms-open-state(path, src, maxpos, prompt-count, cursor, ids, live-cursor, clock, spec-open, span, (String) worn[0] == "refused" ? ctx : worn[1], (String) worn[0] == "refused" ? worn[1] : !context-observed || !wear-observed ? "allocation-observation-incomplete" : "",reservation,ledger);
+        fcms-activate-parts(ledger,reservation);
+        fcms-with-release-ledger(opened,ledger);
     };
-    def fcms-open-state(path, src, maxpos, prompt-count, cursor, ids, live-cursor, clock, spec-open, span, ctx, wearWhy) = {
+    def fcms-open-state(path, src, maxpos, prompt-count, cursor, ids, live-cursor, clock, spec-open, span, ctx, wearWhy,reservation,ledger) = {
         (Comparable) len(wearWhy) > 0 || !((Comparable) q38-context-ok?(ctx) == 1) ? {
             let reason = (Comparable) len(wearWhy) > 0 ? "adapter-wear-refused: " ++ wearWhy : "model-context-open-refused; " ++ metal_status();
-            let closed = len(ctx) < 10 ? 0 : q38-close(ctx, []);
-            let unleased = mg-release();
-            fcms-none(reason ++ ";closed_handles=" ++ closed.str());
+            fcms-session("nothing",reason,path,src,ctx,[],maxpos,0,-1,0,prompt-count,0,0,0);
         } : {
             let _state-begin = fcms-open-stage(clock, "model-session-state-begin", 8388621);
-            let sts = q38-new-state(ctx[2]);
+            let constructing=fcms-retain-owned-release(fcms-with-release-ledger(fcms-none("model-stream-opening"),ledger),[],filter(part=>any?(name=>name==record_get(part,"part"),["full-kv","recurrent"]),record_get(reservation,"parts")));
+            record_set(ledger,"state",constructing);
+            let sts = q38-new-state-by(ctx[2],bytes=>q38x-alloc(constructing,bytes));
+            record_set(ledger,"active-state",sts);
             let _state-ready = fcms-open-stage(clock, "model-session-state-ready", 8388621);
-            !((Comparable) q38-state-ok?(sts) == 1) ? {
-                let state-closed = q38-free-state(sts);
-                let context-closed = q38-close(ctx, []);
-                let unleased = mg-release();
-                fcms-none("model-stream-state-refused");
+            !q38-state-complete?(sts,ctx[2]) || !fcms-reservation-ack(reservation,["full-kv","recurrent"]) ? {
+                fcms-session("nothing","model-stream-state-refused",path,src,ctx,sts,maxpos,0,-1,0,prompt-count,0,0,0);
             } : {
                 // The speculative drafter opens before the prompt's prefill, so the prefill's own batches capture what it reads (form-cli-model-spec.fk).
                 // A refusal names its reason in the owner and the session opens plain.
                 let _spec-begin = fcms-open-stage(clock, "model-session-spec-open-begin", 8388626);
-                let spec = spec-open(path, ctx, maxpos);
+                let spec=q38x-off("spec-opening");record_set(ledger,"spec",spec);
+                spec-open(path,ctx,maxpos,spec);
                 let _spec-ready = fcms-open-stage(clock, (Comparable) q38x-on?(spec) == 1 ? "model-session-spec-open-ready" : "model-session-spec-off", 8388626);
                 fcms-open-prefilled(path, src, maxpos, prompt-count, cursor, ids, live-cursor, ctx, sts, span, spec, clock);
             };
@@ -316,10 +423,17 @@ section [form.bml] {
     // default; fcms-open-with-profile is the same door with the shape
     // chosen by the caller as data.
     def fcms-open(path, prompt, maxpos) = fcms-open-with-profile(path, prompt, maxpos, "full");
-    def fcms-open-with-profile(path, prompt, maxpos, profile) = fcms-open-sized(path, prompt, maxpos, profile, 0);
+    def fcms-open-with-profile(path,prompt,maxpos,profile) = fcms-open-profile-retaining(path,prompt,maxpos,profile,nothing());
+    def fcms-open-profile-retaining(path,prompt,maxpos,profile,retain) = fcms-open-sized-retaining(fcsp-open-retaining,fcma-lease-fixed,nothing(),path,prompt,maxpos,profile,0,retain);
     // Allocate from the counted prompt plus the caller's output/observation
     // reserve. Artifact capacity is still checked before model admission.
-    def fcms-open-reserved(path, prompt, reserve, profile) = reserve <= 0 ? fcms-none("session-output-reserve-refused") : fcms-open-sized(path, prompt, 0, profile, reserve);
+    def fcms-open-reserved(path,prompt,reserve,profile) = fcms-open-reserved-retaining(path,prompt,reserve,profile,nothing());
+    def fcms-open-reserved-retaining(path,prompt,reserve,profile,retain) = reserve<=0 ? fcms-none("session-output-reserve-refused") : fcms-open-sized-retaining(fcsp-open-retaining,fcma-lease-fixed,nothing(),path,prompt,0,profile,reserve,retain);
+    // Qwen admits the counted prompt and its next prediction, then grows in
+    // its owned walk. DeepSeek retains its declared context ceiling until its
+    // driver offers growth. Neither geometry imposes an answer allowance.
+    def fcms-open-unbounded(path,prompt,profile) = fcms-open-unbounded-retaining(path,prompt,profile,nothing());
+    def fcms-open-unbounded-retaining(path,prompt,profile,retain) = fcmg-arch(fcmg-src(path))=="deepseek4" ? fcms-open-profile-retaining(path,prompt,fcms-artifact-context-capacity-from-src(fcmg-src(path)),profile,retain) : fcms-open-sized-retaining(fcsp-open-plain-retaining,fcma-lease-fixed,nothing(),path,prompt,0,profile,1,retain);
     // Every open queues for its weights at this one place (model-admission.bml), so the voice, the code lane, learning,
     // prompt lookup and every probe share one queue: oldest first, admitted when the OS has headroom for what the load adds
     // (a file a live process already holds is shared, not loaded again). The load slot frees when the open completes; the
@@ -327,7 +441,7 @@ section [form.bml] {
     // The session's clock (fcms-clock-new) is born here, before the queue, so the wait for admission is its first span; the
     // session that comes back carries it (fcms-with-clock), opened or refused. An ask the queue did not admit has no grant
     // and no clock: its reading is nothing.
-    def fcms-open-sized(path, prompt, requested-maxpos, profile, reserve) = fcms-open-sized-using(fcsp-open, fcma-lease-fixed, path, prompt, requested-maxpos, profile, reserve);
+    def fcms-open-sized(path, prompt, requested-maxpos, profile, reserve) = fcms-open-sized-using(fcsp-open-retaining, fcma-lease-fixed, path, prompt, requested-maxpos, profile, reserve);
     // The voice chooses its decode owner and leases a wider prefill independently
     // of the prompt profile. Ordinary sessions retain their fixed-width opener.
     // Both retain the same tokenizer, complete prompt and release boundary.
@@ -335,21 +449,31 @@ section [form.bml] {
     // The same voice door with a wear named: wear is [adapter directory, scale or nothing (the config's)], form-stdlib/bml/qwen-last-block-wear.bml.
     def fcms-open-worn-by(wear) = (spec-open, path, prompt, requested-maxpos, profile, reserve) => fcms-open-sized-wearing(spec-open, fcma-lease-span, wear, path, prompt, requested-maxpos, profile, reserve);
     def fcms-open-sized-using(spec-open, span-lease, path, prompt, requested-maxpos, profile, reserve) = fcms-open-sized-wearing(spec-open, span-lease, nothing(), path, prompt, requested-maxpos, profile, reserve);
-    def fcms-open-sized-wearing(spec-open, span-lease, wear, path, prompt, requested-maxpos, profile, reserve) = !nothing?(wear) && (String) fcmg-arch(fcmg-src(path)) == "deepseek4" ? fcms-none("adapter-wear-refused: the deepseek4 lane carries no adapter hook") : {
+    def fcms-retained-opener(wear,retain) = (spec-open,path,prompt,requested-maxpos,profile,reserve)=>fcms-open-sized-retaining(spec-open,fcma-lease-span,wear,path,prompt,requested-maxpos,profile,reserve,retain);
+    def fcms-open-sized-wearing(spec-open,span-lease,wear,path,prompt,requested-maxpos,profile,reserve) = fcms-open-sized-retaining(spec-open,span-lease,wear,path,prompt,requested-maxpos,profile,reserve,nothing());
+    def fcms-open-sized-retaining(spec-open, span-lease, wear, path, prompt, requested-maxpos, profile, reserve,retain) = !nothing?(wear) && (String) fcmg-arch(fcmg-src(path)) == "deepseek4" ? fcms-none("adapter-wear-refused: the deepseek4 lane carries no adapter hook") : {
         let clock = fcms-clock-new();
+        record_set(clock,"retain-session",retain);
+        record_set(clock,"release-ledger",record_new(0));
         let arrived = fcms-clock-stamp(clock, "admission-begin");
-        fcms-open-admitted(path, prompt, requested-maxpos, profile, reserve, clock, adm-admit-for("fcms-open", path, adm-wait-ms(), fcms-admit-own(path, requested-maxpos)), spec-open, span-lease, wear);
+        fcms-with-context-limit(fcms-open-admitted(path, prompt, requested-maxpos, profile, reserve, clock, adm-admit("fcms-open", path, adm-wait-ms()), spec-open, span-lease, wear),requested-maxpos);
     };
-    def fcms-open-admitted(path, prompt, requested-maxpos, profile, reserve, clock, claim, spec-open, span-lease, wear) = (Comparable) claim[0] == 1 ? fcms-open-held(path, prompt, requested-maxpos, profile, reserve, clock, claim[2], spec-open, span-lease, wear) : fcms-none(("model-queued: " + claim[1]));
-    def fcms-open-held(path, prompt, requested-maxpos, profile, reserve, clock, ticket, spec-open, span-lease, wear) = {
+    def fcms-open-admitted(path, prompt, requested-maxpos, profile, reserve, clock, claim, spec-open, span-lease, wear) = (Comparable) claim[0] == 1 ? fcms-open-held(path, prompt, requested-maxpos, profile, reserve, clock, claim, spec-open, span-lease, wear) : fcms-none(("model-queued: " + claim[1]));
+    def fcms-open-held(path, prompt, requested-maxpos, profile, reserve, clock, claim, spec-open, span-lease, wear) = {
+        let ticket=claim[2];let note-owned=len(claim)>3 && claim[3]==1;
+        defer adm-loaded(ticket);
+        let ledger=record_get(clock,"release-ledger");
+        record_set(ledger,"residency-owned",note-owned);record_set(ledger,"residency-path",path);
+        let partial=fcms-with-release-ledger(fcms-none("model-admission-in-progress"),ledger);
+        let retain=record_get(clock,"retain-session");
+        value_kind(retain)=="closure" ? retain(partial) : 0;
         let granted = fcms-clock-stamp(clock, "admission-granted");
-        let opened = fcms-open-body(path, prompt, requested-maxpos, profile, reserve, clock, spec-open, span-lease, wear);
-        let loaded = adm-loaded(ticket);
-        fcms-with-clock((Comparable) fcms-resident?(opened) == 1 ? opened : fcms-open-refused(opened, path), clock);
-    };
-    def fcms-open-refused(opened, path) = {
-        let dropped = adm-drop(path);
-        opened;
+        let opened = try fcms-open-body(path, prompt, requested-maxpos, profile, reserve, clock, spec-open, span-lease, wear) catch fcms-with-release-ledger(fcms-none("model-admission-stopped"),ledger);
+        let answer=fcms-with-clock(opened,clock);
+        record_set(fcms-release-ledger(answer),"residency-owned",note-owned);
+        record_set(fcms-release-ledger(answer),"residency-path",path);
+        value_kind(retain)=="closure" ? retain(answer) : 0;
+        answer;
     };
     // A prefix preparation retains the ordinary seal, tokenizer, capacity and
     // admission path. Only exact initial IDs are prepared; the predicted ID at
@@ -370,7 +494,7 @@ section [form.bml] {
             // admission by the lane table, never a literal: an arch
             // whose lane is not yet wired into this door refuses
             // TYPED, naming the lane that would serve it.
-            !((Comparable) mr-wired?(arch) == 1) ? fcms-none(("lane-unwired:" + (mr-lane-for(arch) + (":" + arch)))) : (String) arch == "deepseek4" ? fcms-open-ds4-staged(path, src, prompt, requested-maxpos, reserve) : {
+            !((Comparable) mr-wired?(arch) == 1) ? fcms-none(("lane-unwired:" + (mr-lane-for(arch) + (":" + arch)))) : (String) arch == "deepseek4" ? fcms-open-ds4-staged(path,src,prompt,requested-maxpos,reserve,clock) : {
                 let _crystal-begin = fcms-stage(clock, "model-session-tokenizer-crystal-begin", 8388616);
                 let x = qsx-load(path);
                 let _crystal-complete = fcms-stage(clock, "model-session-tokenizer-crystal-complete", 8388617);
@@ -433,15 +557,33 @@ section [form.bml] {
     // The forward is the caller's step, as fcsam-walk takes its own: fcms-walk is this walk with the session's
     // token-wise forward, and the draft lane's band (tests/form-cli-model-draft-band.bml) holds its walk to
     // this one's contract by running the same scripted predictions through both.
-    def fcms-walk-by(step, s, id, pos, left, stops, out, steps-to-checkpoint, checkpoint-width, completed-steps) = id < 0 ? [out, -1, pos, 1] : (Comparable) q38-stop?(id, stops) == 1 ? [out, id, pos, 1] : left <= 0 ? [out, id, pos, 0] : {
+    def fcms-progress(s) = record_new(0,"session",s,"ids",[],"reversed",0);
+    def fcms-progress-of(s) = len(s)>22 && record?(record_get(fcms-release-ledger(s),"generation-progress")) ? record_get(fcms-release-ledger(s),"generation-progress") : nothing();
+    def fcms-progress-generation(progress) = fcms-progress-generation-by(progress,(s,ids)=>fcms-ds4?(s) ? fcds-text(fcms-src(s),ids) : ftdb-text(fcms-src(s),ids));
+    def fcms-progress-generation-by(progress,decode) {
+        let s=record_get(progress,"session");let ids=fcms-progress-ids(progress);
+        let text=try decode(s,ids) catch nothing();
+        record_set(progress,"text-available",value_kind(text)=="string");
+        fcms-generation(value_kind(text)=="string" ? text : "",ids,s);
+    }
+    def fcms-progress-set(progress,s,ids,reversed) = nothing?(progress) ? 0 : {
+        record_set(progress,"session",s); record_set(progress,"ids",ids); record_set(progress,"reversed",reversed);
+        let retain=record_get(progress,"retain");if value_kind(retain)=="closure" then retain(s) else 0;1;
+    };
+    def fcms-progress-ids(progress) = record_get(progress,"reversed") ? reverse(record_get(progress,"ids")) : record_get(progress,"ids");
+    def fcms-walk-by(step, s, id, pos, left, stops, out, steps-to-checkpoint, checkpoint-width, completed-steps) = fcms-walk-observed(nothing(),step,s,id,pos,left,stops,out,steps-to-checkpoint,checkpoint-width,completed-steps);
+    def fcms-walk-ended(progress,s,out,id,pos,stopped) {fcms-progress-set(progress,fcms-open-stream(s,pos,id,stopped,len(out)),out,0);[out,id,pos,stopped];}
+    def fcms-walk-observed(progress,step, s, id, pos, left, stops, out, steps-to-checkpoint, checkpoint-width, completed-steps) = id < 0 ? fcms-walk-ended(progress,s,out,-1,pos,1) : (Comparable) q38-stop?(id, stops) == 1 ? fcms-walk-ended(progress,s,out,id,pos,1) : left <= 0 ? fcms-walk-ended(progress,s,out,id,pos,0) : {
         let out2 = append(out, [id]);
         let completed2 = completed-steps + 1;
+        fcms-progress-set(progress,fcms-open-stream(s,pos,id,0,len(out2)),out2,0);
         let pulse = (Comparable) fcms-decode-checkpoint?(steps-to-checkpoint) == 1 ? fcms-decode-pulse-of(s, completed2) : 0;
         let next-left = fcms-decode-next-left(steps-to-checkpoint, checkpoint-width);
         let next-width = fcms-decode-next-width(steps-to-checkpoint, checkpoint-width);
         (Comparable) left == 1 ? [out2, id, pos, 0] : {
             let nid = step(s, id, pos);
-            nid < 0 ? [out2, -1, pos + 1, 1] : (Comparable) q38-stop?(nid, stops) == 1 ? [out2, nid, pos + 1, 1] : fcms-walk-by(step, s, nid, pos + 1, left - 1, stops, out2, next-left, next-width, completed2);
+            fcms-progress-set(progress,fcms-open-stream(s,pos+1,nid,nid<0 || q38-stop?(nid,stops),len(out2)),out2,0);
+            nid < 0 ? [out2, -1, pos + 1, 1] : (Comparable) q38-stop?(nid, stops) == 1 ? [out2, nid, pos + 1, 1] : fcms-walk-observed(progress,step, s, nid, pos + 1, left - 1, stops, out2, next-left, next-width, completed2);
         };
     };
     // THE PLANNED STEP. A walk of n tokens builds the token's position-independent dispatch records ONCE for this session's state
@@ -461,14 +603,71 @@ section [form.bml] {
         next;
     };
     def fcms-step-for(s, n) = fcms-plannable?(s, n) ? fcms-planned-step(fcms-ctx(s), fcms-sts(s), q38-plan(fcms-ctx(s), fcms-sts(s))) : fcms-forward;
-    def fcms-walk(s, id, pos, left, stops, out, steps-to-checkpoint, checkpoint-width, completed-steps) = fcms-walk-by(fcms-step-for(s, left), s, id, pos, left, stops, out, steps-to-checkpoint, checkpoint-width, completed-steps);
+    def fcms-walk(s, id, pos, left, stops, out, steps-to-checkpoint, checkpoint-width, completed-steps) = fcms-walk-observed(fcms-progress-of(s),fcms-step-for(s, left), s, id, pos, left, stops, out, steps-to-checkpoint, checkpoint-width, completed-steps);
     // generation = tag text ids updated-session. No generated text is needed to
     // resume; the bytes are exposed only for the Form/BMF boundary that asks.
     def fcms-generation(text, ids, session) = ["form-cli-model-session-generation-v1", text, ids, session];
     def fcms-generation-text(g) = g[1];
     def fcms-generation-ids(g) = g[2];
     def fcms-generation-session(g) = g[3];
-    def fcms-generate(s, n) = !((Comparable) fcms-live?(s) == 1) || n <= 0 ? fcms-generation("", [], s) : fcms-ds4?(s) ? fcms-generate-ds4(s, n) : !nil?(fcsam-owner(s)) ? fcms-generate-sampled(s, n) : fcms-generate-greedy(s, n);
+    def fcms-generate(s,n) {
+        let owner=len(s)>22 ? record_get(fcms-release-ledger(s),"generation-owner") : nothing();
+        if record?(owner) then {
+            let progress=fcms-progress(s);
+            record_set(fcms-release-ledger(s),"generation-progress",progress);record_set(owner,"plain-progress",progress);record_set(owner,"active-generation","plain");
+            let generated=fcms-generate-dispatch(s,n);
+            fcms-progress-set(progress,fcms-generation-session(generated),fcms-generation-ids(generated),0);record_set(owner,"generation",generated);generated;
+        } else fcms-generate-dispatch(s,n);
+    }
+    def fcms-generate-dispatch(s, n) = !((Comparable) fcms-live?(s) == 1) ? fcms-generation("", [], s) : nothing?(n) ? fcms-generate-open(s) : n <= 0 ? fcms-generation("", [], s) : fcms-ds4?(s) ? fcms-generate-ds4(s, n) : !nil?(fcsam-owner(s)) ? fcms-generate-sampled(s, n) : fcms-generate-greedy(s, n);
+    // An absent output allowance follows the model's ending. Allocation growth
+    // retains the committed position, pending ID and sampler owner before old
+    // buffers can be released. Finite walks keep their existing result shapes.
+    def fcms-open-pick(s) = nil?(fcsam-owner(s)) ? [fcms-pending(s), s] : {
+        let chosen = fcsam-draw(fcsam-owner(s), fcms-ctx(s)[1][28]);
+        [chosen[0], fcsam-with-owner(s, chosen[1])];
+    };
+    def fcms-open-mark(s, id) = nil?(fcsam-owner(s)) || fcsam-mark(fcsam-owner(s), id);
+    def fcms-open-step(s) = fcms-step-for(s, fcms-maxpos(s) - fcms-pos(s));
+    def fcms-open-stream(s, pos, pending, stopped, added) = fcms-with-stream(s, pos, pending, stopped, fcms-generated-ids(s) + added, fcms-injected-ids(s), fcms-observations(s));
+    def fcms-open-ended(progress,s,ids) {fcms-progress-set(progress,s,ids,0);[ids,s];}
+    def fcms-open-walk(progress,s, pick, mark, stepFor, grow, pulse, stops, step, out, untilPulse, width, count) = !fcms-live?(s) ? fcms-open-ended(progress,s,reverse(out)) : {
+        let chosen = pick(s); let id = chosen[0]; let owned = chosen[1];
+        id < 0 ? fcms-open-ended(progress,fcms-refuse(owned, "open-generation-prediction-unavailable"),reverse(out)) : q38-stop?(id, stops) ? fcms-open-ended(progress,fcms-open-stream(owned,fcms-pos(owned),id,1,0),reverse(out)) : !mark(owned, id) ? fcms-open-ended(progress,fcms-refuse(owned,"sampling-presence-write-failed"),reverse(out)) : {
+            let nextOut = cons(id, out); let completed = count + 1;
+            let current = fcms-open-stream(owned, fcms-pos(owned), id, 0, 1);
+            fcms-progress-set(progress,current,nextOut,1);
+            let noted = untilPulse <= 1 ? pulse(owned, completed) : 0;
+            let needsGrowth = fcms-pos(current) >= fcms-maxpos(current);
+            let ready = needsGrowth ? grow(current) : current;
+            fcms-progress-set(progress,ready,nextOut,1);
+            !fcms-live?(ready) ? [reverse(nextOut), ready] : {
+                let nextStep = needsGrowth ? stepFor(ready) : step;
+                let predicted = nextStep(ready, id, fcms-pos(ready));
+                let moved = fcms-open-stream(ready, fcms-pos(ready) + 1, predicted, predicted>=0 && q38-stop?(predicted,stops), 0);
+                fcms-progress-set(progress,moved,nextOut,1);
+                predicted < 0 ? [reverse(nextOut), fcms-refuse(moved, "open-generation-forward-refused")] : fcms-open-walk(progress,moved, pick, mark, stepFor, grow, pulse, stops, nextStep, nextOut, fcms-decode-next-left(untilPulse, width), fcms-decode-next-width(untilPulse, width), completed);
+            };
+        };
+    };
+    def fcms-open-with(s, pick, mark, stepFor, grow, pulse, stops) = fcms-open-walk(nothing(),s, pick, mark, stepFor, grow, pulse, stops, stepFor(s), [], 1, 1, 0);
+    def fcms-generate-open(s) = fcms-generate-open-with(fcms-open-step,s);
+    def fcms-generate-open-with(stepFor,s) = !fcms-ds4?(s) ? fcms-generate-open-owned-with(stepFor,s) : {
+        let progress=fcms-progress-of(s) ?? fcms-progress(s);
+        let generated = try fcms-generate-open-observed(progress,stepFor,s) catch nothing();
+        nothing?(generated) ? fcms-ds4-unwind-progress(progress, "walk-stopped") : generated;
+    };
+    def fcms-generate-open-owned(s) = fcms-generate-open-owned-with(fcms-open-step,s);
+    def fcms-generate-open-owned-with(stepFor,s) = fcms-generate-open-observed(fcms-progress-of(s),stepFor,s);
+    def fcms-generate-open-observed(progress,stepFor,s) = {
+        let admitted = nil?(fcsam-owner(s)) || fcsam-reset(fcsam-owner(s)) ? s : fcms-refuse(s, "sampling-reset-failed");
+        let walked = !fcms-live?(admitted) ? [[], admitted] : fcms-open-walk(progress,admitted, fcms-open-pick, fcms-open-mark, stepFor, fcms-grow, fcms-decode-pulse-of, fcmo-stops(admitted),stepFor(admitted),[],1,1,0);
+        fcms-progress-set(progress,walked[1],walked[0],0);
+        let text = fcms-ds4?(walked[1]) ? fcds-text(fcms-src(walked[1]), walked[0]) : ftdb-text(fcms-src(walked[1]), walked[0]);
+        let last = fcms-ds4?(walked[1]) ? fcms-open-ds4-ending(walked[1], walked[0]) : walked[1];
+        fcms-generation(text, walked[0], last);
+    };
+    def fcms-open-ds4-ending(s, ids) = fcms-reason(s) == "model-context-capacity-needs-continuation" ? fcms-ends(s, "context-limit") : fcms-live?(s) || fcms-reason(s) == "open-generation-forward-refused" ? fcms-ends(s, fcds-ending-of(fcms-ctx(s), fcmo-stops(s), [ids, fcms-pending(s), fcms-pos(s), fcms-reason(s) == "open-generation-forward-refused" ? 1 : fcms-stopped?(s)])) : s;
     // THE GREEDY WALK of a plain Qwen session is speculative while its owner is ready (form-cli-model-spec.fk): the same generation (text, ids, session) and a fifth
     // element naming what happened: the walk's report, or the reason it was the plain planned walk. A session with no owner (opened before the lane had one) is plain and says nothing.
     def fcms-generation-spec(g) = len(g) > 4 ? g[4] : "";
@@ -485,6 +684,7 @@ section [form.bml] {
         let ms = host_monotonic_ms() - t0;
         let ids = walked[0];
         let next = fcms-with-stream(s, walked[2], walked[1], walked[3], fcms-generated-ids(s) + len(ids), fcms-injected-ids(s), fcms-observations(s));
+        fcms-progress-set(fcms-progress-of(s),next,ids,0);
         let g = fcms-generation(ftdb-text(fcms-src(s), ids), ids, next);
         let note = fcms-spec-why(s, n) == "" ? "spec-off:plain-walk" : fcms-spec-why(s, n);
         fcsp-has?(s) == 1 ? fcms-generation-with-spec(g, fcsp-announce("plain", len(ids), ms, note)) : g;
@@ -492,6 +692,8 @@ section [form.bml] {
     // The speculative walk: the plain walk's contract (ids said, pending token and position, stopped) from steps that check a drafted block in one weight pass.
     def fcms-generate-spec(s, n) = {
         let o = fcsp-owner(s);
+        let progress=fcms-progress-of(s);
+        record_set(o,"progress",nothing?(progress) ? nothing() : (ids,pending,pos,stopped)=>fcms-progress-set(progress,fcms-open-stream(s,pos,pending,stopped,len(ids)),ids,0));
         let t0 = host_monotonic_ms();
         let walked = q38x-walk(o, fcms-sts(s), fcms-pending(s), fcms-pos(s), n, fcmo-stops(s), fcms-decode-pulse-for(s));
         let ids = walked[0];
@@ -506,32 +708,45 @@ section [form.bml] {
     // A walk ends with a NAMED ending (form-cli-model-ds4.fk fcds-ending-of: eos, max-tokens, context-limit, step-refused) and the session keeps it as its reason (fcms-ending): the driver serves positions 0 through 2047,
     // so a long walk stops at the limit and says so. A session whose last walk already ended (no pending id) answers nothing new and keeps its ending.
     def fcms-generate-ds4(s, n) = fcms-pending(s) < 0 ? fcms-generation("", [], s) : fcms-generate-ds4-with(fcms-forward, s, n);
-    // THE UNWIND. A stop inside the walk (a step that raises, a text that cannot render) is a surprise with live resources: the walk is offered once under try, and when it answers nothing the session's context, expert
-    // arena and state are released in synced rounds and its lease given back, here, where they are owned, before anything else runs; the session that comes back is a named ending (walk-stopped), not resident, and its
-    // own release has nothing left to free. The Qwen walk is as it was. `step` is the session's step (fcms-forward), the seam a band hands a step that raises.
+    // A raised walk keeps its emitted prefix and last known committed position.
+    // Cleanup settles here; unresolved handles or lease deletion retain their
+    // owner for another release. The named failure remains unfinished either way.
     def fcms-generate-ds4-with(step, s, n) = {
-        let g = try fcms-generate-ds4-by(step, s, n) catch nothing();
-        nothing?(g) ? fcms-ds4-unwind(s, "walk-stopped") : g;
+        let progress=fcms-progress-of(s) ?? fcms-progress(s);
+        let g = try fcms-generate-ds4-observed(progress,step,s,n) catch nothing();
+        nothing?(g) ? fcms-ds4-unwind-progress(progress, "walk-stopped") : g;
     };
+    def fcms-generate-ds4-observed(progress,step,s,n) {
+        let walked=fcms-walk-observed(progress,step,s,fcms-pending(s),fcms-pos(s),n,fcds-stops(fcms-src(s)),[],1,1,0);
+        fcms-progress-set(progress,fcms-open-stream(s,walked[2],walked[1],walked[3],len(walked[0])),walked[0],0);
+        fcms-generate-ds4-done(s,fcds-stops(fcms-src(s)),walked);
+    }
     def fcms-generate-ds4-by(step, s, n) = fcms-generate-ds4-walk(step, s, n, fcds-stops(fcms-src(s)));
     def fcms-generate-ds4-walk(step, s, n, stops) = fcms-generate-ds4-done(s, stops, fcms-walk-by(step, s, fcms-pending(s), fcms-pos(s), n, stops, [], 1, 1, 0));
-    def fcms-ds4-unwind(s, why) = {
-        let left = fcds-release(fcms-ctx(s), fcms-sts(s));
-        fcms-generation("", [], fcms-ds4-unwound(s, left == 0 ? why : why ++ "-release-incomplete"));
-    };
-    def fcms-ds4-unwound(s, reason) = fcmd-inherit(s, fcms-session("nothing", reason, fcms-path(s), fcms-src(s), [], [], fcms-maxpos(s), fcms-pos(s), 0 - 1, 1, fcms-prompt-ids(s), fcms-generated-ids(s), fcms-injected-ids(s), fcms-observations(s)));
+    def fcms-ds4-unwind(s, why) = fcms-ds4-unwind-progress(fcms-progress(s),why);
+    def fcms-ds4-unwind-progress(progress,why) {
+        let s=record_get(progress,"session");let ids=fcms-progress-ids(progress);
+        let text=try fcds-text(fcms-src(s),ids) catch nothing();
+        let released = fcms-release-ok?(s);
+        let reason=why+(value_kind(text)=="string" ? "" : "-text-unavailable");
+        let last=released ? fcms-ds4-unwound(s,reason) : fcms-refuse(fcms-with-stream(s,fcms-pos(s),fcms-pending(s),0,fcms-generated-ids(s),fcms-injected-ids(s),fcms-observations(s)),reason+"-release-incomplete");
+        fcms-generation(value_kind(text)=="string" ? text : "", ids, last);
+    }
+    def fcms-ds4-unwound(s, reason) = fcmd-inherit(s, fcms-base-session("nothing", reason, fcms-path(s), fcms-src(s), [], [], fcms-maxpos(s), fcms-pos(s), fcms-pending(s), 0, fcms-prompt-ids(s), fcms-generated-ids(s), fcms-injected-ids(s), fcms-observations(s)));
     def fcms-generate-ds4-done(s, stops, walked) = {
         let ids = walked[0];
         let next = fcms-with-stream(s, walked[2], walked[1], walked[3], fcms-generated-ids(s) + len(ids), fcms-injected-ids(s), fcms-observations(s));
         fcms-generation(fcds-text(fcms-src(s), ids), ids, fcms-ends(next, fcds-ending-of(fcms-ctx(s), stops, walked)));
     };
     // The session with its ending named: the status stays what it was (a session at its limit is live and finished, not refused).
-    def fcms-ends(s, ending) = fcmd-inherit(s, fcms-session(fcms-status(s), ending, fcms-path(s), fcms-src(s), fcms-ctx(s), fcms-sts(s), fcms-maxpos(s), fcms-pos(s), fcms-pending(s), fcms-stopped?(s), fcms-prompt-ids(s), fcms-generated-ids(s), fcms-injected-ids(s), fcms-observations(s)));
+    def fcms-ends(s, ending) = fcmd-inherit(s, fcms-base-session(fcms-status(s), ending, fcms-path(s), fcms-src(s), fcms-ctx(s), fcms-sts(s), fcms-maxpos(s), fcms-pos(s), fcms-pending(s), fcms-stopped?(s), fcms-prompt-ids(s), fcms-generated-ids(s), fcms-injected-ids(s), fcms-observations(s)));
     def fcms-ending(s) = fcms-reason(s);
     // the line a DeepSeek session reports its usage in: the prompt, what it generated, how its last walk ended and the last position the driver serves for it
     def fcms-usage-line-ds4(s) = fcds-usage-line(fcms-prompt-ids(s), fcms-generated-ids(s), fcms-ending(s), fcds-consumed(fcms-pos(s), fcms-maxpos(s)), fcms-maxpos(s), fcds-driver-limit(fcms-src(s)));
     def fcms-generate-sampled(s, n) = {
-        let walked = fcsam-run(s, fcsam-owner(s), fcms-ctx(s)[1][28], fcms-step-for(s, n),fcms-decode-pulse-for(s), fcms-pos(s), n, fcmo-stops(s));
+        let progress=fcms-progress-of(s);
+        let observed=(owner,pos,id,stopped,ids)=>fcms-progress-set(progress,fcms-open-stream(fcsam-with-owner(s,owner),pos,id,stopped,len(ids)),ids,0);
+        let walked = fcsam-run-observed(observed,s, fcsam-owner(s), fcms-ctx(s)[1][28], fcms-step-for(s, n),fcms-decode-pulse-for(s), fcms-pos(s), n, fcmo-stops(s));
         let ids = walked[0];
         let owned = fcsam-with-owner(s, walked[4]);
         let next = fcms-with-stream(owned, walked[2], walked[1], walked[3], fcms-generated-ids(s) + len(ids), fcms-injected-ids(s), fcms-observations(s));
@@ -592,14 +807,21 @@ section [form.bml] {
         // All IDs retain their order and the same stream state.
         // Submission width, unlike observation length, is bounded.
         // the speculative drafter reads the observation's hidden states in the observation's own batches (fcsp-tap: nothing for a session without a drafter)
-        let pf = fcmo-prefill-t(ctx, fcms-sts(s), ids, fcms-pos(s), fcsp-tap(s));
+        fcms-retain-observation-prefix(s,fcms-pos(s),fcms-pending(s));
+        let pf = fcmo-prefill-t-observed(ctx,fcms-sts(s),ids,fcms-pos(s),fcsp-tap(s),(pending,pos)=>fcms-retain-observation-prefix(s,pos,pending));
         !fcmo-shape(pf, fcms-pos(s), len(ids)) ?         // No retry may resume this state: a completed prefix or
         // a partially executed failing submission can be present.
         // Counters retain the last completed observation, not a
         // claim that physical KV was rolled back. Keep ownership
         // so the original context can still be released.
-fcms-refuse(s, "observation-prefill-refused") : fcms-refresh-head(fcms-with-stream(s, pf[1], pf[0], 0, fcms-generated-ids(s), fcms-injected-ids(s) + len(ids), fcms-observations(s) + 1));
+fcms-retain-observed(fcms-refuse(record_get(fcms-release-ledger(s),"observed-session") ?? s,"observation-prefill-refused")) : fcms-retain-observed(fcms-refresh-head(fcms-with-stream(s, pf[1], pf[0], 0, fcms-generated-ids(s), fcms-injected-ids(s) + len(ids), fcms-observations(s) + 1)));
     };
+    def fcms-retain-observed(s) {
+        record_set(fcms-release-ledger(s),"observed-session",s);
+        let retain=record_get(fcms-release-ledger(s),"retain-session");
+        if value_kind(retain)=="closure" then retain(s) else 0;s;
+    }
+    def fcms-retain-observation-prefix(s,pos,pending) = fcms-retain-observed(fcms-refuse(fcms-with-stream(s,pos,pending,0,fcms-generated-ids(s),fcms-injected-ids(s)+pos - fcms-pos(s),fcms-observations(s)),"observation-prefill-interrupted"));
     // Injects one typed Form observation into the SAME q38 state. It returns a
     // session whose pending ID is the first prediction after the observation.
     // A DeepSeek-V4 session takes no observation yet (the crossing is Qwen's ChatML; the driver has no template here): a typed refusal that keeps the context for its release.
@@ -615,46 +837,150 @@ fcms-refuse(s, "observation-prefill-refused") : fcms-refresh-head(fcms-with-stre
     def fcms-observe-rejection(s, text) = fcms-ds4?(s) ? fcms-ds4-observation-refused(s) : fcms-observe-ids(s, fcms-rejection-observation-ids(s, text), "rejection-observation-context-window-refused");
     // A DeepSeek session's handles go through the driver's own close (dsv4-close: the work is settled first, every handle of the context and its expert arena and of the state is freed in synced rounds, and the
     // handles still held are answered): the carrier refuses metal_buf_free while work naming the buffer is unsettled and the native wrapper reads that refusal as 0, and Qwen's closer does not reach the arena's buffers.
-    // Released is every handle freed; the lease goes back either way.
+    // Released is every handle freed; unresolved handles retain their lease.
     def fcms-release-ds4(s, ok) = {
-        let left = fcds-release(fcms-ctx(s), fcms-sts(s));
+        // A renewed DS4 stream has a retained Form allocation owner. Its state
+        // is released there; the driver continues to own the model context.
+        let left=record_get(fcms-release-ledger(s),"ds4-owned")==1 ? 0 : fcds-release(fcms-owned-context(s),record_has(fcms-release-ledger(s),"state") ? [] : fcms-owned-state(s));
         ok && left == 0 ? 1 : 0;
     };
     def fcms-release-ok?(s) = {
-        let clocked = fcms-clock-stamp(fcms-clock-of(s), "model-session-release");
-        let dropped = adm-drop(fcms-path(s));
-        let cursor-released = fcmo-release-index(s);
-        let sampler-expected = fcsam-owned(fcsam-owner(s));
-        let sampler-closed = fcsam-close(fcsam-owner(s));
-        let sampler-ok = cursor-released && (Comparable) sampler-closed == sampler-expected;
-        let adapter-expected = fcmd-owned(fcmd-carrier(s));
-        adapter-expected > 0 ? metal_sync() : 0;
-        let adapter-closed = fcmd-close(fcmd-carrier(s));
-        let adapter-ok = sampler-ok && (Comparable) adapter-closed == adapter-expected;
-        // Slot 18 owns the draft lane's spare recurrent state (form-cli-model-draft.bml); the same expected-against-closed
-        // count. The owner settles the device before it frees (fcmdr-close).
-        let draft-expected = fcmdr-owned(fcmdr-owner(s));
-        let draft-closed = fcmdr-close(fcmdr-owner(s));
-        let draft-ok = adapter-ok && (Comparable) draft-closed == draft-expected;
-        // Slot 19 owns the speculative drafter and its scratch (form-cli-model-spec.fk): closed before the context its weights sit beside, the same count.
-        let spec-expected = fcsp-owned(s);
-        let spec-closed = fcsp-close(s);
-        let spec-ok = draft-ok && (Comparable) spec-closed == spec-expected;
-        (Comparable) fcms-resident?(s) == 0 ? spec-ok : fcms-ds4?(s) ? fcms-release-ds4(s, spec-ok) : {
-            let state-expected = q38-state-handle-count(fcms-sts(s));
-            let state-closed = q38-free-state(fcms-sts(s));
-            let context-expected = q38-close-expected(fcms-ctx(s), []);
-            let context-closed = q38-close(fcms-ctx(s), []);
-            let unleased = mg-release();
-            let observed = [["cursor", cursor-released, 1], ["sampler", sampler-closed, sampler-expected], ["adapter", adapter-closed, adapter-expected], ["draft", draft-closed, draft-expected], ["spec", spec-closed, spec-expected], ["state", state-closed, state-expected], ["context", context-closed, context-expected]];
-            let unease = filter(row => row[1] != row[2], observed);
-            nil?(unease) ? 0 : {
-                let signal = intern_node(intern_trivial_string("model-release"), map(row => intern_node(intern_trivial_string(row[0]), [intern_trivial_int(row[1]), intern_trivial_int(row[2])]), unease));
-                fb_record(signal, "model-session-release", len(unease));
-                print_str("form-model-release unease " + unease.str());
-            };
-            spec-ok &&((Comparable) state-closed == state-expected && (Comparable) context-closed == context-expected) ? 1 : 0;
+        let released=fcms-release-owned(s);
+        let finalizers=record_get(fcms-release-ledger(s),"finalizers") ?? record_new(0);
+        let completed=record_get(fcms-release-ledger(s),"finalizers-complete") ?? record_new(0);
+        record_set(fcms-release-ledger(s),"finalizers-complete",completed);
+        let outcomes=map(key=>{
+            let done=record_get(completed,key)==1 || (record_get(finalizers,key))();
+            if done then record_set(completed,key,1) else 0;done;
+        },record_keys(finalizers));
+        released && all?(ok=>ok,outcomes) && fcms-release-residency(s);
+    };
+    def fcms-retain-finalizer(s,name,release) {
+        let finalizers=record_get(fcms-release-ledger(s),"finalizers") ?? record_new(0);
+        record_set(finalizers,name,release);record_set(fcms-release-ledger(s),"finalizers",finalizers);s;
+    }
+    def fcms-retain-in(root,key,session) { record_set(root,key,session);session; }
+    def fcms-release-in(root,key) {
+        let session=record_get(root,key);
+        let released=nothing?(session) || fcms-release-ok?(session);
+        if released then record_set(root,key,nothing()) else 0;released;
+    }
+    def fcms-release-residency(s) = {
+        let ledger=fcms-release-ledger(s);
+        record_get(ledger,"residency-owned") != 1 || adm-drop-owned(record_get(ledger,"residency-path"),ledger);
+    };
+    def fcms-release-owned(s) = record_get(fcms-release-ledger(s),"ds4-owned")==1 ? fcms-release-other(s) : !fcms-ds4?(s) && (fcms-resident?(s) || record_has(fcms-release-ledger(s),"context") || record_has(fcms-release-ledger(s),"state")) ? fcms-release-qwen(s) : fcms-release-other(s);
+    def fcms-release-lease(ledger,unlease) {
+        let released=record_get(ledger,"lease-released")==1 || record_get(ledger,"lease-owned") != 1 || unlease();
+        record_set(ledger,"lease-released",released);released;
+    }
+    def fcms-owned-context(s) = record_get(fcms-release-ledger(s),"active-context") ?? fcms-ctx(s);
+    def fcms-owned-state(s) = record_get(fcms-release-ledger(s),"active-state") ?? fcms-sts(s);
+    def fcms-retain-release(s,handles,bytes) {
+        let ledger=fcms-release-ledger(s);
+        let owner=record_new(0,"on",0,"release-handles",q38x-unique-handles(handles),"lease-bytes",bytes);
+        record_set(ledger,"pending-releases",append(record_get(ledger,"pending-releases") ?? [],[owner]));owner;
+    }
+    def fcms-retain-owned-release(s,handles,parts) {
+        let owner=fcms-retain-release(s,handles,0);
+        record_set(owner,"lease-parts",parts);owner;
+    }
+    def fcms-retain-selection(s,handles,parts) {
+        let ledger=fcms-release-ledger(s);
+        let sources=filter(source=>!record_has(source,"release-sources"),append(map(row=>fcms-buffer-owner(ledger,row),fcms-release-rows(s)),record_get(ledger,"pending-releases") ?? []));
+        let owner=fcms-retain-owned-release(s,[],parts);
+        record_set(owner,"release-selection",q38x-unique-handles(handles));record_set(owner,"release-sources",sources);owner;
+    }
+    def fcms-phase-open(s,label,parts) {
+        let bytes=sum(map(part=>part[1],parts));
+        let grant=mg-lease-retaining(label,"",0,bytes,token=>fcms-retain-reservation(fcms-release-ledger(s),token));
+        record_set(fcms-release-ledger(s),"phase-admission",[label,grant,parts]);
+        let reservation=fcms-reservation(fcms-release-ledger(s),grant,parts);
+        !record_get(reservation,"ready") ? form_error(mg-held-reason()+mg-line(label,bytes,grant)) : {
+            let owner=fcms-retain-owned-release(s,[],record_get(reservation,"parts"));
+            record_set(owner,"reservation",reservation);owner;
         };
+    }
+    def fcms-phase-ready(owner) {
+        let reservation=record_get(owner,"reservation");
+        fcms-reservation-ack(reservation,map(part=>record_get(part,"part"),record_get(reservation,"parts")));
+    }
+    def fcms-phase-close(owner) = fcms-pending-release(owner) && mg-reservation-release(record_get(record_get(owner,"reservation"),"token"));
+    def fcms-pending-release(owner) { q38x-close(owner);fcms-pending-retired(owner,bytes=>-1); }
+    def fcms-pending-release-by(owner,settle,free,return-lease) {
+        q38x-close-by(owner,settle,free);
+        fcms-pending-retired(owner,return-lease);
+    }
+    def fcms-pending-retired(owner,return-lease) {
+        let bytes=record_get(owner,"lease-bytes") ?? 0;
+        let returned=q38x-owned(owner)==0 && (record_has(owner,"lease-parts") ? all?(ok=>ok,map(mg-reservation-retire,record_get(owner,"lease-parts"))) : bytes==0 || return-lease(bytes)==0);
+        if returned then record_set(owner,"lease-bytes",0) else 0;
+        returned;
+    }
+    def fcms-pending-releases(s) {
+        let outcomes=map(fcms-pending-release,record_get(fcms-release-ledger(s),"pending-releases") ?? []);
+        all?(ok=>ok,outcomes);
+    }
+    def fcms-release-reservations(s) {
+        let outcomes=map(mg-reservation-release,record_get(fcms-release-ledger(s),"reservations") ?? []);
+        let spec=fcsp-release-reservation(record_get(fcms-release-ledger(s),"spec") ?? fcsp-owner(s));
+        all?(ok=>ok,outcomes) && spec;
+    }
+    // Exact outstanding handles, shared by every stream copy, survive partial
+    // release. Successful handles are never submitted to the carrier again.
+    def fcms-release-aux(s) {
+        let sampler=fcsam-owner(s);let adapter=fcmd-adapter(fcmd-carrier(s));let draft=fcmdr-owner(s);
+        [["sampler",len(sampler)<6 ? [] : sampler[2],nothing()],
+         ["adapter",len(adapter)==5 ? take(3,adapter) : [],nothing()],
+         ["draft",nothing?(draft) ? [] : foldl(append,[],fcmdr-spare(draft)),nothing()],
+         ["spec",q38x-release-handles(fcsp-owner(s)),fcsp-owner(s)]];
+    }
+    def fcms-release-rows(s) = fcms-ds4?(s) ? append(fcms-release-aux(s),[["state",fcms-ds4-state-handles(s),nothing()]]) : {
+        let ctx=fcms-owned-context(s);
+        let context=len(ctx)<7 ? [] : append(ctx[1],append(foldl((hs,layer)=>append(hs,q38x-views-handles(q38-lay-tvs(layer))),[],ctx[3]),q38x-views-handles([ctx[4],ctx[5],ctx[6]])));
+        append(fcms-release-aux(s),[
+         ["state",foldl(append,[],fcms-owned-state(s)),nothing()],
+         ["context",context,nothing()]]);
+    };
+    def fcms-ds4-state-handles(s) = nothing?(fcms-owned-state(s)) || nil?(fcms-owned-state(s)) ? [] : dsv4-state-handles(fcms-owned-state(s));
+    def fcms-buffer-owner(ledger,row) {
+        let key=row[0];
+        if !record_has(ledger,key) then record_set(ledger,key,nothing?(row[2]) ? record_new(0,"on",0,"release-handles",q38x-unique-handles(row[1])) : row[2]) else 0;
+        record_get(ledger,key);
+    }
+    def fcms-release-buffers(ledger,rows,settle,free) {
+        let owners=map(row=>{
+            let key=row[0];
+            [key,fcms-buffer-owner(ledger,row)];
+        },rows);
+        settle();
+        map(row=>{let owner=row[1];let expected=q38x-owned(owner);let closed=nothing?(free) ? q38x-close-owned-by(owner,()=>0,q38x-free) : q38x-close-by(owner,()=>0,free);q38x-owned(owner)==0 ? fcms-pending-retired(owner,bytes=>-1) : 0;[row[0],closed,expected,q38x-owned(owner)];},owners);
+    }
+    def fcms-release-qwen(s) {
+        let ledger=fcms-release-ledger(s);
+        fcms-clock-stamp(fcms-clock-of(s),"model-session-release");
+        let cursor-released=record_get(ledger,"cursor-released")==1 ? 1 : fcmo-release-index(s);
+        cursor-released ? record_set(ledger,"cursor-released",1) : 0;
+        let pending-released=fcms-pending-releases(s);
+        let observed=fcms-release-buffers(ledger,fcms-release-rows(s),()=>metal_sync(),nothing());
+        let buffers-released=pending-released && cursor-released && all?(row=>row[3]==0,observed);
+        let lease-released=buffers-released && fcms-release-reservations(s);
+        let unease=filter(row=>row[1] != row[2],append(map(row=>take(3,row),observed),[["cursor",cursor-released,1],["lease",lease-released,1]]));
+        nil?(unease) ? 0 : {
+            let signal=intern_node(intern_trivial_string("model-release"),map(row=>intern_node(intern_trivial_string(row[0]),[intern_trivial_int(row[1]),intern_trivial_int(row[2])]),unease));
+            fb_record(signal,"model-session-release",len(unease));print_str("form-model-release unease " ++ unease.str());
+        };
+        lease-released ? 1 : 0;
+    }
+    def fcms-release-other(s) = {
+        let ledger=fcms-release-ledger(s);
+        fcms-clock-stamp(fcms-clock-of(s),"model-session-release");
+        let cursor-released=record_get(ledger,"cursor-released")==1 || fcmo-release-index(s);
+        if cursor-released then record_set(ledger,"cursor-released",1) else 0;
+        let observed=fcms-release-buffers(ledger,fcms-ds4?(s) && record_has(ledger,"state") ? fcms-release-rows(s) : fcms-release-aux(s),()=>metal_sync(),nothing());
+        let pending-released=fcms-pending-releases(s);
+        let auxiliary=cursor-released && pending-released && all?(row=>row[3]==0,observed);
+        !auxiliary ? 0 : (fcms-resident?(s) ? fcms-release-ds4(s,1) : 1) && fcms-release-reservations(s);
     };
     0;
 }

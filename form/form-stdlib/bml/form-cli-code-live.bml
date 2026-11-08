@@ -16,6 +16,8 @@ import form-stdlib/hearth.bml;
 import form-stdlib/organ-health.bml;
 import form-stdlib/bml/form-token-grammar.bml;
 import form-stdlib/bml/memory-governor.bml;
+import form-stdlib/bml/native-owner-clock.bml;
+import form-stdlib/bml/form-cli-native-voice.bml;
 section [form.bml] {
  class FormCliCodeLive {
   def fcac-source-care(checked,checker) {
@@ -47,7 +49,7 @@ section [form.bml] {
    print_str(("form-code " + json-emit(json-node-object(append([json-node-pair("mode", json-node-string(fcap-mode(s))), json-node-pair("stage", json-node-string(fcap-stage(s))), json-node-pair("turns", json-node-int(fcap-turns(s))), json-node-pair("tool_calls", json-node-int(fcap-calls(s))), json-node-pair("repairs", json-node-int(fcap-failures(s))), json-node-pair("checks", json-node-int(fcap-checks(s))), json-node-pair("generated_ids", json-node-int(fcms-generated-ids(session))), json-node-pair("injected_ids", json-node-int(fcms-injected-ids(session))), json-node-pair("position", json-node-int(fcms-pos(session))), json-node-pair("elapsed_ms", json-node-int((now_unix_ms() - started)))],fcsw-telemetry-pairs(s))))));
    print_str("\n");
   }
-  def fcac-open(model, state, context) = fcms-open-with-profile(mr-path(mr-find(model)), fcap-bootstrap(state), context, "knowledge-query");
+   def fcac-open(model,state,context) = fcacs-open-staged(mr-path(mr-find(model)),fcap-bootstrap(state),context,"knowledge-query");
   def fcac-replies-left(state,turns) = turns<=0 ? nothing() : fat-max(0,(turns - fcap-turns(state)));
   def fcac-budget(state,turns) = json-node-object([json-node-pair("limit",turns<=0 ? json-node-null() : json-node-int(turns)),json-node-pair("completed",json-node-int(fcap-turns(state))),json-node-pair("remaining",turns<=0 ? json-node-null() : json-node-int(fcac-replies-left(state,turns)))]);
   def fcac-finish-minimum(state) = if fcap-done(state) then 0 else if ((String) fcap-stage(state) == "review") then 1 else if ((String) fcap-stage(state) == "implement") then (len(state[5]) + 1) else if ((String) fcap-stage(state) == "repair") then if fcap-reviewing(state) then 1 else (len(state[5]) + 2) else if ((String) fcap-stage(state) == "split") then 3 else if ((String) fcap-stage(state) == "plan") then if ((Value) state[5] == [fcap-direct-task()]) then 3 else 4 else 5;
@@ -85,10 +87,10 @@ section [form.bml] {
   }
   // checker = [native callback, caller contract]. The callback receives that
   // contract and candidate documents, returning [passed, actual observation].
-  def fcac-run(model, goal, docs, writable, checker, context, turns) = if (!(fat-docs-valid(docs, []) && ((len(goal) > 0) && ((context > 0) && (turns >= 0))))) then [fcap-terminal(fcap-open(goal, docs, writable), "invalid-caller-contract"), 1, 0, 0, 0] else fcac-admit(model, fcap-open(goal, docs, writable), checker, context, turns);
+  def fcac-run(model, goal, docs, writable, checker, context, turns) = if (!(fat-docs-valid(docs, []) && len(goal)>0 && value_kind(context)=="int" && context>=0 && value_kind(turns)=="int" && turns>=0)) then [fcap-terminal(fcap-open(goal, docs, writable), "invalid-caller-contract"), 1, 0, 0, 0] else fcac-admit(model, fcap-open(goal, docs, writable), checker, context, turns);
   // Fresh, unmanaged review: no recalled answers, checkpoint writes or LoRA.
   // checker is [report callback, contract, optional source callback, contract].
-  def fcac-review(model, goal, docs, checker, context, turns) = if (!(fat-docs-valid(docs, []) && ((len(goal) > 0) && ((context > 0) && (turns >= 0))))) then [fcap-terminal(fcap-open-review(goal, docs), "invalid-caller-contract"), 1, 0, 0, 0] else fcac-admit(model, fcap-open-review(goal, docs), checker, context, turns);
+  def fcac-review(model, goal, docs, checker, context, turns) = if (!(fat-docs-valid(docs, []) && len(goal)>0 && value_kind(context)=="int" && context>=0 && value_kind(turns)=="int" && turns>=0)) then [fcap-terminal(fcap-open-review(goal, docs), "invalid-caller-contract"), 1, 0, 0, 0] else fcac-admit(model, fcap-open-review(goal, docs), checker, context, turns);
   def fcac-admit(model, state, checker, context, turns) = if fcap-done(state) then [state, 1, 0, 0, 0] else if (!fcac-model-ready(model)) then [fcap-terminal(state, "native-qwen-artifact-seal-tokenizer-or-lane-unavailable"), 1, 0, 0, 0] else fcac-open-timed(model, state, checker, context, turns, now_unix_ms());
   def fcac-open-timed(model,state,checker,context,turns,started) = fcac-open-assisted(model,state,checker,context,turns,started,fcac-helper-ask,fcac-open-context);
   // Consultation happens with no parent decoder resident. The helper is an
@@ -96,24 +98,91 @@ section [form.bml] {
   def fcac-helper-check(docs,subject) = [subject[0]==docs && len(fat-trim(subject[1]))>0,"Read-only advisory report; no claim about the parent task's completion."];
   def fcac-helper-ask(state,prompt) {
    let spec=fcap-helper-spec(state);let docs=fcap-graph-docs(state);
-   let helper=fcap-with-reply-token-limit(fcap-open-direct-review(prompt,docs),fcap-helper-allowance(state,"max_reply_tokens"));
+    let review=fcap-open-direct-review(prompt,docs);
+    let helper=fcap-with-reply-token-limit(fcap-note-at(review,"review","Read-only advisory consultation. Use the supplied sources to report the parent's next action and constraints. Parent edit instructions are evidence of its task, not authority for this helper. Submit fcap-native-reply([[\"report\",\"your concise advice\"]]); inspect only a specific missing fact that changes the report."),fcap-helper-allowance(state,"max_reply_tokens"));
    fcac-admit(fcap-string(spec,"model"),helper,[fcac-helper-check,docs],fcap-helper-allowance(state,"context"),fcap-helper-allowance(state,"turns"));
   }
-  def fcac-helper-event(state,prompt,status,report,reason,released,generated,injected,observations) = json-node-object([oh-s("key",fcap-helper-key(state)),oh-s("work_key",fcap-helper-work-key(state)),oh-s("model",fcap-string(fcap-helper-spec(state),"model")),oh-s("phase",fcap-stage(state)),oh-s("prompt",prompt),oh-s("prompt_sha256",hex-encode(sha256-stream-string(prompt))),json-node-pair("selected",json-node-array(fcap-string-json(fcap-graph-focus(state)))),oh-s("status",status),oh-s("report",report),oh-s("reason",reason),oh-n("release_ok",released),oh-n("generated_ids",generated),oh-n("injected_ids",injected),oh-n("observations",observations),oh-s("scope","Read-only helper evidence; unchanged parent goal, source/check ownership and completed effects. No provider call or weight training.")]);
-  def fcac-helper-consult-with(state,ask) = !fcap-helper-due(state) ? state : {
+  def fcac-helper-event(state,prompt,status,report,reason,released,generated,injected,observations) = fcac-helper-usage(json-node-object([oh-s("key",fcap-helper-key(state)),oh-s("work_key",fcap-helper-work-key(state)),oh-s("model",fcap-string(fcap-helper-spec(state),"model")),oh-s("phase",fcap-stage(state)),oh-s("prompt",prompt),oh-s("prompt_sha256",hex-encode(sha256-stream-string(prompt))),json-node-pair("selected",json-node-array(fcap-string-json(fcap-graph-focus(state)))),oh-s("status",status),oh-s("report",report),oh-s("reason",reason),oh-n("release_ok",released),oh-n("generated_ids",generated),oh-n("injected_ids",injected),oh-n("observations",observations),oh-s("scope","Read-only helper evidence; unchanged parent goal, source/check ownership and completed effects. No provider call or weight training.")]),status != "pending",status=="pending" ? "before-admission" : "returned-helper-result");
+  def fcac-helper-usage(event,complete,reason) = oh-set(oh-set(oh-set(event,"usage_complete",json-node-int(complete)),"usage_scope",json-node-string(complete ? "final-observed" : "retained-lower-bound")),"usage_reason",json-node-string(reason));
+   def fcac-helper-owners() {
+    let root=ftg-session();
+    if !record?(record_get(root,"helper-continuations")) then record_set(root,"helper-continuations",record_new(0)) else 0;
+    record_get(root,"helper-continuations");
+   }
+   def fcac-helper-owner() {
+    let key=noc-open();let owner=record_new(0,"key",key,"continuation","helper:"+key,"phase","pending","lifetime",nothing(),"session",nothing(),"completed-state",nothing(),"released",0);
+    record_set(fcac-helper-owners(),key,owner);owner;
+   }
+   // Completion belongs to the review. Cleanup is a separate continuation of
+   // the same physical owner, retained before admission and after partial close.
+   def fcac-helper-bind(event,owner,complete) = oh-set(oh-set(event,"release_continuation",json-node-string(record_get(owner,"key"))),"complete",json-node-int(complete));
+   def fcac-helper-settle(event) {
+    let key=fcap-string(event,"release_continuation");let owner=record_get(fcac-helper-owners(),key);
+    record?(owner) ? fcnv-active?(owner) ? 0 : {
+     let session=record_get(owner,"session");
+     let released=(record_get(owner,"released") || nothing?(session) || (value_kind(session)=="list" && fcms-release-ok?(session))) && fcnv-lifetime-close(owner);
+     if released then {record_set(owner,"released",1);record_set(owner,"phase","complete");} else 0;
+     if record_get(ftg-session(),"coding-helper-owner")==owner then record_set(ftg-session(),"coding-helper-owner",nothing()) else 0;
+     released;
+    } : {
+     let parts=split-on(key,":");
+     len(parts)==3 && noc-positive(parse-int(parts[0])) && noc-positive(parse-int(parts[1])) && noc-process-ended?([parse-int(parts[0]),parse-int(parts[1])]);
+    };
+   }
+   def fcac-helper-care-with(state,settle) {
+    let events=fcap-helper-events(state) |> map(event=>node_value(json-object-get(event,"release_ok"))==1 || fcap-string(event,"release_continuation")=="" ? event : {
+     let measured=fcac-helper-projected(event);let closed=settle(measured);let observed=fcac-helper-projected(measured);
+     !closed ? observed : {
+     let released=oh-set(observed,"release_ok",json-node-int(1));
+     let status=oh-set(released,"status",json-node-string(node_value(json-object-get(released,"complete"))==1 ? "complete" : "unfinished"));
+     oh-set(oh-set(status,"release_resumed",json-node-int(1)),"current_generated_ids",json-node-int(0));
+     };
+    });
+    let next=fcap-with-context-work(state,[fcap-graph-spec(state),fcap-helper-spec(state),events]);
+    if next==state || fcam-save(next) then {fcac-helper-forget-settled(events);next;} else fcap-terminal(next,"helper-release-checkpoint-write-refused;candidate-retained");
+   }
+   def fcac-helper-forget-settled(events) = events |> map(event=>node_value(json-object-get(event,"release_ok"))==1 && fcap-string(event,"release_continuation")!="" ? record_set(fcac-helper-owners(),fcap-string(event,"release_continuation"),nothing()) : 0);
+   def fcac-helper-projected(event) {
+    let owner=record_get(fcac-helper-owners(),fcap-string(event,"release_continuation"));
+    if !record?(owner) then node_value(json-object-get(event,"usage_complete"))==1 ? event : fcac-helper-usage(event,0,"owner-unavailable;usage-after-checkpoint-unobserved") else if record_has(owner,"event") then record_get(owner,"event") else {
+      let completed=record_get(owner,"completed-state");let usage=value_kind(completed)=="list" ? record_get(owner,"completed-usage") ?? record_get(owner,"partial-usage") : record_get(owner,"partial-usage") ?? record_get(owner,"completed-usage");
+      if value_kind(usage)!="list" then event else {
+       let report=value_kind(completed)=="list" ? oh-set(oh-set(event,"report",json-node-string(fcap-report(completed))),"reason",json-node-string(fcap-note(completed))) : oh-set(event,"reason",json-node-string(fcnv-active?(owner) ? "helper-active;measured-usage-retained" : "helper-interrupted;measured-usage-retained"));
+       let retained=value_kind(completed)=="list" ? fcac-helper-review-evidence(report,completed) : report;
+       let counts=oh-set(oh-set(oh-set(retained,"generated_ids",json-node-int(usage[0])),"injected_ids",json-node-int(usage[1])),"observations",json-node-int(usage[2]));
+       let complete=value_kind(completed)=="list" && fcap-stage(completed)=="complete";
+       let status=oh-set(oh-set(oh-set(counts,"complete",json-node-int(complete)),"status",json-node-string(complete ? "complete" : fcnv-active?(owner) ? "pending" : "unfinished")),"current_generated_ids",json-node-int(0));
+       let finalUsage=value_kind(completed)=="list" && value_kind(record_get(owner,"completed-usage"))=="list";
+       fcac-helper-usage(status,finalUsage,finalUsage ? "retained-final-usage" : "retained-partial-usage");
+     };
+    };
+   }
+   def fcac-helper-consult-with(state,ask) = !fcap-helper-due(state) ? state : {
    let prompt=fcap-helper-prompt(state);
-   let pending=fcap-with-helper-event(state,fcac-helper-event(state,prompt,"pending","","retained-before-admission",0,0,0,0));
+    let owner=fcac-helper-owner();
+    let pending=fcap-with-helper-event(state,fcac-helper-bind(fcac-helper-event(state,prompt,"pending","","retained-before-admission",0,0,0,0),owner,0));
    if !fcam-save(pending) then fcap-terminal(state,"helper-checkpoint-write-refused;candidate-retained") else {
+     let priorOwner=record_get(ftg-session(),"coding-helper-owner");
+     defer { record_set(owner,"phase","release-pending");record_set(ftg-session(),"coding-helper-owner",priorOwner);fcnv-lifetime-close(owner); };
+     fcnv-lifetime(owner);record_set(owner,"phase","active");
+     record_set(ftg-session(),"coding-helper-owner",owner);
     let result=ask(state,prompt);
-    let event=fcac-helper-event(state,prompt,fcap-stage(result[0])=="complete" && result[1] ? "complete" : "unfinished",fcap-report(result[0]),fcap-note(result[0]),result[1],result[2],result[3],result[4]);
+     record_set(ftg-session(),"coding-helper-owner",nothing());
+     let released=result[1] && fcnv-lifetime-close(owner);record_set(owner,"released",released);
+     let kept=record_get(owner,"completed-state");let reviewed=value_kind(kept)=="list" ? kept : result[0];
+     let complete=fcap-stage(reviewed)=="complete";
+      let event=fcac-helper-bind(fcac-helper-review-evidence(fcac-helper-event(state,prompt,complete ? "complete" : "unfinished",fcap-report(reviewed),fcap-note(reviewed),released,result[2],result[3],result[4]),reviewed),owner,complete);
+     record_set(owner,"event",event);
     let next=fcap-with-helper-event(state,event);
-    if !fcam-save(next) then fcap-terminal(next,"helper-result-write-refused;candidate-retained") else !result[1] ? fcap-terminal(next,"helper-model-release-incomplete;candidate-retained") : next;
+     if !fcam-save(next) then fcap-terminal(next,"helper-result-write-refused;candidate-retained") else !released ? fcap-terminal(next,"helper-model-release-incomplete;candidate-retained") : {fcac-helper-forget-settled([event]);next;};
    };
   };
+   def fcac-helper-review-evidence(event,reviewed) = oh-set(oh-set(event,"helper_observation",fcap-note-cell(reviewed)),"helper_evidence",json-node-string(fcap-evidence(reviewed)));
   def fcac-helper-released(state) = all?(event=>node_value(json-object-get(event,"release_ok"))==1,fcap-helper-events(state));
   def fcac-open-assisted(model,state,checker,context,turns,started,ask,open) {
-   let before=fcap-helper-cost(state);
-   let next=fcac-helper-released(state) ? fcac-helper-consult-with(state,ask) : fcap-terminal(state,"helper-release-unobserved;candidate-retained");
+    let cared=fcac-helper-care-with(state,fcac-helper-settle);
+    let before=fcap-helper-cost(cared);
+    let next=fcac-helper-released(cared) ? fcac-helper-consult-with(cared,ask) : fcap-terminal(cared,"helper-release-unobserved;candidate-retained");
    let after=fcap-helper-cost(next);
    let spent=[after[0]-before[0],after[1]-before[1],after[2]-before[2]];
    let result=fcap-done(next) ? [next,fcac-helper-released(next),0,0,0] : open(model,fcap-begin-context(fcac-held-state(next,context)),checker,context,turns,started);
@@ -122,14 +191,16 @@ section [form.bml] {
   def fcac-helper-yield?(result) = len(result)==4 && result[3]=="helper-consultation";
   def fcac-helper-reopen(session,state,checker,turns,started) {
    let model=mr-name(tb-first(mr-registry(),row=>mr-path(row)==fcms-path(session)) ?? mr-none());
-   fcac-open-timed(model,state,checker,fcms-maxpos(session),turns,started);
+    fcac-open-timed(model,state,checker,fcms-context-limit(session),turns,started);
   }
   // The old session is closed exactly once before the helper can open. A
   // failed close keeps the continuation and never starts a second owner.
   def fcac-helper-handoff-with(result,checker,turns,started,prior,close,reopen) {
    let session=result[0];let state=result[2];
+    fcacs-retain(session);
    let spent=fcac-context-cost(session,prior);
    let released=close(session);
+    if released then record_set(ftg-session(),"coding-model",nothing()) else 0;
    fcac-stream-release();
    !released ? [fcap-terminal(state,"native-model-release-incomplete;helper-not-started"),0,spent[0],spent[1],spent[2]] : fcac-total-result(reopen(session,state,checker,turns,started),spent);
   }
@@ -178,7 +249,12 @@ section [form.bml] {
   // hands in its own pair to read what the lane continues with and how it ends, with no model.
   def fcac-finish-contexts(result,checker,turns,started,firstTurn,prior,number) = fcac-finish-contexts-with(result,checker,turns,started,firstTurn,prior,number,fcac-loop,fcac-renew);
   // json-serves: a log reader outside this process. text: the renewal line is the share; the session stays the owner.
-  def fcac-finish-contexts-with(result,checker,turns,started,firstTurn,prior,number,loop,renew) = if fcac-helper-yield?(result) then fcac-helper-handoff-with(result,checker,turns,started,prior,fcms-release-ok?,fcac-helper-reopen) else if (!fcac-renewable(result,firstTurn,turns)) then fcac-total-result(fcac-settle(result,started),prior) else {
+   def fcac-finish-contexts-with(result,checker,turns,started,firstTurn,prior,number,loop,renew) {
+    let owner=record_get(ftg-session(),"coding-helper-owner");
+    if record?(owner) then record_set(owner,"completed-usage",fcac-context-cost(result[0],prior)) else 0;
+    fcac-finish-contexts-owned(result,checker,turns,started,firstTurn,prior,number,loop,renew);
+   }
+   def fcac-finish-contexts-owned(result,checker,turns,started,firstTurn,prior,number,loop,renew) = if fcac-helper-yield?(result) then fcac-helper-handoff-with(result,checker,turns,started,prior,fcms-release-ok?,fcac-helper-reopen) else if (!fcac-renewable(result,firstTurn,turns)) then fcac-total-result(fcac-settle(result,started),prior) else {
    let session = result[0]; let state = result[2];
    let reading = fcac-context-reading(state,number,0);
    oh-voice(reading); oh-voice(oh-response(reading,"renew-context"));
@@ -190,6 +266,9 @@ section [form.bml] {
    let changed = fcmr-changed(renewed); let reason = fcmr-reason(renewed);
    let good = (changed && ((String) reason == "fresh-stream-same-weights"));
    let spent = if changed then fcac-context-cost(session,prior) else prior;
+    let helper=record_get(ftg-session(),"coding-helper-owner");
+    if record?(helper) then record_set(helper,"usage-prior",spent) else 0;
+    fcacs-retain(fresh);
    let evidence = json-node-object([oh-n("renewed",good),oh-n("owner_replaced",changed),oh-s("reason",reason),oh-n("renewal_attempts",renewal[2]),oh-s("trigger",fcap-note(result[1])),oh-n("remaining_positions",fcac-reply-room(session)),oh-n("max_reply_tokens",fcap-reply-token-limit(state)),oh-n("weight_admissions",0),oh-n("completed_contexts",number),oh-n("context_prompt_ids",fcms-prompt-ids(session)),oh-n("generated_ids",if changed then spent[0] else (prior[0] + fcms-generated-ids(session))),oh-n("injected_ids",if changed then spent[1] else (prior[1] + fcms-injected-ids(session)))]);
    oh-voice(oh-applied(reading,"renew-context",evidence));
    print_str(("form-code-context " + json-emit(evidence)));
@@ -202,15 +281,23 @@ section [form.bml] {
     fcac-finish-contexts-with(loop(fresh,next,checker,turns,started),checker,turns,started,fcap-turns(next),spent,(number + 1),loop,renew);
    };
   };
-  def fcac-settle(result,started) = fcac-settled(result,started,fcms-release-ok?(result[0]));
+   def fcac-settle(result,started) {
+    let helper=record_get(ftg-session(),"coding-helper-owner");
+    if record?(helper) then record_set(helper,"completed-state",result[1]) else 0;
+    fcac-settled(result,started,fcms-release-ok?(result[0]));
+   }
   def fcac-settled(result,started,released) {
    let last = result[0];
+    fcacs-retain(last);
+    let helper=record_get(ftg-session(),"coding-helper-owner");
+    if record?(helper) then record_set(helper,"completed-state",result[1]) else 0;
    let candidate = if ((Comparable) released == 1) then result[1] else fcap-terminal(result[1], "native-model-release-incomplete");
    let saved = fcam-save(candidate);
    let learned = if saved then fcam-learn(candidate) else 0;
    let final = if (saved && learned) then candidate else fcap-terminal(candidate, "continuity-write-refused;candidate-retained");
    let observed = fcac-observe(final, last, started);
    let detached=fcac-stream-release();
+    if released then record_set(ftg-session(),"coding-model",nothing()) else 0;
    [final, released, fcms-generated-ids(last), fcms-injected-ids(last), fcms-observations(last)];
   }
   // A lane that already holds memory gives it back when the machine runs low (memory-governor.bml mg-low?: available
@@ -225,7 +312,7 @@ section [form.bml] {
   // by that (the turns-spent ending wins), not as a memory ending. sense() answers a host_vm_stat() reading.
   def fcac-memory-reason() = mg-low-reason();
   def fcac-memory-low?(sense) = mg-low?(sense());
-  def fcac-loop(session, state, checker, turns, started) = fcac-loop-with(session, state, checker, turns, started, () => mg-sense());
+   def fcac-loop(session,state,checker,turns,started) { fcacs-retain(session);fcac-loop-with(session,state,checker,turns,started,()=>mg-sense()); }
   def fcac-loop-with(session, state, checker, turns, started, sense) = ((!fcap-done(state)) && (turns<=0 || fcap-turns(state) < turns) && ftg-window-past?()) ? fcac-window-stop(session, state, started) : ((!fcap-done(state)) && (turns<=0 || fcap-turns(state) < turns) && fcac-memory-low?(sense)) ? fcac-memory-stop(session, state, started) : fcac-loop-turn(session, state, checker, turns, started);
   // A lane past its process's window (ftg-window-past?) ends between replies: it saves its checkpoint and ends
   // window-end, so an option begun inside a window ends with it, one reply past the instant at most.
@@ -238,7 +325,9 @@ section [form.bml] {
    let said = print_str("[memory] host-memory-low: the lane gives its memory back; " ++ (!saved ? "its checkpoint did not write" : fcam-managed(state) ? "its checkpoint is saved" : "the task is unmanaged, so its candidate stays in the result and no checkpoint file is written") ++ " and a later walk resumes it where one exists");
    fcac-finish(session, fcap-terminal(state, saved ? fcac-memory-reason() : "checkpoint-write-refused;candidate-retained"), started);
   }
-  def fcac-loop-turn(session, state, checker, turns, started) {
+   def fcac-prepare-room(session,state,turns) = fcap-done(state) || (turns>0 && fcap-turns(state)>=turns) || !fcacs-can-grow?(session) || fcac-current-reply-fits(session,state,turns) ? session : fcac-prepare-room(fcms-grow(session),state,turns);
+   def fcac-loop-turn(session,state,checker,turns,started) = fcac-loop-prepared(fcac-prepare-room(session,state,turns),state,checker,turns,started);
+   def fcac-loop-prepared(session, state, checker, turns, started) {
    let saved = fcam-save(state);
    let observed = fcac-observe(state, session, started);
    let lane = fcap-model-lane(state);
@@ -508,7 +597,8 @@ section [form.bml] {
   }
    def fcac-decode(session, state, started, stops, ids) {
     if nil?(ids) then { fcac-control-begin(); let held=ftw-get(ftg-lane-session("code"),"coding-state"); if !nothing?(held) then record_set(ftg-lane-session("code"),"coding-state",fcap-with-reply-token-limit(state,fcap-reply-token-limit(held))) else 0; } else 0;
-    fcac-decoded(fcacs-quantum(session, stops, fcac-decode-width(state,session,len(ids))), state, started, stops, ids);
+     let ready=fcacs-room(session,fcac-quantum(session)+1);
+     fcac-decoded(!fcms-live?(ready) ? fcms-generation("",[],ready) : fcacs-quantum(ready,stops,fcac-decode-width(state,ready,len(ids))),state,started,stops,ids);
    }
   // A Form control the reply closed in this quantum is answered in the same stream before the
   // next ID (form-token-grammar.bml); otherwise the pending ID is forwarded as before.
@@ -517,15 +607,20 @@ section [form.bml] {
   // incomplete-reply flow with its prefix retained, so the next reply is asked for an action.
   def fcac-echoing?(session, ids) = len(ids) >= 12 && len(ids) <= 96 && fcctg-echo?(fcmo-text(session,ids));
   def fcac-decoded(generation, state, started, stops, before) {
-   let session = fcms-generation-session(generation);
+    let initial = fcms-generation-session(generation);
+     fcacs-retain(initial);
    let ids = append(before, fcms-generation-ids(generation));
-   let observed = fcac-observe(state, session, started);
+    let observed = fcac-observe(state, initial, started);
+     !fcms-live?(initial) ? fcms-generation(fcmo-text(initial,ids),ids,initial) : fcac-decoded-live(initial,state,started,stops,before,ids);
+   }
+   def fcac-decoded-live(initial,state,started,stops,before,ids) {
     let lane = fcap-model-lane(state);
-     let fresh = ftg-quantum-controls(session, before, ids);
+      let fresh = ftg-quantum-controls(initial, before, ids);
      fcac-control-repeat(lane,fresh);
-     let room = nothing?(fcac-control-care()) && !fcac-reply-exhausted(state,len(ids)) && fcms-pos(session) < fcms-maxpos(session) - 1 && !fcac-echoing?(session, ids);
+      let session=fcms-stopped?(initial) || fcac-stream-ended() || fcac-stream-steps()>0 || !nil?(fcac-control-submissions()) || !nothing?(fcac-control-care()) || fcac-reply-exhausted(state,len(ids)) ? initial : fcacs-room(initial,2);
+      let room = fcms-live?(session) && nothing?(fcac-control-care()) && !fcac-reply-exhausted(state,len(ids)) && fcms-pos(session) < fcms-maxpos(session) - 1 && !fcac-echoing?(session, ids);
     let limit=fcap-reply-token-limit(state);
-    let answerable=(limit<=0 || len(ids)<=limit) && fcms-pos(session)<fcms-maxpos(session)-1;
+     let answerable=fcms-live?(session) && (limit<=0 || len(ids)<=limit) && fcms-pos(session)<fcms-maxpos(session)-1;
     let next = !nil?(fresh) && answerable ? fcac-control-answer(session, stops, fresh) : room && !fcms-stopped?(session) ? fcacs-next(session, stops) : session;
     if (!room || fcac-stream-ended() || fcac-stream-steps()>0 || !nil?(fcac-control-submissions()) || !nothing?(fcac-control-care()) || fcms-stopped?(next) || !fcms-live?(next)) then fcms-generation(fcmo-text(session,ids), ids, next) else fcac-decode(next, fcap-with-reply-token-limit(fcac-stream-state(state),limit), started, stops, ids);
   }

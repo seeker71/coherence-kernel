@@ -28,10 +28,10 @@ section [form.bml] {
   def fcmr-fresh-state(session) = if fcms-ds4?(session) then fcds-fresh-state(fcms-ctx(session)) else q38-new-state(fcms-ctx(session)[2]);
   def fcmr-fresh-complete?(session,fresh) = if fcms-ds4?(session) then ((!nothing?(fresh)) && (fcds-state-count(fresh) > 0)) else fcmr-state-complete?(fresh,fcms-ctx(session)[2]);
   def fcmr-state-count(session,state) = if fcms-ds4?(session) then fcds-state-count(state) else q38-state-handle-count(state);
-  // the handles released (Qwen's q38-free-state answers the count it freed; the driver's release answers the handles still held, so the count freed is what the state held less those)
-  def fcmr-state-free(session,state) = if fcms-ds4?(session) then (fcds-state-count(state) - len(fcds-state-release(state))) else q38-free-state(state);
+   def fcmr-state-handles(session,state) = nothing?(state) ? (fcms-ds4?(session) ? dso-take-refused-state-handles(fcms-ctx(session)[2]) : []) : fcms-ds4?(session) ? dsv4-state-handles(state) : q38x-unique-handles(foldl(append,[],state));
+   def fcmr-stream-bytes(session) = fcms-ds4?(session) ? dvl-kv-total(fcms-ctx(session)[2],fcms-maxpos(session)) : q38-stream-bytes(fcms-ctx(session)[2]);
   // The speculative drafter (form-cli-model-spec.fk) follows the stream: the fresh prefill carried its tap from position 0 (fcsp-renew-tap), and the new stream is its stream.
-  def fcmr-new-session(previous,state,prefill,count) = fcsp-restamp(fcmd-inherit(previous,fcms-session("live","fresh-stream-same-weights",fcms-path(previous),fcms-src(previous),fcms-ctx(previous),state,fcms-maxpos(previous),prefill[1],prefill[0],0,count,0,0,0)),state);
+   def fcmr-new-session(previous,state,prefill,count) = fcsp-restamp(fcmd-inherit(previous,fcms-base-session("live","fresh-stream-same-weights",fcms-path(previous),fcms-src(previous),fcms-ctx(previous),state,fcms-maxpos(previous),prefill[1],prefill[0],0,count,0,0,0)),state);
   def fcmr-reading(flow,reason,good,expected,observed) = oh-reading("model-session",flow,"independent-stream",expected,observed,json-node-int(good),if good then [] else [oh-need(reason,json-node-null())],["replace-stream","retain-session","inspect-state-release"],json-node-null());
   def fcmr-observed(flow,result,expected,observed) {
    let reading = oh-voice(fcmr-reading(flow,fcmr-reason(result),(fcmr-changed(result) && ((String) fcmr-reason(result) == "fresh-stream-same-weights")),expected,observed));
@@ -63,7 +63,7 @@ section [form.bml] {
    let answered = oh-voice(response);
    let selected = oh-select(reading,response,"retain-session");
    if (!((String) selected == "replace-stream")) then fcmr-result(0,"renewal-not-selected",session)
-   else fcmr-granted(flow,session,ids,reading,mg-lease("renewal second KV state","",0,mg-kv-margin()));
+     else fcmr-granted(flow,session,ids,reading,mg-lease-retaining("renewal second KV state","",0,fcmr-stream-bytes(session),token=>fcms-retain-reservation(fcms-release-ledger(session),token)));
   }
   // The old stream's state lives until the new one is prefilled, so a renewal briefly holds two KV states: the
   // machine is asked for the second before it is allocated (memory-governor.bml), and the grant is a lease other
@@ -72,39 +72,56 @@ section [form.bml] {
   // is given back (mg-lease-return) when a stream is retired: the old one on success, the new one when it is discarded.
   // A held answer leaves the caller's owner as it was and names host-memory-held,
   // so the lane ends with a reason through its checkpoint, not a crash.
-  def fcmr-granted(flow,session,ids,reading,v) = mg-granted?(v) ? fcmr-allocated(flow,session,ids,reading,fcmr-fresh-state(session)) : fcmr-observed(flow,fcmr-result(0,"host-memory-held:" ++ v[1],session),json-node-string("room for a second KV state"),json-node-string(v[1]));
-  def fcmr-allocated(flow,session,ids,reading,fresh) {
-   let good = fcmr-fresh-complete?(session,fresh);
-   if (!good) then fcmr-discard(flow,session,fresh,"new-stream-allocation-refused")
-   else fcmr-prefilled(flow,session,ids,reading,fresh,fcmr-prefill-of(session,fresh,ids));
+   def fcmr-parts(session) = fcms-ds4?(session) ? [["full-kv",fcmr-stream-bytes(session)]] : [["full-kv",q38-full-kv-bytes(fcms-ctx(session)[2])],["recurrent",q38-recurrent-bytes(fcms-ctx(session)[2])]];
+   def fcmr-granted(flow,session,ids,reading,v) {
+    let reservation=fcms-reservation(fcms-release-ledger(session),v,fcmr-parts(session));
+    !mg-granted?(v) ? fcmr-observed(flow,fcmr-result(0,"host-memory-held:" ++ v[1],session),json-node-string("room for a second KV state"),json-node-string(v[1]))
+     : !record_get(reservation,"ready") ? fcmr-result(0,"stream-reservation-partition-incomplete",session)
+      : fcmr-allocate(flow,session,ids,reading,reservation);
+   }
+    def fcmr-allocate(flow,session,ids,reading,reservation) {
+     map(row=>fcms-buffer-owner(fcms-release-ledger(session),row),fcms-release-rows(session));
+     let owner=fcms-retain-owned-release(session,[],record_get(reservation,"parts"));
+     record_set(reservation,"allocation-owner",owner);
+     let fresh=fcms-ds4?(session) ? dsv4-new-state-by(fcms-ctx(session)[2],fcms-ctx(session)[0],fcms-maxpos(session),bytes=>q38x-alloc(owner,bytes)) : q38-new-state-by(fcms-ctx(session)[2],bytes=>q38x-alloc(owner,bytes));
+     fcmr-allocated(flow,session,ids,reading,fresh,reservation);
+    }
+   def fcmr-allocated(flow,session,ids,reading,fresh,reservation) {
+      let owner=record_get(reservation,"allocation-owner") ?? fcms-retain-owned-release(session,fcmr-state-handles(session,fresh),record_get(reservation,"parts"));
+     record_set(owner,"candidate-reservation",reservation);
+    let good = fcmr-fresh-complete?(session,fresh) && fcms-reservation-ack(reservation,["full-kv","recurrent"]);
+    if (!good) then fcmr-discard(flow,session,owner,"new-stream-allocation-refused")
+    else fcmr-prefilled(flow,session,ids,reading,fresh,fcmr-prefill-of(session,fresh,ids),owner);
   }
   // the prefill of the new prompt into the second state: Qwen's walk, or the driver's (nothing there is the refused shape)
   // A stop inside a DeepSeek prefill is the refused-prefill shape, so the renewal ends through its own discard: the second state is freed and its lease returned, the owner is as it was (the Qwen prefill is as it was).
   def fcmr-prefill-of(session,fresh,ids) = if fcms-ds4?(session) then fcmr-ds4-shape(try fcds-fresh-prefill(fcms-ctx(session),fresh,ids) catch nothing()) else fcmr-prefill-t(fcms-ctx(session),fresh,ids,fcsp-renew-tap(session));
   def fcmr-ds4-shape(pf) = if nothing?(pf) then [-1,0] else pf;
-  def fcmr-state-complete?(state,geo) = (((Comparable) len(state) == geo[21]) && (((Comparable) q38-state-handle-count(state) == (2 * geo[21])) && q38-state-ok?(state)));
+   def fcmr-state-complete?(state,geo) = q38-state-complete?(state,geo);
   def fcmr-span(ctx,count) = if (q38-ctx-span(ctx) < fcma-span(count)) then q38-ctx-span(ctx) else fcma-span(count);
   def fcmr-prefill(ctx,state,ids) = fcmr-prefill-t(ctx,state,ids,nothing());
   def fcmr-prefill-t(ctx,state,ids,tap) = fcmo-walk(fcmo-native-step-t(tap),ctx,state,ids,0,fcmr-span(ctx,len(ids)));
-  def fcmr-discard(flow,session,fresh,reason) {
-   let settled = metal_sync();
-   let expected = fcmr-state-count(session,fresh);
-   let released = fcmr-state-free(session,fresh);
-   let returned = mg-lease-return(mg-kv-margin());
-   fcmr-observed(flow,fcmr-result(0,if ((Comparable) expected == released) then reason else "candidate-stream-release-incomplete",session),json-node-int(expected),json-node-int(released));
+   def fcmr-discard(flow,session,owner,reason) {
+    let expected=q38x-owned(owner);
+     let released=fcms-pending-release(owner);
+    fcmr-observed(flow,fcmr-result(0,released ? reason : "candidate-stream-release-incomplete",session),json-node-int(expected),json-node-int(expected - q38x-owned(owner)));
   }
-  def fcmr-prefilled(flow,session,ids,reading,fresh,prefill) {
-   if (!fcmo-shape(prefill,0,len(ids))) then fcmr-discard(flow,session,fresh,"new-stream-prefill-refused")
-   else fcmr-retire(flow,session,ids,reading,fresh,prefill);
+   def fcmr-prefilled(flow,session,ids,reading,fresh,prefill,owner) {
+    if (!fcmo-shape(prefill,0,len(ids))) then fcmr-discard(flow,session,owner,"new-stream-prefill-refused")
+    else fcmr-retire(flow,session,ids,reading,fresh,prefill,owner);
   }
-  def fcmr-retire(flow,session,ids,reading,fresh,prefill) {
-   let settled = metal_sync();
-   let expected = fcmr-state-count(session,fcms-sts(session));
-   let released = fcmr-state-free(session,fcms-sts(session));
-   let returned = mg-lease-return(mg-kv-margin());
+   def fcmr-retire(flow,session,ids,reading,fresh,prefill,owner) {
+     let retired=fcms-retain-selection(session,fcmr-state-handles(session,fcms-sts(session)),fcms-active-parts(session,["full-kv","recurrent"]));
+     fcms-activate-parts(fcms-release-ledger(session),record_get(owner,"candidate-reservation"));
+    record_set(fcms-release-ledger(session),"active-state",fresh);
+     let expected=q38x-owned(retired);
+      let complete=fcms-pending-release(retired);
+     let released=expected - q38x-owned(retired);
    let next = fcms-refresh-head(fcmr-new-session(session,fresh,prefill,len(ids)));
+    let retained=record_get(fcms-release-ledger(session),"renewed-session");
+    if value_kind(retained)=="closure" then retained(session,next) else 0;
    let applied = oh-voice(oh-applied(reading,"replace-stream",json-node-object([oh-n("prompt_ids",len(ids)),oh-n("old_state_handles_expected",expected),oh-n("old_state_handles_released",released),oh-n("weight_admissions",0)])));
-   fcmr-observed(flow,fcmr-result(1,if ((Comparable) expected == released) then if fcms-live?(next) then "fresh-stream-same-weights" else fcms-reason(next) else "old-stream-release-incomplete",next),json-node-int(expected),json-node-int(released));
+    fcmr-observed(flow,fcmr-result(1,if complete then if fcms-live?(next) then "fresh-stream-same-weights" else fcms-reason(next) else "old-stream-release-incomplete",next),json-node-int(expected),json-node-int(released));
   }
   def fcmr-replace-with-profile(session,prompt,profile) = fcmr-replace-with-profile-checked(session,prompt,profile,fcmr-any-prompt,0);
   def fcmr-replace-with-profile-checked(session,prompt,profile,check,contract) {

@@ -18024,6 +18024,143 @@ static long long fk_intern_float32_node(double d) {
     fk_nhash_memo[fk_np] = h;
     return fk_nbox(fk_np);
 }
+/* a door word: does string word sv spell w exactly */
+static int fk_door_word(long long sv, const char *w) {
+    if (!fk_is_str(sv)) { return 0; }
+    long long sa = fk_stri(sv);
+    if (sa < 0 || !FK_SOK(sa)) { return 0; }
+    long long n = 0;
+    while (w[n] != 0) { n++; }
+    return FK_SLEN(sa) == n && memcmp(FK_SBYTES(sa), w, (size_t)n) == 0;
+}
+/* float_leaf 62/63: a wire number's 8 little-endian bytes. (62 [kind n]) -> the 8-byte string of n's bits, kind 3
+ * an int, kind 2 a float; (63 [kind bytes]) -> the number those bytes hold. The Form codec and storage recipes own
+ * every framing decision; this door only crosses the bit pattern Form arithmetic cannot read. */
+static long long fk_number_bytes(long long mode, long long x) {
+    long long kind, rest, payload, tail;
+    if (!fk_door_pair(x, &kind, &rest) || !fk_door_pair(rest, &payload, &tail) || tail != 1) { return fk_nothing; }
+    if ((kind & 1) != 0 || fk_is_str(kind) || ((kind >> 1) != 2 && (kind >> 1) != 3)) { return fk_nothing; }
+    int whole = (kind >> 1) == 3;
+    unsigned long long bits = 0;
+    if (mode == 62) {
+        if (whole) {
+            if ((payload & 1) != 0 || fk_is_str(payload)) { return fk_nothing; }
+            long long n = payload >> 1; memcpy(&bits, &n, sizeof bits);
+        } else {
+            if (!fk_isf(payload)) { return fk_nothing; }
+            double d = fk_num(payload); memcpy(&bits, &d, sizeof bits);
+        }
+        char b[8];
+        for (int i = 0; i < 8; ++i) { b[i] = (char)(bits >> (i * 8)); }
+        return fk_sbuf(b, 8);
+    }
+    if (!fk_is_str(payload)) { return fk_nothing; }
+    long long sa = fk_stri(payload);
+    if (sa < 0 || !FK_SOK(sa) || FK_SLEN(sa) != 8) { return fk_nothing; }
+    const unsigned char *p = (const unsigned char *)FK_SBYTES(sa);
+    for (int i = 0; i < 8; ++i) { bits |= (unsigned long long)p[i] << (i * 8); }
+    if (!whole) { double d; memcpy(&d, &bits, sizeof d); return fk_fbox(d); }
+    long long n; memcpy(&n, &bits, sizeof n);
+    /* a Form int is signed 63 bits: a wider wire int has no int word here, so it is nothing, never a wrapped value */
+    if (n > 4611686018427387903LL || n < -4611686018427387904LL) { return fk_nothing; }
+    return n << 1;
+}
+/* float_leaf 60: scoped file leases -- the descriptor owner under the Form storage recipes (native-posix.bml), which
+ * do every read, write, frame and publication on the returned descriptor.
+ *   ("open" path writing)         a private journal lease: the caller's own 0600 regular file, held under a
+ *                                 non-blocking flock (shared to read, exclusive to write) retried until the cell
+ *                                 deadline -> [id fd], else nothing
+ *   ("regular-open" path writing) any regular file, no lock -> [id fd], else -errno
+ *   ("close"|"held"|"status"|"identity"|"stamp"|"mode" id)
+ *   ("fork" 0)                    libc fork, refused (-EBUSY) while any lease is held: two writable owners never */
+typedef struct { int fd; int close_error; } fk_file_lease;
+static fk_file_lease *fk_leases;
+static long long fk_lease_n, fk_lease_cap;
+static int fk_lease_close(long long i) {
+    if (i < 0 || i >= fk_lease_n) { return 1; }
+    if (fk_leases[i].fd < 0) { return fk_leases[i].close_error == 0; }
+    int fd = fk_leases[i].fd;
+    if (close(fd) == 0 || errno == EBADF) { fk_leases[i].fd = -1; fk_leases[i].close_error = 0; return 1; }
+    fk_leases[i].close_error = errno;
+#ifdef __linux__
+    fk_leases[i].fd = -1; /* Linux released the descriptor before reporting; a retry could close a reused one */
+#endif
+    return 0;
+}
+static long long fk_lease_list(const long long *v, int n) {
+    long long l = 1;
+    for (int k = n - 1; k >= 0; --k) { l = fk_cons_val(v[k] << 1, l); }
+    return l;
+}
+static long long fk_lease_door(long long x) {
+    long long op, rest, arg, more;
+    if (!fk_door_pair(x, &op, &rest) || !fk_door_pair(rest, &arg, &more)) { return fk_nothing; }
+    if (fk_door_word(op, "fork")) {
+        for (long long i = 0; i < fk_lease_n; ++i) { if (fk_leases[i].fd >= 0) { return (long long)(-EBUSY) * 2; } }
+        pid_t child = fork();
+        return child < 0 ? (long long)(-errno) * 2 : (long long)child * 2;
+    }
+    int ident = fk_door_word(op, "identity"), stamp = fk_door_word(op, "stamp"), mode = fk_door_word(op, "mode");
+    int status = fk_door_word(op, "status"), held = fk_door_word(op, "held");
+    if (ident || stamp || mode || status || held || fk_door_word(op, "close")) {
+        if (more != 1 || (arg & 1) != 0 || fk_is_str(arg) || (arg >> 1) <= 0 || (arg >> 1) > fk_lease_n) { return fk_nothing; }
+        long long i = (arg >> 1) - 1;
+        if (ident || stamp || mode) {
+            struct stat st;
+            if (fk_leases[i].fd < 0 || fstat(fk_leases[i].fd, &st) != 0) { return fk_nothing; }
+            if (mode) { return (long long)st.st_mode << 1; }
+#if defined(__APPLE__)
+            struct timespec m = st.st_mtimespec, c = st.st_ctimespec;
+#else
+            struct timespec m = st.st_mtim, c = st.st_ctim;
+#endif
+            long long f[] = {(long long)st.st_dev, (long long)(st.st_ino & 0x3FFFFFFFFFFFFFFFULL), (long long)st.st_size,
+                             (long long)m.tv_sec, (long long)m.tv_nsec, (long long)c.tv_sec, (long long)c.tv_nsec};
+            return fk_lease_list(f, ident ? 2 : 7);
+        }
+        if (status) { long long f[] = {fk_leases[i].fd >= 0, fk_leases[i].close_error}; return fk_lease_list(f, 2); }
+        return (long long)(held ? fk_leases[i].fd >= 0 : fk_lease_close(i)) << 1;
+    }
+    int regular = fk_door_word(op, "regular-open");
+    long long writing, end;
+    static char lp[FK_PATH_CAP];
+    if ((!regular && !fk_door_word(op, "open")) || !fk_door_path(arg, lp) || !fk_door_pair(more, &writing, &end) || end != 1
+        || (writing != 0 && writing != 2)) { return fk_nothing; }
+    int w = writing == 2;
+    if (fk_cell_deadline_ms != 0) { fk_cell_deadline_hit(); }
+    if (fk_lease_n == fk_lease_cap) {
+        long long grown = fk_lease_cap == 0 ? 16 : fk_lease_cap * 2;
+        fk_file_lease *next = realloc(fk_leases, (size_t)grown * sizeof *next);
+        if (next == NULL) { return fk_nothing; }
+        fk_leases = next; fk_lease_cap = grown;
+    }
+    /* a FIFO must not block before the regular-file check can refuse it */
+    int flags = O_CLOEXEC | O_NONBLOCK | (regular ? 0 : O_NOFOLLOW) | (w ? (regular ? O_WRONLY : O_RDWR) | O_CREAT : O_RDONLY);
+    int fd = open(lp, flags, regular ? 0666 : 0600);
+    if (fd < 0) { return regular ? (long long)(-errno) * 2 : fk_nothing; }
+    long long i = fk_lease_n++;
+    fk_leases[i].fd = fd; fk_leases[i].close_error = 0;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || (!regular && (st.st_uid != getuid() || (st.st_mode & 0077) != 0))) {
+        if (!fk_lease_close(i)) { fk_stop("fkwu: file lease: descriptor release incomplete after regular-file admission failed"); }
+        return fk_nothing;
+    }
+    while (!regular && flock(fd, (w ? LOCK_EX : LOCK_SH) | LOCK_NB) != 0) {
+        int error = errno;
+        if (error != EINTR && error != EWOULDBLOCK && error != EAGAIN) { fk_lease_close(i); return fk_nothing; }
+        for (long long h = 0; error != EINTR && h < i; ++h) {
+            struct stat owner;
+            if (fk_leases[h].fd >= 0 && fstat(fk_leases[h].fd, &owner) == 0 && owner.st_dev == st.st_dev && owner.st_ino == st.st_ino) {
+                fk_lease_close(i);
+                fk_stop("fkwu: file lease would wait on its own process -- reuse or release the held owner");
+            }
+        }
+        if (fk_cell_deadline_ms != 0 && fk_mono_ns() / 1000000LL >= fk_cell_deadline_ms) { fk_lease_close(i); fk_cell_deadline_hit(); return fk_nothing; }
+        poll(NULL, 0, 1); /* yields between refusals; the caller's deadline is authoritative, not a count */
+    }
+    long long f[] = {i + 1, fd};
+    return fk_lease_list(f, 2);
+}
 /* mode 0 float_value: a type-6/7 leaf's IEEE value as a boxed double (an interned
  * leaf holds it in fk_nval; a hand-built type-6 leaf holds the bits in nid[3]; a
  * hand-built type-7 leaf names a pool slot) -- nothing for any other value, the
@@ -20163,6 +20300,9 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if ((fm201 >> 1) == 57) { return fk_jit_node(fx201); }
         /* mode 58: jit_cpu_run([image, buffers, consts]) -- a Form-emitted CPU image over the body's bytes, see fk_jit_cpu_run */
         if ((fm201 >> 1) == 58) { return fk_jit_cpu_run(fx201); }
+        /* mode 60: scoped file leases; modes 62-63: a wire number's 8 bytes -- see fk_lease_door, fk_number_bytes */
+        if ((fm201 >> 1) == 60) { return fk_lease_door(fx201); }
+        if ((fm201 >> 1) == 62 || (fm201 >> 1) == 63) { return fk_number_bytes(fm201 >> 1, fx201); }
         /* The Form cell frame takes root identity with its argument when residency leaves the seed. */
         if ((fm201 >> 1) == 55) {
             const char *root55 = fk_cell_root_path != 0 ? fk_cell_root_path : fk_src_root_path;
@@ -20968,7 +21108,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             fk_stop("fkwu: record_get: only a record has fields -- ask record? first");
         }
         long long j = fk_rfind(r, key);
-        return j >= 0 ? fk_rval[r][j] : 0;
+        /* an absent field is a reading that did not arrive: nothing, never a number a caller could mistake */
+        return j >= 0 ? fk_rval[r][j] : fk_nothing;
     }
     if (t == 66) {
         long long rec = fk_walk(fk_node[i][1], fp); fk_vp(rec);

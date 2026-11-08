@@ -8,14 +8,115 @@ import form-stdlib/sha256.fk;
 import form-stdlib/hex.fk;
 import form-stdlib/str-byte-at.fk;
 import form-stdlib/json.fk;
+import form-stdlib/form-asm.fk;
+import form-stdlib/bml/native-linux.bml;
 section [form.bml] {
+ let FBC-PUBLISH=record_new(0,"next",0);
+ let FBC-ASCII-IMAGE=fbc-ascii-image();
+ let FBC-LIST=fbc-string(1,"list");
+ let FBC-NOTHING=fbc-string(1,"nothing");
+ let FBC-DOTTED=fbc-string(1,"dotted-list");
+ let FBC-BYTES=fbc-string(1,"byte-string");
+ let FBC-COORDINATE=fbc-string(1,"node-coordinate");
  class FormbinCodec {
-  def fbc-max-bytes() = 67108864;
+  // Native admission uses this same inert codec. Only exact scalar bit
+  // transport crosses float_leaf (34 pack, 35 admit); framing stays in Form.
+  def fbc-native-data(node) {
+   if value_kind(node)=="string" then fbc-string(1,node)
+   else if value_kind(node) != "node_id" then nothing()
+   else if !node_eq(node,node_category(node)) then fbc-composite(fbc-native-data(node_category(node)),map(fbc-native-data,node_children(node)))
+   // Native type-1 identities now carry signed 63-bit integers. FORMBIN2's
+   // coordinate field remains u32 with signed-i32 decoding; wider values use
+   // the existing exact int64 payload, independent of the in-memory layout.
+   else if node_pkg(node)==1 && node_level(node)==1 && node_type(node)==1 then {
+    let value=node_value(node);
+    value>=-2147483648 && value<=2147483647 ? fbc-leaf(1,1,1,value<0 ? value+4294967296 : value) : fbc-number(3,float_leaf(62,[3,value]));
+   }
+   else if node_level(node)==1 && node_type(node)==2 then fbc-string(node_pkg(node),node_value(node))
+   else if node_level(node)==1 && node_type(node)==5 then fbc-number(3,float_leaf(62,[3,node_value(node)]))
+   else if node_level(node)==1 && node_type(node)==7 then fbc-number(2,float_leaf(62,[2,node_value(node)]))
+   else fbc-leaf(node_pkg(node),node_level(node),node_type(node),node_inst(node));
+  }
+  def fbc-native-node(data) {
+   if data[0]==1 then intern_node(fbc-native-node(data[1]),map(fbc-native-node,data[2]))
+   else if data[0]==4 then intern_trivial_string(data[2])
+   else if data[0]==2 || data[0]==3 then (data[0]==3 ? intern_trivial_int(float_leaf(63,data)) : make_float64(float_leaf(63,data)))
+   else if data[1]==1 && data[2]==1 && data[3]==1 then intern_trivial_int(data[4]>=2147483648 ? data[4]-4294967296 : data[4])
+   else make_nodeid(data[1],data[2],data[3],data[4]);
+  }
+  def fbc-native-result(decoded) = fbc-good(decoded) ? fbc-native-node(fbc-value(decoded)) : nothing();
+  def read_form_binary(path) = fbc-native-result(fbc-load(path));
+  def recipe_to_bytes(node) {
+   let encoded=fbc-encode(fbc-native-data(node));
+   fbc-good(encoded) ? range(0,len(fbc-value(encoded))) |> map(i=>str_byte_at(fbc-value(encoded),i)) : nothing();
+  }
+  def bytes_to_recipe(bytes) = value_kind(bytes) != "list" || !all?(byte=>value_kind(byte)=="int" && byte>=0 && byte<=255,bytes) ? nothing() : fbc-native-result(fbc-decode(fbc-finish(foldl((bins,byte)=>fbc-put(bins,byte_to_str(byte)),[],bytes),"")));
+  def write_form_binary(path,node) {
+   let encoded=fbc-encode(fbc-native-data(node));
+   if !fbc-good(encoded) then -1 else {
+    let ordinal=record_get(FBC-PUBLISH,"next");
+    record_set(FBC-PUBLISH,"next",ordinal+1);
+    let stage=path+".tmp."+host_pid().str()+"."+ordinal.str();
+    let bytes=fbc-value(encoded);
+    let wrote=write_file(stage,bytes);
+    if wrote==len(bytes) && host_path_rename(stage,path)==0 then wrote else { host_path_remove(stage); -1; };
+   };
+  }
   def fbc-fail(reason) = [0, ("form binary: " + reason), [], 0, 0];
   def fbc-ok(value, nodes, depth) = [1, "", value, nodes, depth];
   def fbc-good(result) = ((Comparable) result[0] == 1);
   def fbc-value(result) = result[2];
   def fbc-error(result) = result[1];
+  // Ordinary values use the same inert codec as syntax caches and shared
+  // storage. Decoding these numeric bits never interns a native node.
+   def fbc-data-list(items) = fbc-composite(FBC-LIST,items);
+  def fbc-data(value) {
+   let kind=value_kind(value);
+   kind=="list" ? fbc-data-items(value,[])
+    : nothing?(value) ? fbc-composite(FBC-NOTHING,[])
+    : kind=="string" ? (fbc-string(1,value) ?? fbc-composite(FBC-BYTES,cons(fbc-data(len(value)),fbc-data-bytes(value,0))))
+   : kind=="int" ? fbc-number(3,float_leaf(62,[3,value]))
+   : kind=="float" ? fbc-number(2,float_leaf(62,[2,value]))
+   : kind=="node_id" ? form_error("form binary: native values require an explicit payload or coordinate policy")
+   : form_error("form binary: ordinary value has no portable representation");
+  }
+  // This explicit reference transport intentionally carries no resident
+  // payload or lifetime. Use fbc-native-data when the payload must travel.
+   def fbc-data-coordinate(value) = value_kind(value)!="node_id" ? form_error("form binary: coordinate transport expects a node") : fbc-composite(FBC-COORDINATE,map(fbc-data,[node_pkg(value),node_level(value),node_type(value),node_inst(value)]));
+   def fbc-data-items(items,reversed) = value_kind(items)!="list" ? fbc-composite(FBC-DOTTED,[fbc-data-list(reverse(reversed)),fbc-data(items)])
+   : nil?(items) ? fbc-data-list(reverse(reversed)) : fbc-data-items(tail(items),cons(fbc-data(head(items)),reversed));
+  def fbc-data-bytes(text,offset) = offset>=len(text) ? [] : {
+   let chunk=substring(text,offset,offset+8);
+   cons(fbc-number(3,chunk+fbc-data-padding(8-len(chunk))),fbc-data-bytes(text,offset+8));
+  };
+  def fbc-data-padding(n) = n<=0 ? "" : byte_to_str(0)+fbc-data-padding(n - 1);
+   def fbc-data-value(data) = fbc-data-recover(data,1);
+   // Storage replay must stay inert even when a valid wire carries an explicit
+   // coordinate category. Only the caller-selected coordinate path may intern.
+   def fbc-data-inert-value(data) = fbc-data-recover(data,0);
+   def fbc-data-recover(data,coordinates) = data[0]==4 ? data[2]
+   : data[0]==2 || data[0]==3 ? float_leaf(63,[data[0],data[1]])
+   : data[0]!=1 ? form_error("form binary: unsupported ordinary value")
+    : data[1]==FBC-LIST ? map(item=>fbc-data-recover(item,coordinates),data[2])
+    : data[1]==FBC-NOTHING && nil?(data[2]) ? nothing()
+    : data[1]==FBC-DOTTED && len(data[2])==2 ? {
+     let heads=fbc-data-recover(data[2][0],coordinates);
+     fbc-proper?(heads) && !nil?(heads) ? foldl((rest,item)=>cons(item,rest),fbc-data-recover(data[2][1],coordinates),reverse(heads)) : form_error("form binary: malformed dotted list");
+   }
+    : data[1]==FBC-BYTES && !nil?(data[2]) ? fbc-data-byte-value(fbc-data-recover(head(data[2]),coordinates),tail(data[2]))
+    : data[1]==FBC-COORDINATE && len(data[2])==4 ? {
+     if coordinates != 1 then form_error("form binary: coordinate admission was not requested") else {
+      let parts=map(item=>fbc-data-recover(item,coordinates),data[2]); make_nodeid(parts[0],parts[1],parts[2],parts[3]);
+     };
+   }
+   : form_error("form binary: unsupported ordinary value");
+  def fbc-proper?(value) = value_kind(value)!="list" ? 0 : nil?(value) ? 1 : fbc-proper?(tail(value));
+  def fbc-data-byte-value(size,chunks) {
+   if value_kind(size)!="int" || size<0 || len(chunks)!=(size+7)/8 || !all?(chunk=>len(chunk)==2 && chunk[0]==3 && value_kind(chunk[1])=="string" && len(chunk[1])==8,chunks) then form_error("form binary: malformed byte string") else {
+    let raw=fbc-finish(foldl((bins,chunk)=>fbc-put(bins,chunk[1]),[],chunks),"");
+    substring(raw,size,len(raw))==fbc-data-padding(len(raw)-size) ? substring(raw,0,size) : form_error("form binary: noncanonical byte string padding");
+   };
+  }
   def fbc-word(n) = (byte_to_str(((n / 16777216) % 256)) + (byte_to_str(((n / 65536) % 256)) + ((String) byte_to_str(((n / 256) % 256)) + byte_to_str((n % 256)))));
   def fbc-u32?(n) = if ((String) value_kind(n) == "int") then ((n >= 0) && (n <= 4294967295)) else 0;
   def fbc-list?(value) = ((String) value_kind(value) == "list");
@@ -26,25 +127,46 @@ section [form.bml] {
   def fbc-put-weight(bins, text, weight) = if nil?(bins) then fbd-push([weight, text], []) else if ((Comparable) bins[0][0] == weight) then fbc-put-weight(fbd-rest(bins), ((String) bins[0][1] + text), (weight * 2)) else fbd-push([weight, text], bins);
   def fbc-finish(bins, out) = if nil?(bins) then out else fbc-finish(fbd-rest(bins), ((String) bins[0][1] + out));
   // Constructors carry issued coordinates, never native NodeIDs.
-  def fbc-leaf(pkg, level, type, inst) = if (fbc-u32?(pkg) && (fbc-u32?(level) && (fbc-u32?(type) && fbc-u32?(inst)))) then if (((Comparable) level == 1) && ((Comparable) type == 2)) then nothing() else [0, pkg, level, type, inst] else nothing();
-  def fbc-string(pkg, value) = if (fbc-u32?(pkg) && fbc-text?(value)) then if fbc-utf8(value, 0) then [4, pkg, value] else nothing() else nothing();
-  def fbc-number(tag, raw) = if ((((Comparable) tag == 2) || ((Comparable) tag == 3)) && fbc-text?(raw)) then if ((Comparable) len(raw) == 8) then [tag, raw] else nothing() else nothing();
+  def fbc-leaf-valid?(pkg, level, type, inst) = fbc-u32?(pkg) && fbc-u32?(level) && fbc-u32?(type) && fbc-u32?(inst) && !(level==1 && type==2);
+  def fbc-string-valid?(pkg, value) = fbc-u32?(pkg) && fbc-text?(value) && fbc-utf8(value,0);
+  def fbc-number-valid?(tag, raw) = (tag==2 || tag==3) && fbc-text?(raw) && len(raw)==8;
+  def fbc-leaf(pkg, level, type, inst) = fbc-leaf-valid?(pkg,level,type,inst) ? [0,pkg,level,type,inst] : nothing();
+  def fbc-string(pkg, value) = fbc-string-valid?(pkg,value) ? [4,pkg,value] : nothing();
+  def fbc-number(tag, raw) = fbc-number-valid?(tag,raw) ? [tag,raw] : nothing();
   def fbc-composite(category, children) = if fbc-list?(children) then [1, category, children] else nothing();
   def fbc-cont?(s, p) = if (p >= len(s)) then 0 else ((str_byte_at(s, p) >= 128) && (str_byte_at(s, p) <= 191));
-  def fbc-utf8(s, p) = if (p >= len(s)) then 1 else fbc-utf8-byte(s, p, str_byte_at(s, p));
-  def fbc-utf8-byte(s, p, b) {
-   if (b < 128) then fbc-utf8(s, (p + 1))
-   else if ((b >= 194) && (b <= 223)) then if fbc-cont?(s, (p + 1)) then fbc-utf8(s, (p + 2)) else 0
-   else if ((b >= 224) && (b <= 239)) then if (fbc-cont?(s, (p + 1)) && (fbc-cont?(s, (p + 2)) && ((if ((Comparable) b == 224) then (str_byte_at(s, (p + 1)) >= 160) else 1) && (if ((Comparable) b == 237) then (str_byte_at(s, (p + 1)) <= 159) else 1)))) then fbc-utf8(s, (p + 3)) else 0
-   else if ((b >= 240) && (b <= 244)) then if (fbc-cont?(s, (p + 1)) && (fbc-cont?(s, (p + 2)) && (fbc-cont?(s, (p + 3)) && ((if ((Comparable) b == 240) then (str_byte_at(s, (p + 1)) >= 144) else 1) && (if ((Comparable) b == 244) then (str_byte_at(s, (p + 1)) <= 143) else 1))))) then fbc-utf8(s, (p + 4)) else 0
+   // The image skips only ASCII. The existing Form validator owns every
+   // multibyte rule and remains the fallback when native admission is absent.
+   // The u32 image span is an ABI width, never an artifact-size allowance.
+    def fbc-ascii-image() = nli-platform ? ["linux-x86_64",nli-bytes([76,139,7,76,139,79,8,76,139,87,16,77,139,18,77,1,208,139,14,49,192,133,201,116,16,65,128,56,128,115,10,73,255,192,72,255,192,255,201,117,240,73,137,1,195])]
+     : nli-bytes(fa-image([fa-ldr(3,0,0),fa-ldr(4,0,1),fa-ldr(7,0,2),fa-ldr(7,7,0),fa-add-x-r(3,3,7),fa-ldr-w(5,1,0),fa-movz-x(6,0),fa-cmp-x(5,0),fa-bcond(0,9),fa-ldrb(7,3,0),fa-cmp-x(7,128),fa-bcond(2,6),fa-add-x-imm(3,3,1),fa-add-x-imm(6,6,1),fa-sub-x-imm(5,5,1),fa-cmp-x(5,0),fa-bcond(1,0 - 7),fa-str-x(6,4,0),fa-ret()]));
+   def fbc-ascii-prefix(result,span) = !fbc-proper?(result) || len(result)!=1 || value_kind(result[0])!="string" || len(result[0])!=8 || substring(result[0],4,8)!=nli-zero(4) ? nothing() : {
+    let count=nli-unsigned(result[0],0,4); count<=span ? count : nothing();
+   };
+   def fbc-utf8(s,p) = p>=len(s) ? 1 : p<0 || len(s)-p>4294967295 ? fbc-utf8-pure(s,p) : {
+     // Borrow the complete string; an exact eight-byte offset avoids copying
+     // a growing suffix when Unicode is followed by another ASCII span.
+     fbc-utf8-result(s,p,jit_cpu_run([FBC-ASCII-IMAGE,[s,[nli-zero(8)],float_leaf(62,[3,p])],[len(s)-p]]));
+   };
+   def fbc-utf8-result(s,p,result) {
+    let count=fbc-ascii-prefix(result,len(s)-p);
+     nothing?(count) ? fbc-utf8-pure(s,p) : fbc-utf8-resume(s,p+count);
+   };
+    def fbc-utf8-resume(s,p) = p>=len(s) ? 1 : str_byte_at(s,p)<128 ? fbc-utf8(s,p) : fbc-utf8-byte-by(s,p,str_byte_at(s,p),fbc-utf8-resume);
+    def fbc-utf8-pure(s,p) = p>=len(s) ? 1 : fbc-utf8-byte(s,p,str_byte_at(s,p));
+   def fbc-utf8-byte(s,p,b) = fbc-utf8-byte-by(s,p,b,fbc-utf8-pure);
+   def fbc-utf8-byte-by(s, p, b, next) {
+     if (b < 128) then next(s, (p + 1))
+     else if ((b >= 194) && (b <= 223)) then if fbc-cont?(s, (p + 1)) then next(s, (p + 2)) else 0
+    else if ((b >= 224) && (b <= 239)) then if (fbc-cont?(s, (p + 1)) && (fbc-cont?(s, (p + 2)) && ((if ((Comparable) b == 224) then (str_byte_at(s, (p + 1)) >= 160) else 1) && (if ((Comparable) b == 237) then (str_byte_at(s, (p + 1)) <= 159) else 1)))) then next(s, (p + 3)) else 0
+    else if ((b >= 240) && (b <= 244)) then if (fbc-cont?(s, (p + 1)) && (fbc-cont?(s, (p + 2)) && (fbc-cont?(s, (p + 3)) && ((if ((Comparable) b == 240) then (str_byte_at(s, (p + 1)) >= 144) else 1) && (if ((Comparable) b == 244) then (str_byte_at(s, (p + 1)) <= 143) else 1))))) then next(s, (p + 4)) else 0
    else 0;
   }
   def fbc-decode(s) {
    if nothing?(s) then fbc-fail("unreadable artifact")
-   else if (len(s) > fbc-max-bytes()) then fbc-fail("maximum artifact size exceeded")
    else if (!((String) substring(s, 0, 8) == "FORMBIN2")) then fbc-fail("bad magic")
    else if (len(s) < 12) then fbc-fail("truncated u32")
-   else if (fbd-u32(s, 8) > 262144) then fbc-fail("maximum string count exceeded")
+   else if (fbd-u32(s, 8) > ((len(s)-12)/4)) then fbc-fail("string count exceeds artifact extent")
    else fbc-pool(s, 12, fbd-u32(s, 8), 0, []);
   }
   // File readings retain both extent observations beside the held bytes.
@@ -60,7 +182,8 @@ section [form.bml] {
    else if (!((Comparable) readBytes == before)) then fbc-fail(("incomplete artifact read" + evidence))
    else fbc-ok(bytes, before, after);
   }
-  def fbc-load(path) = fbc-load-read(fbc-read-exact(path, fbc-max-bytes()));
+  def fbc-load(path) = fbc-load-limited(path,0);
+  def fbc-load-limited(path,maximum) = fbc-load-read(fbc-read-exact(path,maximum));
   def fbc-load-read(reading) = if fbc-good(reading) then fbc-decode(fbc-value(reading)) else reading;
   def fbc-pool(s, p, left, total, strings) {
    if ((Comparable) left == 0) then fbc-walk(s, fbd-start(p), reverse(strings), [])
@@ -68,8 +191,7 @@ section [form.bml] {
    else fbc-pool-string(s, (p + 4), left, total, strings, fbd-u32(s, p));
   }
   def fbc-pool-string(s, p, left, total, strings, size) {
-   if ((total + size) > 33554432) then fbc-fail("maximum string bytes exceeded")
-   else if (size > (len(s) - p)) then fbc-fail("truncated string")
+   if (size > (len(s) - p)) then fbc-fail("truncated string")
    else if (!fbc-utf8(substring(s, p, (p + size)), 0)) then fbc-fail("invalid utf8")
    else fbc-pool(s, (p + size), (left - 1), (total + size), cons(substring(s, p, (p + size)), strings));
   }
@@ -108,23 +230,42 @@ section [form.bml] {
   // explicit child-count token after each category, preserving wire order.
   def fbc-tasks(children, rest) = fbc-tasks-reversed(reverse(children), rest);
   def fbc-tasks-reversed(children, rest) = if nil?(children) then rest else fbc-tasks-reversed(children[1:], fbd-push([0, children[0]], rest));
-  def fbc-encode(root) {
+   def fbc-encode(root) = fbc-encode-by(pool=>fbc-emit-value(pool,root));
+   // A producer may emit one independently owned subtree at a time. The one
+   // pool preserves first-use string order across all parts of this artifact.
+   def fbc-encode-by(emit) {
    let pool = record_new(0);
    record_set(pool, "values", []);
    record_set(pool, "size", 0);
-   let wire = fbc-emit(fbd-push([0, root], []), pool, []);
+    record_set(pool, "strings", record_new(0));
+    let wire = emit(pool);
    if nothing?(wire) then fbc-fail("invalid node data")
-   else fbc-encoded(("FORMBIN2" + (fbc-word(record_get(pool, "size")) + ((String) fbc-pool-emit(reverse(record_get(pool, "values")), []) + wire))));
+    // Emission checks every tuple, child list, coordinate, string and payload
+    // before writing it. Incoming bytes still travel through the full decoder.
+    else fbc-ok(("FORMBIN2" + (fbc-word(record_get(pool, "size")) + ((String) fbc-pool-emit(reverse(record_get(pool, "values")), []) + wire))),0,0);
   }
-  def fbc-encoded(wire) = if fbc-good(fbc-decode(wire)) then fbc-ok(wire, 0, 0) else fbc-decode(wire);
+   def fbc-emit-value(pool,node) = fbc-emit(fbd-push([0,node],[]),pool,[]);
+    // A shared pool already proves the UTF-8 of strings it contains. Scalar
+    // producers can reuse that evidence instead of validating the same source
+    // path or syntax kind before constructing every identical inert leaf.
+    // The ordinary emitter still validates the leaf and owns its wire bytes.
+    def fbc-emit-data(pool,value) {
+     let kind=value_kind(value);
+     let data=kind=="string" && fbc-pool-string-valid?(pool,1,value) ? [4,1,value]
+      : kind=="int" ? [3,float_leaf(62,[3,value])]
+      : kind=="float" ? [2,float_leaf(62,[2,value])] : fbc-data(value);
+     fbc-emit-value(pool,data);
+    }
+   def fbc-emit-list-prefix(pool,count) = !fbc-u32?(count) ? nothing() : fbc-word(1)+fbc-emit-value(pool,FBC-LIST)+fbc-word(count);
   def fbc-pool-emit(values, out) = if nil?(values) then fbc-finish(out, "") else fbc-pool-emit(values[1:], fbc-put(out, ((String) fbc-word(len(values[0])) + values[0])));
   def fbc-string-index(pool, s) {
-   let key = ("string:" + s);
-   if record_has(pool, key) then record_get(pool, key)
-   else fbc-string-insert(pool, s, key, record_get(pool, "size"));
+   let index=record_get(record_get(pool,"strings"),s);
+   nothing?(index) ? fbc-string-insert(pool,s,s,record_get(pool,"size")) : index;
   }
+  def fbc-pool-string-valid?(pool,pkg,text) = fbc-u32?(pkg) && fbc-text?(text) && (!nothing?(record_get(record_get(pool,"strings"),text)) || fbc-utf8(text,0));
   def fbc-string-insert(pool, s, key, index) {
-   record_set(pool, key, index);
+   if !fbc-u32?(len(s)) || index>=4294967295 then form_error("form binary: string pool exceeds u32 wire geometry") else 0;
+   record_set(record_get(pool,"strings"), key, index);
    record_set(pool, "size", (index + 1));
    record_set(pool, "values", cons(s, record_get(pool, "values")));
    index;
@@ -134,13 +275,13 @@ section [form.bml] {
    else if ((Comparable) tasks[0][0] == 1) then fbc-emit(fbd-rest(tasks), pool, fbc-put(out, fbc-word(tasks[0][1])))
    else fbc-emit-node(tasks[0][1], fbd-rest(tasks), pool, out);
   }
-  def fbc-emit-node(node, rest, pool, out) {
-   if (!fbc-list?(node)) then nothing()
-   else if ((Comparable) node[0] == 1) then if (((Comparable) len(node) == 3) && (fbc-list?(node[2]) && (len(node[2]) <= 262144))) then fbc-emit(fbd-push([0, node[1]], fbd-push([1, len(node[2])], fbc-tasks(node[2], rest))), pool, fbc-put(out, fbc-word(1))) else nothing()
-   else if ((Comparable) node[0] == 4) then if (((Comparable) len(node) == 3) && (!nothing?(fbc-string(node[1], node[2])))) then fbc-emit(rest, pool, fbc-put(out, (fbc-word(0) + (fbc-word(node[1]) + (fbc-word(1) + ((String) fbc-word(2) + fbc-word(fbc-string-index(pool, node[2])))))))) else nothing()
-   else if (((Comparable) node[0] == 2) || ((Comparable) node[0] == 3)) then if (((Comparable) len(node) == 2) && (!nothing?(fbc-number(node[0], node[1])))) then fbc-emit(rest, pool, fbc-put(out, ((String) fbc-word(node[0]) + node[1]))) else nothing()
-   else if ((Comparable) node[0] == 0) then if (((Comparable) len(node) == 5) && (!nothing?(fbc-leaf(node[1], node[2], node[3], node[4])))) then fbc-emit(rest, pool, fbc-put(out, (fbc-word(0) + (fbc-word(node[1]) + (fbc-word(node[2]) + ((String) fbc-word(node[3]) + fbc-word(node[4]))))))) else nothing()
-   else nothing();
+   def fbc-emit-node(node, rest, pool, out) {
+    if (!fbc-proper?(node) || nil?(node) || value_kind(node[0])!="int") then nothing()
+    else if ((Comparable) node[0] == 1) then if (((Comparable) len(node) == 3) && (fbc-proper?(node[2]) && fbc-u32?(len(node[2])))) then fbc-emit(fbd-push([0, node[1]], fbd-push([1, len(node[2])], fbc-tasks(node[2], rest))), pool, fbc-put(out, fbc-word(1))) else nothing()
+    else if ((Comparable) node[0] == 4) then if (((Comparable) len(node) == 3) && fbc-pool-string-valid?(pool,node[1],node[2])) then fbc-emit(rest, pool, fbc-put(out, (fbc-word(0) + (fbc-word(node[1]) + (fbc-word(1) + ((String) fbc-word(2) + fbc-word(fbc-string-index(pool, node[2])))))))) else nothing()
+    else if (((Comparable) node[0] == 2) || ((Comparable) node[0] == 3)) then if (((Comparable) len(node) == 2) && fbc-number-valid?(node[0],node[1])) then fbc-emit(rest, pool, fbc-put(out, ((String) fbc-word(node[0]) + node[1]))) else nothing()
+    else if ((Comparable) node[0] == 0) then if (((Comparable) len(node) == 5) && fbc-leaf-valid?(node[1],node[2],node[3],node[4])) then fbc-emit(rest, pool, fbc-put(out, (fbc-word(0) + (fbc-word(node[1]) + (fbc-word(node[2]) + ((String) fbc-word(node[3]) + fbc-word(node[4]))))))) else nothing()
+    else nothing();
   }
   def fbc-dump(path, root) = fbc-dump-result(path, fbc-encode(root));
   def fbc-dump-result(path, encoded) = if (!fbc-good(encoded)) then encoded else if ((Comparable) write_file(path, fbc-value(encoded)) == len(fbc-value(encoded))) then encoded else fbc-fail("artifact write incomplete");
@@ -149,14 +290,50 @@ section [form.bml] {
   // every numeric payload bit participate. The canonical tree byte stream
   // receives its own schema; it is not a hash of source formatting.
   def fbc-structural(root) = fbc-structure(fbd-push([0, root], []), []);
+   // Replay already holds ordinary values. Emit the same structural bytes
+   // directly, without constructing a second inert tree for every field row.
+   // Recovery still owns BYTES/DOTTED normalization before this entry point.
+   def fbc-data-key(value) = fbc-data-key-walk(fbd-push([0,value],[]),[]);
+   def fbc-data-key-head(name,count) {
+    if !fbc-u32?(count) then form_error("form binary: structural child count exceeds u32 geometry") else 0;
+     fbc-word(1)+fbc-word(4)+fbc-word(len(name))+name+fbc-word(count);
+   }
+   def fbc-data-key-walk(tasks,out) = nil?(tasks) ? fbc-finish(out,"") : tasks[0][0]==1 ? fbc-data-key-walk(fbd-rest(tasks),fbc-put(out,tasks[0][1])) : fbc-data-key-value(tasks[0][1],fbd-rest(tasks),out);
+   def fbc-data-key-value(value,rest,out) {
+    let kind=value_kind(value);
+    kind=="list" ? fbc-data-key-list(value,rest,out)
+     : nothing?(value) ? fbc-data-key-walk(rest,fbc-put(out,fbc-data-key-head(FBC-NOTHING[2],0)))
+      : kind=="int" || kind=="float" ? fbc-data-key-walk(rest,fbc-put(out,fbc-word(kind=="int" ? 3 : 2)+float_leaf(62,[kind=="int" ? 3 : 2,value])))
+     : kind=="string" ? fbc-data-key-string(value,rest,out)
+     : kind=="node_id" ? form_error("form binary: native values require an explicit payload or coordinate policy")
+     : form_error("form binary: ordinary value has no portable representation");
+   }
+   def fbc-data-key-list(value,rest,out) = fbc-proper?(value) ? fbc-data-key-walk(fbc-tasks(value,rest),fbc-put(out,fbc-data-key-head(FBC-LIST[2],len(value)))) : fbc-data-key-dotted(value,[],rest,out);
+   def fbc-data-key-dotted(items,heads,rest,out) = value_kind(items)=="list" ? fbc-data-key-dotted(tail(items),cons(head(items),heads),rest,out) : fbc-data-key-walk(fbc-tasks-reversed(heads,fbd-push([0,items],rest)),fbc-put(out,fbc-data-key-head(FBC-DOTTED[2],2)+fbc-data-key-head(FBC-LIST[2],len(heads))));
+   def fbc-data-key-string(value,rest,out) {
+    if fbc-utf8(value,0) then {
+     if !fbc-u32?(len(value)) then form_error("form binary: structural string exceeds u32 geometry") else 0;
+      fbc-data-key-walk(rest,fbc-put(out,fbc-word(4)+fbc-word(len(value))+value));
+     } else fbc-data-key-bytes(value,0,rest,fbc-put(out,fbc-data-key-head(FBC-BYTES[2],1+(len(value)+7)/8)+fbc-word(3)+float_leaf(62,[3,len(value)])));
+   }
+   def fbc-data-key-bytes(value,offset,rest,out) = offset>=len(value) ? fbc-data-key-walk(rest,out) : {
+    let chunk=substring(value,offset,offset+8);
+     fbc-data-key-bytes(value,offset+8,rest,fbc-put(out,fbc-word(3)+chunk+fbc-data-padding(8-len(chunk))));
+   };
   def fbc-structure(tasks, out) {
    if nil?(tasks) then fbc-finish(out, "")
    else if ((Comparable) tasks[0][0] == 1) then fbc-structure(fbd-rest(tasks), fbc-put(out, fbc-word(tasks[0][1])))
    else fbc-structure-node(tasks[0][1], fbd-rest(tasks), out);
   }
-  def fbc-structure-node(node, rest, out) {
-   if ((Comparable) node[0] == 1) then fbc-structure(fbd-push([0, node[1]], fbd-push([1, len(node[2])], fbc-tasks(node[2], rest))), fbc-put(out, fbc-word(1)))
-   else if ((Comparable) node[0] == 4) then fbc-structure(rest, fbc-put(out, (fbc-word(4) + ((String) fbc-word(len(node[2])) + node[2]))))
+   def fbc-structure-node(node, rest, out) {
+    if ((Comparable) node[0] == 1) then {
+     if !fbc-u32?(len(node[2])) then form_error("form binary: structural child count exceeds u32 geometry") else 0;
+     fbc-structure(fbd-push([0, node[1]], fbd-push([1, len(node[2])], fbc-tasks(node[2], rest))), fbc-put(out, fbc-word(1)));
+    }
+    else if ((Comparable) node[0] == 4) then {
+     if !fbc-u32?(len(node[2])) then form_error("form binary: structural string exceeds u32 geometry") else 0;
+     fbc-structure(rest, fbc-put(out, (fbc-word(4) + ((String) fbc-word(len(node[2])) + node[2]))));
+    }
    else if (((Comparable) node[0] == 2) || ((Comparable) node[0] == 3)) then fbc-structure(rest, fbc-put(out, ((String) fbc-word(node[0]) + node[1])))
    else fbc-structure(rest, fbc-put(out, (fbc-word(0) + (fbc-word(node[1]) + (fbc-word(node[2]) + ((String) fbc-word(node[3]) + fbc-word(node[4])))))));
   }
