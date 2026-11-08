@@ -634,25 +634,11 @@ section [form.bml] {
    lines[min2(len(seen), len(lines) - 1)];
   }
   def hwb-plan-calls(mark) = len(read_file(mark) ?? "");
-  // ── a turn asks the machine for memory before it begins, and a held answer is a window that takes no turn ──
-  def hwb-note-ask(rec, who, need, by) {
-   let a = record_set(rec, "who", who);
-   let b = record_set(rec, "need", need);
-   let c = record_set(rec, "by", by);
-   [1, "room", 0, 0, 0];
-  }
-  def hwb-fast-need() {
-   let path = mr-path(mr-find("qwen38-q4"));
-   let weights = file_size(path);
-   (weights > 0 ? weights : (26 * mg-gib())) + mg-kv-margin();
-  }
+   // The planner receives its original window and complete default voice chain.
   def hwb-memory(ctx) {
-   let room = [true, "[walk-window] 100 min left holds an option"];
-   let granted = hw-memory-room-with(0, room, (who, need, by) => [1, "room", 0, 0, 0]);
-   let held = hw-memory-room-with(0, room, (who, need, by) => [0, "wired-cap", 0, 0, 0]);
-   let asked = record_new(0, "who", "", "need", 0, "by", 0);
-   let probe = hw-memory-room-with(5000000, room, (who, need, by) => hwb-note-ask(asked, who, need, by));
-   hwb-bit(granted[0] && ((String) granted[1] == room[1]) && (!held[0]) && hwb-has?(held[1], "[memory] held walk turn needs") && hwb-has?(held[1], "wired-cap") && hwb-has?(held[1], "no turn starts") && ((String) record_get(asked, "who") == "walk turn") && (record_get(asked, "need") == hw-turn-need()) && (hw-turn-need() == hwb-fast-need()) && (record_get(asked, "by") < 5000000));
+    let implicit=parse-json("default-plan",hw-plan-options-with(5000000,[]));
+    let explicit=parse-json("offered-plan",hw-plan-options-with(5000000,["voice-a","voice-b"]));
+    hwb-bit(!json-object-has?(implicit,"voices") && json-int-value(json-object-get(implicit,"until_ms"))==5000000 && json-int-value(json-object-get(explicit,"until_ms"))==5000000 && json-emit(json-object-get(explicit,"voices"))=="[\"voice-a\",\"voice-b\"]");
   }
   def hwb-replanned(ctx) {
    let gap = "[native-turn] no open gap";
@@ -795,6 +781,7 @@ section [form.bml] {
   }
   def hwb-dp-door(opts) {
    let rec = cell_run("observe/native-turn-run.bml", 0, nothing(), [json-emit(json-node-object(opts))]);
+   let retained = print(["door-pass-observation", opts, rec]);
    cs-stdout(rec) ++ cs-stderr(rec);
   }
   def hwb-dp-opts(dir, queue, ledger) = [fhn-s("queue", dir ++ "/" ++ queue), fhn-s("ledger", dir ++ "/" ++ ledger), json-node-pair("ways", json-node-array([json-node-string("native")]))];
@@ -996,6 +983,7 @@ section [form.bml] {
   // ── a turn cell stopped on its deadline: what it published returns when it returns ──
   def hwb-turn-under(io, stub, deadline, cand, outerFile, witness) {
    let turn = hw-turn-run-of(io, stub, 24, deadline);
+   let retained = print(["turn-return-observation",turn,"entry",read_file(witness ++ ".entry")]);
    [turn, read_file(cand), read_file(outerFile), len(hw-own-markers(hw-turn-dir())), read_file(witness)];
   }
   def hwb-turn-returns(ctx) {
@@ -1007,7 +995,12 @@ section [form.bml] {
    let w1 = write_file_text(cand, "A\n");
    let w2 = write_file_text(outerFile, "A\n");
    let stub = io ++ "/window-stub.bml";
-   let w3 = write_file_text(stub, "import form-stdlib/bml/host-walk-publish.bml;\nsection [form.bml] {\n class TurnStubZz {\n  def tsz-spin(n) {\n   let slept = host_sleep_ms(20);\n   tsz-spin(n + 1);\n  }\n  def tsz-run() {\n   let w = write_file_text(\"" ++ witness ++ "\", read_file(\"" ++ cand ++ "\") ?? \"\");\n   tsz-spin(0);\n  }\n }\n let window = hw-with-published(hw-turn-dir(), [\"" ++ cand ++ "\"], [\"A\\n\"], [\"B\\n\"], () => tsz-run());\n 1;\n}\n");
+   let w3 = write_file_text(stub, "import form-stdlib/bml/host-walk-publish.bml;\nsection [form.bml] {\n class TurnStubZz {\n  def tsz-spin(n) {\n   let slept = host_sleep_ms(20);\n   tsz-spin(n + 1);\n  }\n  def tsz-run() {\n   let w = write_file_text(\"" ++ witness ++ "\", read_file(\"" ++ cand ++ "\") ?? \"\");\n   tsz-spin(0);\n  }\n }\n let mode = read_line();\n let entered = mode == \"admit\" ? 0 : write_file_text(\"" ++ witness ++ ".entry\", host_monotonic_ms().str());\n let window = mode == \"admit\" ? 1 : hw-with-published(hw-turn-dir(), [\"" ++ cand ++ "\"], [\"A\\n\"], [\"B\\n\"], () => tsz-run());\n 1;\n}\n");
+   // This claim observes rollback after execution begins. Admit this exact
+   // source first; the separate cold-deadline observation covers admission.
+   let admitted=cell_run(stub,0,nothing(),["admit"]);
+   let retained = print(["turn-return-admission", admitted]);
+   record_get(admitted,"errors")>0 || !nothing?(record_get(admitted,"stopped")) ? form_error("turn-return fixture admission failed") : 0;
    let deadline = host_monotonic_ms() + 6000 - hw-backstop-ms();
    // this process may already hold its own window here: a band under a candidate runs as a cell of the door
    let held = len(hw-own-markers(hw-turn-dir()));
@@ -1043,7 +1036,7 @@ section [form.bml] {
    let stubbornBegan = host_monotonic_ms();
    let stubborn = hch-run-in(io, "stubborn", hwb-sh("trap '' TERM; echo up; exec sleep 60"), "", stubbornBegan + 200);
    let stubbornSpent = host_monotonic_ms() - stubbornBegan;
-   hwb-bit(nothing?(hung[0]) && ((String) hung[1] == "partial\n") && hwb-has?(hung[2], "deadline: the child ran past its deadline and was stopped") && (spent < 20000) && (spent >= 300) && ((Comparable) blocked[0] == 4) && ((Comparable) hw-backstop-ms() == 1800000) && nothing?(stubborn[0]) && hwb-has?(stubborn[2], "ended with SIGKILL") && ((String) stubborn[1] == "up\n") && (stubbornSpent >= hch-grace-ms()) && (stubbornSpent < hch-grace-ms() + 6000) && hwb-has?(hch-said(hung), "partial\n[host-child] deadline") && hwb-has?(read_file(io ++ "/hung.exit") ?? "", "none deadline"));
+   hwb-bit(nothing?(hung[0]) && ((String) hung[1] == "partial\n") && hwb-has?(hung[2], "its observed process family ended") && (spent < 20000) && (spent >= 300) && ((Comparable) blocked[0] == 4) && ((Comparable) hw-backstop-ms() == 1800000) && nothing?(stubborn[0]) && hwb-has?(stubborn[2], "its observed process family ended") && ((String) stubborn[1] == "up\n") && (stubbornSpent >= hch-grace-ms()) && (stubbornSpent < hch-grace-ms() + 6000) && hwb-has?(hch-said(hung), "partial\n[host-child] deadline") && hwb-has?(read_file(io ++ "/hung.exit") ?? "", "none deadline"));
   }
   // a child that ends is noticed within about a second of its end, whatever its deadline: six and a half seconds of
   // work under a ten minute deadline returns near six and a half seconds. A poll whose naps double up to a minute
@@ -1070,8 +1063,8 @@ section [form.bml] {
   }
   // the walk's turn and plan reach the door with the window's end plus the backstop: a stub cell in the turn's place whose
   // window ended hw-backstop-ms less 0.3 s ago is ended by its budget 0.3 s after it begins (it is called in this process,
-  // so its budget is the whole of the stop), with the options it read kept. A stub is a cell this band writes: it reads
-  // its stdin lines back, prints what it was told to, and never ends.
+   // so its budget includes admission), with its input retained even if it stops before printing. A stub reads
+   // its stdin back, prints what it was told to, and never ends; emitted output must survive the stop.
   def hwb-stub-cell(path, said) {
    let text = "; a stub cell the host-walk band writes: prints what it was told, then never ends\n; preludes: form-stdlib/core.fk\n(do\n (defn spin (n) (spin (add n 1)))\n (defn echo () (do (let l (read_line)) (if (nothing? l) 0 (do (print_str l) (echo)))))\n (defn drain () (do (let l (read_line)) (if (nothing? l) 0 (drain))))\n" ++ said ++ "\n (spin 0))\n";
    let wrote = write_file_text(path, text);
@@ -1092,7 +1085,10 @@ section [form.bml] {
    let planSpent = host_monotonic_ms() - planBegan;
    let queuedBegan = host_monotonic_ms();
    let queued = hw-plan-run-of(io, queuedStub, queuedBegan + 300 - hw-backstop-ms());
-   hwb-bit(nothing?(turn[0]) && hwb-has?(turn[2], "deadline: the cell ran past its deadline") && hwb-has?(turn[1], "\"turns\":24") && hwb-has?(turn[1], "\"deadline_ms\":" ++ deadline.str()) && (turnSpent >= 300) && (turnSpent < 15000) && nothing?(plan[0]) && hwb-has?(plan[2], "deadline: the cell ran past its deadline") && (planSpent >= 300) && (planSpent < 15000) && hwb-has?(hw-plan-answer(plan), "[local-plan:stopped] deadline: the cell ran past its deadline") && ((String) hw-plan-answer(queued) == hwb-queued-line() ++ "\n[host-child] " ++ queued[2]) && hw-planned?(hw-plan-answer(queued)) && ((String) hw-plan-or-stopped([0, "", ""], "[local-plan] no request") == "[local-plan] no request") && hwb-has?(hw-plan-or-stopped([nothing(), "", "birth refused: x"], ""), "[local-plan:stopped] birth refused: x") && ((String) hw-turn-cell() == "observe/native-turn-run.bml") && ((String) hw-plan-cell() == "observe/local-plan-run.bml") && ((Comparable) hch-step-backstop-ms() == 7200000) && ((Comparable) hch-git-backstop-ms() == 1800000));
+    let turnInput=read_file(io+"/turn.in") ?? "";
+    let projected=hw-plan-answer([nothing(),hwb-queued-line(),queued[2]]);
+    let outputKept=queued[1]=="" ? hwb-has?(hw-plan-answer(queued),"[local-plan:stopped]") : hw-plan-answer(queued)==hwb-queued-line()+"\n[host-child] "+queued[2];
+    hwb-bit(nothing?(turn[0]) && hwb-has?(turn[2], "deadline: the cell ran past its deadline") && hwb-has?(turnInput, "\"turns\":24") && hwb-has?(turnInput, "\"deadline_ms\":" ++ deadline.str()) && (turn[1]=="" || hwb-has?(turn[1],trim(turnInput))) && (turnSpent >= 300) && (turnSpent < 15000) && nothing?(plan[0]) && hwb-has?(plan[2], "deadline: the cell ran past its deadline") && (planSpent >= 300) && (planSpent < 15000) && hwb-has?(hw-plan-answer(plan), "[local-plan:stopped] deadline: the cell ran past its deadline") && outputKept && projected==hwb-queued-line()+"\n[host-child] "+queued[2] && hw-planned?(projected) && ((String) hw-plan-or-stopped([0, "", ""], "[local-plan] no request") == "[local-plan] no request") && hwb-has?(hw-plan-or-stopped([nothing(), "", "birth refused: x"], ""), "[local-plan:stopped] birth refused: x") && ((String) hw-turn-cell() == "observe/native-turn-run.bml") && ((String) hw-plan-cell() == "observe/local-plan-run.bml") && ((Comparable) hch-step-backstop-ms() == 7200000) && ((Comparable) hch-git-backstop-ms() == 1800000));
   }
   // the readers that replaced `grep -F ... | tail -1` and `grep -F -e ... -e ...`, and the lines they read
   def hwb-spawn-readers(ctx) {
@@ -1503,8 +1499,8 @@ section [form.bml] {
     && !nothing?(kchild) && hwb-has?(ktext, "holds this checkout, pid " ++ kchild.str() ++ ", renewed from pid ") && !hwb-has?(ktext, "[walk-renew-door] built")
     && ((String) kexit == "143") && ((Comparable) kheld == kchild)
     && ((Comparable) broken[0] == 1) && !nothing?(bparent) && hwb-has?(btext, "taken over from walk-renew-door pid " ++ kchild.str() ++ ", gone")
-    && hwb-has?(btext, "[walk-renew] the renewed walk ended 2") && !hwb-has?(btext, "[walk-renew-door] renewed pid=") && !hwb-has?(btext, "[walk-renew-door] built")
-    && ((String) hwb-rn-io(walk, ".exit") == "2") && ((Comparable) hwb-rn-holder(walk) == bparent)
+    && hwb-has?(btext, "[walk-renew] the renewed walk ended 1") && !hwb-has?(btext, "[walk-renew-door] renewed pid=") && !hwb-has?(btext, "[walk-renew-door] built")
+    && ((String) hwb-rn-io(walk, ".exit") == "1") && ((Comparable) hwb-rn-holder(walk) == bparent)
     && ((Comparable) untaken[0] == 1) && !nothing?(uparent) && hwb-has?(utext, "walk-renew-door already began at") && !hwb-has?(utext, "built in one start")
     && hwb-has?(utext, "[walk-renew] the renewed start ended 0 without taking the walk: the lock still names pid " ++ uparent.str())
     && ((Comparable) hwb-rn-holder((lone ?? "") ++ "/walk") == uparent)
@@ -1522,12 +1518,12 @@ section [form.bml] {
   // the part files the aggregator imports, as paths from the repo root
   def hwb-sp-part-paths(lines) = nil?(lines) ? [] : hwb-sp-starts?(lines[0], "import form-stdlib/bml/host-walk-") ? cons("form/" ++ substring(trim(lines[0]), 7, len(trim(lines[0])) - 1), hwb-sp-part-paths(lines[1:])) : hwb-sp-part-paths(lines[1:]);
   def hwb-sp-parts() = hwb-sp-part-paths(split-on(read_file(hwb-sp-aggregator()) ?? "", "\n"));
-  // the definitions of a text: [name, text] for each `  def name(` line, its text running to the next definition, comment or close
-  def hwb-sp-name(line) = substring(line, 6, str_find(line, "(", 6));
+   // Declaration indentation does not change ownership. Retain original text.
+   def hwb-sp-name(line) = substring(trim(line), 4, str_find(trim(line), "(", 4));
   def hwb-sp-ends?(l) = hwb-sp-starts?(l, "  //") || hwb-sp-starts?(l, " }") || hwb-sp-starts?(l, "}") || hwb-sp-starts?(l, "section") || hwb-sp-starts?(l, "import") || hwb-sp-starts?(l, "//") || hwb-sp-starts?(l, " class");
   def hwb-sp-close(cur, out) = nothing?(cur) ? out : cons(cur, out);
   def hwb-sp-scan(lines, cur, out) = nil?(lines) ? hwb-sp-close(cur, out)
-   : hwb-sp-starts?(lines[0], "  def ") ? hwb-sp-scan(lines[1:], [hwb-sp-name(lines[0]), lines[0]], hwb-sp-close(cur, out))
+    : hwb-sp-starts?(trim(lines[0]), "def ") ? hwb-sp-scan(lines[1:], [hwb-sp-name(lines[0]), lines[0]], hwb-sp-close(cur, out))
    : hwb-sp-ends?(lines[0]) ? hwb-sp-scan(lines[1:], nothing(), hwb-sp-close(cur, out))
    : hwb-sp-scan(lines[1:], nothing?(cur) ? nothing() : [cur[0], cur[1] ++ "\n" ++ lines[0]], out);
   def hwb-sp-defs-of(text) = hwb-sp-scan(split-on(text, "\n"), nothing(), []);
@@ -1567,6 +1563,6 @@ section [form.bml] {
  let ctx = hwb-fresh();
  nothing?(ctx) ? form_error("host-walk band needs a fresh directory under temp_dir") : 0;
  let verdict = live-claims("host-walk-band", ctx, [["options", 1, 1, hwb-options], ["claims", 2, 1, hwb-claims], ["refuses", 4, 1, hwb-refuses], ["takes-gone", 8, 1, hwb-takes-gone], ["takes-reused", 16, 1, hwb-takes-reused], ["one-taker", 32, 1, hwb-one-taker], ["unowned", 64, 1, hwb-unowned], ["releases", 128, 1, hwb-releases], ["floor", 256, 1, hwb-floor], ["unmeasured", 512, 1, hwb-unmeasured], ["room", 1024, 1, hwb-room], ["turn-lines", 2048, 1, hwb-turn-lines], ["turns", 4096, 1, hwb-turns], ["elsewhere", 8192, 1, hwb-elsewhere], ["yield", 16384, 1, hwb-yield], ["sync", 32768, 1, hwb-sync], ["reviewed", 65536, 1, hwb-reviewed], ["idle", 131072, 1, hwb-idle], ["stale-mark", 262144, 1, hwb-stale-mark], ["publish", 524288, 1, hwb-publish], ["heal", 1048576, 1, hwb-heal], ["sync-rows", 2097152, 1, hwb-sync-rows], ["publish-absent", 4194304, 1, hwb-publish-absent], ["band-after", 8388608, 1, hwb-band-after], ["planned", 16777216, 1, hwb-planned], ["queue-paths", 33554432, 1, hwb-queue-paths], ["spawn", 67108864, 1, hwb-spawn], ["clock", 134217728, 1, hwb-clock], ["sync-lease", 268435456, 1, hwb-sync-lease], ["replanned", 536870912, 1, hwb-replanned], ["memory", 1073741824, 1, hwb-memory], ["split", 2147483648, 1, hwb-split], ["part-size", 4294967296, 1, hwb-part-size], ["sync-drawn", 8589934592, 1, hwb-sync-drawn], ["sync-river", 17179869184, 1, hwb-sync-river], ["sync-wall", 34359738368, 1, hwb-sync-wall], ["sync-rounds", 68719476736, 1, hwb-sync-rounds], ["sync-side", 137438953472, 1, hwb-sync-side], ["sync-gone-bank", 274877906944, 1, hwb-sync-gone-bank], ["sync-loop", 549755813888, 1, hwb-sync-loop], ["began", 1099511627776, 1, hwb-began], ["began-plants", 2199023255552, 1, hwb-began-plants], ["gap", 4398046511104, 1, hwb-gap], ["pinned", 8796093022208, 1, hwb-pinned], ["reads-free", 17592186044416, 1, hwb-reads-free], ["door-pass", 35184372088832, 1, hwb-door-pass], ["sync-named", 70368744177664, 1, hwb-sync-named], ["offline", 140737488355328, 1, hwb-offline], ["own-live", 281474976710656, 1, hwb-own-live], ["nested-window", 562949953421312, 1, hwb-nested], ["turn-returns", 1125899906842624, 1, hwb-turn-returns], ["renewal", 2251799813685248, 1, hwb-renewal], ["renew-ends", 4503599627370496, 1, hwb-renew-ends]]);
- host_dir_rmdir(hwb-root(ctx));
+  if verdict==9007199254740991 then host_dir_rmdir(hwb-root(ctx)) else print(["host-walk-failure-evidence",hwb-root(ctx)]);
  verdict;
 }

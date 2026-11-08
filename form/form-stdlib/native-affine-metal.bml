@@ -193,6 +193,7 @@ kernel void nam_stats(device const float* x [[buffer(0)]],device float* out [[bu
   def nam-profile-top(rows) = foldl((best, r) => r[1] > best[1] ? r : best, rows[0], rows[1:]);
   def nam-profile-order(rows) = nil?(rows) ? [] : cons(nam-profile-top(rows), nam-profile-order(filter(r => (String) r[0] != (String) nam-profile-top(rows)[0], rows)));
   def nam-alloc(n) = n <= 0 ? form_error("native affine empty allocation") : nam-held(metal_buf_alloc(n * 4));
+  def nam-alloc-by(n,allocate) = n <= 0 ? form_error("native affine empty allocation") : nam-held(allocate(n * 4));
   def nam-held(h) = h <= 0 ? nam-refused("allocation") : h;
   def nam-sync() = metal_sync() < 0 ? form_error("native affine GPU completion refused") : 1;
   def nam-free(handles) = nil?(handles) ? 1 : nam-free-next(metal_buf_free(handles[0]), handles[1:]);
@@ -205,16 +206,23 @@ kernel void nam_stats(device const float* x [[buffer(0)]],device float* out [[bu
    let done = nam-sync();
    out;
   }
+  def nam-floats-by(mapped,allocate,free) {
+   let n=sti-product(mapped[1]);let out=nam-alloc-by(n,allocate);
+   nam-run("nam_cast",[mapped[0],out],[n,nam-type(mapped[2])],n,0);nam-sync();
+   free(mapped[0])==1 ? out : form_error("native affine mapped input release incomplete");
+  }
   // affine view: W, scales, biases, rows, cols, group, scalar type
-  def nam-view(index, prefix, group) {
+  def nam-view(index,prefix,group) = nam-view-by(index,prefix,group,metal_buf_from_file);
+  def nam-view-by(index, prefix, group,from-file) {
    let w = sti-find(index, prefix + ".weight");
    let s = sti-find(index, prefix + ".scales");
    let b = sti-find(index, prefix + ".biases");
-   (group <= 0) || (!((Comparable) (group % 8) == 0)) ? form_error("native affine group size refused") : nil?(w) || (nil?(s) || nil?(b)) ? form_error("native affine tensors missing: " + prefix) : nam-view-shaped(index, prefix, group, w, s, b);
+   (group <= 0) || (!((Comparable) (group % 8) == 0)) ? form_error("native affine group size refused") : nil?(w) || (nil?(s) || nil?(b)) ? form_error("native affine tensors missing: " + prefix) : nam-view-shaped-by(index, prefix, group, w, s, b,from-file);
   }
-  def nam-view-shaped(index, prefix, group, w, s, b) {
+  def nam-view-shaped(index,prefix,group,w,s,b) = nam-view-shaped-by(index,prefix,group,w,s,b,metal_buf_from_file);
+  def nam-view-shaped-by(index, prefix, group, w, s, b,from-file) {
    let ws = w[2]; let ss = s[2]; let bs = b[2];
-   !(((String) w[1] == "U32") && (((Comparable) len(ws) == 2) && (((Comparable) len(ss) == 2) && (((Comparable) len(bs) == 2) && (((Comparable) ws[0] == ss[0]) && (((Comparable) ss[0] == bs[0]) && (((Comparable) ss[1] == bs[1]) && (((Comparable) (ws[1] * 8) == (ss[1] * group)) && ((String) s[1] == b[1]))))))))) ? form_error("native affine shape/group mismatch") : [sti-map-row(index, w)[0], sti-map-row(index, s)[0], sti-map-row(index, b)[0], ws[0], ws[1] * 8, group, nam-type(s[1])];
+   !(((String) w[1] == "U32") && (((Comparable) len(ws) == 2) && (((Comparable) len(ss) == 2) && (((Comparable) len(bs) == 2) && (((Comparable) ws[0] == ss[0]) && (((Comparable) ss[0] == bs[0]) && (((Comparable) ss[1] == bs[1]) && (((Comparable) (ws[1] * 8) == (ss[1] * group)) && ((String) s[1] == b[1]))))))))) ? form_error("native affine shape/group mismatch") : [sti-map-row-by(index,w,from-file)[0],sti-map-row-by(index,s,from-file)[0],sti-map-row-by(index,b,from-file)[0], ws[0], ws[1] * 8, group, nam-type(s[1])];
   }
   // The transposed product walks columns (form_affine4_t_f32, backprop-msl.bml): adjacent threads read
   // adjacent nibbles of one row. nam-linear-lanes is the simdgroup-per-output walk, in both directions.
@@ -303,6 +311,7 @@ kernel void nam_stats(device const float* x [[buffer(0)]],device float* out [[bu
   // iterative: one frame per float stopped a 393 thousand float input on the walker's stack (2026-10-11)
   def nam-f32s(xs) = str-join(map(v => md-le32(md-f32-bits(v)), xs));
   def nam-buffer(xs) = nam-write(nam-alloc(len(xs)), nam-f32s(xs));
+  def nam-buffer-by(xs,allocate) = nam-write(nam-alloc-by(len(xs),allocate),nam-f32s(xs));
   def nam-read(h, n) = nam-read-bytes(metal_buf_read(h, 0, n * 4), n);
   def nam-read-bytes(bytes, n) = nothing?(bytes) || (!((Comparable) len(bytes) == (n * 4))) ? form_error("native affine read incomplete") : ln-floats-go(bytes, 0, n, []);
   // Non-finite count, squared norm, maximum absolute value. Values never leave the GPU.
@@ -311,6 +320,11 @@ kernel void nam_stats(device const float* x [[buffer(0)]],device float* out [[bu
    defer NativeAffineBuffer_dispose(out);
    let rc = nam-run("nam_stats",[h,out],[n],1,1);
    nam-read(out,3);
+  }
+  def nam-stats-by(h,n,allocate,free) {
+   let out=nam-alloc-by(3,allocate);nam-run("nam_stats",[h,out],[n],1,1);
+   let result=nam-read(out,3);
+   free(out)==1 ? result : form_error("native affine statistics release incomplete");
   }
  }
  0;

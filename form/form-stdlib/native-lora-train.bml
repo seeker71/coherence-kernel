@@ -42,17 +42,20 @@ section [form.bml] {
   }
   def ntr-config(model,r,step) = json-node-object([ntr-text("model",model[4]),ntr-text("fine_tune_type","lora"),ntr-int("num_layers",ntr-get(r,"layers")),json-node-pair("lora_parameters",json-object-get(model[5],"lora_parameters")),ntr-text("optimizer","adam"),ntr-real("learning_rate",ntr-get(r,"learning_rate")),ntr-int("batch_size",ntr-get(r,"batch")),ntr-int("mask_prompt",ntr-get(r,"mask_prompt")),ntr-int("native_step",step),ntr-text("data",ntr-get(r,"data")),ntr-text("sequence_policy","whole-row; memory admission; no silent truncation")]);
   def ntr-save(model,state,r,step) {
+   let owner=nll-owner(model);let request=[r,step,state];let held=record_get(owner,"training-checkpoint");
+   if record?(held) && record_get(held,"request") != request && record_get(held,"phase") != "published" then form_error("native training checkpoint awaits its retained publication") else 0;
    let out = ntr-get(r,"output"); let made = fs-mkdir((out + "/generations"));
-   let gen = (out + ("/generations/" + (step.str() + ("-" + (host_pid().str() + ("-" + host_monotonic_ms().str()))))));
+   let checkpoint=record?(held) && record_get(held,"request")==request ? held : record_new(0,"request",request,"phase","pending","generation",out+"/generations/"+step.str()+"-"+noc-open(),"adapters",record_new(0),"optimizer",record_new(0));
+   record_set(owner,"training-checkpoint",checkpoint);let gen=record_get(checkpoint,"generation");
    let mkdir = fs-mkdir(gen);
-   let a = nlc-save((gen + "/adapters.safetensors"),nlc-adapter-rows(nlb-pairs(model[1])),model[4],step);
-   let o = nlc-save((gen + "/optimizer.safetensors"),nlc-optimizer-rows(state),model[4],step);
+    let a = nlc-save-held((gen + "/adapters.safetensors"),nlc-adapter-rows(nlb-pairs(model[1])),model[4],step,owner,record_get(checkpoint,"adapters"));
+    let o = nlc-save-held((gen + "/optimizer.safetensors"),nlc-optimizer-rows(state),model[4],step,owner,record_get(checkpoint,"optimizer"));
    let progress = json-object-get(r,"training_progress");
    let config = oh-set(ntr-config(model,r,step),"activation_policy",json-node-string(ntr-activation-policy()));
    let c = if nlp-valid(progress) then nag-write((gen + "/adapter_config.json"),json-emit-precise(oh-set(config,"training_progress",progress))) else form_error("native checkpoint requires dataset progress");
    let complete = nag-write((gen + "/complete.json"),json-emit-precise(json-node-object([ntr-int("step",step),ntr-int("adapter_bytes",a[1]),ntr-int("adapter_tensors",a[2]),ntr-int("optimizer_bytes",o[1]),ntr-int("optimizer_tensors",o[2]),json-node-pair("training_progress",progress)])));
    let sync = nlc-sync-host(host_sync());
-   nag-publish(out,gen);
+   let published=nag-publish(out,gen);record_set(checkpoint,"phase","published");published;
   }
   // A finished run's adapter leaves the run directory through the same checkpoint door the
   // generations use (nlc-save: one GPU copy, byte-verified, published by rename) into a serving
@@ -65,7 +68,7 @@ section [form.bml] {
    if (!json-object-has?(r,"export")) then 0 else {
     let dest = ntr-get(r,"export");
     let made = fs-mkdir(dest);
-    let a =nlc-save((dest + "/adapters.safetensors"),nlc-adapter-rows(nlb-pairs(model[1])),model[4],step);
+    let a =nlc-save-by((dest + "/adapters.safetensors"),nlc-adapter-rows(nlb-pairs(model[1])),model[4],step,nll-owner(model));
     let c = nag-write((dest + "/adapter_config.json"),json-emit-precise(ntr-export-config(model,r,step)));
     ntr-event(ntr-get(r,"output"),"exported",[ntr-text("adapter",dest),ntr-int("optimizer_step",step),ntr-int("adapter_bytes",a[1]),ntr-int("adapter_tensors",a[2]),ntr-int("verified_rows",a[4])]);
    };
@@ -230,10 +233,11 @@ section [form.bml] {
   // This checks that boundary, not the transformer's earlier activations.
   def ntr-head-equality(model,r) {
    let g = model[0]; let d = g[0]; let v = g[5]; let row = (r[7] - 1);
-   let x = nam-alloc(d); let actual = nam-alloc(v); let expected = nam-alloc(v); let delta = nam-alloc(v);
+    let owner=nll-group(nll-owner(r) ?? nll-owner(model),"llama-head-verification");
+    let x = nll-allocate(owner,d); let actual = nll-allocate(owner,v); let expected = nll-allocate(owner,v); let delta = nll-allocate(owner,v);
    nll-last(r[2],x,d,(row * d)); nll-last(r[0],actual,v,(row * v));
    nam-linear(model[2],x,expected,1,0); nam-add(actual,expected,delta,v,-1.0); nam-sync();
-   let stats = nam-stats(delta,v); let scale = nam-stats(actual,v); let released = nam-free([x,actual,expected,delta]);
+    let stats = nll-stats(owner,delta,v); let scale = nll-stats(owner,actual,v);record_set(owner,"finding",[row,stats,scale]);let released = nll-release(owner);
    let bound = ntr-head-bound(scale[2]);
    [(released && (((Comparable) stats[0] == 0.0) && ((Comparable) scale[0] == 0.0) && (stats[2] <= bound))),row,stats[2],stats[0],bound];
   }
@@ -328,6 +332,7 @@ section [form.bml] {
    let out = ntr-get(r,"output");
    let adapter = if (file_size((out + "/native-current")) > 0) then out else ntr-get(r,"adapter");
    let session = nlg-open(ntr-get(r,"model"),adapter); let model = session[0]; let tk = session[1];
+   defer nlg-close(session);
    if (!((Comparable) ntr-get(model[5],"num_layers") == ntr-get(r,"layers"))) then form_error("native training adapter layer lineage mismatch") else ntr-run-model(r,rows,start,session,adapter);
   }
   def ntr-run-model(r,rows,start,session,adapter) {

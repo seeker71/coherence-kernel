@@ -1,4 +1,4 @@
-// rounding-ops.bml — floor, ceil, trunc and round as Form definitions; each answers an int.
+// Integer rounding and exact decimal-place rounding have one Form owner.
 // These bodies are the only definition on every kernel. fkwu walks them cold and its loop lane
 // compiles them to arm64 once they run hot; no kernel carries a copy of its own.
 section [form.bml] {
@@ -22,5 +22,47 @@ section [form.bml] {
         }
         def math_floor(x) = floor(x);
         def math_ceil(x) = ceil(x);
+        // Little-endian decimal digits keep the dyadic numerator exact. Each
+        // doubling consumes one observed fractional bit, including subnormals.
+        def rdo-digits(n) = n == 0 ? [] : cons(n % 10,rdo-digits(n / 10));
+        def rdo-times(d,m,c) = nil?(d) ? rdo-digits(c) : {
+            let v = head(d) * m + c;
+            cons(v % 10,rdo-times(tail(d),m,v / 10));
+        };
+        def rdo-fraction(f,d,e) = f == 0.0 ? [d,e] : {
+            let twice = f * 2.0; let bit = twice >= 1.0 ? 1 : 0;
+            rdo-fraction(twice - bit,rdo-times(d,2,bit),e + 1);
+        };
+        def rdo-fives(d,e) = e == 0 ? d : rdo-fives(rdo-times(d,5,0),e - 1);
+        def rdo-text(d) = nil?(d) ? "" : rdo-text(tail(d)) + int_to_str(head(d));
+        def rdo-nonzero(s,i) = i == len(s) ? 0 : str_byte_at(s,i) != 48 || rdo-nonzero(s,i + 1);
+        def rdo-increment(s,i) = i < 0 ? "1" : str_byte_at(s,i) == 57
+            ? rdo-increment(s,i - 1) + "0"
+            : substring(s,0,i) + int_to_str(str_byte_at(s,i) - 47);
+        def rdo-rounded(d,whole,fraction,n) {
+            let e = fraction[1];
+            n >= e ? d : {
+                let exact = int_to_str(whole) + fstr-pad-left(rdo-text(rdo-fives(fraction[0],e)),e);
+                let cut = len(int_to_str(whole)) + n; let next = str_byte_at(exact,cut);
+                let retained = substring(exact,0,cut);
+                let up = next > 53 || next == 53 && (rdo-nonzero(exact,cut + 1) || (str_byte_at(exact,cut - 1) - 48) % 2 == 1);
+                let digits = up ? rdo-increment(retained,len(retained) - 1) : retained;
+                let point = len(digits) - n;
+                str_to_float((d < 0.0 ? "-" : "") + substring(digits,0,point) + "." + substring(digits,point,len(digits)));
+            };
+        };
+        def round_ndigits(x,n) {
+            value_kind(n) != "int" || n < 0 ? form_error("round_ndigits requires a nonnegative integer count")
+            : value_kind(x) != "int" && value_kind(x) != "float" ? form_error("round_ndigits requires a number") : {
+                let d = value_kind(x) == "int" ? x + 0.0 : x;
+                let a = d < 0.0 ? 0.0 - d : d;
+                // Binary64 has no fractional bits at this magnitude. NaN,
+                // infinities and signed zero retain their original value.
+                d != d || a == 0.0 || a >= 4503599627370496.0 ? d : {
+                    let whole = float_to_int(a);
+                    rdo-rounded(d,whole,rdo-fraction(a - whole,[],0),n);
+                };
+            };
+        };
     }
 }

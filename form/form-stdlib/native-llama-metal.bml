@@ -4,6 +4,7 @@ import form-stdlib/native-affine-metal.bml;
 import form-stdlib/model-registry.bml;
 import form-stdlib/native-adapter-generation.bml;
 import form-stdlib/sha256.fk;
+import form-stdlib/metal-carrier.bml;
 section [form.bml] {
  // the frozen-prefix cache's counts for the process
  let NLL-PREFIX = record_new(0, "hits", 0, "misses", 0, "saved", 0, "spoiled", 0);
@@ -11,6 +12,28 @@ section [form.bml] {
  // source text and had metal_pipeline find its pipeline by it on every dispatch, 9% of an eight-stream evaluation's wall by its own time
  let NLL-CACHE = record_new(0, "pipes", 0);
  class NativeLlamaMetal {
+  def nll-owner(value) = mca-tail-owner(value);
+  def nll-group(parent,label) {
+   let owner=mca-owner(parent,label);
+   if !record?(parent) then record_set(NLL-CACHE,"owners",append(record_get(NLL-CACHE,"owners") ?? [],[owner])) else 0;
+   owner;
+  }
+  def nll-release(owner) {
+   let released=mca-release(owner);
+   let parent=record?(owner) ? record_get(owner,"parent") : nothing();
+   if released && record?(parent) then record_set(parent,"children",filter(o=>o != owner,record_get(parent,"children") ?? [])) else 0;
+   if released then record_set(NLL-CACHE,"owners",filter(o=>o != owner,record_get(NLL-CACHE,"owners") ?? [])) else 0;
+   released;
+  }
+  def nll-allocate(owner,n) = nam-alloc-by(n,bytes=>record?(owner) ? mca-alloc(owner,bytes) : metal_buf_alloc(bytes));
+  def nll-map(owner,path,offset,bytes) = record?(owner) ? mca-map(owner,path,offset,bytes) : metal_buf_from_file(path,offset,bytes);
+  def nll-free(owner,handles) = record?(owner) ? mca-free-selected(owner,handles) : nam-free(handles);
+  def nll-alloc(g,n) = nll-allocate(nll-owner(g),n);
+  def nll-buffer(owner,values) = nam-write(nll-allocate(owner,len(values)),nam-f32s(values));
+  def nll-floats(owner,index,row) = nam-floats-by(sti-map-row-by(index,row,(p,o,n)=>nll-map(owner,p,o,n)),n=>record?(owner) ? mca-alloc(owner,n) : metal_buf_alloc(n),h=>nll-free(owner,[h]));
+  def nll-view(owner,index,prefix,group) = nam-view-by(index,prefix,group,(p,o,n)=>nll-map(owner,p,o,n));
+  def nll-phase-geo(g,parent,label) = append(take(11,g),[nll-group(parent,label)]);
+  def nll-forward-parent(model,ctx) = nll-owner(ctx) ?? nll-owner(model);
   def nll-msl() = "#include <metal_stdlib>\nusing namespace metal;\n" + "
 kernel void nll_rope(device float* x [[buffer(0)]],device const float* freq [[buffer(1)]],constant uint& heads [[buffer(2)]],constant uint& hd [[buffer(3)]],constant uint& tokens [[buffer(4)]],constant uint& offset [[buffer(5)]],constant uint& inverse [[buffer(6)]],uint i [[thread_position_in_grid]]) {uint hw=hd/2;if(i>=tokens*heads*hw)return;uint j=i%hw;uint h=i/hw;uint at=h*hd+j;float angle=float(offset+h/heads)*freq[j]*(inverse?-1.0f:1.0f);float c=cos(angle),s=sin(angle),a=x[at],b=x[at+hw];x[at]=a*c-b*s;x[at+hw]=a*s+b*c;}
 kernel void nll_store(device const float* x [[buffer(0)]],device float* y [[buffer(1)]],constant uint& n [[buffer(2)]],constant uint& offset [[buffer(3)]],uint i [[thread_position_in_grid]]){if(i<n)y[offset+i]=x[i];}
@@ -68,56 +91,64 @@ kernel void nll_attend8(device const float* p [[buffer(0)]],device const float* 
   def nll-freqs(c, i, d) = i >= (d / 2) ? [] : cons(nll-freq(c, i, d), nll-freqs(c, i + 1, d));
   // Geometry: D, FF, query heads, KV heads, head width, vocab, layers, epsilon,
   // group size, maximum architectural positions, rotary buffer.
-  def nll-geo(c) {
+  def nll-geo(c) = nll-geo-by(c,nothing());
+  def nll-geo-by(c,owner) {
    let quant = json-object-get(c, "quantization");
    let d = nll-get(c, "head_dim");
-   !(((String) nll-get(c, "model_type") == "llama") && (((Comparable) nll-get(quant, "bits") == 4) && ((nll-get(quant, "group_size") > 0) && (((Comparable) (nll-get(quant, "group_size") % 8) == 0) && (((Comparable) nll-get(c, "tie_word_embeddings") == 1) && ((Comparable) nll-get(c, "hidden_size") == (nll-get(c, "num_attention_heads") * d))))))) ? form_error("native Llama configuration not admitted") : [nll-get(c, "hidden_size"), nll-get(c, "intermediate_size"), nll-get(c, "num_attention_heads"), nll-get(c, "num_key_value_heads"), d, nll-get(c, "vocab_size"), nll-get(c, "num_hidden_layers"), nll-get(c, "rms_norm_eps"), nll-get(quant, "group_size"), nll-get(c, "max_position_embeddings"), nam-buffer(nll-freqs(c, 0, d))];
+   !(((String) nll-get(c, "model_type") == "llama") && (((Comparable) nll-get(quant, "bits") == 4) && ((nll-get(quant, "group_size") > 0) && (((Comparable) (nll-get(quant, "group_size") % 8) == 0) && (((Comparable) nll-get(c, "tie_word_embeddings") == 1) && ((Comparable) nll-get(c, "hidden_size") == (nll-get(c, "num_attention_heads") * d))))))) ? form_error("native Llama configuration not admitted") : [nll-get(c, "hidden_size"), nll-get(c, "intermediate_size"), nll-get(c, "num_attention_heads"), nll-get(c, "num_key_value_heads"), d, nll-get(c, "vocab_size"), nll-get(c, "num_hidden_layers"), nll-get(c, "rms_norm_eps"), nll-get(quant, "group_size"), nll-get(c, "max_position_embeddings"), nll-buffer(owner,nll-freqs(c,0,d))];
   }
   def nll-prefix(i, suffix) = "model.layers." + (i.str() + ("." + suffix));
   // Pair: prefix, A(input,rank), B(rank,output), input,rank,output,scale.
   // Mutable owners copy only adapter values, leaving the immutable checkpoint mapped.
-  def nll-pair(index, config, prefix, din, dout) {
+  def nll-pair(index,config,prefix,din,dout) = nll-pair-by(index,config,prefix,din,dout,nothing());
+  def nll-pair-by(index, config, prefix, din, dout,owner) {
    let a = sti-find(index, prefix + ".lora_a");
    let b = sti-find(index, prefix + ".lora_b");
-   nil?(a) && nil?(b) ? [] : nil?(a) || nil?(b) ? form_error("native LoRA pair incomplete") : nll-pair-shaped(index, config, prefix, a, b, din, dout);
+   nil?(a) && nil?(b) ? [] : nil?(a) || nil?(b) ? form_error("native LoRA pair incomplete") : nll-pair-shaped-by(index, config, prefix, a, b, din, dout,owner);
   }
-  def nll-pair-shaped(index, config, prefix, a, b, din, dout) {
+  def nll-pair-shaped(index,config,prefix,a,b,din,dout) = nll-pair-shaped-by(index,config,prefix,a,b,din,dout,nothing());
+  def nll-pair-shaped-by(index, config, prefix, a, b, din, dout,owner) {
    let sa = a[2]; let sb = b[2];
    let params = json-object-get(config, "lora_parameters");
-   !(((Comparable) len(sa) == 2) && (((Comparable) len(sb) == 2) && (((Comparable) sa[0] == din) && (((Comparable) sb[1] == dout) && (((Comparable) sa[1] == sb[0]) && (((Comparable) nll-get(params, "dropout") == 0.0) && (nll-get(params, "scale") > 0.0))))))) ? form_error("native LoRA shape/dropout/scale not admitted") : [prefix, nam-floats(sti-map-row(index, a)), nam-floats(sti-map-row(index, b)), din, sa[1], dout, nll-get(params, "scale")];
+   !(((Comparable) len(sa) == 2) && (((Comparable) len(sb) == 2) && (((Comparable) sa[0] == din) && (((Comparable) sb[1] == dout) && (((Comparable) sa[1] == sb[0]) && (((Comparable) nll-get(params, "dropout") == 0.0) && (nll-get(params, "scale") > 0.0))))))) ? form_error("native LoRA shape/dropout/scale not admitted") : [prefix,nll-floats(owner,index,a),nll-floats(owner,index,b), din, sa[1], dout, nll-get(params, "scale")];
   }
   // Projection = shared affine view and optional mutable low-rank pair.
-  def nll-projection(base, adapter, ac, prefix, group) {
-   let view = nam-view(base, prefix, group);
-   [view, nil?(adapter) ? [] : nll-pair(adapter, ac, prefix, view[4], view[3])];
+  def nll-projection(base,adapter,ac,prefix,group) = nll-projection-by(base,adapter,ac,prefix,group,nothing());
+  def nll-projection-by(base, adapter, ac, prefix, group,owner) {
+   let view = nll-view(owner,base,prefix,group);
+   [view, nil?(adapter) ? [] : nll-pair-by(adapter, ac, prefix, view[4], view[3],owner)];
   }
-  def nll-layer(base, adapter, ac, i, group) = [
-   nam-floats(sti-map(base, nll-prefix(i, "input_layernorm") + ".weight")),
-   nll-projection(base, adapter, ac, nll-prefix(i, "self_attn.q_proj"), group),
-   nll-projection(base, adapter, ac, nll-prefix(i, "self_attn.k_proj"), group),
-   nll-projection(base, adapter, ac, nll-prefix(i, "self_attn.v_proj"), group),
-   nll-projection(base, adapter, ac, nll-prefix(i, "self_attn.o_proj"), group),
-   nam-floats(sti-map(base, nll-prefix(i, "post_attention_layernorm") + ".weight")),
-   nll-projection(base, adapter, ac, nll-prefix(i, "mlp.gate_proj"), group),
-   nll-projection(base, adapter, ac, nll-prefix(i, "mlp.up_proj"), group),
-   nll-projection(base, adapter, ac, nll-prefix(i, "mlp.down_proj"), group)];
-  def nll-layers(base, adapter, ac, i, n, group) = i >= n ? [] : cons(nll-layer(base, adapter, ac, i, group), nll-layers(base, adapter, ac, i + 1, n, group));
+  def nll-layer(base,adapter,ac,i,group) = nll-layer-by(base,adapter,ac,i,group,nothing());
+  def nll-layer-by(base,adapter,ac,i,group,owner) = [
+   nll-floats(owner,base,sti-find(base,nll-prefix(i,"input_layernorm")+".weight")),
+   nll-projection-by(base,adapter,ac,nll-prefix(i,"self_attn.q_proj"),group,owner),
+   nll-projection-by(base,adapter,ac,nll-prefix(i,"self_attn.k_proj"),group,owner),
+   nll-projection-by(base,adapter,ac,nll-prefix(i,"self_attn.v_proj"),group,owner),
+   nll-projection-by(base,adapter,ac,nll-prefix(i,"self_attn.o_proj"),group,owner),
+   nll-floats(owner,base,sti-find(base,nll-prefix(i,"post_attention_layernorm")+".weight")),
+   nll-projection-by(base,adapter,ac,nll-prefix(i,"mlp.gate_proj"),group,owner),
+   nll-projection-by(base,adapter,ac,nll-prefix(i,"mlp.up_proj"),group,owner),
+   nll-projection-by(base,adapter,ac,nll-prefix(i,"mlp.down_proj"),group,owner)];
+  def nll-layers(base,adapter,ac,i,n,group) = nll-layers-by(base,adapter,ac,i,n,group,nothing());
+  def nll-layers-by(base,adapter,ac,i,n,group,owner) = i>=n ? [] : cons(nll-layer-by(base,adapter,ac,i,group,owner),nll-layers-by(base,adapter,ac,i+1,n,group,owner));
   // Model = geo, layers, embedding, final norm, source directory, adapter config.
   def nll-open(dir, adapterPath) = nll-open-dir(dir,(Comparable) len(adapterPath) == 0 ? "" : nag-resolve(adapterPath));
   // The historical repository spelling resolves only to the registry's pinned local snapshot.
   def nll-base-match(identity,dir) = ((String) identity == dir) || (((String) identity == "mlx-community/Llama-3.2-3B-Instruct-4bit") && ((String) dir == mr-path(mr-find("llama32-3b-mlx-4bit"))));
-  def nll-open-dir(dir, adapterDir) {
+  def nll-open-dir(dir,adapterDir) = nll-open-owned(dir,adapterDir,nll-group(nothing(),"llama-model"));
+  def nll-open-owned(dir, adapterDir,owner) {
    let cfg = nll-config(dir);
-   let geo = nll-geo(cfg);
+   let geo = nll-geo-by(cfg,owner);
    let base = sti-open(dir + "/model.safetensors");
    let ac = (Comparable) len(adapterDir) == 0 ? [] : parse-json(adapterDir + "/adapter_config.json", read_file(adapterDir + "/adapter_config.json"));
-   (!nil?(ac)) && (!nll-base-match(nll-get(ac,"model"),dir)) ? form_error("native LoRA base identity mismatch") : nll-open-matched(dir,adapterDir,geo,base,ac);
+   (!nil?(ac)) && (!nll-base-match(nll-get(ac,"model"),dir)) ? form_error("native LoRA base identity mismatch") : nll-open-matched-by(dir,adapterDir,geo,base,ac,owner);
   }
-  def nll-open-matched(dir,adapterDir,geo,base,ac) {
+  def nll-open-matched(dir,adapterDir,geo,base,ac) = nll-open-matched-by(dir,adapterDir,geo,base,ac,nothing());
+  def nll-open-matched-by(dir,adapterDir,geo,base,ac,owner) {
    let checked = nll-check-metadata(base,geo);
    let adapter = (Comparable) len(adapterDir) == 0 ? [] : sti-open(adapterDir + "/adapters.safetensors");
-   let layers = nll-layers(base, adapter, ac, 0, geo[6], geo[8]);
-   (!nil?(adapter)) && (!((Comparable) len(adapter[2]) == (2 * nll-pair-count(layers)))) ? form_error("native LoRA contains unconsumed tensors") : [geo, layers, nam-view(base, "model.embed_tokens", geo[8]), nam-floats(sti-map(base, "model.norm.weight")), dir, ac, adapterDir];
+   let layers = nll-layers-by(base, adapter, ac, 0, geo[6], geo[8],owner);
+   (!nil?(adapter)) && (!((Comparable) len(adapter[2]) == (2 * nll-pair-count(layers)))) ? form_error("native LoRA contains unconsumed tensors") : [geo,layers,nll-view(owner,base,"model.embed_tokens",geo[8]),nll-floats(owner,base,sti-find(base,"model.norm.weight")),dir,ac,adapterDir,owner];
   }
   def nll-adapter(model) = len(model) > 6 ? model[6] : "";
   def nll-expect(index,key,shape) = (Value) sti-find(index,key)[2] == shape ? 1 : form_error("native Llama tensor geometry mismatch: " + key);
@@ -157,13 +188,18 @@ kernel void nll_attend8(device const float* p [[buffer(0)]],device const float* 
   def nll-projection-handles(p) = append(take(3, p[0]), nil?(p[1]) ? [] : [p[1][1], p[1][2]]);
   def nll-layer-handles(l) = append([l[0], l[5]], append(nll-projection-handles(l[1]), append(nll-projection-handles(l[2]), append(nll-projection-handles(l[3]), append(nll-projection-handles(l[4]), append(nll-projection-handles(l[6]), append(nll-projection-handles(l[7]), nll-projection-handles(l[8]))))))));
   def nll-all-handles(layers) = nil?(layers) ? [] : append(nll-layer-handles(layers[0]), nll-all-handles(layers[1:]));
-  def nll-close(model) = nam-free(append([model[0][10], model[3]], append(take(3, model[2]), nll-all-handles(model[1]))));
+  def nll-close(model) = record?(nll-owner(model)) ? nll-release(nll-owner(model)) : nam-free(append([model[0][10], model[3]], append(take(3, model[2]), nll-all-handles(model[1]))));
   def nll-caches(n, bytes) = n <= 0 ? [] : cons(nam-alloc(bytes), nll-caches(n - 1, bytes));
   def nll-context(model, positions) {
    let g = model[0];
-   (positions <= 0) || (positions > g[9]) ? form_error("native Llama context exceeds model positions") : [positions, nll-caches(g[6], positions * (g[3] * g[4])), nll-caches(g[6], positions * (g[3] * g[4]))];
+   (positions <= 0) || (positions > g[9]) ? form_error("native Llama context exceeds model positions") : nll-context-owned(model,positions,nll-group(nll-owner(model),"llama-context"));
   }
-  def nll-context-close(ctx) = nam-free(append(ctx[1], ctx[2]));
+  def nll-caches-by(n,elements,owner) = map(i=>nll-allocate(owner,elements),range(0,n));
+  def nll-context-owned(model,positions,owner) {
+   let g=model[0];let n=positions*g[3]*g[4];
+   [positions,nll-caches-by(g[6],n,owner),nll-caches-by(g[6],n,owner),owner];
+  }
+  def nll-context-close(ctx) = record?(nll-owner(ctx)) ? nll-release(nll-owner(ctx)) : nam-free(append(ctx[1], ctx[2]));
   def nll-rope(x, g, heads, tokens, pos, inverse) = nll-run("nll_rope", [x, g[10]], [heads, g[4], tokens, pos, inverse], tokens * (heads * (g[4] / 2)), 0);
   def nll-store(x, cache, count, offset) = nll-run("nll_store", [x, cache], [count, offset], count, 0);
   def nll-last(x, y, count, offset) = nll-run("nll_last", [x, y], [count, offset], count, 0);
@@ -184,7 +220,7 @@ kernel void nll_attend8(device const float* p [[buffer(0)]],device const float* 
   def nll-rank(layers) = nil?(layers) ? 1 : nll-max(nll-rank-layer(layers[0]), nll-rank(layers[1:]));
   // Owned layer activation list: normalized input,Q,K,V,attention,residual,
   // normalized residual,gate,up,SwiGLU,output,inverse norms,probabilities.
-  def nll-buffers(g, t, pos) = [nam-alloc(t * g[0]),nam-alloc(t * g[0]),nam-alloc(t * (g[3] * g[4])),nam-alloc(t * (g[3] * g[4])),nam-alloc(t * g[0]),nam-alloc(t * g[0]),nam-alloc(t * g[0]),nam-alloc(t * g[1]),nam-alloc(t * g[1]),nam-alloc(t * g[1]),nam-alloc(t * g[0]),nam-alloc(t),nam-alloc(t),nam-alloc(t * (g[2] * (pos + t)))];
+  def nll-buffers(g, t, pos) = [nll-alloc(g,t * g[0]),nll-alloc(g,t * g[0]),nll-alloc(g,t * (g[3] * g[4])),nll-alloc(g,t * (g[3] * g[4])),nll-alloc(g,t * g[0]),nll-alloc(g,t * g[0]),nll-alloc(g,t * g[0]),nll-alloc(g,t * g[1]),nll-alloc(g,t * g[1]),nll-alloc(g,t * g[1]),nll-alloc(g,t * g[0]),nll-alloc(g,t),nll-alloc(g,t),nll-alloc(g,t * (g[2] * (pos + t)))];
   def nll-block(g, l, x, ck, cv, t, pos, scratch) {
    let b = nll-buffers(g,t,pos); let d = g[0]; let kd = g[3] * g[4];
    let norm = nam-rms(x,l[0],b[0],b[11],d,t,g[7]);
@@ -228,31 +264,32 @@ kernel void nll_attend8(device const float* p [[buffer(0)]],device const float* 
   // Its retained KV is read-only history; backward still requires a whole row.
   def nll-forward-evaluation(model,ctx,ids,pos) = nll-forward-rows(model,ctx,ids,pos,1);
   def nll-forward-rows(model,ctx,ids,pos,allRows) {
-   let g = model[0]; let t = len(ids);
+   let g=nll-phase-geo(model[0],nll-forward-parent(model,ctx),"llama-forward");let t=len(ids);
    ((Comparable) t == 0) || ((!nll-ids-valid(ids,g[5])) || ((pos < 0) || ((pos + t) > ctx[0]))) ? form_error("native Llama token/context admission refused") : nll-forward-admitted(model,ctx,ids,pos,allRows,g,t);
   }
   def nll-forward-admitted(model,ctx,ids,pos,allRows,g,t) {
    let p = nll-prefix-count(model,ctx,allRows,pos,t);
    p > 0 ? nll-forward-prefixed(model,ctx,ids,pos,allRows,g,t,p) : nll-forward-whole(model,ctx,ids,pos,allRows,g,t);
   }
-  def nll-forward-whole(model,ctx,ids,pos,allRows,g,t) {
-   let ib = nam-write(nam-alloc(t),md-le32-list(ids,""));
-   let x = nam-alloc(t * g[0]);
-   let scratch = nam-alloc(t * nll-rank(model[1]));
+  def nll-forward-whole(model,ctx,ids,pos,allRows,g,t) = nll-forward-whole-owned(model,ctx,ids,pos,allRows,record?(nll-owner(g)) ? g : nll-phase-geo(g,nll-forward-parent(model,ctx),"llama-forward"),t);
+  def nll-forward-whole-owned(model,ctx,ids,pos,allRows,g,t) {
+   let ib = nam-write(nll-alloc(g,t),md-le32-list(ids,""));
+   let x = nll-alloc(g,t * g[0]);
+   let scratch = nll-alloc(g,t * nll-rank(model[1]));
    let emb = nam-embed(model[2],ib,x,t);
    let blocks = nll-blocks(g,model[1],x,ctx[1],ctx[2],t,pos,scratch,[]);
    let head = nll-forward-head(model,g,blocks[0],t,allRows);
-   [head[0],blocks[1],head[1],head[2],head[3],[ib,x,scratch,head[2],head[1],head[3],head[0]],t,head[4]];
+   [head[0],blocks[1],head[1],head[2],head[3],[ib,x,scratch,head[2],head[1],head[3],head[0]],t,head[4],nll-owner(g)];
   }
   // the last block's output to the logits: [logits, normalized, head input, inverse, logit rows]
   def nll-forward-head(model,g,last,t,allRows) = nll-forward-head-by(model,g,last,t,allRows,0);
   // exact 1: the scalar kernels only, whatever the row count (the batched decode's rows each equal the token decoded alone)
   def nll-forward-head-by(model,g,last,t,allRows,exact) {
    let ht = allRows ? t : 1;
-   let hx = nam-alloc(ht * g[0]);
-   let hn = nam-alloc(ht * g[0]);
-   let inv = nam-alloc(ht);
-   let logits = nam-alloc(ht * g[5]);
+   let hx = nll-alloc(g,ht * g[0]);
+   let hn = nll-alloc(g,ht * g[0]);
+   let inv = nll-alloc(g,ht);
+   let logits = nll-alloc(g,ht * g[5]);
    let copied = nll-last(last,hx,ht * g[0],allRows ? 0 : ((t - 1) * g[0]));
    let norm = nam-rms(hx,model[3],hn,inv,g[0],ht,g[7]);
    let out = exact ? nam-linear-exact(model[2],hn,logits,ht) : nam-linear(model[2],hn,logits,ht,0);
@@ -293,13 +330,18 @@ kernel void nll_attend8(device const float* p [[buffer(0)]],device const float* 
    nam-f32s([s[1],s[2],0.15625]);
   }
   def nll-prefix-sound?(x,n) = (String) metal_buf_read(x,n * 4,12) == (String) nll-prefix-trailer(x,n);
+  def nll-stats(owner,h,n) = nam-stats-by(h,n,bytes=>record?(owner) ? mca-alloc(owner,bytes) : metal_buf_alloc(bytes),x=>nll-free(owner,[x]));
+  def nll-prefix-trailer-by(h,n,owner) {
+   let s=nll-stats(owner,h,n);nam-f32s([s[1],s[2],0.15625]);
+  }
+  def nll-prefix-sound-by?(x,n,owner) = metal_buf_read(x,n*4,12)==nll-prefix-trailer-by(x,n,owner);
   def nll-forward-prefixed(model,ctx,ids,pos,allRows,g,t,p) {
    let path = nll-prefix-path(nll-prefix-key(model,ids,p));
    (file_size(path) == nll-prefix-bytes(t,g)) ? nll-forward-hit(model,ctx,ids,pos,allRows,g,t,p,path) : nll-forward-miss(model,ctx,ids,pos,allRows,g,t,p,path);
   }
   def nll-forward-hit(model,ctx,ids,pos,allRows,g,t,p,path) {
-   let x = metal_buf_from_file(path,0,nll-prefix-bytes(t,g));
-   x <= 0 ? nll-forward-whole(model,ctx,ids,pos,allRows,g,t) : nll-prefix-sound?(x,t * g[0]) ? nll-forward-used(model,ctx,pos,allRows,g,t,p,x,path) : nll-forward-spoiled(model,ctx,ids,pos,allRows,g,t,p,path,x);
+   let x = nll-map(nll-owner(g),path,0,nll-prefix-bytes(t,g));
+   x <= 0 ? nll-forward-whole(model,ctx,ids,pos,allRows,g,t) : nll-prefix-sound-by?(x,t * g[0],nll-owner(g)) ? nll-forward-used(model,ctx,pos,allRows,g,t,p,x,path) : nll-forward-spoiled(model,ctx,ids,pos,allRows,g,t,p,path,x);
   }
   // a hit renews the entry's time, so that observe/prefix-cache-run.bml prunes what has not been used, not what is old
   def nll-forward-used(model,ctx,pos,allRows,g,t,p,x,path) {
@@ -307,59 +349,66 @@ kernel void nll_attend8(device const float* p [[buffer(0)]],device const float* 
    nll-forward-hit-from(model,ctx,pos,allRows,g,t,p,x);
   }
   def nll-forward-spoiled(model,ctx,ids,pos,allRows,g,t,p,path,x) {
-   let freed = metal_buf_free(x);
+   let freed = nll-free(nll-owner(g),[x]);
    let removed = host_path_remove(path);
    let noted = nll-prefix-note("spoiled");
    nll-forward-miss(model,ctx,ids,pos,allRows,g,t,p,path);
   }
   def nll-forward-hit-from(model,ctx,pos,allRows,g,t,p,x) {
    let noted = nll-prefix-note("hits");
-   let scratch = nam-alloc(t * nll-rank(model[1]));
+   let scratch = nll-alloc(g,t * nll-rank(model[1]));
    let blocks = nll-blocks(g,drop(p,model[1]),x,drop(p,ctx[1]),drop(p,ctx[2]),t,pos,scratch,[]);
    let head = nll-forward-head(model,g,blocks[0],t,allRows);
-   [head[0],blocks[1],head[1],head[2],head[3],[x,scratch,head[2],head[1],head[3],head[0]],t,head[4]];
+   [head[0],blocks[1],head[1],head[2],head[3],[x,scratch,head[2],head[1],head[3],head[0]],t,head[4],nll-owner(g)];
   }
   def nll-forward-miss(model,ctx,ids,pos,allRows,g,t,p,path) {
    let r = nll-forward-whole(model,ctx,ids,pos,allRows,g,t);
    let noted = nll-prefix-note("misses");
-   let kept = nll-prefix-save(path,r[1][p - 1][0],t * g[0]);
+   let kept = nll-prefix-save-by(path,r[1][p - 1][0],t * g[0],nll-owner(r));
    r;
   }
   // the boundary activation to a temp file mapped writable, one GPU copy, then renamed over: whole or absent
-  def nll-prefix-save(path,h,n) {
+  def nll-prefix-save(path,h,n) = nll-prefix-save-by(path,h,n,nothing());
+  def nll-prefix-save-by(path,h,n,parent) {
+   let owner=nll-group(parent,"llama-prefix-publication");
    let dir = host_dir_mkdir(".hearth");
    let dir2 = host_dir_mkdir(".hearth/prefix-cache");
    let tmp = path ++ ".tmp-" ++ host_pid().str();
+   record_set(owner,"temporary",tmp);record_set(owner,"destination",path);
    let touched = write_file_text(tmp,"");
-   let dest = metal_buf_from_file(tmp,0,0 - (n + 3) * 4);
-   dest <= 0 ? 0 : nll-prefix-saved(path,tmp,h,dest,n);
+   let dest = nll-map(owner,tmp,0,0 - (n + 3) * 4);
+   dest <= 0 ? {nll-release(owner);0;} : nll-prefix-saved-by(path,tmp,h,dest,n,owner);
   }
-  def nll-prefix-saved(path,tmp,h,dest,n) {
+  def nll-prefix-saved(path,tmp,h,dest,n) = nll-prefix-saved-by(path,tmp,h,dest,n,nothing());
+  def nll-prefix-saved-by(path,tmp,h,dest,n,owner) {
    let copied = nam-run("nam_copy",[h,dest],[n],n,0);
    let done = nam-sync();
-   let trailed = metal_buf_write(dest,n * 4,nll-prefix-trailer(h,n));
-   let freed = metal_buf_free(dest);
-   let moved = fs-rename(tmp,path);
-   let noted = nll-prefix-note("saved");
-   moved;
+   let trailer=nll-prefix-trailer-by(h,n,owner);
+   let trailed=metal_buf_write(dest,n*4,trailer)==len(trailer) && metal_buf_read(dest,n*4,len(trailer))==trailer;
+   let freed=record?(owner) ? nll-release(owner) : metal_buf_free(dest)==1;
+   !trailed || !freed ? form_error("native Llama prefix publication incomplete; original owner retained") : {
+    let moved=fs-rename(tmp,path);if moved==0 then nll-prefix-note("saved") else 0;moved;
+   };
   }
   def nll-forward-handles(blocks) = nil?(blocks) ? [] : append(blocks[0][1],nll-forward-handles(blocks[1:]));
-  def nll-forward-close(r) = nam-free(append(r[5],nll-forward-handles(r[1])));
-  def nll-pick(kernel,logits,values) {
-   let out = nam-alloc(1);
-   defer NativeAffineBuffer_dispose(out);
-   let rc = nll-run(kernel,[logits,out],values,1,1);
-   ln-u32-le(metal_buf_read(out,0,4),0);
+  def nll-forward-close(r) = record?(nll-owner(r)) ? nll-release(nll-owner(r)) : nam-free(append(r[5],nll-forward-handles(r[1])));
+  def nll-pick(kernel,logits,values) = nll-pick-owned(kernel,logits,values,nothing(),0);
+  def nll-pick-owned(kernel,logits,values,parent,wide) {
+   let owner=nll-group(parent,"llama-pick");let out=nll-allocate(owner,1);
+   let rc=wide ? nll-run-wide(kernel,[logits,out],values) : nll-run(kernel,[logits,out],values,1,1);
+   let result=ln-u32-le(metal_buf_read(out,0,4),0);record_set(owner,"completed",result);
+   nll-release(owner) ? result : form_error("native Llama selection release incomplete");
   }
   // The best three in one dispatch and one read back, in the order the three selects below give them (value descending, index
   // ascending among equals; any non-finite logit makes all three 0xffffffff, as each select would): the in-stream walk asked
   // for all three after every token, three dispatches and three syncs (60 ms a token against 43 for one select).
-  def nll-select3(logits,vocab) {
-   let out = nam-alloc(3);
-   defer NativeAffineBuffer_dispose(out);
+  def nll-select3(logits,vocab) = nll-select3-by(logits,vocab,nothing());
+  def nll-select3-by(logits,vocab,parent) {
+   let owner=nll-group(parent,"llama-select");let out=nll-allocate(owner,3);
    let rc = nll-run-wide("nll_top3",[logits,out],[vocab,0]);
    let bytes = metal_buf_read(out,0,12);
-   [ln-u32-le(bytes,0),ln-u32-le(bytes,4),ln-u32-le(bytes,8)];
+   let result=[ln-u32-le(bytes,0),ln-u32-le(bytes,4),ln-u32-le(bytes,8)];record_set(owner,"completed",result);
+   nll-release(owner) ? result : form_error("native Llama selection release incomplete");
   }
   // One threadgroup of 1024 threads (32 simdgroups) reads the 128 thousand logits: 125 a thread, not 4000 a lane in one simdgroup
   // (1 ms a pick). The best and the best three do not depend on the order the logits are met in (value descending, the lowest
@@ -369,19 +418,15 @@ kernel void nll_attend8(device const float* p [[buffer(0)]],device const float* 
    let rc = nam-enqueue(name, p, md-bind16(handles, values, 1024, 1024, 1, 0), 1);
    rc < 0 ? form_error("native Llama dispatch refused: " + name) : rc;
   }
-  def nll-pick-wide(kernel,logits,values) {
-   let out = nam-alloc(1);
-   defer NativeAffineBuffer_dispose(out);
-   let rc = nll-run-wide(kernel,[logits,out],values);
-   ln-u32-le(metal_buf_read(out,0,4),0);
-  }
+  def nll-pick-wide(kernel,logits,values) = nll-pick-owned(kernel,logits,values,nothing(),1);
   // The best three of every row of `rows` logit rows, one dispatch a row and one read back: [[best, second, third] a row].
-  def nll-select3-rows(logits,vocab,rows) {
-   let out = nam-alloc(3 * rows);
-   defer NativeAffineBuffer_dispose(out);
+  def nll-select3-rows(logits,vocab,rows) = nll-select3-rows-by(logits,vocab,rows,nothing());
+  def nll-select3-rows-by(logits,vocab,rows,parent) {
+   let owner=nll-group(parent,"llama-selection-rows");let out=nll-allocate(owner,3*rows);
    let sent = map(r => nll-run-wide("nll_top3",[logits,out],[vocab,r]),range(0,rows));
    let bytes = metal_buf_read(out,0,12 * rows);
-   map(r => [ln-u32-le(bytes,12 * r),ln-u32-le(bytes,12 * r + 4),ln-u32-le(bytes,12 * r + 8)],range(0,rows));
+   let result=map(r => [ln-u32-le(bytes,12 * r),ln-u32-le(bytes,12 * r + 4),ln-u32-le(bytes,12 * r + 8)],range(0,rows));record_set(owner,"completed",result);
+   nll-release(owner) ? result : form_error("native Llama selection release incomplete");
   }
   // ── one token each for up to thirty-two streams ──
   // A decoded token is 620 dispatches and moves the 3B's 1.8 GB of weights for one token's worth of arithmetic; the 2 to 15 token
@@ -403,30 +448,31 @@ kernel void nll_attend8(device const float* p [[buffer(0)]],device const float* 
   // the same step answering the logits' bytes (every stream's row, in order) instead of the best three: what the band compares
   def nll-forward-multi-logits(model,ctxs,ids,poss) = nll-forward-multi-mode(model,ctxs,ids,poss,1);
   def nll-forward-multi-mode(model,ctxs,ids,poss,logitsToo) {
-   let g = model[0]; let b = len(ids);
+   let g=nll-phase-geo(model[0],nll-owner(model),"llama-batch");let b=len(ids);
    b < 1 || b > nll-multi-max() || len(ctxs) != b || len(poss) != b || !nll-ids-valid(ids,g[5]) || any?(p => p < 0, poss) || !nll-multi-room?(ctxs,poss,0) ? form_error("native Llama multi-stream admission refused") : nll-forward-multi-admitted(model,ctxs,ids,poss,g,b,logitsToo);
   }
   def nll-multi-room?(ctxs,poss,i) = i >= len(ctxs) ? 1 : (poss[i] < ctxs[i][0] && nll-multi-room?(ctxs,poss,i + 1)) ? 1 : 0;
   def nll-forward-multi-admitted(model,ctxs,ids,poss,g,b,logitsToo) {
-   let ib = nam-write(nam-alloc(b),md-le32-list(ids,""));
-   let pb = nam-write(nam-alloc(b),md-le32-list(poss,""));
-   let x = nam-alloc(b * g[0]);
-   let scratch = nam-alloc(b * nll-rank(model[1]));
+   let ib = nam-write(nll-alloc(g,b),md-le32-list(ids,""));
+   let pb = nam-write(nll-alloc(g,b),md-le32-list(poss,""));
+   let x = nll-alloc(g,b * g[0]);
+   let scratch = nll-alloc(g,b * nll-rank(model[1]));
    let emb = nam-embed(model[2],ib,x,b);
    let nhm = foldl((m,p) => p + 1 > m ? p + 1 : m,1,poss);
    let blocks = nll-multi-blocks(g,model[1],x,ctxs,0,pb,nhm,b,scratch,[]);
    let head = nll-forward-head-by(model,g,blocks[0],b,1,1);
-   let tops = nll-select3-rows(head[0],g[5],b);
+   let tops = nll-select3-rows-by(head[0],g[5],b,nll-owner(g));
    let bytes = logitsToo == 1 ? metal_buf_read(head[0],0,b * g[5] * 4) : "";
-   let freed = nam-free(append([ib,pb,x,scratch,head[0],head[1],head[2],head[3]],blocks[1]));
-   logitsToo == 1 ? [tops,bytes] : tops;
+   let result=logitsToo == 1 ? [tops,bytes] : tops;
+   record_set(nll-owner(g),"completed",result);
+   nll-release(nll-owner(g)) ? result : form_error("native Llama batch completed; release incomplete");
   }
   def nll-multi-blocks(g,layers,x,ctxs,i,pb,nhm,b,scratch,owned) = nil?(layers) ? [x,owned] : nll-multi-blocks-next(g,layers[1:],ctxs,i,pb,nhm,b,scratch,owned,nll-multi-block(g,layers[0],x,ctxs,i,pb,nhm,b,scratch));
   def nll-multi-blocks-next(g,layers,ctxs,i,pb,nhm,b,scratch,owned,r) {
    let flowed = metal_submit();
    nll-multi-blocks(g,layers,r[0],ctxs,i + 1,pb,nhm,b,scratch,append(r[1],owned));
   }
-  def nll-multi-buffers(g,b,nhm) = [nam-alloc(b * g[0]),nam-alloc(b * g[0]),nam-alloc(b * (g[3] * g[4])),nam-alloc(b * (g[3] * g[4])),nam-alloc(b * g[0]),nam-alloc(b * g[0]),nam-alloc(b * g[0]),nam-alloc(b * g[1]),nam-alloc(b * g[1]),nam-alloc(b * g[1]),nam-alloc(b * g[0]),nam-alloc(b),nam-alloc(b),nam-alloc(b * (g[2] * nhm))];
+  def nll-multi-buffers(g,b,nhm) = [nll-alloc(g,b * g[0]),nll-alloc(g,b * g[0]),nll-alloc(g,b * (g[3] * g[4])),nll-alloc(g,b * (g[3] * g[4])),nll-alloc(g,b * g[0]),nll-alloc(g,b * g[0]),nll-alloc(g,b * g[0]),nll-alloc(g,b * g[1]),nll-alloc(g,b * g[1]),nll-alloc(g,b * g[1]),nll-alloc(g,b * g[0]),nll-alloc(g,b),nll-alloc(g,b),nll-alloc(g,b * (g[2] * nhm))];
   def nll-rope-pos(x,g,heads,b,pb,inverse) = nll-run("nll_rope_pos",[x,g[10],pb],[heads,g[4],b,inverse],b * (heads * (g[4] / 2)),0);
   def nll-multi-block(g,l,x,ctxs,i,pb,nhm,b,scratch) {
    let u = nll-multi-buffers(g,b,nhm); let d = g[0]; let kd = g[3] * g[4];

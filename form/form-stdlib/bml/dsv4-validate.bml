@@ -3,8 +3,9 @@
 // beyond an estimate are framebuffer signals. Missing readings or failed driver
 // operations retain their failure and release owned resources. Other resident
 // models are observed; lease-aware memory admission owns resource competition.
-// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml form-stdlib/bml/form-cli-local-plan.bml form-stdlib/bml/sha256-owned.bml form-stdlib/metal-door.fk form-stdlib/dsv4-layout.fk form-stdlib/dsv4-lease.fk form-stdlib/dsv4-tokenizer.fk native/metal/dsv4-token-handle.fk form-stdlib/bml/host-fs.bml
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml form-stdlib/bml/form-cli-local-plan.bml form-stdlib/bml/sha256-owned.bml form-stdlib/metal-door.fk form-stdlib/dsv4-layout.fk form-stdlib/dsv4-lease.fk form-stdlib/dsv4-tokenizer.fk native/metal/dsv4-token-handle.fk form-stdlib/bml/host-fs.bml form-stdlib/form-cli-model-session.fk
 section [form.bml] {
+ let DVR-OWNED=record_new(0);
  class Dsv4Validate {
   // ---- the pins ---------------------------------------------------------------------------------------------------------
   def dvr-file() = "/Users/ursmuff/models/ds4-engine/gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf";
@@ -245,13 +246,15 @@ section [form.bml] {
   def dvr-plan-lines(m, size, opts, facts, organs) {
    let cap = dvr-int(opts, "cap", dvr-default-cap());
    let c = dvr-int(opts, "cache_experts", dls-cache-experts());
-   let shared = dls-shared(m, c, cap);
-   let lease = shared + mg-kv-margin();
+    let slots = dvr-arena-slots(opts);
+    let shared = dls-shared(m, slots, cap);
+    let own = dls-own(m, slots, cap);
+    let lease = shared + own;
    let gaps = dvr-gaps(m);
    let logitsIds = dvr-logits-ids(opts);
    append(["[dsv4-validate] DRY: the plan below is what the window WILL do; nothing is opened, nothing mapped, no lease taken, no row written, no kernel compiled",
     "[dsv4-validate] file " ++ dvr-text(opts, "file", dvr-file()) ++ " " ++ size.str() ++ " B (" ++ dvr-gib(size) ++ "), " ++ record_get(m, "arch") ++ ", " ++ record_get(m, "layers-n").str() ++ " layers, " ++ record_get(m, "tensors").str() ++ " tensors, header read only",
-    "[dsv4-validate] lease: shared " ++ dvr-gib(shared) ++ " (" ++ shared.str() ++ " B: dense " ++ dls-dense(m).str() ++ " + " ++ c.str() ++ " experts a layer " ++ dls-cache(m, c).str() ++ " + KV at " ++ cap.str() ++ " positions " ++ dvl-kv-total(m, cap).str() ++ "), own " ++ dvr-gib(mg-kv-margin()) ++ ", derived and not measured",
+     "[dsv4-validate] lease: shared mapped weights " ++ dvr-gib(shared) ++ " (" ++ shared.str() ++ " B), private arena, KV and scratch " ++ dvr-gib(own) ++ " (" ++ own.str() ++ " B); arena_slots " ++ slots.str() ++ ", capacity " ++ cap.str() ++ "; derived and not measured",
     "[dsv4-validate] the window asks the governor for " ++ dvr-gib(lease) ++ " with available memory " ++ dvr-gib(mg-available(facts[2])) ++ " on this machine (the file itself is " ++ dvr-gib(size) ++ ")"],
     append(dvr-facts-lines(facts),
      append(map(row => dvr-stage-line(row), dvr-stages(m, opts)),
@@ -360,7 +363,7 @@ section [form.bml] {
   // r: the run's record: status reason file bytes lease cap cache organs moved denied vmwin stages(list of [label est delta ms own vm]) wirespan(delta slice stack kind) cold_ms matched ids deterministic agreement gaps
   def dvr-receipt-row(date, at, r) = "{" ++ dvr-join([
    dvr-kv("schema", dvr-q("dsv4-validation-v1")), dvr-kv("at_unix_ms", at.str()), dvr-kv("date", dvr-q(date)), dvr-kv("status", dvr-q(record_get(r, "status"))), dvr-kv("reason", dvr-q(record_get(r, "reason"))),
-   dvr-kv("file", dvr-q(record_get(r, "file"))), dvr-kv("file_bytes", record_get(r, "bytes").str()), dvr-kv("lease_shared", record_get(r, "shared").str()), dvr-kv("lease_own", mg-kv-margin().str()),
+    dvr-kv("file", dvr-q(record_get(r, "file"))), dvr-kv("file_bytes", record_get(r, "bytes").str()), dvr-kv("lease_shared", record_get(r, "shared").str()), dvr-kv("lease_own", record_get(r,"own").str()),
    dvr-kv("cap", record_get(r, "cap").str()), dvr-kv("cache_experts", record_get(r, "cache").str()), dvr-kv("arena_slots", record_get(r, "arena").str()), dvr-kv("organs", record_get(r, "organs")), dvr-kv("moved", record_get(r, "moved")), dvr-kv("denied", record_get(r, "denied")), dvr-kv("vm_window", record_get(r, "vmwin")),
    dvr-kv("stages", "[" ++ dvr-join(map(s => dvr-stage-json(s), record_get(r, "stages")), ",") ++ "]"),
    dvr-kv("wirespan", "{" ++ dvr-join([dvr-kv("delta", record_get(r, "ws-delta").str()), dvr-kv("slice", record_get(r, "ws-slice").str()), dvr-kv("stack", record_get(r, "ws-stack").str()), dvr-kv("kind", dvr-q(record_get(r, "ws-kind")))], ",") ++ "}"),
@@ -368,16 +371,20 @@ section [form.bml] {
    dvr-kv("stream_margins", dvr-floats-json(record_get(r, "margins"))), dvr-kv("stream_recorded_gap", dvr-floats-json(record_get(r, "rgaps"))),
    dvr-kv("deterministic", record_get(r, "deterministic").str()),
    dvr-kv("logits", record_get(r, "logits")), dvr-kv("driver_gaps", "[" ++ dvr-join(map(g => dvr-q(g), record_get(r, "gaps")), ",") ++ "]"),
-   dvr-kv("elapsed_ms", record_get(r, "elapsed").str())], ",") ++ "}";
+    dvr-kv("elapsed_ms",record_get(r,"elapsed").str()),dvr-kv("held",record_has(r,"held") ? record_get(r,"held").str() : "null"),dvr-kv("release_ok",record_has(r,"release_ok") ? record_get(r,"release_ok").str() : "null")],",") ++ "}";
   def dvr-logits-json(a) = "{" ++ dvr-join([dvr-kv("r", a[0].str()), dvr-kv("top10_overlap", a[1].str()), dvr-kv("argmax_ours", a[2].str()), dvr-kv("argmax_ref", a[3].str()), dvr-kv("ref_margin", a[4].str()), dvr-kv("max_delta_top64", a[5].str()), dvr-kv("finite", a[6].str())], ",") ++ "}";
   // the local time as `date '+%Y-%m-%d %H:%M:%S %Z'` wrote it, from the host's zone (host_localtime, host-fs.bml)
   def dvr-date() = hfs-date-line(now_unix_ms()) ?? "";
-  def dvr-append(path, line) = write_file_text(path, (read_file(path) ?? "") ++ line ++ "\n");
+   def dvr-append(path,line) = {
+    let exact="\n"+line+"\n";
+    if str_find("\n"+(read_file(path) ?? ""),exact,0)<0 then fhn-append(path,line+"\n") else 0;
+    str_find("\n"+(read_file(path) ?? ""),exact,0)>=0 ? len(line)+1 : -1;
+   };
 
   // ---- the run (the window; never run by a band) --------------------------------------------------------------------------------------------------
   def dvr-said(lines) = len(lines) == 0 ? 0 : dvr-said-next(print_str(lines[0]), lines[1:]);
   def dvr-said-next(said, rest) = dvr-said(rest);
-  def dvr-env(file, m, size, shared, cap, cache, base, lease) = record_new(0, "file", file, "m", m, "bytes", size, "shared", shared, "cap", cap, "cache", cache, "base", base, "lease", lease, "prev", base, "arena", 0, "organs", "[]", "moved", "[]", "t0", host_monotonic_ms(),
+   def dvr-env(file, m, size, shared, cap, cache, base, lease) = record_new(0, "file", file, "m", m, "bytes", size, "shared", shared, "own", lease - shared, "cap", cap, "cache", cache, "base", base, "lease", lease, "prev", base, "arena", 0, "organs", "[]", "moved", "[]", "t0", host_monotonic_ms(),
     "vm0", [], "denied", "{}", "log", [], "ctx", [], "sts", [], "reason", "", "ws-delta", 0, "ws-slice", 0, "ws-stack", 0, "ws-kind", "none", "matched", 0, "ids", [], "margins", [], "rgaps", [], "deterministic", 0, "logits", "{\"waits\":\"no logits_prompt_ids supplied\"}", "extra", []);
   def dvr-elapsed(env) = host_monotonic_ms() - record_get(env, "t0");
   def dvr-log-add(env, row) = record_set(env, "log", append(record_get(env, "log"), [row]));
@@ -425,19 +432,34 @@ section [form.bml] {
   def dvr-seq-next(steps, r) = r == "" ? dvr-seq(steps[1:]) : r;
   def dvr-ctx(env) = record_get(env, "ctx");
   def dvr-sts(env) = record_get(env, "sts");
+   def dvr-own-reservation(env,grant) {
+    let token=mg-reservation-of(grant);record_set(env,"reservation",token);
+    let m=record_get(env,"m");let slots=record_get(env,"arena");let cap=record_get(env,"cap");
+    let parts=[["scratch",dso-plan-bytes(dso-scratch-plan(m,cap))],["arena",slots>0 ? dls-cache(m,slots)+4*record_get(m,"used") : 0],["full-kv",dvl-kv-total(m,cap)]];
+     let session=record_get(env,"session");let reservation=fcms-reservation(fcms-release-ledger(session),grant,parts);
+     record_get(reservation,"ready") ? {record_set(env,"ports",fcms-ds4-ports(fcms-release-ledger(session),reservation));1;} : 0;
+   }
+   def dvr-ack-allocation(env,name,bytes) {
+    let token=record_get(env,"reservation");
+    !record?(token) || mg-reservation-ack(mg-reservation-part(token,name),bytes);
+   }
 
   def dvr-do-compile(env) { let ps = dkr-open-pipes(dkr-graph-units()); record_set(env, "ps", ps); 1; }
   // the map opens the dense tensors only when the arena is asked for (env "arena" = the slots: the routed stacks keep their rows and have no handle), else every tensor with the stacks whole (the control)
   def dvr-do-map(env) {
-   let ctx = record_get(env, "arena") > 0 ? dsv4-open-span-mode(record_get(env, "file"), record_get(env, "cap"), 1, dkr-graph-units(), "arena") : dsv4-open-span(record_get(env, "file"), record_get(env, "cap"), 1);
-   len(ctx) == 13 ? { let k = record_set(env, "ctx", ctx); let p = dsv4-prepare(ctx); p == 1 ? 1 : nothing(); } : nothing();
+    let ctx=dsv4-open-span-mode-by(record_get(env,"file"),record_get(env,"cap"),1,dkr-graph-units(),record_get(env,"arena")>0 ? "arena" : "whole",record_get(env,"ports"));
+    (record_get(record_get(env,"ports"),"retain-context"))(ctx);
+   len(ctx) == 13 ? { record_set(env,"ctx",ctx); !dso-open-ok?(ctx) ? nothing() : {
+    let observed=dvr-ack-allocation(env,"scratch",dso-plan-bytes(dso-scratch-plan(ctx[2],record_get(env,"cap"))));
+    let p=observed ? dsv4-prepare(ctx) : 0;p==1 ? 1 : nothing();
+   }; } : nothing();
   }
   // the arena's buffers, allocated once over the mapped context (the lease's expert term at env "arena" slots)
-  def dvr-do-arena(env) { let ar = dxa-open(dvr-ctx(env), record_get(env, "arena")); nothing?(ar) ? nothing() : 1; }
+   def dvr-do-arena(env) { let ar = dxa-open(dvr-ctx(env), record_get(env, "arena")); nothing?(ar) ? nothing() : dvr-ack-allocation(env,"arena",dls-cache(record_get(env,"m"),record_get(env,"arena"))+4*record_get(record_get(env,"m"),"used")) ? 1 : nothing(); }
   def dvr-do-state(env) {
    let ctx = dvr-ctx(env);
-   let sts = dsv4-new-state(ctx[2], ctx[0], record_get(env, "cap"));
-   nothing?(sts) ? nothing() : { let k = record_set(env, "sts", sts); 1; };
+    let ports=record_get(env,"ports");let sts=dsv4-new-state-by(ctx[2],ctx[0],record_get(env,"cap"),record_get(ports,"state-allocate"));
+    nothing?(sts) ? nothing() : {record_set(env,"sts",sts);(record_get(ports,"retain-state"))(sts);dvr-ack-allocation(env,"full-kv",dvl-kv-total(ctx[2],record_get(env,"cap"))) ? 1 : nothing();};
   }
   // the probe: in the arena mode ONE fill of expert 137's span of layer 0's gate stack into slot 0 (the view, the copy, the wait that settles it, the view freed); in the control one dispatch over one expert slice of the whole stack
   def dvr-do-wirespan(env) = record_get(env, "arena") > 0 ? dvr-do-wirespan-arena(env) : dvr-do-wirespan-whole(env);
@@ -480,12 +502,17 @@ section [form.bml] {
    let id = nothing?(h) ? nothing() : dsv4-argmax(ctx);
    nothing?(id) ? nothing() : 1;
   }
-  // a fresh state for a new walk: the old one is freed (synced rounds) first
+   // Keep the prior state until the newly reserved state is admitted in full.
   def dvr-fresh-state(env) {
-   let freed = dsv4-free-state(dvr-sts(env));
    let ctx = dvr-ctx(env);
-   let sts = dsv4-new-state(ctx[2], ctx[0], record_get(env, "cap"));
-   nothing?(sts) ? nothing() : { let k = record_set(env, "sts", sts); 1; };
+    let session=record_get(env,"session");let ledger=fcms-release-ledger(session);let prior=record_get(ledger,"state");
+    let owner=fcms-phase-open(session,"DS4 validation fresh state",[["full-kv",dvl-kv-total(ctx[2],record_get(env,"cap"))]]);
+    let sts=dsv4-new-state-by(ctx[2],ctx[0],record_get(env,"cap"),bytes=>q38x-alloc(owner,bytes));
+    nothing?(sts) || !fcms-phase-ready(owner) ? nothing() : {
+     record_set(env,"sts",sts);record_set(ledger,"state",owner);record_set(ledger,"active-state",sts);
+     fcms-activate-parts(ledger,record_get(owner,"reservation"));
+     fcms-pending-release(prior) ? 1 : nothing();
+    };
   }
   def dvr-do-logits(env, ids) {
    let fresh = dvr-fresh-state(env);
@@ -551,32 +578,39 @@ section [form.bml] {
   }
   // free everything the window holds, give the lease back, answer the handles still held
   def dvr-release(env) {
-   let s = metal_sync();
-   let ctx = dvr-ctx(env);
-   let left = len(ctx) == 13 ? dsv4-close(ctx, dvr-sts(env)) : [];
-   let unleased = mg-release();
-   len(left);
+    let session=record_get(env,"session");let released=fcms-release-ok?(session);
+    record_set(env,"lease-released",released);record_set(env,"release-ok",released);
+    sum(map(q38x-owned,record_get(fcms-release-ledger(session),"pending-releases") ?? []));
   }
-  def dvr-record(env, status, reason, held) = record_new(0, "status", status, "reason", reason, "file", record_get(env, "file"), "bytes", record_get(env, "bytes"), "shared", record_get(env, "shared"), "cap", record_get(env, "cap"),
+   def dvr-release-reason(env,held) = held>0 ? "handles-held" : record_get(env,"release-ok")==1 ? "released" : "memory-lease-release-incomplete";
+   def dvr-record(env, status, reason, held) = record_new(0, "status", status, "reason", reason, "file", record_get(env, "file"), "bytes", record_get(env, "bytes"), "shared", record_get(env, "shared"), "own", record_get(env,"own"), "cap", record_get(env, "cap"),
     "cache", record_get(env, "cache"), "arena", record_get(env, "arena"), "organs", record_get(env, "organs"), "moved", record_get(env, "moved"), "denied", record_get(env, "denied"), "vmwin", dvr-window-vm-json(mg-sense(), record_get(env, "vm0"), dvr-stored-pages()),
     "stages", record_get(env, "log"), "ws-delta", record_get(env, "ws-delta"), "ws-slice", record_get(env, "ws-slice"), "ws-stack", record_get(env, "ws-stack"), "ws-kind", record_get(env, "ws-kind"),
     "matched", record_get(env, "matched"), "ids", record_get(env, "ids"), "margins", record_get(env, "margins"), "rgaps", record_get(env, "rgaps"), "deterministic", record_get(env, "deterministic"), "logits", record_get(env, "logits"),
-    "gaps", dvr-gaps(record_get(env, "m")), "elapsed", dvr-elapsed(env), "held", held);
+     "gaps", dvr-gaps(record_get(env, "m")), "elapsed", dvr-elapsed(env), "held", held,"release_ok",record_get(env,"release-ok"));
   def dvr-finish(env, opts, why) {
+    record_set(env,"original-why",record_get(env,"original-why") ?? why);record_set(env,"opts",opts);
    let held = dvr-release(env);
-   let status = why == "" ? "completed" : "aborted";
-   let r = dvr-record(env, status, why == "" ? (held == 0 ? "released" : "handles-held") : why, held);
-   let row = dvr-receipt-row(dvr-date(), now_unix_ms(), r);
+     let original=record_get(env,"original-why");let status=original=="" ? "completed" : "aborted";
+     let r=dvr-record(env,status,original=="" ? dvr-release-reason(env,held) : original,held);
+    let state=[held,record_get(env,"release-ok")];
+    if record_get(env,"receipt-state")!=state then {record_set(env,"receipt-row",dvr-receipt-row(dvr-date(),now_unix_ms(),r));record_set(env,"receipt-state",state);} else 0;
+    let row=record_get(env,"receipt-row");
    let wrote = dvr-append(dvr-text(opts, "receipt", dvr-receipt-path()), row);
    let said = print_str("[dsv4-validate] " ++ status ++ ": " ++ record_get(r, "reason") ++ "; handles still held " ++ held.str() ++ "; receipt row " ++ (wrote >= 0 ? "written" : "NOT written"));
-   status == "completed" && held == 0 ? 0 : 1;
+     record_set(env,"finished",record_get(env,"release-ok")==1 && wrote>=0);
+     status=="completed" && record_get(env,"finished")==1 ? 0 : 1;
   }
   def dvr-refuse(why, file) {
    let said = print_str("[dsv4-validate] REFUSED before anything opened: " ++ why);
    1;
   }
   // the window: the checks that must hold before anything opens, the lease, the stages
-  def dvr-window(opts) {
+   def dvr-window(opts) {
+    let prior=record_get(DVR-OWNED,"current");
+    record?(prior) && record_get(prior,"finished")!=1 ? dvr-finish(prior,record_get(prior,"opts"),record_get(prior,"original-why") ?? "window-interrupted") : dvr-window-start(opts);
+   }
+   def dvr-window-start(opts) {
    let file = dvr-text(opts, "file", dvr-file());
    let size = file_size(file);
    let src = size > 24 ? dvl-src(file) : "";
@@ -587,28 +621,32 @@ section [form.bml] {
   def dvr-window-leased(opts, file, size, m) {
    let cap = dvr-int(opts, "cap", dvr-default-cap());
    let cache = dvr-int(opts, "cache_experts", dls-cache-experts());
-   let shared = dls-shared(m, cache, cap);
-   let granted = mg-lease("dsv4 validation window", file, shared, mg-kv-margin());
-   !mg-granted?(granted) ? dvr-refuse(mg-line("dsv4 validation window", shared + mg-kv-margin(), granted), file) : dvr-window-run(opts, file, size, m, shared, cap, cache);
+    let slots = dvr-arena-slots(opts);
+    let shared = dls-shared(m, slots, cap);
+    let own = dls-own(m, slots, cap);
+     let env=dvr-prepare(opts,file,size,m,shared,cap,cache);
+     let why=try {
+      let session=record_get(env,"session");let grant=mg-lease-retaining("dsv4 validation window",file,shared,own,token=>fcms-retain-reservation(fcms-release-ledger(session),token));
+      record_set(env,"grant",grant);!mg-granted?(grant) ? mg-line("dsv4 validation window",shared+own,grant) : !dvr-own-reservation(env,grant) ? "reservation-partition-incomplete" : dvr-seq(dvr-steps(env,m,opts));
+     } catch "walker-stop";
+     dvr-finish(env,opts,why);
   }
-  def dvr-window-run(opts, file, size, m, shared, cap, cache) {
+    def dvr-prepare(opts,file,size,m,shared,cap,cache) {
    let organs = dvr-organs();
    let vm0 = mg-sense();
-   let env = dvr-env(file, m, size, shared, cap, cache, mg-wired(vm0), shared + mg-kv-margin());
+    let env = dvr-env(file, m, size, shared, cap, cache, mg-wired(vm0), shared + dls-own(m,dvr-arena-slots(opts),cap));
+     record_set(env,"session",fcms-none("DS4-validation-owner"));record_set(env,"opts",opts);record_set(env,"finished",0);record_set(DVR-OWNED,"current",env);
    let noted = record_set(env, "organs", dvr-organs-json(organs));
    let more = record_set(env, "vm0", vm0);
    let slots = record_set(env, "arena", dvr-arena-slots(opts));
    let said = print_str(dvr-organs-line(organs));
-   // a stop inside a stage is a backtrack point, not the end of the window: it reads as an abort, and the handles, the lease and the receipt follow
-   let why = try dvr-seq(dvr-steps(env, m, opts)) catch "walker-stop";
-   dvr-finish(env, opts, why);
+    env;
   }
   // the header names tensors the driver cannot run: the window cannot succeed, so nothing is mapped or compiled, any lease this process holds is given back, and the receipt names the gaps
   def dvr-refuse-gaps(opts, file, size, m) {
    let cap = dvr-int(opts, "cap", dvr-default-cap());
    let cache = dvr-int(opts, "cache_experts", dls-cache-experts());
-   let env = dvr-env(file, m, size, dls-shared(m, cache, cap), cap, cache, 0, 0);
-   let unleased = mg-release();
+    let env = dvr-env(file, m, size, 0, cap, cache, 0, 0);
    let row = dvr-receipt-row(dvr-date(), now_unix_ms(), dvr-record(env, "refused", "driver-gaps", 0));
    let wrote = dvr-append(dvr-text(opts, "receipt", dvr-receipt-path()), row);
    let said = print_str("[dsv4-validate] REFUSED before anything was mapped: the driver cannot run " ++ len(dvr-gaps(m)).str() ++ " things this file holds (" ++ flp-join(dvr-gaps(m), "; ") ++ "); receipt row " ++ (wrote >= 0 ? "written" : "NOT written"));

@@ -41,11 +41,13 @@ kernel void fcsam_merge(device const float* values [[buffer(0)]],device const ui
   // [vocabulary, pipelines, owned buffers, initial seed, current RNG, draws,
   //  aggregate diagnostics]. Diagnostics contain no token IDs or text.
   // Even partial admission owns its positive buffer handles until close.
-  def fcsam-open(vocab,seed) = if (!(fcsam-seed-valid(seed) && fcsam-vocab-valid(vocab))) then [] else {
+   def fcsam-buffer-sizes(vocab) = [(Partitions()*TopK())*4,(Partitions()*TopK())*4,TopK()*4,TopK()*4,vocab*4];
+   def fcsam-private-bytes(vocab) = foldl((n,bytes)=>n+bytes,0,fcsam-buffer-sizes(vocab));
+   def fcsam-open(vocab,seed) = fcsam-open-by(vocab,seed,metal_buf_alloc);
+   def fcsam-open-by(vocab,seed,allocate) = if (!(fcsam-seed-valid(seed) && fcsam-vocab-valid(vocab))) then [] else {
    let source = fcsam-msl();
    let pipes = [metal_pipeline(source,"fcsam_parts"),metal_pipeline(source,"fcsam_merge"),metal_pipeline(source,"fcsam_clear")];
-   let bytes = ((Partitions() * TopK()) * 4);
-   let buffers = [metal_buf_alloc(bytes),metal_buf_alloc(bytes),metal_buf_alloc((TopK() * 4)),metal_buf_alloc((TopK() * 4)),metal_buf_alloc((vocab * 4))];
+    let buffers=map(allocate,fcsam-buffer-sizes(vocab));
    [vocab,pipes,buffers,seed,seed,0,[0,0,0,0.0]];
   };
   def fcsam-live(owner) = if (len(owner) < 6) then 0 else (fcsam-positive(owner[1]) && fcsam-positive(owner[2]));
@@ -103,13 +105,16 @@ kernel void fcsam_merge(device const float* values [[buffer(0)]],device const ui
   // committed exactly once by step; the last emitted ID stays pending at cap.
   // [ids,pending,position,stopped,owner,reason]. The caller supplies its existing
   // forward and progress functions; sampling never replays a prompt or state.
-  def fcsam-walk(session,owner,logits,step,pulse,pos,left,stops,out,untilPulse,width,completed) {
+   def fcsam-walk(session,owner,logits,step,pulse,pos,left,stops,out,untilPulse,width,completed) = fcsam-walk-observed(nothing(),session,owner,logits,step,pulse,pos,left,stops,out,untilPulse,width,completed);
+   def fcsam-progress(progress,owner,pos,id,stopped,ids) = value_kind(progress)=="closure" ? progress(owner,pos,id,stopped,ids) : 0;
+   def fcsam-walk-observed(progress,session,owner,logits,step,pulse,pos,left,stops,out,untilPulse,width,completed) {
    let chosen = fcsam-draw(owner,logits); let id = chosen[0]; let next = chosen[1];
    if (id < 0) then [out,-1,pos,0,next,"sampling-candidates-unavailable"]
-   else if q38-stop?(id,stops) then [out,id,pos,1,next,""]
+    else if q38-stop?(id,stops) then {fcsam-progress(progress,next,pos,id,1,out);[out,id,pos,1,next,""];}
    else if (!fcsam-mark(next,id)) then [out,-1,pos,0,next,"sampling-presence-write-failed"]
    else {
     let output = append(out,[id]); let count = (completed + 1);
+     fcsam-progress(progress,next,pos,id,0,output);
     if (untilPulse <= 1) then pulse(count) else 0;
     if ((Comparable) left == 1) then [output,id,pos,0,next,""]
     else if (step(session,id,pos) < 0) then {
@@ -117,10 +122,11 @@ kernel void fcsam_merge(device const float* values [[buffer(0)]],device const ui
      oh-voice(oh-reading("native-coding","code." + host_pid().str(),"sampled-forward",json-node-int(1),json-node-int(0),json-node-int(0),[oh-need("model-forward",json-node-object([oh-n("position",pos),oh-s("device",device)]))],["retain-checkpoint-and-release"],json-node-object([oh-s("cause","sampling-forward-failed"),oh-n("position",pos),oh-s("device",device)])));
      [output,-1,(pos + 1),0,next,"sampling-forward-failed"];
     }
-    else fcsam-walk(session,next,logits,step,pulse,(pos + 1),(left - 1),stops,output,if (untilPulse <= 1) then (width * 2) else (untilPulse - 1),if (untilPulse <= 1) then (width * 2) else width,count);
+     else fcsam-walk-observed(progress,session,next,logits,step,pulse,(pos + 1),(left - 1),stops,output,if (untilPulse <= 1) then (width * 2) else (untilPulse - 1),if (untilPulse <= 1) then (width * 2) else width,count);
    };
   }
-  def fcsam-run(session,owner,logits,step,pulse,pos,limit,stops) = if (!fcsam-reset(owner)) then [[],-1,pos,0,owner,"sampling-reset-failed"] else fcsam-walk(session,owner,logits,step,pulse,pos,limit,stops,[],1,1,0);
+   def fcsam-run(session,owner,logits,step,pulse,pos,limit,stops) = fcsam-run-observed(nothing(),session,owner,logits,step,pulse,pos,limit,stops);
+   def fcsam-run-observed(progress,session,owner,logits,step,pulse,pos,limit,stops) = if (!fcsam-reset(owner)) then [[],-1,pos,0,owner,"sampling-reset-failed"] else fcsam-walk-observed(progress,session,owner,logits,step,pulse,pos,limit,stops,[],1,1,0);
  }
  0;
 }

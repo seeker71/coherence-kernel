@@ -185,16 +185,15 @@ section [form.bml] {
     // buffers are independent allocations owned by the adapter, so this is an
     // overlay on an activation, never an in-place patch of the immutable GGUF.
     def q38-lora-rank1-valid?(adapter, width) = (Comparable) len(adapter) == 5 ? (Comparable) adapter[3] == width ? adapter[0] > 0 ? adapter[1] > 0 ? adapter[2] > 0 ? 1 : 0 : 0 : 0 : 0 : 0;
-    def q38-lora-rank1-open(a-bytes, b-bytes, width, alpha-bits) = (width > 0 ? (Comparable) len(a-bytes) == width * 4 ? (Comparable) len(b-bytes) == width * 4 : 0 : 0) ? {
-        let ah = metal_buf_alloc(width * 4);
-        let bh = metal_buf_alloc(width * 4);
-        let dh = metal_buf_alloc(4);
-        ((Comparable) metal_buf_write(ah, 0, a-bytes) == width * 4 ? (Comparable) metal_buf_write(bh, 0, b-bytes) == width * 4 ? 1 : 0 : 0) ? [ah, bh, dh, width, alpha-bits] : {
-            metal_buf_free(ah);
-            metal_buf_free(bh);
-            metal_buf_free(dh);
-            [];
-        };
+    def q38-lora-rank1-open(a-bytes,b-bytes,width,alpha-bits) = q38-lora-rank1-open-by(a-bytes,b-bytes,width,alpha-bits,metal_buf_alloc);
+    def q38-lora-rank1-open-by(a-bytes, b-bytes, width, alpha-bits,allocate) = (width > 0 ? (Comparable) len(a-bytes) == width * 4 ? (Comparable) len(b-bytes) == width * 4 : 0 : 0) ? {
+        let ah = allocate(width * 4);
+        let bh = allocate(width * 4);
+        let dh = allocate(4);
+        let written=ah>0 && bh>0 && dh>0 && metal_buf_write(ah,0,a-bytes)==width*4 && metal_buf_write(bh,0,b-bytes)==width*4;
+        // A refused write still returns its owned handles; width zero refuses
+        // forward admission while the ordinary close can release the partial.
+        [ah,bh,dh,written ? width : 0,alpha-bits];
     } : [];
     def q38-lora-rank1-close(adapter) = (Comparable) len(adapter) == 5 ? sum([metal_buf_free(adapter[0]), metal_buf_free(adapter[1]), metal_buf_free(adapter[2])]) : 0;
     def q38-lora-rank1-apply-pipes(dot-pipe, add-pipe, xh, adapter, width) = (Comparable) q38-lora-rank1-valid?(adapter, width) == 1 ? {
@@ -216,6 +215,10 @@ section [form.bml] {
     def q38-layer(src, base, path, tabs, l, interval) = kth-full?(l, interval) ? append(q38-layer-common(src, base, path, tabs, l), [q38-tv-for(src, base, path, tabs, 14, l), q38-tv-for(src, base, path, tabs, 15, l), q38-tv-for(src, base, path, tabs, 16, l), q38-tv-for(src, base, path, tabs, 17, l), q38-tv-for(src, base, path, tabs, 18, l), q38-tv-for(src, base, path, tabs, 19, l)]) : append(q38-layer-common(src, base, path, tabs, l), [q38-tv-for(src, base, path, tabs, 5, l), q38-tv-for(src, base, path, tabs, 6, l), q38-tv-for(src, base, path, tabs, 7, l), q38-tv-for(src, base, path, tabs, 8, l), q38-tv-for(src, base, path, tabs, 9, l), q38-tv-for(src, base, path, tabs, 10, l), q38-tv-for(src, base, path, tabs, 11, l), q38-tv-for(src, base, path, tabs, 12, l), q38-tv-for(src, base, path, tabs, 13, l)]);
     def q38-layers-go(src, base, path, tabs, l, n, interval, acc) = l >= n ? acc : q38-layers-go(src, base, path, tabs, (Number) l + (Number) 1, n, interval, append(acc, [q38-layer(src, base, path, tabs, l, interval)]));
     def q38-layers(src, base, path, n, interval) = q38-layers-go(src, base, path, q38-tabs(src), 0, n, interval, []);
+    def q38-layers-by(src,base,path,n,interval,from-file) {
+        let tabs=q38-tabs(src);
+        map(l=>map(k=>kth-tv-at-by(src,base,path,gti-off-for(nth(tabs,k),l),from-file),append(range(0,5),kth-full?(l,interval) ? range(14,20) : range(5,14))),range(0,n));
+    }
     // Each block is its records (the *-recs below) run in order: one definition of every dispatch, run directly by the blocks and
     // built once into a plan by q38-plan.
     def q38-linear-attn-recs(ps, bs, geo, lay, st) = append([
@@ -920,13 +923,20 @@ section [form.bml] {
     };
     def q38-full-layers(n, interval) = interval <= 0 ? n : n / interval;
     def q38-linear-bytes(geo) = (geo[1] * geo[23] * 4) + (geo[3] * geo[5] * geo[4] * 4);
-    def q38-state-bytes(geo) = {
+    def q38-stream-bytes(geo) = {
         let n = geo[21];
         let full = q38-full-layers(n, geo[22]);
         let linear = n - full;
-        (full * (2 * (geo[20] * geo[18] * 4))) + (linear * (2 * q38-linear-bytes(geo)));
+        (full * (2 * (geo[20] * geo[18] * 4))) + (linear * q38-linear-bytes(geo));
     };
+    def q38-state-bytes(geo) = q38-stream-bytes(geo)+(geo[21]-q38-full-layers(geo[21],geo[22]))*q38-linear-bytes(geo);
     def q38-own-bytes(geo, span) = q38-scratch-bytes(geo, span) + q38-state-bytes(geo);
+    // Ordinary sessions allocate one stream. Spare recurrent state belongs to
+    // the checkpoint or speculative owner that actually allocates it.
+    def q38-position-scratch-bytes(geo,span) = 8 * geo[12] * geo[18] * span;
+    def q38-full-kv-bytes(geo) = 8 * q38-full-layers(geo[21],geo[22]) * geo[20] * geo[18];
+    def q38-recurrent-bytes(geo) = (geo[21]-q38-full-layers(geo[21],geo[22])) * q38-linear-bytes(geo);
+    def q38-session-parts(geo,span,wear) = [["scratch",q38-scratch-bytes(geo,span)-q38-position-scratch-bytes(geo,span)], ["position-scratch",q38-position-scratch-bytes(geo,span)], ["full-kv",q38-full-kv-bytes(geo)], ["recurrent",q38-recurrent-bytes(geo)], ["wear",wear]];
     // Returns the same setup shape as KAT plus the selected path at index 9.  No model path or model
     // geometry is compiled in.  The header window is a carrier window; egg-data-base determines the
     // real data boundary (10,996,704 bytes on the observed Qwen3.8 Q8_0 file).
@@ -934,8 +944,10 @@ section [form.bml] {
     // q38-open is q38-open-span at span 1 — the same allocation the lane has
     // always made. ctx slot 10 carries the span so the stack can read it.
     def q38-open(path, maxpos) = q38-open-span(path, maxpos, 1);
-    def q38-open-span(path, maxpos, span) = gpu-lease-turn("qwen model open", () => q38-open-span-owned(path,maxpos,span));
-    def q38-open-span-owned(path, maxpos, span) =     // The header is read once.  Its required extent decides admission and
+    def q38-open-span(path,maxpos,span) = q38-open-span-by(path,maxpos,span,metal_buf_alloc,metal_buf_from_file);
+    def q38-open-span-by(path,maxpos,span,allocate,from-file) = gpu-lease-turn("qwen model open",()=>q38-open-span-owned-by(path,maxpos,span,allocate,from-file));
+    def q38-open-span-owned(path,maxpos,span) = q38-open-span-owned-by(path,maxpos,span,metal_buf_alloc,metal_buf_from_file);
+    def q38-open-span-owned-by(path, maxpos, span,allocate,from-file) =     // The header is read once.  Its required extent decides admission and
     // the same retained source then feeds every open step below; a second
     // header read was pure bookkeeping with no new authority or knowledge.
 {
@@ -963,22 +975,23 @@ section [form.bml] {
             // gone rather than merely that the new one be present.
             let _scratch-begin = q38oo-scratch-begin();
             let convcap = qlslc-bs2-allocation-capacity(geo);
-            let bs = kth-bufs-span(geo[0], convcap, geo[3] * geo[5], geo[3], geo[10], 1, geo[12] * geo[14], geo[20], maxpos, geo[12], geo[19], span);
+            let bs = kth-bufs-span-by(geo[0], convcap, geo[3] * geo[5], geo[3], geo[10], 1, geo[12] * geo[14], geo[20], maxpos, geo[12], geo[19], span,allocate);
             let _scratch-ready = q38oo-scratch-ready();
             let _layer-begin = q38oo-layer-begin();
-            let lays = q38-layers(src, base, path, geo[21], geo[22]);
+            let lays = q38-layers-by(src, base, path, geo[21], geo[22],from-file);
             let _layer-ready = q38oo-layer-ready();
             let _tensor-begin = q38oo-tensor-begin();
-            let embTv = kth-tv-at(src, base, path, egg-find-tensor(src, "token_embd.weight"));
-            let onormTv = kth-tv-at(src, base, path, egg-find-tensor(src, "output_norm.weight"));
-            let projTv = kth-tv-at(src, base, path, egg-find-tensor(src, "output.weight"));
+            let embTv = kth-tv-at-by(src, base, path, egg-find-tensor(src, "token_embd.weight"),from-file);
+            let onormTv = kth-tv-at-by(src, base, path, egg-find-tensor(src, "output_norm.weight"),from-file);
+            let projTv = kth-tv-at-by(src, base, path, egg-find-tensor(src, "output.weight"),from-file);
             let _tensor-ready = q38oo-tensor-ready();
             let _open-ready = q38oo-open-ready();
             [ps, bs, geo, lays, embTv, onormTv, projTv, src, base, path, span];
         };
     };
     def q38-ctx-span(ctx) = len(ctx) > 10 ? ctx[10] : 1;
-    def q38-new-state(geo) = kth-stream-state(geo[21], geo[22], geo[1], geo[23], geo[3], geo[5], geo[4], geo[20], geo[18]);
+    def q38-new-state-by(geo,allocate) = kth-stream-state-by(geo[21], geo[22], geo[1], geo[23], geo[3], geo[5], geo[4], geo[20], geo[18],allocate);
+    def q38-new-state(geo) = q38-new-state-by(geo,metal_buf_alloc);
     // ================= per-turn context recycling =================
     // The stream state holds two different truths. Full-attention layers
     // keep position-indexed K/V (written at pos*kvd, read to pos+1), so
@@ -990,8 +1003,10 @@ section [form.bml] {
     // copy kernel (pipeline 32); nothing crosses the CPU membrane.
     def q38-recur-conv-n(geo) = geo[1] * geo[23];
     def q38-recur-delta-n(geo) = geo[3] * geo[5] * geo[4];
-    def q38-spare-go(l, n, interval, convn, deltan, acc) = l >= n ? acc : q38-spare-go((Number) l + (Number) 1, n, interval, convn, deltan, append(acc, kth-full?(l, interval) ? [[0, 0]] : [[metal_buf_alloc(convn * 4), metal_buf_alloc(deltan * 4)]]));
-    def q38-spare-state(geo) = q38-spare-go(0, geo[21], geo[22], q38-recur-conv-n(geo), q38-recur-delta-n(geo), []);
+    def q38-spare-go(l,n,interval,convn,deltan,acc) = q38-spare-go-by(l,n,interval,convn,deltan,acc,metal_buf_alloc);
+    def q38-spare-go-by(l, n, interval, convn, deltan, acc,allocate) = l >= n ? acc : q38-spare-go-by((Number) l + (Number) 1, n, interval, convn, deltan, append(acc, kth-full?(l, interval) ? [[0, 0]] : [[allocate(convn * 4), allocate(deltan * 4)]]),allocate);
+    def q38-spare-state(geo) = q38-spare-state-by(geo,metal_buf_alloc);
+    def q38-spare-state-by(geo,allocate) = q38-spare-go-by(0,geo[21],geo[22],q38-recur-conv-n(geo),q38-recur-delta-n(geo),[],allocate);
     def q38-copy-buf(ps, src, dst, n) = metal_enqueue(ps[32], kth-b16([src, dst], [n, 0]), n);
     // The native Metal door reports a refused enqueue as 0; acceptance is 1.
     def q38-recur-copied(a,b) = a == 1 && b == 1 ? 2 : -1;
@@ -1049,6 +1064,7 @@ section [form.bml] {
     def q38-forward-weight-bytes(ctx) = sum([q38-tv-row-bytes(ctx[4]), q38-tv-storage-bytes(ctx[5]), q38-tv-storage-bytes(ctx[6]), q38-layers-storage-bytes(ctx[3])]);
     def q38-state-row-handle-count(row) = sum([row[0] > 0 ? 1 : 0, row[1] > 0 ? 1 : 0, row[2] > 0 ? 1 : 0, row[3] > 0 ? 1 : 0]);
     def q38-state-handle-count(sts) = (Comparable) len(sts) == 0 ? 0 : (Number) q38-state-row-handle-count(sts[0]) + (Number) q38-state-handle-count(sts[1:]);
+    def q38-state-complete?(state,geo) = len(state)==geo[21] && q38-state-handle-count(state)==2*geo[21] && q38-state-ok?(state);
     def q38-close-expected(ctx, sts) = (Number) len(ctx[1]) + (Number) ((Number) q38-layer-handle-count(ctx[3]) + (Number) ((Number) 3 + (Number) ((Number) q38-tv-extra(ctx[6]) + (Number) q38-state-handle-count(sts))));
     def q38-close(ctx, sts) = {
         metal_sync();

@@ -107,7 +107,26 @@ section [form.bml] {
     // read), and a division keeps lo-div's rule: the divisor is a nonzero literal.
     def lo-arith-tag?(t) = ((Comparable) t == 3) || (((Comparable) t == 4) || (((Comparable) t == 5) || ((Comparable) t == 8)));
     def lo-tree-ok?(prog, i) = lo-arith-tag?(lo-tag(prog, i)) ? (((Comparable) lo-tag(prog, i) == 8) ? lo-div-safe?(prog, i) : 1) : 0;
-    def lo-tree(prog, i, argr, depth) = lo-lit?(prog, i) ? fa-movz(0, lo-val(prog, i)) : lo-arg?(prog, i) ? fa-mov(0, lo-argr(prog, i, argr)) : (Comparable) lo-tree-ok?(prog, i) == 0 ? nothing() : lo-tree-bin(prog, i, argr, depth, 9 + depth);
+    def lo-tree(prog, i, argr, depth) = lo-lit?(prog, i) ? fa-movz(0, lo-val(prog, i)) : lo-arg?(prog, i) ? fa-mov(0, lo-argr(prog, i, argr)) : depth >= 7 || (Comparable) lo-tree-ok?(prog, i) == 0 ? nothing() : lo-tree-bin(prog, i, argr, depth, 9 + depth);
+    // The typed u32 door uses this same lowerer. Admission constrains the V1
+    // tree; executable-page ownership and release stay with jit_leaf_inram.
+    def lo-u32?(x) = value_kind(x)=="int" && x>=0 && x<=4294967295;
+    def lo-u32-row?(prog,row,i) = value_kind(row)!="list" || nil?(row) || !lo-u32?(row[0]) ? 0
+        : row[0]==1 ? len(row)==2 && lo-u32?(row[1]) && row[1]<=65535
+        : row[0]==2 ? len(row)==1
+        : row[0]!=3 && row[0]!=4 && row[0]!=5 ? 0
+        : len(row)!=3 || !lo-u32?(row[1]) || !lo-u32?(row[2]) || row[1]>=i || row[2]>=i ? 0
+        : row[0]==5 || prog[row[2]][0]!=1 || prog[row[2]][1]<=4095;
+    def lo-u32-program?(prog,i) = i==len(prog) ? i>0
+        : lo-u32-row?(prog,prog[i],i) && lo-u32-program?(prog,i+1);
+    // Same buffer ABI as the compiler's jit_cpu_run rewrite; host memory is
+    // carried by float_leaf's existing CPU image mode.
+    def jit_cpu_run(request) = float_leaf(58,request);
+    def jit_arm64_u32_leaf(prog,root,arg) = value_kind(prog)!="list" || !lo-u32?(root) || root>=len(prog) || !lo-u32?(arg) ? nothing()
+        : !lo-u32-program?(prog,0) ? nothing() : {
+            let image=lo-app(fa-mov(1,0),lo-app(lo-node(prog,root,1),fa-ret()));
+            nothing?(image) ? nothing() : jit_leaf_inram(image,arg);
+        };
     // COND(CMP(ARG, LIT i), then, else) — the control-flow scheme with computed
     // branch offsets (in instructions = bytes/4):
     //   cmp w<argr>,#i ; b.<skip> +(len(then)+2) ; then ; b +(len(else)+1) ; else

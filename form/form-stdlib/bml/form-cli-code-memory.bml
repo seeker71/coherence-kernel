@@ -37,7 +37,23 @@ section [form.bml] {
   def fcam-packet-valid(n, kind, scope) = !fat-wire-object?(n) ? 0 : !(((String) fcap-string(n, "schema") == "form-code-continuity-v1") && ((String) fcap-string(n, "kind") == kind)) ? 0 : fcam-payload-valid(json-object-get(n, "payload"), fcap-string(n, "digest"), scope);
   // json-serves: the next process that reads this checkpoint. text: the digest is checked against the same canonical bytes that were written.
   def fcam-payload-valid(payload, digest, scope) = !fat-wire-array?(payload) ? 0 : !((Comparable) len(node_children(payload)) == 2) ? 0 : (((String) digest == fcam-hash(json-emit(payload))) && ((String) node_value(node_children(payload)[0]) == scope));
-  def fcam-read(path) = file_size(path) <= 0 ? nothing() : read_form_binary(path);
+   // Early rewrite checkpoints used trivial strings as JSON categories. Adapt
+   // only composite category positions here; ordinary strings keep their bytes.
+   // The original packet digest, caller contract and state checks still decide
+   // admission. An ambiguous old scalar or unknown category therefore refuses.
+   def fcam-legacy-json-kind(n) = value_kind(n)!="node_id" || node_level(n)!=2 ? "" : {
+    let category=node_category(n);
+    node_level(category)==1 && node_type(category)==2 && node_eq(node_category(category),category) ? node_value(category) : "";
+   };
+   def fcam-json-category(name) = fat-has(["JSON-OBJECT","E-JSON-OBJECT","JSON-BNF-OBJECT"],name) ? JSON-OBJECT()
+    : fat-has(["JSON-ARRAY","E-JSON-ARRAY","JSON-BNF-ARRAY"],name) ? JSON-ARRAY()
+    : fat-has(["JSON-PAIR","E-JSON-PAIR","JSON-BNF-PAIR"],name) ? JSON-PAIR()
+    : fat-has(["JSON-NULL","E-JSON-NULL","JSON-BNF-NULL"],name) ? JSON-NULL() : nothing();
+   def fcam-current-json(n) {
+    let category=fcam-json-category(fcam-legacy-json-kind(n));
+    nothing?(category) ? n : intern_node(category,map(fcam-current-json,node_children(n)));
+   };
+   def fcam-read(path) = file_size(path) <= 0 ? nothing() : fcam-current-json(read_form_binary(path));
   def fcam-state-from(n) = fcam-unpack(node_children(json-object-get(n, "payload"))[1]);
   def fcam-save(s) = !fcam-managed(s) ? 1 : (String) fcap-stage(s) == "attention" ? 1 : try fcam-write(fcam-path(fcam-root(s), fcam-id(s), "checkpoint"), fcam-packet(s, "checkpoint")) catch false;
   // A checkpoint and its exact lesson carry one payload and one digest.
@@ -50,7 +66,7 @@ section [form.bml] {
   // A completed repair is learned twice: under its exact contract, and as its family's repairs. Only the
   // exact lesson answers. The family record is guidance, so a family write that did not land speaks as a
   // native-coding reading and never demotes the candidate.
-  def fcam-learnable(s) = fcam-managed(s) && (String) fcap-stage(s) == "complete" && !nil?(fcap-reflections(s));
+  def fcam-learnable(s) = fcam-managed(s) && !fcam-evaluation(s) && (String) fcap-stage(s) == "complete" && !nil?(fcap-reflections(s));
   def fcam-learn(s) = fcam-learnable(s) ? fcam-learn-packet(s,fcam-packet(s,"lesson")) : 1;
   def fcam-learn-packet(s,packet) = fcam-learned(s,fcam-write(fcam-path(fcam-root(s),fcam-hash(fcam-contract(s)),"lesson"),packet));
   def fcam-learned(s, exact) {
@@ -106,7 +122,7 @@ section [form.bml] {
   // Recalled guidance enters the brief once, at admission. Direct entry never rewrites the brief, so it
   // stays frozen for the attempt: across renewal, resume, and a family lesson patched meanwhile. Staged
   // entry hands it to the refine role, whose own brief replaces it after one reply.
-  def fcam-family-recall(s) = fcap-reviewing(s) ? s : fcam-family-recalled(s, fcam-family-key(s), fcam-family-read(fcam-root(s), fcam-family-key(s)));
+  def fcam-family-recall(s) = fcap-reviewing(s) || fcam-evaluation(s) ? s : fcam-family-recalled(s, fcam-family-key(s), fcam-family-read(fcam-root(s), fcam-family-key(s)));
   def fcam-family-recalled(s, family, record) = nothing?(record) ? s : ((String) fcam-family-guidance(record) == "") ? s : {
    let touched = fcam-family-put(fcam-root(s), family, fcam-family-merge(record, family, [["recall_hits", json-node-int(fcam-family-int(record, "recall_hits") + 1)], ["last_recalled_ms", json-node-int(now_unix_ms())]]));
    let brief = (String) s[6] == "" ? fcam-family-guidance(record) : (s[6] ++ "\n" ++ fcam-family-guidance(record));
@@ -128,18 +144,23 @@ section [form.bml] {
   };
   def fcam-family-sweep(root, now) = !fs-is-dir?(root) ? 0 : foldl((moved, name) => moved + fcam-family-cool(root, now, name), 0, fs-list(root));
   def fcam-state-valid(s, initial) = !((Comparable) len(s) == 14) ? 0 : !(fat-has(["code", "review"], fcap-mode(s)) && ((String) fcap-mode(s) == fcap-mode(initial))) ? 0 : fcap-reviewing(s) && (!((Value) initial[2] == fcap-docs(s))) ? 0 : (fat-has(["refine", "plan", "split", "implement", "review", "repair", "complete"], fcap-stage(s)) && (((Value) s[1] == initial[1]) && (((Value) s[2] == initial[2]) && (((Value) s[4] == initial[4]) && (fat-docs-valid(fcap-docs(s), []) && fcap-readonly-preserved(initial[2], fcap-docs(s), initial[4]))))));
-  def fcam-prepare(root, initial, checks, resume, checker) {
+  def fcam-prepare(root,initial,checks,resume,checker) = fcam-prepare-owned(root,initial,checks,resume,checker,0);
+  def fcam-prepare-owned(root, initial, checks, resume, checker, evaluation) {
    let made = fs-mkdir(root);
    let scope = fcam-work-scope(initial, checks);
    let id = fcam-hash(scope) + ("-" + (host_pid().str() + ("-" + now_unix_ms().str())));
-   let state = fcam-with(initial, [root, (String) resume == "" ? id : resume, scope, 0]);
+   let context = [root, (String) resume == "" ? id : resume, scope, 0];
+   let state = fcam-with(initial,evaluation ? append(context,[1]) : context);
    (String) resume == "" ? fcam-recall(state, checker) : !fcam-id-valid(resume) ? fcap-terminal(state, "invalid-checkpoint-id") : fcam-resume(state, fcam-read(fcam-path(root, resume, "checkpoint")), checker);
   }
   def fcam-resume(initial, packet, checker) = !fcam-packet-valid(packet, "checkpoint", fcam-contract(initial)) ? fcap-terminal(initial, "checkpoint-absent-corrupt-or-contract-changed") : fcam-resume-state(initial, fcam-state-from(packet), checker);
-  def fcam-resume-state(initial, saved, checker) = !fcam-state-valid(saved, initial) ? fcap-terminal(initial, "checkpoint-state-refused") : fcam-resume-ready(fcam-with(saved, [fcam-root(initial), fcam-id(initial), fcam-contract(initial), fcam-hits(saved)]), checker);
+  def fcam-resume-state(initial, saved, checker) = !fcam-state-valid(saved, initial) || !fcam-managed(saved) || fcam-evaluation(initial) != fcam-evaluation(saved) ? fcap-terminal(initial, "checkpoint-state-refused") : {
+   let context=[fcam-root(initial),fcam-id(initial),fcam-contract(initial),fcam-hits(saved)];
+   fcam-resume-ready(fcam-with(saved,fcam-evaluation(initial) ? append(context,[1]) : context),checker);
+  };
   def fcam-resume-ready(s, checker) = !((String) fcap-stage(s) == "complete") ? s : fcam-resume-checked(fcap-count-check(s), fcap-check-state(s, checker));
-  def fcam-resume-checked(s,result) = fcap-verified(s,result);
-  def fcam-recall(s, checker) = fcam-recall-packet(s, fcam-read(fcam-path(fcam-root(s), fcam-hash(fcam-contract(s)), "lesson")), checker);
+  def fcam-resume-checked(s,result) = fcap-counters-from(fcap-verified(s,result),s);
+  def fcam-recall(s, checker) = fcam-evaluation(s) ? s : fcam-recall-packet(s, fcam-read(fcam-path(fcam-root(s), fcam-hash(fcam-contract(s)), "lesson")), checker);
   def fcam-recall-packet(s, packet, checker) = !fcam-packet-valid(packet, "lesson", fcam-contract(s)) ? fcam-family-recall(s) : fcam-recall-state(s, fcam-state-from(packet), checker);
   def fcam-recall-state(s, prior, checker) = !fcam-state-valid(prior, s) ? s : !((String) fcap-stage(prior) == "complete") ? s : fcam-recall-checked(fcap-count-check(s), prior, fcap-check-state(prior, checker));
   def fcam-recall-checked(s, prior, result) = fcap-check-passed?(result) ? fcam-recall-ready(s, prior, result) : fcam-recall-refused(s,prior,result);

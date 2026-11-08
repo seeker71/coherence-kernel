@@ -44,6 +44,7 @@ section [form.bml] {
     };
     // a renewal's fresh stream: the owner's context starts again at position 0 and the new stream is its stream (the old stream's rows are overwritten as the new ones commit)
     def fcsp-renew-tap(s) = fcsp-has?(s) == 1 && q38x-on?(fcsp-owner(s)) == 1 ? {
+        record_set(fcsp-owner(s), "stamp", nothing());
         record_set(fcsp-owner(s), "committed", 0);
         fcsp-tap(s);
     } : nothing();
@@ -53,23 +54,31 @@ section [form.bml] {
     } : s;
     // ── open ──
     // the owner for a stream context: opened and leased, or a record that names why speculation is off for this session
-    def fcsp-open(path, ctx, maxpos) = !fcsp-wanted?() ? q38x-off("spec-off:disabled-by-FORM_SPEC") : fcsp-open-for(path, ctx, maxpos, fcsp-drafter-path(path));
+    def fcsp-open(path,ctx,maxpos) = fcsp-open-retaining(path,ctx,maxpos,q38x-off("spec-opening"));
+    def fcsp-off(owner,reason) {record_set(owner,"reason",reason);owner;}
+    def fcsp-open-retaining(path,ctx,maxpos,owner) = !fcsp-wanted?() ? fcsp-off(owner,"spec-off:disabled-by-FORM_SPEC") : fcsp-open-for-owned(owner,path,ctx,maxpos,fcsp-drafter-path(path));
     // A single-token cursor cannot use a drafted block. Choose its owner before
     // prefill so it never leases a drafter or records hidden states for one.
     def fcsp-open-plain(path, ctx, maxpos) = q38x-off("spec-off:single-token-cursor");
-    def fcsp-open-for(path, ctx, maxpos, dpath) = (String) dpath == "" ? q38x-off("spec-off:no-drafter-for-model") : len(ctx) < 11 || q38-ctx-span(ctx) < 2 ? q38x-off("spec-off:prefill-span-1") : (file_size(dpath) ?? 0) <= 0 ? q38x-off("spec-off:drafter-file-missing") : fcsp-lease(ctx, maxpos, dpath);
-    def fcsp-lease(ctx, maxpos, dpath) = {
+    def fcsp-open-plain-retaining(path,ctx,maxpos,owner) = fcsp-off(owner,"spec-off:single-token-cursor");
+    def fcsp-open-for(path,ctx,maxpos,dpath) = fcsp-open-for-owned(q38x-off("spec-opening"),path,ctx,maxpos,dpath);
+    def fcsp-open-for-owned(owner,path,ctx,maxpos,dpath) = (String) dpath == "" ? fcsp-off(owner,"spec-off:no-drafter-for-model") : len(ctx) < 11 || q38-ctx-span(ctx) < 2 ? fcsp-off(owner,"spec-off:prefill-span-1") : (file_size(dpath) ?? 0) <= 0 ? fcsp-off(owner,"spec-off:drafter-file-missing") : fcsp-lease(owner,ctx,maxpos,dpath);
+    def fcsp-lease(owner,ctx,maxpos,dpath) = {
         let shared = file_size(dpath);
-        let own = q38x-own-bytes(ctx, maxpos);
-        let granted = mg-lease("drafter " ++ dpath, "", shared, own);
-        !mg-granted?(granted) ? q38x-off("spec-off:drafter-memory-held:" ++ granted[1]) : fcsp-opened(q38x-open(ctx, dpath, maxpos), shared + own);
+        let plan=q38x-plan(ctx,dpath,maxpos);let own=q38x-own-bytes(plan);
+        let granted=mg-lease-retaining("drafter " ++ dpath,dpath,shared,own,token=>record_set(owner,"reservation",token));
+        let token=mg-reservation-of(granted);
+        if record?(token) then record_set(owner,"reservation",token) else 0;
+        record_set(owner,"lease-bytes",shared+own);
+        record_set(owner,"allocation-bytes",own);record_set(owner,"drafter-layers",plan[0][2]);record_set(owner,"capture-rows",plan[0][3]);
+        if !mg-granted?(granted) then fcsp-off(owner,"spec-off:drafter-memory-held:" ++ granted[1]) else q38x-open-owned(owner,ctx,dpath,maxpos,plan);
+        if mg-granted?(granted) && q38x-on?(owner)==1 then mg-reservation-ack(mg-reservation-part(token,"allocation"),own) else 0;
+        if q38x-owned(owner)==0 then fcsp-release-reservation(owner) else 0;
+        owner;
     };
-    def fcsp-opened(o, bytes) = q38x-on?(o) == 1 ? {
-        record_set(o,"lease-bytes",bytes);
-        o;
-    } : {
-        let returned = mg-lease-return(bytes);
-        o;
+    def fcsp-release-reservation(owner) = !record?(owner) || !record?(record_get(owner,"reservation")) ? 1 : q38x-owned(owner)>0 ? 0 : {
+        let returned=mg-reservation-release(record_get(owner,"reservation"));
+        if returned then record_set(owner,"lease-bytes",0) else 0;returned;
     };
     // ── the walk's report ──
     // "spec dflash: 31 tokens, 6 speculative steps (51/10 tokens a step, next k 7, yield 4110/1000 of a plain token), 480 ms" or "spec-off:<why>"

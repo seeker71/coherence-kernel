@@ -278,8 +278,9 @@ For native response development, or when asked to hear or evaluate native
 generation, use the same source-backed CLI: `models <directory>`,
 `use <observed index>`, `generate <question>`, then
 `quit`. Resolve the directory from `form/form-stdlib/model-registry.bml` and
-the index from the listing. Ordinary generation allows 2,048 generated tokens;
-`generate --tokens <positive integer> <question>` selects another allowance.
+the index from the listing. Ordinary generation follows the model's ending and
+observed capacity without an implicit output-token cutoff;
+`generate --tokens <positive integer> <question>` selects a caller allowance.
 `generate --reasoning <positive integer> <question>` opens native reasoning
 with a separately reserved answer stage. It retains both stages privately and
 reports their tokens, completion and release; read the final answer to assess

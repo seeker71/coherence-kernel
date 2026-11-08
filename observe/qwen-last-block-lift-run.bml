@@ -31,13 +31,14 @@
 // preflight-exec: forbidden
 // preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml form-stdlib/form-cli-model-session.fk form-stdlib/bml/qwen-last-block-capture.bml form-stdlib/bml/qwen-last-block-forward.bml form-stdlib/bml/qwen-last-block-backward.bml form-stdlib/bml/qwen-last-block-train.bml form-stdlib/bml/qwen-last-block-judge.bml
 section [form.bml] {
+ let QLBL-OWNED=record_new(0);
  class QwenLastBlockLift {
+   def qlbl-session() = record_get(record_get(QLBL-OWNED,"current"),"session");
   def qlbl-door() = "qwen-last-block-lift";
   def qlbl-spec() = [["child", "str"], ["parent", "str"], ["rows", "str"], ["valid_rows", "int"], ["negatives", "str"], ["captures", "str"], ["train_captures", "str"]];
   def qlbl-ledger() = "receipts/lora-promotion-ledger.jsonl";
   def qlbl-maxpos() = 256;
   def qlbl-span() = 64;
-  def qlbl-handles() = 41;
   def qlbl-say(s) = print_str("[qwen-last-block-lift] " ++ s);
   def qlbl-refuse(why) = dop-refuse(qlbl-door(), why);
   def qlbl-stand(why) = len(why) > 0 ? qlbl-refuse(why) : 0;
@@ -61,7 +62,7 @@ section [form.bml] {
   def qlbl-unsup-why(row, cap) = "its prompt is " ++ row[5].str() ++ " ids: under the " ++ cap.str() ++ "-id cap no assistant token is a supervised target";
   // ── captures: [row, xin, prefill ms, cached?, [text, line]] each, said as they land ──
   def qlbl-capture-one(ctx, L, dir, side, e, cap, i, n) {
-   let c = qlbt-capture(ctx, L, dir, e[0], cap);
+    let c=qlbt-capture-owned(qlbl-session(),ctx,L,dir,e[0],cap);
    qlbl-say(side ++ " capture " ++ i.str() ++ " of " ++ n.str() ++ " (line " ++ e[0][0].str() ++ "): " ++ (c[2] == 1 ? "from cache" : "prefill " ++ c[1].str() ++ " ms") ++ ", " ++ len(c[0]).str() ++ " bytes" ++ (len(c[0]) == 0 ? " — did not land" : ""));
    [e[0], c[0], c[1], c[2], e[1]];
   }
@@ -95,11 +96,14 @@ section [form.bml] {
    let L = record_get(plan, "layer");
    let lay = nth(ctx[3], L);
    let cap = record_get(plan, "cap");
-   let o = qlbt-open(geo, lay, ctx[5], cap, record_get(plan, "rank"), record_get(c, "scale"));
-   let sx = qlbf-scratch(geo, 0, cap);
-   !qlbt-ok?(o) || !qlbf-ok?(sx) ? {
-    let freed = qlbf-free(sx) + qlbt-free(o);
-    ["refused", "the judge's device state did not open (freed " ++ freed.str() ++ " handles)"];
+    let owner=fcms-phase-open(qlbl-session(),"qwen held-out judge",[["forward",qlbf-scratch-bytes(geo,0,cap)],["judge",qlbt-own-bytes(geo,cap,record_get(plan,"rank"))]]);
+    record_set(c,"judge-owner",owner);
+    let allocate=bytes=>q38x-alloc(owner,bytes);
+    let o=qlbt-open-by(geo,lay,ctx[5],cap,record_get(plan,"rank"),record_get(c,"scale"),allocate);
+    let sx=qlbf-scratch-by(geo,0,cap,allocate);
+    !qlbt-ok?(o) || !qlbf-ok?(sx) || !fcms-phase-ready(owner) ? {
+     let released=fcms-phase-close(owner);
+     ["refused","the judge's device state did not open; release_ok "+released.str()];
    } : {
     let t0 = host_monotonic_ms();
     let p0 = pAbsent ? qlbj-zero(o) : qlbj-load(o, record_get(plan, "parent"), L);
@@ -112,22 +116,22 @@ section [form.bml] {
     let cValid = c0 == 1 ? qlbj-means(ps, geo, lay, ctx[5], ctx[6], sx, o, validPrep) : [];
     let cNeg = c0 == 1 ? qlbj-means(ps, geo, lay, ctx[5], ctx[6], sx, o, negPrep) : [];
     let t2 = host_monotonic_ms();
-    let freed = qlbf-free(sx) + qlbt-free(o);
-    qlbl-say("passes: parent " ++ (pAbsent ? "(the pair at +0)" : "(its adapter, loaded " ++ p0.str() ++ ")") ++ " " ++ (t1 - t0).str() ++ " ms, child (loaded " ++ c0.str() ++ ") " ++ (t2 - t1).str() ++ " ms over " ++ (len(trainPrep) + len(validPrep) + len(negPrep)).str() ++ " rows each; freed " ++ freed.str() ++ " of " ++ qlbl-handles().str() ++ " handles; " ++ mg-status-line(mg-sense()));
+     let out=qlbl-judged(c,plan,pAbsent,p0,c0,trainPrep,validPrep,negPrep,aside,pTrain,pValid,pNeg,cTrain,cValid,cNeg,need);
+     record_set(c,"completed-judgement",out);
+     let expected=q38x-owned(owner);let released=fcms-phase-close(owner);let freed=expected - q38x-owned(owner);
+     qlbl-say("passes: parent " ++ (pAbsent ? "(the pair at +0)" : "(its adapter, loaded " ++ p0.str() ++ ")") ++ " " ++ (t1 - t0).str() ++ " ms, child (loaded " ++ c0.str() ++ ") " ++ (t2 - t1).str() ++ " ms over " ++ (len(trainPrep) + len(validPrep) + len(negPrep)).str() ++ " rows each; freed " ++ freed.str() ++ " of " ++ expected.str() ++ " handles; " ++ mg-status-line(mg-sense()));
     let saidT = qlbl-said-means("in-sample", trainPrep, pTrain, cTrain);
     let saidV = qlbl-said-means("held-out", validPrep, pValid, cValid);
     let saidN = qlbl-said-means("rejected", negPrep, pNeg, cNeg);
-    qlbl-judged(c, plan, pAbsent, p0, c0, freed, trainPrep, validPrep, negPrep, aside, pTrain, pValid, pNeg, cTrain, cValid, cNeg, need);
+     released ? out : form_error("qwen judge release incomplete; completed judgement retained");
    };
   }
   // what the passes read, judged: every refusal named, or ["judged", the record qlbj-row reads]
-  def qlbl-judged(c, plan, pAbsent, p0, c0, freed, trainPrep, validPrep, negPrep, aside, pTrain, pValid, pNeg, cTrain, cValid, cNeg, need) {
+   def qlbl-judged(c,plan,pAbsent,p0,c0,trainPrep,validPrep,negPrep,aside,pTrain,pValid,pNeg,cTrain,cValid,cNeg,need) {
    let pIn = qlbj-mean(pTrain);
    let cIn = qlbj-mean(cTrain);
    let witness = nil?(trainPrep) ? "" : "in-sample witness on the " ++ len(trainPrep).str() ++ " training rows: parent " ++ qlbl-num(pIn) ++ " (config mean_loss_step0 " ++ qlbl-num(record_get(c, "mean0")) ++ "), child " ++ qlbl-num(cIn) ++ " (config mean_loss_step20 " ++ qlbl-num(record_get(c, "mean20")) ++ ")";
-   let said = len(witness) > 0 ? qlbl-say(witness) : 0;
-   (Comparable) freed != qlbl-handles() ? ["refused", "the judge gave back " ++ freed.str() ++ " of " ++ qlbl-handles().str() ++ " device handles"]
-   : (Comparable) p0 != 1 ? ["refused", "the parent's pair did not load whole from " ++ qlbj-st(record_get(plan, "parent"))]
+    (Comparable) p0 != 1 ? ["refused", "the parent's pair did not load whole from " ++ qlbj-st(record_get(plan, "parent"))]
    : (Comparable) c0 != 1 ? ["refused", "the child's pair did not load whole from " ++ qlbj-st(record_get(plan, "child"))]
    : !nothing?(qlbl-first-unread(validPrep, pValid)) ? ["refused", "the parent's loss on held-out line " ++ qlbl-first-unread(validPrep, pValid).str() ++ " did not arrive"]
    : !nothing?(qlbl-first-unread(validPrep, cValid)) ? ["refused", "the child's loss on held-out line " ++ qlbl-first-unread(validPrep, cValid).str() ++ " did not arrive"]
@@ -139,7 +143,6 @@ section [form.bml] {
   def qlbl-held-apart(j, kept, seen) {
    let idx = filter(i => !any?(l => (Comparable) l == nth(kept[0], i)[0][0], seen), qlbl-ints(0, len(kept[0])));
    let w = record_set(j, "neg_held", [len(idx), qlbj-mean(map(i => nth(kept[1], i), idx)), qlbj-mean(map(i => nth(kept[2], i), idx))]);
-   let said = qlbl-say("rejected rows the gradient never saw: " ++ len(idx).str() ++ " of " ++ len(kept[0]).str() ++ ", parent " ++ qlbl-num(record_get(j, "neg_held")[1]) ++ ", child " ++ qlbl-num(record_get(j, "neg_held")[2]));
    j;
   }
   // ── inside the lease: rows, captures, passes ──
@@ -181,23 +184,35 @@ section [form.bml] {
     };
    };
   }
-  def qlbl-leased(model, src, c, plan, pAbsent, caps, trainCaps, need) {
+   def qlbl-leased(model,src,c,plan,pAbsent,caps,trainCaps,need,reservation) {
    let x = qtf2-load(qtf2-root-for(model), qsx-seal-line(model));
-   let ctx = q38-open-span(model, qlbl-maxpos(), qlbl-span());
+    let session=record_get(c,"session");let ledger=fcms-release-ledger(session);
+    let owner=fcms-retain-owned-release(session,[],record_get(reservation,"parts"));record_set(ledger,"context",owner);
+    let ctx=q38-open-span-by(model,qlbl-maxpos(),qlbl-span(),bytes=>q38x-alloc(owner,bytes),(path,offset,bytes)=>q38x-map(owner,path,offset,bytes));
+    record_set(ledger,"active-context",ctx);record_set(c,"session",fcms-capacity-owner(session,ctx,[],qlbl-maxpos()));
+    q38-context-ok?(ctx)==1 && !fcms-reservation-ack(reservation,["scratch","position-scratch"]) ? form_error("judge context allocation observation incomplete") : 0;
    let out = (Comparable) q38-context-ok?(ctx) == 1 ? qlbl-judge(ctx, src, x, c, plan, pAbsent, caps, trainCaps, need) : ["refused", "the model context of " ++ model ++ " did not open"];
-   let closed = len(ctx) > 10 ? q38-close(ctx, []) : 0;
-   let unleased = mg-release();
+    record_set(c,"completed-judgement",out);
    out;
   }
-  // ── the row ──
-  def qlbl-land(plan, j, started) {
-   let w = record_set(j, "wall", now_unix_ms() - started);
-   let row = qlbj-row(plan, j);
-   let appended = fhn-append(qlbl-ledger(), lrun-row-line(row) ++ "\n");
-   qlbl-say("verdict on the accepted held-out (" ++ len(record_get(plan, "valid")).str() ++ " rows): parent " ++ qlbl-num(qlbj-parent-mean(j)) ++ ", child " ++ qlbl-num(qlbj-child-mean(j)) ++ ", better " ++ json-int-value(json-object-get(row, "better")).str() ++ "; rejected beside: parent " ++ qlbl-num(record_get(j, "neg_parent")) ++ ", child " ++ qlbl-num(record_get(j, "neg_child")) ++ " over " ++ len(record_get(j, "neg_judged")).str() ++ " rows, " ++ len(record_get(j, "excluded")).str() ++ " set aside");
-   (String) appended == "appended" ? qlbl-say(json-emit(row)) : qlbl-refuse("the promotion row did not land in " ++ qlbl-ledger() ++ " (" ++ appended ++ ")");
-  }
-  def qlbl-run() {
+   def qlbl-run() {
+    let prior=record_get(QLBL-OWNED,"current");
+    record?(prior) && record_get(prior,"finished")!=1 ? qlbl-finish(prior) : qlbl-start();
+   }
+   def qlbl-finish(c) {
+    let released=fcms-release-ok?(record_get(c,"session"));record_set(c,"release-ok",released);
+    !released ? qlbl-refuse("release incomplete; original judgement and owners retained") : {
+     let out=record_get(c,"completed-judgement") ?? ["refused","judgement interrupted before completion; retained original inputs and admission"];
+     out[0]!="judged" ? {record_set(c,"finished",1);qlbl-refuse(out[1]);} : {
+      if !record_has(c,"promotion-row") then {record_set(out[1],"wall",now_unix_ms() - record_get(c,"started"));record_set(c,"promotion-row",lrun-row-line(qlbj-row(record_get(c,"plan"),out[1]))+"\n");} else 0;
+      let text=record_get(c,"promotion-row");let existing=read_file(qlbl-ledger()) ?? "";
+      if str_find("\n"+existing,"\n"+text,0)<0 then fhn-append(qlbl-ledger(),text) else 0;
+      let landed=str_find("\n"+(read_file(qlbl-ledger()) ?? ""),"\n"+text,0)>=0;
+      record_set(c,"finished",landed);landed ? qlbl-say(text) : qlbl-refuse("completed judgement retained; promotion row publication incomplete");
+     };
+    };
+   }
+   def qlbl-start() {
    let started = now_unix_ms();
    let opts = dop-doc(qlbl-door(), stdin-text(), qlbl-spec());
    let child = qlbl-text(opts, "child", qlbj-next());
@@ -239,15 +254,16 @@ section [form.bml] {
    qlbl-say("parent " ++ parent ++ ": " ++ record_get(plan, "parent_reads"));
    qlbl-say("held-out: " ++ rowsPath ++ " lines " ++ qlbj-nums(qlbj-line-nums(valid)) ++ " (the last " ++ k.str() ++ " of " ++ len(lines).str() ++ " rows, accepted, disjoint by draft id from the trained lines); rejected beside: " ++ (len(negPath) == 0 ? "none" : negPath ++ ", " ++ len(negs).str() ++ " rows") ++ "; captures under " ++ caps ++ (len(trainCaps) == 0 ? "" : "; in-sample witness from " ++ trainCaps));
    // the lease, then everything that opens
-   let own = fcms-qwen-own(src, qlbl-maxpos()) + qlbf-scratch-bytes(geo, 0, cap) + qlbt-own-bytes(geo, cap, r) + qlbc-own-bytes(geo[0], cap);
+    let parts=take(2,q38-session-parts(geo,qlbl-span(),0));let own=sum(map(part=>part[1],parts));
    let need = own + fcms-weights-bytes(model);
-   let granted = mg-lease("qwen last-block lift", model, fcms-weights-bytes(model), own);
-   let line = mg-line("qwen last-block lift", need, granted);
-   let said = mg-granted?(granted) ? qlbl-say(line ++ "; counted own " ++ own.str() ++ " bytes beside the shared weights") : 0;
-   let out = !mg-granted?(granted) ? ["held", line] : qlbl-leased(model, src, c, plan, pAbsent, caps, trainCaps, need);
-   (String) out[0] == "held" ? qlbl-refuse("held by the memory governor: " ++ out[1])
-   : (String) out[0] == "refused" ? qlbl-refuse(out[1])
-   : qlbl-land(plan, out[1], started);
+    let session=fcms-session("nothing","judge-context",model,src,[],[],qlbl-maxpos(),0,-1,0,0,0,0,0);
+    record_set(c,"session",session);record_set(c,"plan",plan);record_set(c,"started",started);record_set(c,"finished",0);record_set(QLBL-OWNED,"current",c);
+    let attempted=try {
+     let granted=mg-lease-retaining("qwen last-block lift",model,fcms-weights-bytes(model),own,token=>fcms-retain-reservation(fcms-release-ledger(session),token));record_set(c,"admission",granted);
+     let reservation=fcms-reservation(fcms-release-ledger(session),granted,parts);
+     !record_get(reservation,"ready") ? form_error(mg-line("qwen last-block lift",need,granted)) : qlbl-leased(model,src,c,plan,pAbsent,caps,trainCaps,need,reservation);
+    } catch {record_set(c,"interrupted",1);nothing();};
+    qlbl-finish(c);
   }
  }
  cs-entry?("observe/qwen-last-block-lift-run.bml") ? qlbl-run() : nothing();

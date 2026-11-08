@@ -52,14 +52,14 @@ section [form.bml] {
     // ── the drafter's tensors (a second GGUF) ──
     // dsrc here is the file's bundle [source, where the tensor table begins, how many tensors]: egg-find-tensor walks the whole metadata (the tokenizer's vocabulary,
     // element by element) to find where the table begins on EVERY call, 0.38 s a name here; the bundle walks it once and the 81 names are found from the start of the table
-    def q38d-tv(dsrc, dbase, dpath, name) = kth-tv-at(dsrc[0], dbase, dpath, egg-find(dsrc[0], dsrc[1], dsrc[2], name));
+    def q38d-tv-by(dsrc, dbase, dpath, name, from-file) = kth-tv-at-by(dsrc[0], dbase, dpath, egg-find(dsrc[0], dsrc[1], dsrc[2], name),from-file);
     def q38d-bn(l, sfx) = ("blk." + (l.str() + sfx));
     // per layer: 0 attn_norm 1 attn_conv_base 2 attn_conv_proj 3 q 4 k 5 v 6 q_norm 7 k_norm 8 attn_output 9 ffn_norm 10 ffn_conv_base
     // 11 ffn_conv_proj 12 gate 13 up 14 down
-    def q38d-layer-tvs(dsrc, dbase, dpath, l) = [q38d-tv(dsrc, dbase, dpath, q38d-bn(l, ".attn_norm.weight")), q38d-tv(dsrc, dbase, dpath, q38d-bn(l, ".attn_conv_base")), q38d-tv(dsrc, dbase, dpath, q38d-bn(l, ".attn_conv_proj.weight")), q38d-tv(dsrc, dbase, dpath, q38d-bn(l, ".attn_q.weight")), q38d-tv(dsrc, dbase, dpath, q38d-bn(l, ".attn_k.weight")), q38d-tv(dsrc, dbase, dpath, q38d-bn(l, ".attn_v.weight")), q38d-tv(dsrc, dbase, dpath, q38d-bn(l, ".attn_q_norm.weight")), q38d-tv(dsrc, dbase, dpath, q38d-bn(l, ".attn_k_norm.weight")), q38d-tv(dsrc, dbase, dpath, q38d-bn(l, ".attn_output.weight")), q38d-tv(dsrc, dbase, dpath, q38d-bn(l, ".ffn_norm.weight")), q38d-tv(dsrc, dbase, dpath, q38d-bn(l, ".ffn_conv_base")), q38d-tv(dsrc, dbase, dpath, q38d-bn(l, ".ffn_conv_proj.weight")), q38d-tv(dsrc, dbase, dpath, q38d-bn(l, ".ffn_gate.weight")), q38d-tv(dsrc, dbase, dpath, q38d-bn(l, ".ffn_up.weight")), q38d-tv(dsrc, dbase, dpath, q38d-bn(l, ".ffn_down.weight"))];
-    def q38d-layers-tvs(dsrc, dbase, dpath, l, n) = l >= n ? [] : cons(q38d-layer-tvs(dsrc, dbase, dpath, l), q38d-layers-tvs(dsrc, dbase, dpath, l + 1, n));
+    def q38d-layer-tvs-by(dsrc, dbase, dpath, l, from-file) = map(sfx=>q38d-tv-by(dsrc,dbase,dpath,q38d-bn(l,sfx),from-file),[".attn_norm.weight",".attn_conv_base",".attn_conv_proj.weight",".attn_q.weight",".attn_k.weight",".attn_v.weight",".attn_q_norm.weight",".attn_k_norm.weight",".attn_output.weight",".ffn_norm.weight",".ffn_conv_base",".ffn_conv_proj.weight",".ffn_gate.weight",".ffn_up.weight",".ffn_down.weight"]);
+    def q38d-layers-tvs-by(dsrc, dbase, dpath, l, n, from-file) = l >= n ? [] : cons(q38d-layer-tvs-by(dsrc,dbase,dpath,l,from-file),q38d-layers-tvs-by(dsrc,dbase,dpath,l+1,n,from-file));
     // model level: 0 enc.output_norm (hidden_norm) 1 fc 2 output_norm 3 selector_hidden 4 selector_predecessor 5 selector_successor
-    def q38d-model-tvs(dsrc, dbase, dpath) = [q38d-tv(dsrc, dbase, dpath, "enc.output_norm.weight"), q38d-tv(dsrc, dbase, dpath, "fc.weight"), q38d-tv(dsrc, dbase, dpath, "output_norm.weight"), q38d-tv(dsrc, dbase, dpath, "selector_hidden.weight"), q38d-tv(dsrc, dbase, dpath, "selector_predecessor.weight"), q38d-tv(dsrc, dbase, dpath, "selector_successor.weight")];
+    def q38d-model-tvs-by(dsrc,dbase,dpath,from-file) = map(name=>q38d-tv-by(dsrc,dbase,dpath,name,from-file),["enc.output_norm.weight","fc.weight","output_norm.weight","selector_hidden.weight","selector_predecessor.weight","selector_successor.weight"]);
     def q38d-block() = 8;
     def q38d-width() = 25600;
     def q38d-tap-count() = 5;
@@ -70,23 +70,30 @@ section [form.bml] {
     def q38d-slot(l) = l - q38d-tap-shift() == 5 ? 0 : (l - q38d-tap-shift() == 19 ? 1 : (l - q38d-tap-shift() == 33 ? 2 : (l - q38d-tap-shift() == 47 ? 3 : (l - q38d-tap-shift() == 61 ? 4 : 0 - 1))));
     // db: 0 h0 1 h1 2 nrm 3 dyn 4 cv 5 q 6 k 7 v 8 q2 9 k2 10 att 11 proj 12 res 13 gate 14 up 15 inter 16 fnrm 17 sel 18 cap 19 fco 20 hn
     //     21 kin 22 vin 23 logits 24 pi 25 pv 26 cand 27 unary 28 table 29 dbg 30 dids
-    def q38d-alloc-kv(l, n, maxpos) = l >= n ? [] : cons([metal_buf_alloc(8 * maxpos * 128 * 4), metal_buf_alloc(8 * maxpos * 128 * 4)], q38d-alloc-kv(l + 1, n, maxpos));
-    def q38d-bufs(geo, nr) {
+    def q38d-kv-bytes(maxpos) = 8 * maxpos * 128 * 4;
+    def q38d-alloc-kv-by(l,n,maxpos,allocate) = l>=n ? [] : cons([allocate(q38d-kv-bytes(maxpos)),allocate(q38d-kv-bytes(maxpos))],q38d-alloc-kv-by(l+1,n,maxpos,allocate));
+    def q38d-buf-sizes(geo, nr) {
         let H = geo[0];
         let V = geo[19];
         let F = geo[10];
-        [metal_buf_alloc(8 * H * 4), metal_buf_alloc(8 * H * 4), metal_buf_alloc(nr * H * 4), metal_buf_alloc(8 * 1280 * 4), metal_buf_alloc(8 * H * 4), metal_buf_alloc(8 * 4096 * 4), metal_buf_alloc(8 * 1024 * 4), metal_buf_alloc(8 * 1024 * 4), metal_buf_alloc(8 * 4096 * 4), metal_buf_alloc(8 * 1024 * 4), metal_buf_alloc(8 * 4096 * 4), metal_buf_alloc(8 * H * 4), metal_buf_alloc(8 * H * 4), metal_buf_alloc(8 * F * 4), metal_buf_alloc(8 * F * 4), metal_buf_alloc(8 * F * 4), metal_buf_alloc(8 * H * 4), metal_buf_alloc(8 * 256 * 4), metal_buf_alloc(nr * q38d-width() * 4), metal_buf_alloc(nr * H * 4), metal_buf_alloc(nr * H * 4), metal_buf_alloc(nr * 1024 * 4), metal_buf_alloc(nr * 1024 * 4), metal_buf_alloc(8 * V * 4), metal_buf_alloc(7 * 1024 * 16 * 4), metal_buf_alloc(7 * 1024 * 16 * 4), metal_buf_alloc(7 * 16 * 4), metal_buf_alloc(7 * 16 * 4), metal_buf_alloc(7 * 256 * 4), metal_buf_alloc(64), metal_buf_alloc(64)];
+        [8*H*4,8*H*4,nr*H*4,8*1280*4,8*H*4,8*4096*4,8*1024*4,8*1024*4,8*4096*4,8*1024*4,8*4096*4,8*H*4,8*H*4,8*F*4,8*F*4,8*F*4,8*H*4,8*256*4,nr*q38d-width()*4,nr*H*4,nr*H*4,nr*1024*4,nr*1024*4,8*V*4,7*1024*16*4,7*1024*16*4,7*16*4,7*16*4,7*256*4,64,64];
     }
     // dx: 0 layers' tensors 1 model tensors 2 buffers 3 per-layer [K, V] context caches 4 maxpos 5 nr (rows the capture and commit buffers hold) 6 layers
-    def q38d-open(ctx, dpath, maxpos, nr0) {
+    def q38d-plan(ctx,dpath,maxpos,nr0) {
         let dsrc0 = eqr-of-file(dpath, 0, 40000000);
         let dsrc = [dsrc0, egg-tinfo-start(dsrc0), egg-tensor-count(dsrc0)];
         let dbase = egg-data-base(dsrc0, 32);
         let n = gmt-u32(dsrc0, "dflash.block_count");
         let nr = nr0 < 8 ? 8 : nr0;
-        let db = q38d-bufs(ctx[2], nr);
-        let wm = metal_buf_write(db[30], 0, md-le32(0) + (md-le32(248070) + (md-le32(248070) + (md-le32(248070) + (md-le32(248070) + (md-le32(248070) + (md-le32(248070) + md-le32(248070))))))));
-        [q38d-layers-tvs(dsrc, dbase, dpath, 0, n), q38d-model-tvs(dsrc, dbase, dpath), db, q38d-alloc-kv(0, n, maxpos), maxpos, nr, n];
+        n<=0 || maxpos<=0 ? form_error("drafter allocation geometry unavailable") : [dsrc,dbase,n,nr,maxpos,q38d-buf-sizes(ctx[2],nr)];
+    }
+    def q38d-plan-bytes(plan) = sum(plan[5])+2*plan[2]*q38d-kv-bytes(plan[4]);
+    def q38d-open(ctx,dpath,maxpos,nr0) = q38d-open-plan(ctx,dpath,q38d-plan(ctx,dpath,maxpos,nr0),metal_buf_alloc,metal_buf_from_file);
+    def q38d-open-plan(ctx,dpath,plan,allocate,from-file) {
+        let db=map(allocate,plan[5]);
+        let ids=md-le32(0)+foldl((text,word)=>text+word,"",q38s-fill(7,md-le32(248070)));
+        let wrote=metal_buf_write(db[30],0,ids)==len(ids);
+        [q38d-layers-tvs-by(plan[0],plan[1],dpath,0,plan[2],from-file),q38d-model-tvs-by(plan[0],plan[1],dpath,from-file),db,q38d-alloc-kv-by(0,plan[2],plan[4],allocate),plan[4],plan[3],plan[2],wrote];
     }
     def q38d-free-kv(kvs) = (Comparable) len(kvs) == 0 ? 0 : (Number) q38-free-handles(kvs[0]) + (Number) q38d-free-kv(kvs[1:]);
     def q38d-free-layers(ls) = (Comparable) len(ls) == 0 ? 0 : (Number) q38-free-tvs(ls[0]) + (Number) q38d-free-layers(ls[1:]);
@@ -94,7 +101,7 @@ section [form.bml] {
         metal_sync();
         sum([q38-free-handles(dx[2]), q38d-free-kv(dx[3]), q38-free-tvs(dx[1]), q38d-free-layers(dx[0])]);
     };
-    def q38d-ok?(dx) = len(dx) < 7 ? 0 : (q38-handles-ok?(dx[2]) && (q38-handle-ok?(kth-tv-h(dx[1][1])) && (q38-handle-ok?(kth-tv-h(dx[1][5])) && q38-handle-ok?(kth-tv-h(dx[0][0][14])))));
+    def q38d-ok?(dx) = len(dx)<8 || dx[6]<=0 || dx[7]!=1 ? 0 : q38-handles-ok?(dx[2]) && all?(q38-handles-ok?,dx[3]) && all?(tv=>q38-handle-ok?(kth-tv-h(tv)),append(dx[1],foldl(append,[],dx[0])));
     def q38d-mv(ps, qs, tv, xh, yh, nt, barrier) = q38s-mv(ps, qs, tv, xh, yh, nt, kth-tv-r(tv), barrier);
     // ── the target's tapped residuals ──
     def q38d-capture-layer(bs, geo, ds, dx, l, ntok, rowoff) = q38d-slot(l) < 0 ? 0 : metal_enqueue(ds[4], q38-b16([bs[33], dx[2][18]], [geo[0], q38d-width(), q38d-slot(l), rowoff, ntok], 0, 1), geo[0] * ntok);

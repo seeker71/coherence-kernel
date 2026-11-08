@@ -4,9 +4,62 @@
 import form-stdlib/bml/form-cli-answer-length.bml;
 import form-stdlib/hearth.bml;
 import form-stdlib/bml/form-cli-microthought.bml;
+import form-stdlib/bml/form-cli-native-voice.bml;
 section [form.bml] {
  class FormCliGenerateReasoning {
-  def fgcr-reserve(src,reasoning,answer) = ((reasoning + answer) + (3 + (len(fcmo-tool-tail-ids(src,"")) + len(frbg-observation(reasoning,reasoning,answer)))));
+   def fgcr-work() = record_get(ftg-session(),"generation-continuation");
+   def fgcr-retain(session) {
+    let work=fgcr-work();if record?(work) then {record_set(work,"session",session);record_set(fcms-release-ledger(session),"generation-owner",work);} else 0;
+    fcms-retain-in(ftg-session(),"generation-model",session);
+   }
+   // Identical retries settle the retained answer. A changed enquiry receives
+   // no prior text and starts only after that owner has finished its cleanup.
+   def fgcr-request(request,run) = fgcr-request-with(request,run,fgcr-replay);
+   def fgcr-request-with(request,run,replay) {
+    let prior=fgcr-work();
+    if record?(prior) && fcnv-active?(prior) then ["generation is still active\n",record_get(prior,"session")]
+    else if record?(prior) && record_get(prior,"request")==request then replay(prior)
+    else {
+     let settled=record?(prior) ? replay(prior) : nothing();
+     if record?(fgcr-work()) && record_get(fgcr-work(),"phase")!="complete" then ["generation refused: previous result cleanup or retention incomplete\n",record_get(prior,"session")]
+     else {
+      let work=record_new(0,"request",request,"continuation","generation:"+noc-open(),"phase","pending","lifetime",nothing(),"session",nothing(),"generation",nothing(),"result",nothing(),"assessment",nothing(),"thought",nothing(),"evidence","","resumed",0);
+      record_set(work,"path",request[1]);record_set(work,"profile",request[0]=="ordinary" ? "full" : fgcr-profile(request[3]));record_set(work,"reasoning",request[3]);record_set(work,"answer",request[4]);record_set(work,"lower",request[5]);record_set(work,"upper",request[6]);record_set(work,"started",host_monotonic_ms());
+      record_set(ftg-session(),"generation-continuation",work);
+      fcnv-lifetime(work);record_set(work,"phase","active");
+      defer {if record_get(work,"phase")!="complete" then record_set(work,"phase","release-pending") else 0;fcnv-lifetime-close(work);};
+      try {run(work);} catch {record_set(work,"phase","release-pending");fgcr-recover(work,0);};
+     };
+    };
+   }
+   def fgcr-replay(work) = fgcr-recover(work,1);
+   def fgcr-recover(work,resumed) {
+    record_set(work,"resumed",resumed);
+    let session=record_get(work,"session");
+    if value_kind(session)!="list" then {
+     fcnv-lifetime-close(work);record_set(ftg-session(),"generation-continuation",nothing());
+     ["generation ended before model admission\n",fcmr-none()];
+    } else {
+     let held=record_get(work,"result");let progress=record_get(work,"plain-progress");
+     let partial=record_get(work,"active-generation")=="plain" && record?(progress) ? fcms-progress-generation(progress) : record_get(work,"generation");
+     let generated=value_kind(partial)=="list" ? partial : frbg-empty(session);
+      record_set(work,"retained-generation",generated);
+     let complete=frbg-stopped(fcms-generation-session(generated));
+     let reasoning=record_get(work,"reasoning")>0;let finalStarted=record_get(work,"final-started")==1;
+     let first=record_get(work,"reasoning-generation");let initial=value_kind(first)=="list" ? first : generated;
+      let unavailable=record?(progress) && record_get(progress,"text-available")==0;
+      let result=value_kind(held)=="list" ? held : frbg-result(fcms-generation-session(generated),reasoning ? initial : generated,reasoning && finalStarted ? generated : frbg-empty(session),reasoning && !finalStarted ? "" : fgcr-ordinary-prose(session,fcms-generation-text(generated)),finalStarted ? "interrupted-final-stage" : "interrupted-generation","",reasoning && !finalStarted ? 0 : complete,unavailable ? "generation-text-unavailable" : "generation-interrupted");
+     record_set(work,"result",result);
+     let assessed=record_get(work,"assessment");
+     let measured=value_kind(assessed)=="list" ? assessed : fal-finish(frbg-session(result),frbg-answer(result),frbg-empty(frbg-session(result)),"",fal-count(frbg-answer(result)),record_get(work,"lower"),record_get(work,"upper"),frbg-complete(result),[],"interrupted-before-length-check");
+     record_set(work,"assessment",measured);fgcr-publish(work);
+    };
+   }
+   def fgcr-open-retained(path,text,answer,profile) {
+    let root=ftg-session();
+    !fcms-release-in(root,"generation-model") ? fcms-refuse(record_get(root,"generation-model"),"previous-generation-release-incomplete") : fgcr-retain(nothing?(answer) ? fcms-open-unbounded-retaining(path,text,profile,fgcr-retain) : fcms-open-reserved-retaining(path,text,answer,profile,fgcr-retain));
+   }
+  def fgcr-reserve(src,reasoning,answer) = frbg-allowance-sum([reasoning,answer,3,len(fcmo-tool-tail-ids(src,"")),len(frbg-observation(reasoning,reasoning,answer))]);
   // The observation is encoded as its own text segment: its byte length is
   // an upper bound on BPE IDs. Three slots cover pending, close and end room.
   def fgcr-directory(base,index) {
@@ -18,10 +71,58 @@ section [form.bml] {
    (((Comparable) wrote == len(text)) && ((String) read_file(path) == text));
   }
   def fgcr-generation-evidence(g) = json-node-object([oh-s("schema","form-native-generation-evidence-v1"),json-node-pair("ids",json-node-array(oh-ints(fcms-generation-ids(g)))),oh-s("text",fcms-generation-text(g)),oh-n("position",fcms-pos(fcms-generation-session(g))),oh-n("pending",fcms-pending(fcms-generation-session(g))),oh-n("stopped",fcms-stopped?(fcms-generation-session(g))),oh-s("status",fcms-status(fcms-generation-session(g)))]);
+   def fgcr-length-evidence(attempt) = json-node-object([json-node-pair("generation",fgcr-generation-evidence(attempt[0])),oh-s("feedback",attempt[1]),oh-n("before_words",attempt[2]),oh-n("after_words",attempt[3]),oh-n("complete",attempt[4]),oh-s("ending",attempt[5])]);
+   def fgcr-length-tokens(attempts) = nil?(attempts) ? 0 : len(fcms-generation-ids(attempts[0][0]))+fgcr-length-tokens(attempts[1:]);
   def fgcr-run(resident,path,prompt,reasoning,answer) = fgcr-run-bounded(resident,path,prompt,reasoning,answer,0,0);
+   // Ordinary generation retains the lane's profile, native literal offers
+  // and the existing rest/source affinity lookup. The session owns its growth.
+    def fgcr-run-ordinary(resident,path,prompt,answer) = path=="" ? ["generation needs a selected model\n",resident] : !fcmr-release-ok?(resident) ? ["generation refused: previous model release incomplete\n",resident] : fgcr-open-ordinary(path,prompt,answer,host_monotonic_ms());
+  def fgcr-source-observation(source,payload) = fgcr-source-found(source,payload)[1];
+  def fgcr-source-found(source,payload) {
+   let found=fcmg-heed-lookup-source(nothing(),ftg-render("knowledge-query",payload),1,source);
+    [found,fgcr-source-result(found)];
+  }
+   def fgcr-source-result(found) = found[0]=="hit" || found[0]=="miss" ? found[1] : ftv-nothing("source-query-"+found[2]);
+  def fgcr-offer-literals(session,thoughts) {
+   if !fcms-live?(session) || fcms-ds4?(session) || nil?(thoughts) then session else {
+    let lists=fcmg-encode-thoughts(fcms-src(session),thoughts,[]);
+    let needed=fcmg-id-count(lists,0)+lg-gap-default()*(len(lists) - 1)+1;
+    let owner=fcms-ensure-room(session,needed);
+    if !fcms-live?(owner) then owner else {
+     let ctx=fcms-ctx(owner);
+     let offered=fcmg-offer-stream(ctx[0],ctx[1],ctx[2],ctx[3],fcms-sts(owner),ctx[4],ctx[5],ctx[6],lists,fcms-pos(owner),lg-gap-default(),fcmo-stops(owner),[],0,0);
+     let moved=fcms-with-stream(owner,offered[1],offered[0],0,fcms-generated-ids(owner)+len(offered[2]) - offered[3],fcms-injected-ids(owner)+offered[3],fcms-observations(owner)+offered[4]);
+     offered[0]<0 ? fcms-refuse(moved,"literal-offer-prefill-refused") : moved;
+    };
+   };
+  }
+   def fgcr-ordinary-prompt(arch,prompt,answer) = (arch=="deepseek4" ? fgcr-response-prompt(prompt) : fcmg-teach(prompt))+"\n"+fhm-answer-budget-text(answer);
+   def fgcr-ordinary-prose(session,text) = fcms-ds4?(session) ? text : ftg-prose(text);
+    def fgcr-open-ordinary(path,prompt,answer,started) = fgcr-request(["ordinary",path,prompt,0,answer,0,0,0,""],work=>fgcr-open-ordinary-owned(path,prompt,answer,started));
+    def fgcr-open-ordinary-owned(path,prompt,answer,started) {
+     let text=fgcr-ordinary-prompt(fcmg-arch(fcmg-src(path)),prompt,answer);
+     let opened=fgcr-open-retained(path,text,answer,"full");
+   let thoughts=fcms-ds4?(opened) ? [] : lg-think-all(text);
+   let session=fgcr-offer-literals(opened,thoughts);
+   let controls=ftv-session();let source=fcsa-infer(prompt);
+   record_set(controls,"knowledge-evidence",[]);
+   record_set(controls,"knowledge-query",payload=>{
+    let found=fgcr-source-found(source,payload);
+    record_set(controls,"knowledge-evidence",cons([ftg-render("knowledge-query",payload),found[0][0],found[0][2],len(found[1])>0],record_get(controls,"knowledge-evidence")));
+    found[1];
+   });
+   let cursor=ftg-pulsing(ftg-intercept-with(nothing(),controls));
+    record_set(cursor,"generation-owner",fgcr-work());
+   let initial=(s,reasoning,answer)=>{
+    let first=fcms-ds4?(s) ? fcms-generate(s,answer) : ftg-generate-with(cursor,s,answer,"ordinary");let last=fcms-generation-session(first);
+    let evidence=json-emit(json-node-object([json-node-pair("literal_offers",fmc-value-node(thoughts)),json-node-pair("source_queries",fmc-value-node(reverse(record_get(controls,"knowledge-evidence")))),json-node-pair("control_frames",fmc-value-node(reverse(record_get(cursor,"frames")))),json-node-pair("control_injected",fmc-value-node(reverse(record_get(cursor,"injected"))))]));
+     frbg-result(last,first,frbg-empty(last),fgcr-ordinary-prose(s,fcms-generation-text(first)),"direct-final",evidence,frbg-stopped(last),!frbg-valid-session(last) ? fcms-reason(last) : frbg-stopped(last) ? "complete" : "generation-incomplete");
+   };
+     fgcr-compose-owned(session,path,"full",0,answer,0,0,started,initial);
+  }
   def fgcr-run-bounded(resident,path,prompt,reasoning,answer,lower,upper) {
    if ((String) path == "") then fcmg-generate-resident(resident,path,prompt,answer)
-   else if (!fcmr-release-ok?(resident)) then ["generation refused: previous model release incomplete\n",fcmr-none()]
+    else if (!fcmr-release-ok?(resident)) then ["generation refused: previous model release incomplete\n",resident]
    else fgcr-open-bounded(path,prompt,reasoning,answer,lower,upper,host_monotonic_ms());
   }
   def fgcr-open(path,prompt,reasoning,answer,started) = fgcr-open-bounded(path,prompt,reasoning,answer,0,0,started);
@@ -29,37 +130,40 @@ section [form.bml] {
    let first = fcms-generate(session,answer); let last = fcms-generation-session(first);
    frbg-result(last,first,frbg-empty(last),fcms-generation-text(first),"direct-final","",frbg-stopped(last),if (!frbg-valid-session(last)) then fcms-reason(last) else if frbg-stopped(last) then "complete" else "generation-incomplete");
   };
-  def fgcr-result-reason(result,measured) = if (!measured[8]) then if (!measured[7]) then frbg-reason(result) else if (!frbg-valid-session(measured[0])) then fcms-reason(measured[0]) else "length-revision-incomplete" else if (!measured[6]) then "answer-word-range-not-met" else "complete";
+   def fgcr-result-reason(result,measured) = if (!measured[8]) then if (!measured[7]) then frbg-reason(result) else if (!frbg-valid-session(measured[0])) then fcms-reason(measured[0]) else "length-revision-incomplete" else if (!measured[6]) then measured[10]=="no-word-range-progress" ? measured[10] : "answer-word-range-not-met" else "complete";
   def fgcr-response-prompt(prompt) = (fqt-meaning-prefix() + ("Answer the current enquiry from the supplied context. Follow its requested format and length. Runtime feedback can ask for a revision.\n" + prompt));
   def fgcr-profile(reasoning) = if (reasoning > 0) then "response-reasoning" else "response";
   def fgcr-input-text(prompt,answer,lower,upper) {
    let enquiry = if (upper > 0) then (prompt + ("\n\n" + fal-requirement(lower,upper))) else prompt;
-   (fgcr-response-prompt(enquiry) + ("\n" + fhm-caller-budget-text(answer)));
+   (fgcr-response-prompt(enquiry) + ("\n" + fhm-answer-budget-text(answer)));
   }
   def fgcr-open-bounded(path,prompt,reasoning,answer,lower,upper,started) {
    fgcr-open-sampled(path,prompt,reasoning,answer,lower,upper,started,0);
   }
   def fgcr-run-sampled(resident,path,prompt,answer,lower,upper,seed) {
    if ((String) path == "") then ["generation needs a selected model\n",resident]
-   else if (!fcmr-release-ok?(resident)) then ["generation refused: previous model release incomplete\n",fcmr-none()]
+    else if (!fcmr-release-ok?(resident)) then ["generation refused: previous model release incomplete\n",resident]
    else fgcr-open-sampled(path,prompt,0,answer,lower,upper,host_monotonic_ms(),seed);
   }
   def fgcr-open-sampled(path,prompt,reasoning,answer,lower,upper,started,seed) {
    fgcr-open-selected(path,prompt,reasoning,answer,lower,upper,started,seed,"");
   }
-  def fgcr-run-selected(resident,path,prompt,reasoning,answer,lower,upper,seed,adapter) = path == "" ? ["generation needs a selected model\n",resident] : !fcmr-release-ok?(resident) ? ["generation refused: previous model release incomplete\n",fcmr-none()] : fgcr-open-selected(path,prompt,reasoning,answer,lower,upper,host_monotonic_ms(),seed,adapter);
-  def fgcr-open-selected(path,prompt,reasoning,answer,lower,upper,started,seed,adapter) {
+   def fgcr-run-selected(resident,path,prompt,reasoning,answer,lower,upper,seed,adapter) = path == "" ? ["generation needs a selected model\n",resident] : !fcmr-release-ok?(resident) ? ["generation refused: previous model release incomplete\n",resident] : fgcr-open-selected(path,prompt,reasoning,answer,lower,upper,host_monotonic_ms(),seed,adapter);
+   def fgcr-open-selected(path,prompt,reasoning,answer,lower,upper,started,seed,adapter) = fgcr-request(["selected",path,prompt,reasoning,answer,lower,upper,seed,adapter],work=>fgcr-open-selected-owned(path,prompt,reasoning,answer,lower,upper,started,seed,adapter));
+   def fgcr-open-selected-owned(path,prompt,reasoning,answer,lower,upper,started,seed,adapter) {
    let text = fgcr-input-text(reasoning > 0 ? (fmc-teaching() + ("\n" + prompt)) : prompt,answer,lower,upper);
-   let reserve = (fgcr-reserve(fcmg-src(path),reasoning,answer) + fal-reserve(fcmg-src(path),lower,upper,answer) + reasoning);
+   let reserve = nothing?(answer) ? 0 : frbg-allowance-sum([fgcr-reserve(fcmg-src(path),reasoning,answer),fal-reserve(fcmg-src(path),lower,upper,answer),reasoning]);
    let profile = fgcr-profile(reasoning);
-   let base = fcms-open-reserved(path,text,reserve,profile);
+     let base = nothing?(reserve) ? fcms-none("requested-reserves-exceed-native-integer") : fgcr-open-retained(path,text,nothing?(answer) ? nothing() : reserve,profile);
    let opened = len(adapter) > 0 ? fcms-attach-adapter(base,adapter) : base;
    let session = if ((seed > 0) && fcms-live?(opened)) then {
-    let owner = fcsam-open(fcms-ctx(opened)[2][19],seed);
+     let allocated=fcms-phase-open(opened,"native answer sampler",[["sampler",fcsam-private-bytes(fcms-ctx(opened)[2][19])]]);
+     record_set(fcms-release-ledger(opened),"sampler",allocated);
+     let owner = fcsam-open-by(fcms-ctx(opened)[2][19],seed,bytes=>q38x-alloc(allocated,bytes));
     let owned = fcsam-with-owner(opened,owner);
-    if fcsam-live(owner) then owned else fcms-refuse(owned,"sampling-admission-failed");
+     if fcsam-live(owner) && fcms-phase-ready(allocated) then owned else fcms-refuse(owned,"sampling-admission-failed");
    } else opened;
-   fgcr-compose(session,path,profile,reasoning,answer,lower,upper,started);
+    fgcr-compose-owned(session,path,profile,reasoning,answer,lower,upper,started,fgcr-initial);
   }
   def fgcr-sampling(session) {
    let owner = fcsam-owner(session);
@@ -71,14 +175,36 @@ section [form.bml] {
   }
   // Takes ownership of an already admitted session, including an explicitly
   // selected learned adapter. The same controller, retention and release apply.
-  def fgcr-compose(session,path,profile,reasoning,answer,lower,upper,started) {
+  def fgcr-compose(session,path,profile,reasoning,answer,lower,upper,started) = fgcr-compose-with(session,path,profile,reasoning,answer,lower,upper,started,fgcr-initial);
+    def fgcr-compose-with(session,path,profile,reasoning,answer,lower,upper,started,initial) {
+     let request=["composed",path,session,reasoning,answer,lower,upper,0,"",initial,profile];
+     let result=try fgcr-request(request,work=>fgcr-compose-owned(session,path,profile,reasoning,answer,lower,upper,started,initial)) catch nothing();
+     let work=fgcr-work();
+     record?(work) && record_get(work,"request")==request ? result : ["generation refused before composition; supplied session returned for caller cleanup\n",fcms-refuse(session,"composition-not-admitted")];
+    }
+   def fgcr-compose-owned(session,path,profile,reasoning,answer,lower,upper,started,initial) {
+   fgcr-retain(session);
+    let work=fgcr-work();
+    record_set(work,"path",path);record_set(work,"profile",profile);record_set(work,"reasoning",reasoning);record_set(work,"answer",answer);record_set(work,"lower",lower);record_set(work,"upper",upper);record_set(work,"started",started);
    let thought = reasoning > 0 ? fmc-open(fcms-maxpos(session)) : nothing();
-   let result = reasoning > 0 ? fmc-reason(thought,session,reasoning,answer) : fgcr-initial(session,reasoning,answer);
-   let measured = fal-check(result,lower,upper,answer); let last = measured[0]; let returned = measured[1];
-   let thoughtReleased = nothing?(thought) ? 1 : fmc-release(thought);
-   let released = fcms-release-ok?(last) && thoughtReleased;
+    record_set(work,"thought",thought);
+    if record?(thought) then record_set(thought,"generation-owner",work) else 0;
+   if !nothing?(thought) then fcms-retain-finalizer(session,"microthought",()=>fmc-release(thought)) else 0;
+   let result = reasoning > 0 ? fmc-reason(thought,session,reasoning,answer) : initial(session,reasoning,answer);
+   record_set(ftg-session(),"generation-result",result);
+    record_set(work,"result",result);
+    let measured = fal-check-owned(result,lower,upper,answer,work); let last = measured[0]; let returned = measured[1];
+   record_set(ftg-session(),"generation-assessment",measured);fgcr-retain(last);
+    record_set(work,"assessment",measured);fgcr-publish(work);
+   }
+   def fgcr-publish(work) {
+    let path=record_get(work,"path");let profile=record_get(work,"profile");let reasoning=record_get(work,"reasoning");let answer=record_get(work,"answer");let lower=record_get(work,"lower");let upper=record_get(work,"upper");let started=record_get(work,"started");
+    let thought=record_get(work,"thought");let result=record_get(work,"result");let measured=record_get(work,"assessment");let progress=record_get(work,"plain-progress");let owned=record_get(work,"session");
+    let last=record_get(work,"active-generation")=="plain" && record?(progress) ? record_get(progress,"session") : value_kind(owned)=="list" ? owned : measured[0];let returned=measured[1];
+    let released = fcms-release-ok?(last) && fcnv-lifetime-close(work);
    fs-mkdir(hearth-response-sessions()); fs-mkdir(hearth-generate-replies());
-   let root = fgcr-directory((hearth-generate-replies() + ("/" + (host_pid().str() + ("-" + now_unix_ms().str())))),0);
+    let root = record_get(work,"evidence")!="" ? record_get(work,"evidence") : fgcr-directory((hearth-generate-replies() + ("/" + (host_pid().str() + ("-" + now_unix_ms().str())))),0);
+    record_set(work,"evidence",root);
    let firstKept = fgcr-keep(root,"initial.txt",fcms-generation-text(frbg-first(result)));
    let finalKept = fgcr-keep(root,"final.txt",fcms-generation-text(frbg-final(result)));
    let noticeKept = fgcr-keep(root,"controller.txt",frbg-notice(result));
@@ -86,23 +212,28 @@ section [form.bml] {
    let priorKept = fgcr-keep(root,"before-length-check.txt",frbg-answer(result));
    let correctionKept = fgcr-keep(root,"length-revision.txt",fcms-generation-text(measured[2]));
    let feedbackKept = fgcr-keep(root,"length-feedback.txt",measured[3]);
-   let sequenceKept = fgcr-keep(root,"generation.json",json-emit(json-node-object([oh-s("schema","form-native-generation-evidence-v1"),json-node-pair("initial",fgcr-generation-evidence(frbg-first(result))),json-node-pair("final",fgcr-generation-evidence(frbg-final(result))),json-node-pair("length_revision",fgcr-generation-evidence(measured[2]))])));
+     let retained=record_get(work,"retained-generation");
+     let sequenceKept = fgcr-keep(root,"generation.json",json-emit(json-node-object([oh-s("schema","form-native-generation-evidence-v1"),json-node-pair("initial",fgcr-generation-evidence(frbg-first(result))),json-node-pair("final",fgcr-generation-evidence(frbg-final(result))),json-node-pair("retained_generation",value_kind(retained)=="list" ? fgcr-generation-evidence(retained) : json-node-null()),json-node-pair("length_revision",fgcr-generation-evidence(measured[2])),json-node-pair("length_revisions",json-node-array(map(fgcr-length-evidence,measured[9])))])));
    let thoughtKept = nothing?(thought) ? 1 : fgcr-keep(root,"microthought.json",json-emit(json-node-object([json-node-pair("execution",fmc-evidence(thought)),json-node-pair("controls",json-node-array(map(json-node-string,reverse(fmc-get(thought,"frames"))))),json-node-pair("injections",json-node-array(map(json-node-string,reverse(fmc-get(thought,"injections")))))])));
    // the reasoning lane's crossings join the one ledger every lane writes (form-token-grammar.bml)
-   let crossed = nothing?(thought) ? 0 : ftg-retain("reasoning",reverse(fmc-get(thought,"frames")),reverse(fmc-get(thought,"injections")),reverse(fmc-get(thought,"injected")));
-   let retained = thoughtKept && ((firstKept && finalKept) && ((noticeKept && answerKept) && (priorKept && (correctionKept && (feedbackKept && sequenceKept)))));
+    let crossings=nothing?(thought) ? [] : reverse(fmc-get(thought,"frames"));
+    if !nil?(crossings) && !record_has(work,"crossing-row") then record_set(work,"crossing-row",frb-row-text(oh-set(ftg-crossing-row("reasoning",crossings,reverse(fmc-get(thought,"injections")),reverse(fmc-get(thought,"injected"))),"continuation",json-node-string(record_get(work,"continuation"))))) else 0;
+    let crossed = nil?(crossings) ? 1 : ftg-retain-row-once(record_get(work,"crossing-row"))>0;
+    let retained = crossed && thoughtKept && ((firstKept && finalKept) && ((noticeKept && answerKept) && (priorKept && (correctionKept && (feedbackKept && sequenceKept)))));
    let complete = measured[8]; let rangePassed = measured[6];
    let detail = json-node-object([
-    oh-s("model",path),oh-s("profile",profile),json-node-pair("microthought",nothing?(thought) ? json-node-null() : fmc-evidence(thought)),json-node-pair("sampling",fgcr-sampling(last)),json-node-pair("sampling_before_length_check",fgcr-sampling(frbg-session(result))),oh-s("adapter_path",fcmd-path(fcmd-carrier(last))),oh-s("adapter_ab_sha256",fcmd-digest(fcmd-carrier(last))),oh-n("reasoning_allowance",reasoning),oh-n("answer_allowance",answer),oh-n("context",fcms-maxpos(last)),oh-n("prompt_ids",fcms-prompt-ids(last)),
-    oh-n("initial_generated_ids",len(fcms-generation-ids(frbg-first(result)))),oh-n("final_generated_ids",len(fcms-generation-ids(frbg-final(result)))),oh-n("length_revision_generated_ids",len(fcms-generation-ids(measured[2]))),oh-n("injected_ids",fcms-injected-ids(last)),
-    oh-n("complete",complete),oh-s("reason",fgcr-result-reason(result,measured)),oh-s("answer_origin",if measured[7] then "length-revision" else frbg-origin(result)),
+    oh-s("model",path),oh-s("profile",profile),json-node-pair("microthought",nothing?(thought) ? json-node-null() : fmc-evidence(thought)),json-node-pair("sampling",fgcr-sampling(last)),json-node-pair("sampling_before_length_check",fgcr-sampling(frbg-session(result))),oh-s("adapter_path",fcmd-path(fcmd-carrier(last))),oh-s("adapter_ab_sha256",fcmd-digest(fcmd-carrier(last))),oh-n("reasoning_allowance",reasoning),json-node-pair("answer_allowance",nothing?(answer) ? json-node-null() : json-node-int(answer)),oh-n("context",fcms-maxpos(last)),oh-n("prompt_ids",fcms-prompt-ids(last)),
+    oh-n("initial_generated_ids",len(fcms-generation-ids(frbg-first(result)))),oh-n("final_generated_ids",len(fcms-generation-ids(frbg-final(result)))),oh-n("length_revision_generated_ids",fgcr-length-tokens(measured[9])),oh-n("injected_ids",fcms-injected-ids(last)),
+    oh-n("complete",complete),oh-s("reason",fgcr-result-reason(result,measured)),oh-s("answer_origin",if fal-answer-revision(measured)>0 then "length-revision" else frbg-origin(result)),oh-n("answer_revision",fal-answer-revision(measured)),
     oh-n("word_minimum",lower),oh-n("word_maximum",upper),oh-n("initial_words",measured[4]),oh-n("final_words",measured[5]),oh-n("word_range_checked",(upper > 0)),oh-n("word_range_passed",rangePassed),oh-n("length_revisions",measured[7]),oh-s("length_revision_change",fal-change(result,measured)),
-    oh-n("release_ok",released),oh-n("retained",retained),oh-n("elapsed_ms",(host_monotonic_ms() - started)),oh-n("provider_calls",0),oh-s("private_evidence",root)]);
+     oh-n("release_ok",released),oh-n("release_resumed",record_get(work,"resumed")),oh-n("current_generated_ids",record_get(work,"resumed") ? 0 : fcms-generated-ids(last)),oh-n("current_injected_ids",record_get(work,"resumed") ? 0 : fcms-injected-ids(last)),oh-n("retained",retained),oh-n("elapsed_ms",(host_monotonic_ms() - started)),oh-n("provider_calls",0),oh-s("private_evidence",root)]);
    let reportKept = fgcr-keep(root,"report.json",json-emit(detail));
+   if released then record_set(ftg-session(),"generation-model",nothing()) else 0;
+    if released && retained && reportKept then record_set(work,"phase","complete") else record_set(work,"phase","release-pending");
    let healthy = (rangePassed && (complete && (released && (retained && reportKept))));
    let reading = oh-reading("native-generation",root,"bounded-response",json-node-int(1),json-node-int(healthy),json-node-int(healthy),if healthy then [] else [oh-need("inspect-generation-evidence",detail)],["inspect-retained-evidence"],detail);
    oh-voice(reading);
-   [("form-native-generation " + (json-emit(detail) + ("\ntext:\n" + returned))),fcmr-none(),detail];
+    [("form-native-generation " + (json-emit(detail) + ("\ntext:\n" + returned))),released ? fcmr-none() : last,detail];
   }
  }
  0;

@@ -7,14 +7,45 @@
 ; Expected: 7
 ; Verdict 7 when every claim lands:
 ;   1   on this device, a settle leaves the device reading settled
-;   2   a settle on a device already settled still reads settled
+;   2   settling is repeatable; grow/renew/grow retire exact physical owners and reservation parts, including a refused free
 ;   4   the renewal refuses for pending device work only after a settle did not settle it
 ; preflight-exec: forbidden
 // preludes: form-stdlib/core.fk form-stdlib/bml/live.bml form-stdlib/bml/form-cli-model-observation.bml form-stdlib/bml/form-cli-model-renew.bml
 section [form.bml] {
  class ModelRenewSettleBand {
   def mrs-c-settles(ctx) = fcmr-settle();
-  def mrs-c-again(ctx) = fcmr-settle() && fcmo-settled(metal_live());
+   def mrs-c-again(ctx) = fcmr-settle() && fcmo-settled(metal_live()) && mrs-owned-sequence();
+   def mrs-allocation(session,label,parts) {
+    let owner=fcms-phase-open(session,label,parts);
+    let handles=map(part=>q38x-alloc(owner,part[1]),parts);
+    record_set(owner,"observed",all?(h=>h>0,handles) && fcms-phase-ready(owner));
+    fcms-activate-parts(fcms-release-ledger(session),record_get(owner,"reservation"));
+    [owner,handles];
+   }
+   def mrs-owned-sequence() {
+    let before=metal_live();let session=fcms-none("renewal-ownership-observation");
+    let context=mrs-allocation(session,"renewal fixture context",[["scratch",4],["position-scratch",4]]);
+    let state=mrs-allocation(session,"renewal fixture state",[["full-kv",4],["recurrent",4]]);
+    record_set(fcms-release-ledger(session),"context",context[0]);record_set(fcms-release-ledger(session),"state",state[0]);
+    let oldParts=fcms-active-parts(session,["position-scratch","full-kv"]);
+    let growth=mrs-allocation(session,"renewal fixture growth",[["position-scratch",8],["full-kv",8]]);
+    let retired=fcms-retain-selection(session,[context[1][1],state[1][0]],oldParts);
+    let partial=q38x-close-owned-by(retired,()=>metal_sync(),(owner,h)=>h==state[1][0] ? 0 : q38x-free(owner,h));
+    let kept=partial==1 && q38x-release-handles(retired)==[state[1][0]] && q38x-release-handles(context[0])==[context[1][0]] && q38x-owned(state[0])==2 && all?(part=>record_get(part,"released")==0,oldParts);
+    let settled=fcms-pending-release(retired) && all?(part=>record_get(part,"released")==1,oldParts);
+    let stateParts=fcms-active-parts(session,["full-kv","recurrent"]);
+    let renewed=mrs-allocation(session,"renewal fixture replacement",[["full-kv",8],["recurrent",4]]);
+    let oldState=fcms-retain-selection(session,[growth[1][1],state[1][1]],stateParts);
+    let replaced=fcms-pending-release(oldState) && q38x-owned(state[0])==0 && q38x-release-handles(growth[0])==[growth[1][0]] && q38x-owned(renewed[0])==2;
+    let capacityParts=fcms-active-parts(session,["position-scratch","full-kv"]);
+    let grown=mrs-allocation(session,"renewal fixture second growth",[["position-scratch",16],["full-kv",16]]);
+    let oldCapacity=fcms-retain-selection(session,[growth[1][0],renewed[1][0]],capacityParts);
+    let advanced=fcms-pending-release(oldCapacity) && q38x-owned(growth[0])==0 && q38x-release-handles(renewed[0])==[renewed[1][1]] && q38x-owned(grown[0])==2;
+    let owners=[context[0],state[0],growth[0],renewed[0],grown[0]];
+    let released=fcms-release-ok?(session);let after=metal_live();let repeated=fcms-release-ok?(session);let final=metal_live();
+    let checks=[all?(o=>record_get(o,"observed"),owners),kept,settled,replaced,advanced,released && repeated && all?(o=>q38x-owned(o)==0,owners) && before[2]==after[2] && after[2]==final[2] && after[17]==final[17]];
+    print(["model-renew-owned-sequence",checks]);all?(ok=>ok,checks);
+   }
   def mrs-c-guard(ctx) {
    let src = read_file("form/form-stdlib/bml/form-cli-model-renew.bml") ?? "";
    str_find(src, "else if (!fcmo-settled(metal_live()) && !fcmr-settle()) then fcmr-observed(flow,fcmr-result(0,\"device-work-not-settled\"", 0) >= 0;

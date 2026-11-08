@@ -44,51 +44,22 @@ import form-stdlib/dsv4-layout.fk;
 import form-stdlib/dsv4-kernels.fk;
 import native/metal/dsv4-bind.fk;
 section [form.bml] {
-    // ---- the scratch plan: [name, bytes] ---------------------------------------------------------------
-    // the most compressed rows any layer holds at capacity cap, and the rows attention may see (raw + compressed)
-    def dso-max-comp-go(m, il, cap, best) = il == record_get(m, "layers-n") ? best : dso-max-comp-go(m, il + 1, cap, dvl-comp-rows(m, il, cap) > best ? dvl-comp-rows(m, il, cap) : best);
-    def dso-max-comp(m, cap) = dso-max-comp-go(m, 0, cap, 0);
-    def dso-attn-rows(m, cap) = cap + dso-max-comp(m, cap);
-    // what the layout's list does not name: the stages between its buffers, the expert buffers for ALL used experts (the id kernels run every used expert in one dispatch), the attention score
-    // and exponent scratch, the two rope tables (plain and compressed base), the argmax answer, the NaN scan's count
-    def dso-extras(m, cap) {
-        let e = record_get(m, "e");
-        let hd = record_get(m, "hd");
-        let nh = record_get(m, "nh");
-        let qdim = nh * hd;
-        let used = record_get(m, "used");
-        let hidden = dvl-max-layer(m, "hidden");
-        let rows = dso-attn-rows(m, cap);
-        [["hc-split", record_get(m, "mix") * 4], ["router-score", dvl-max-layer(m, "router-rows") * 4], ["q-latn", record_get(m, "qr") * 4], ["q-n", qdim * 4], ["kv-raw", hd * 4], ["kv-n", hd * 4], ["kv-q", hd * 4],
-         ["comp-pool", hd * 4], ["comp-normed", hd * 4], ["comp-q", hd * 4], ["ffn-out", e * 4],
-         ["att-score", nh * rows * 4], ["att-exp", nh * rows * 4], ["att-inv", nh * 4],
-         ["xgate", used * hidden * 4], ["xup", used * hidden * 4], ["xmid", used * hidden * 4], ["xdown", used * e * 4],
-         ["rope-plain", (record_get(m, "nrot") / 2) * 4], ["rope-comp", (record_get(m, "nrot") / 2) * 4], ["argmax-idx", 4], ["argmax-val", 4],
-         ["nan-count", 4]];
-    }
-    // LOGITS SIT WHERE QWEN'S DO. The session's sampler reads the logits buffer at bs[28] (form-cli-model-session.fk: fcms-ctx(s)[1][28], the seat q38-head fills), so the plan puts the layout's
-    // 27 buffers before "logits", then the head's own weights buffer (the n_hc gates of the output head), and the logits are the 29th buffer, index 28.
-    def dso-logits-slot() = 28;
-    def dso-layout-plan(m) {
-        let b = dvl-buffers(m);
-        let n = len(b);
-        append(b[0:n - 1], cons(["head-w", record_get(m, "hc") * 4], [b[n - 1]]));
-    }
-    def dso-scratch-plan(m, cap) = append(dso-layout-plan(m), dso-extras(m, cap));
-    def dso-plan-names(plan) = len(plan) == 0 ? [] : cons(plan[0][0], dso-plan-names(plan[1:]));
-    def dso-plan-bytes(plan) = len(plan) == 0 ? 0 : plan[0][1] + dso-plan-bytes(plan[1:]);
+    def dso-owned?(m) = record?(record_get(m,"allocation-ports"));
+    def dso-allocate(m,bytes) = dso-owned?(m) ? (record_get(record_get(m,"allocation-ports"),"allocate"))(bytes) : metal_buf_alloc(bytes);
+    // The complete scratch plan lives in dsv4-layout beside its pricing.
     // allocate the plan in order; one refused allocation frees the rest and answers nothing
-    def dso-alloc-go(plan, acc) {
+    def dso-alloc-go(plan, acc,m) {
         len(plan) == 0 ? reverse(acc) : {
-            let h = metal_buf_alloc(plan[0][1]);
-            h > 0 ? dso-alloc-go(plan[1:], cons(h, acc)) : dso-refused(acc);
+            let h = dso-allocate(m,plan[0][1]);
+            h > 0 ? dso-alloc-go(plan[1:], cons(h, acc),m) : dso-refused(m,acc);
         };
     }
-    def dso-refused(acc) {
-        let held = dvb-free-rounds(acc, 4);
+    def dso-refused(m,acc) {
+        let held = dso-owned?(m) ? [] : dvb-free-rounds(acc,4);
+        dso-retain-refused(m,held);
         nothing();
     }
-    def dso-alloc(plan) = dso-alloc-go(plan, []);
+    def dso-alloc(plan,m) = dso-alloc-go(plan, [],m);
     def dso-index-go(names, hs, ix) = len(names) == 0 ? ix : { record_set(ix, names[0], hs[0]); dso-index-go(names[1:], hs[1:], ix); };
     def dso-index(names, hs) = dso-index-go(names, hs, record_new(0));
 
@@ -113,23 +84,36 @@ section [form.bml] {
     def dsv4-open-span-with(path, maxpos, span, units) = dsv4-open-span-mode(path, maxpos, span, units, "whole");
     // THE MODE says what the open maps: "whole" maps every tensor of the plan, the three routed expert stacks of every layer among them (each one view over its whole stack: the control path); "arena" maps all
     // but those stacks (their rows stay in the view table with handle 0) and the arena (dsv4-arena.fk, dxa-open) is what the expert kernels read instead
-    def dsv4-open-span-mode(path, maxpos, span, units, mode) {
+    def dsv4-open-span-mode(path,maxpos,span,units,mode) = dsv4-open-span-mode-by(path,maxpos,span,units,mode,nothing());
+    def dsv4-open-span-mode-by(path,maxpos,span,units,mode,ports) {
         let src = file_size(path) > 24 ? dso-window-src(path) : "";
         let m = (str_len(src) > 24 && egg-magic-ok?(src) == 1 && gmt-str(src, "general.architecture") == "deepseek4") ? dvl-open(src) : nothing();
         let plan = nothing?(m) ? nothing() : dvb-plan-driver(m);
+        if record?(m) && record?(ports) then record_set(m,"allocation-ports",ports) else 0;
         (nothing?(m) || maxpos < 1 || !dso-admitted?(path, m, plan)) ? [] : dso-open-piped(path, maxpos, span, src, m, plan, dkr-open-pipes(units), units, mode);
     }
     def dso-open-piped(path, maxpos, span, src, m, plan, ps, units, mode) = dso-pipes-ok?(ps, dso-units-names(units)) ? dso-open-admitted(path, maxpos, span, src, m, plan, ps, mode) : [];
     def dso-open-admitted(path, maxpos, span, src, m, plan, ps, mode) {
-        let views = dvb-open-mode(path, plan, mode);
-        nothing?(views) ? [] : dso-open-views(path, maxpos, span, src, m, views, ps);
+        let views = dso-owned?(m) ? dvb-open-mode-by(path,plan,mode,record_get(record_get(m,"allocation-ports"),"from-file")) : dvb-open-mode(path,plan,mode);
+        nothing?(views) ? [] : record?(views) ? {
+            dso-retain-refused(m,record_get(views,"unreleased"));
+            dso-refused-context(m,"view-open-release-incomplete");
+        } : dso-open-views(path, maxpos, span, src, m, views, ps);
     }
     def dso-open-views(path, maxpos, span, src, m, views, ps) {
         let splan = dso-scratch-plan(m, maxpos);
-        let bs = dso-alloc(splan);
-        nothing?(bs) ? dso-release-views(views) : dso-open-built(path, maxpos, span, src, m, views, splan, bs, ps);
+        let bs = dso-alloc(splan,m);
+        nothing?(bs) ? dso-release-views(m,views) : dso-open-built(path, maxpos, span, src, m, views, splan, bs, ps);
     }
-    def dso-release-views(views) { let held = dvb-close(views); []; }
+    def dso-release-views(m,views) {
+        if !dso-owned?(m) then dso-retain-refused(m,dvb-close(views)) else 0;
+        dso-refused-context(m,"scratch-open-release-incomplete");
+    }
+    def dso-open-ok?(ctx) = value_kind(ctx)=="list" && len(ctx)==13 && !record_has(ctx[2],"open-refused");
+    def dso-refused-context(m,reason) = !dso-owned?(m) && nil?(dso-refused-state-handles(m)) ? [] : {
+        record_set(m,"open-refused",reason);
+        [record_new(0),[],m,[],[0],[0],[0],"",0,"",0,record_new(0),record_new(0)];
+    }
     def dso-open-built(path, maxpos, span, src, m, views, splan, bs, ps) {
         let vx = dvb-index(views);
         let lays = dso-lays(m, vx);
@@ -163,17 +147,19 @@ section [form.bml] {
 
     // ---- the state -----------------------------------------------------------------------------------------------------
     // one block's row [kv, comp state, comp score, comp rows]; a compressing layer's state and score are born by the init kernel
-    def dso-alloc-row(m, il, cap) {
-        let kv = metal_buf_alloc(dvl-raw-arena-bytes(m, cap));
+    def dso-alloc-row(m,il,cap) = dso-alloc-row-by(m,il,cap,metal_buf_alloc);
+    def dso-alloc-row-by(m, il, cap,allocate) {
+        let kv = allocate(dvl-raw-arena-bytes(m, cap));
         dvl-l(m, il, "compressed") ? {
-            let sb = metal_buf_alloc(dvl-state-bytes(m, il));
-            let sc = metal_buf_alloc(dvl-state-bytes(m, il));
-            let cr = metal_buf_alloc(dvl-comp-arena-bytes(m, il, cap));
+            let sb = allocate(dvl-state-bytes(m, il));
+            let sc = allocate(dvl-state-bytes(m, il));
+            let cr = allocate(dvl-comp-arena-bytes(m, il, cap));
             [kv, sb, sc, cr];
         } : [kv, 0, 0, 0];
     }
     def dso-row-ok?(row) = row[0] > 0 && row[1] >= 0 && row[2] >= 0 && row[3] >= 0 && ((row[1] == 0 && row[2] == 0 && row[3] == 0) || (row[1] > 0 && row[2] > 0 && row[3] > 0));
-    def dso-rows-go(m, il, n, cap) = il == n ? [] : cons(dso-alloc-row(m, il, cap), dso-rows-go(m, il + 1, n, cap));
+    def dso-rows-go(m,il,n,cap) = dso-rows-by(m,il,n,cap,metal_buf_alloc);
+    def dso-rows-by(m, il, n, cap,allocate) = il == n ? [] : cons(dso-alloc-row-by(m, il, cap,allocate), dso-rows-by(m, il + 1, n, cap,allocate));
     def dso-row-handles(row) = [row[0], row[1], row[2], row[3]];
     def dso-rows-handles(rows) = len(rows) == 0 ? [] : append(dso-row-handles(rows[0]), dso-rows-handles(rows[1:]));
     def dso-rows-ok?(rows) = len(rows) == 0 ? true : (dso-row-ok?(rows[0]) && dso-rows-ok?(rows[1:]));
@@ -183,10 +169,26 @@ section [form.bml] {
     // the state for cap positions: one row per block, or nothing (what was allocated is freed)
     def dsv4-new-state(m, ps, cap) {
         let rows = dso-rows-go(m, 0, record_get(m, "layers-n"), cap);
-        dso-rows-ok?(rows) && dso-init-rows(ps, m, 0, rows) ? dso-settled(rows) : dso-state-refused(rows);
+        dso-rows-ok?(rows) && dso-init-rows(ps, m, 0, rows) ? dso-settled(m,rows) : dso-state-refused(m,rows);
     }
-    def dso-settled(rows) { let s = metal_sync(); s >= 0 ? rows : dso-state-refused(rows); }
-    def dso-state-refused(rows) { let held = dvb-free-rounds(dso-handles-positive(dso-rows-handles(rows)), 4); nothing(); }
+    // The caller publishes its allocation owner before entering this factory.
+    // A refusal leaves every partial buffer with that same owner for release.
+    def dsv4-new-state-by(m,ps,cap,allocate) {
+        let rows=dso-rows-by(m,0,record_get(m,"layers-n"),cap,allocate);
+        dso-rows-ok?(rows) && dso-init-rows(ps,m,0,rows) && metal_sync()>=0 ? rows : nothing();
+    }
+    def dso-settled(m,rows) { let s = metal_sync(); s >= 0 ? rows : dso-state-refused(m,rows); }
+    def dso-refused-state-handles(m) = record_get(m,"refused-state-handles") ?? [];
+    def dso-retain-refused(m,handles) = record_set(m,"refused-state-handles",append(dso-refused-state-handles(m),handles));
+    def dso-take-refused-state-handles(m) {
+        let held=dso-refused-state-handles(m);
+        record_set(m,"refused-state-handles",[]);held;
+    }
+    def dso-state-refused(m,rows) {
+        let held=dvb-free-rounds(dso-handles-positive(dso-rows-handles(rows)),4);
+        dso-retain-refused(m,held);
+        nothing();
+    }
     def dso-handles-positive(hs) = len(hs) == 0 ? [] : (hs[0] > 0 ? cons(hs[0], dso-handles-positive(hs[1:])) : dso-handles-positive(hs[1:]));
     // the handles the state holds, and the bytes its arenas hold (dvl-kv-total at the same cap)
     def dsv4-state-handles(sts) = dso-handles-positive(dso-rows-handles(sts));
@@ -199,11 +201,35 @@ section [form.bml] {
     // the arena the open carries (dsv4-arena.fk dxa-open keeps it in the layout record under "arena"), or nothing; its handles are the expert buffers and the slot-id buffer, and the span views a fill still has pending
     def dso-arena(ctx) = record_has(ctx[2], "arena") ? record_get(ctx[2], "arena") : nothing();
     def dso-arena-handles(ctx) = nothing?(dso-arena(ctx)) ? [] : append(record_get(dso-arena(ctx), "handles"), record_get(dso-arena(ctx), "pending"));
+    def dso-free-pending(ar) = !record?(ar) ? [] : {
+        let ports=record_get(ar,"allocation-ports");
+        let left=filter(h=>(record?(ports) ? (record_get(ports,"free"))(h) : metal_buf_free([h,ar,"pending"]))!=1,record_get(ar,"pending"));
+        record_set(ar,"pending",left);left;
+    };
     // every handle the ctx holds: scratch, layer views, the three tensor views (the head's other three are in the last layer list), the arena's
-    def dsv4-ctx-handles(ctx) = append(ctx[1], append(dso-lay-handles(ctx[3]), append([ctx[4][0], ctx[5][0], ctx[6][0]], dso-arena-handles(ctx))));
+    def dsv4-ctx-handles(ctx) = append(dso-refused-state-handles(ctx[2]),append(ctx[1], append(dso-lay-handles(ctx[3]), append([ctx[4][0], ctx[5][0], ctx[6][0]], dso-arena-handles(ctx)))));
+    def dso-release-owner(ctx) {
+        let previous=record_get(ctx[2],"model-session-release");
+        !nothing?(previous) ? previous : {
+            let owner=record_new(0,"remaining",nothing(),"lease_released",0,"reason","release-not-started");
+            record_set(ctx[2],"model-session-release",owner);owner;
+        };
+    }
+    def dso-release-rounds(owner,left) = nil?(record_get(owner,"remaining")) || left<=0 ? record_get(owner,"remaining") : {
+        map(h=>metal_buf_free([h,owner,"remaining"]),record_get(owner,"remaining"));
+        metal_sync();dso-release-rounds(owner,left - 1);
+    };
     def dsv4-close(ctx, sts) {
         let s0 = metal_sync();
-        dvb-free-rounds(append(dsv4-ctx-handles(ctx), dsv4-state-handles(sts)), 4);
+        let owner=dso-release-owner(ctx);
+        let owned=record_get(owner,"remaining") ?? append(dsv4-ctx-handles(ctx),dsv4-state-handles(sts));
+        let ar=dso-arena(ctx);let pending=record?(ar) ? record_get(ar,"pending") : [];
+        let seen=record_new(0);
+        let raw=filter(h=>h<=0 || any?(p=>p==h,pending) || record_has(seen,h.str()) ? 0 : {record_set(seen,h.str(),1);1;},owned);
+        record_set(owner,"remaining",raw);
+        let views=dso-free-pending(ar);
+        dso-take-refused-state-handles(ctx[2]);
+        append(dso-release-rounds(owner,4),views);
     }
     def dsv4-ctx-handle-count(ctx) = len(dsv4-ctx-handles(ctx));
     0;

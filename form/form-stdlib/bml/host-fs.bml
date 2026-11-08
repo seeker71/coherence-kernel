@@ -1,8 +1,8 @@
 // host-fs.bml — the host doors that end a borrowed program, under Form names a caller reads.
 //
 // The body borrowed /bin/chmod, /bin/ln, /bin/mkdir -m, /bin/sync, /bin/cp, printenv, date, uname and lsof for want of a
-// seed door. The doors exist now (runtime/fkwu-uni.c, leaf-door modes 35-49; the notes above fk_host_door are the
-// contract): host_chmod, host_symlink, host_link, host_sync, host_getenv, host_mkdir_mode, host_localtime, host_os,
+// host resource. Form owns the filesystem composition in this unit; native-posix and the seed supply physical
+// operations and managed handles: host_chmod, host_symlink, host_link, host_sync, host_getenv, host_mkdir_mode, host_localtime, host_os,
 // host_file_holders, host_file_mode, host_file_copy, host_file_identity, host_utimes, host_realpath, host_pwrite. This file gives each an honest answer as data, so a caller migrates
 // by changing one name:
 //
@@ -22,19 +22,19 @@
 //   cd -P dir && pwd -P         hfs-realpath(path)           the physical path, nothing() when it does not exist
 //   printf X | dd conv=notrunc  hfs-pwrite(path, off, bytes) bytes written in place, no truncation
 //
-// A binary without the doors answers nothing() from every one of them (the call names no native): hfs-door?() asks, and
-// the caller decides; no fallback to a program is carried here.
+// Current source and a fresh seed are admitted together. Missing bindings are admission failures; operation-level
+// absence and error results retain their own contracts. No fallback to a program is carried here.
 //
-// Why hfs-copy is a door and not a Form loop: the only append a Form walk has (file_append_bytes) takes a byte LIST, and a
-// 4 MiB slice through it measured 79 s (2026-10-04); one read_file holds the whole file in the append-only, 2 GiB-capped
-// string pool. host_file_copy streams through a fixed 1 MiB buffer (a 10 MiB file in 17 ms, byte-equal).
+// Copy streams through positioned native I/O. Its chunk is working memory,
+// never an allowance on file size; Form owns identity checks and completion.
 //
 // PROOF: form-stdlib/tests/host-fs-band.fk.
 // preludes: form-stdlib/bml/parse.bml
 import form-stdlib/bml/parse.bml;
+import form-stdlib/bml/native-posix.bml;
 section [form.bml] {
  class HostFs {
-  // whether this fkwu carries the doors (a bad argument answers -2 on a binary that has them, nothing() on one that does not)
+   // Observe the admitted chmod boundary; this is not a substitute for source binding checks.
   def hfs-door?() = nothing?(host_chmod("", 0)) ? 0 : 1;
   def hfs-private-mode() = 448;
   // host_file_mode is the whole st_mode: the permission bits are `% 4096`, the type is the S_IFMT nibble `/ 4096`
@@ -59,16 +59,42 @@ section [form.bml] {
   def hfs-private-chmod(path) = hfs-chmod(path, hfs-private-mode());
   def hfs-private-dir(path) = host_mkdir_mode(path, hfs-private-mode());
   def hfs-symlink(target, path) = (Comparable) host_symlink(target, path) == 0;
+  def hfs-path?(path) = value_kind(path)=="string" && len(path)>0 && str_find(path,byte_to_str(0),0)<0;
+  def host_symlink(target,path) = !hfs-path?(target) || !hfs-path?(path) ? -2 : {
+   let made=nps-result(88,57,[target,path]);
+   made==0 ? 0 : made==(nli-platform ? -36 : -63) ? -2 : -1;
+  };
+  def fs_mkfifo(path) = !hfs-path?(path) ? -1 : {
+   let mode=host_file_mode(path);
+   mode>=0 ? ((mode / 4096) % 16==1 ? 0 : -1)
+   : nps-result(133,132,nli-platform ? [path,4480,0] : [path,384])==0 ? 1 : -1;
+  };
   // link(2) answers -1 for EEXIST and for every other refusal; the path telling them apart is whether it stands now
   def hfs-publish(stage, path) {
    let linked = host_link(stage, path);
    (Comparable) linked == 0 ? 1 : (Comparable) host_path_exists(path) == 1 ? 0 : -1;
   }
   def hfs-sync() = host_sync();
+  def host_sync() = nps-result(162,36,[]);
+  def host_localtime(ms) = float_leaf(41,ms);
+  def hfs-open-error(observed) = observed==(nli-platform ? -36 : -63) ? -2 : -1;
+  def hfs-byte-list?(bytes) = value_kind(bytes)=="list" && (nil?(bytes) || (value_kind(head(bytes))=="int" && hfs-byte-list?(tail(bytes))));
+  def host_pwrite(path,offset,bytes) = !hfs-path?(path) || value_kind(offset)!="int" || offset<0 ? -2 : {
+   let text=value_kind(bytes)=="string" ? bytes : hfs-byte-list?(bytes) ? nli-bytes(map(byte=>(byte % 256+256) % 256,bytes)) : nothing();
+   if nothing?(text) then -2 else {
+    let target=nps-file-open(path,1);
+    if value_kind(target)!="list" then hfs-open-error(target) else {
+     defer nps-file-settle(target);
+     let written=hfs-copy-write(target[1],offset,text,0); let released=nps-file-release(target);
+     written==1 && released==1 ? len(text) : -1;
+    };
+   };
+  };
   def hfs-env(name, default) = host_getenv(name) ?? default;
   def hfs-env-int(name, default) = parse-int(host_getenv(name) ?? "") ?? default;
   def hfs-home() = hfs-env("HOME", "");
   def hfs-os() = host_os();
+  def host_os() = float_leaf(42,0);
   def hfs-darwin?() = (String) host_os() == "Darwin";
   // the pids holding a file open, ascending; the peers of a pid are those that are not it
   def hfs-holders(path) = host_file_holders(path);
@@ -85,6 +111,37 @@ section [form.bml] {
    let cleaned = whole ? 0 : host_path_remove(stage);
    whole ? n : -1;
   }
+  def hfs-copy-write(fd,offset,bytes,written) = written==len(bytes) ? 1 : {
+   let wrote=nps-write-at(fd,offset+written,substring(bytes,written,len(bytes)));
+   wrote==-4 ? hfs-copy-write(fd,offset,bytes,written) : wrote<=0 ? 0 : hfs-copy-write(fd,offset,bytes,written+wrote);
+  };
+  def hfs-copy-stream(source,target,offset) {
+   let read=nps-read-at(source,offset,1048576);
+   read[0]==-4 ? hfs-copy-stream(source,target,offset)
+   : read[0]<0 ? -1 : read[0]==0 ? offset
+   : hfs-copy-write(target,offset,read[1],0)==1 ? hfs-copy-stream(source,target,offset+read[0]) : -1;
+  }
+  def hfs-copy-open(source,to) {
+   let target=nps-file-open(to,1);
+   if value_kind(target)!="list" then hfs-open-error(target) else {
+    defer nps-file-settle(target);
+    let from=nps-file-identity(source); let dest=nps-file-identity(target); let mode=nps-file-mode(source);
+    if nothing?(from) || nothing?(dest) || from==dest || nothing?(mode) then -1 else {
+     let copied=nps-file-resize(target[1],0)==0 ? hfs-copy-stream(source[1],target[1],0) : -1;
+     let changed=copied>=0 ? nps-result(91,124,[target[1],mode % 4096]) : -1;
+     let released=nps-file-release(target);
+     copied>=0 && changed==0 && released==1 ? copied : -1;
+    };
+   };
+  }
+  def host_file_copy(from,to) = !hfs-path?(from) || !hfs-path?(to) ? -2 : {
+   let source=nps-file-open(from,0);
+   if value_kind(source)!="list" then hfs-open-error(source) else {
+    defer nps-file-settle(source);
+    let copied=hfs-copy-open(source,to); let released=nps-file-release(source);
+    released==1 ? copied : -1;
+   };
+  };
   // the local time of a unix ms, as the host's zone reads it
   def hfs-zeros(k) = k <= 0 ? "" : "0" ++ hfs-zeros(k - 1);
   def hfs-pad(n, width) = hfs-zeros(width - len(n.str())) ++ n.str();

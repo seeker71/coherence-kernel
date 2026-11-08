@@ -2,8 +2,8 @@
 ; The queue once ran `printenv HOME`, `printenv FORM_MODEL_ADMISSION_WAIT_MS` and `lsof -t <path>` through a shell; they are the seed's
 ; host_getenv and host_file_holders now (host-fs.bml). Nothing foreign runs here, and no model is opened: the file the band holds open is its own scratch file.
 ;
-;   1     env: adm-home is the host's HOME (a directory) and the root is its .cache/form-model; adm-wait-ms is ten minutes when
-;         FORM_MODEL_ADMISSION_WAIT_MS is unset and that variable's own value when it is set to a number (the band reads it through host_getenv too)
+;   1     env: adm-home is the host's HOME (a directory) and the root is its .cache/form-model; an omitted wait stays absent,
+;         explicit values retain their meaning and malformed allowances are refused before queuing
 ;   2     peers, on scripted holders: this process and a pid that cannot exist are held, and only a live pid other than the asker is a peer
 ;         ([me, gone] asked by 0 is [me]; asked by me it is []); a nothing() and a non-list are no peers
 ;   4     peers, on the host: the band opens its own scratch file with file_open and asks as another pid (1): the band's pid is the peer; asked as
@@ -25,10 +25,14 @@ section [form.bml] {
   def mab-c-env() {
    let home = host_getenv("HOME");
    let wait = host_getenv("FORM_MODEL_ADMISSION_WAIT_MS");
-   let want = nothing?(wait) ? 600000 : (parse-int(wait) ?? 600000);
+    let want = adm-wait-value(wait);
    let said = mab-say("env", [home, adm-root(), adm-wait-ms(), nothing?(wait)]);
    (String) value_kind(home) == "string" && (String) adm-home() == (String) trim(home) && (Comparable) host_path_is_dir(adm-home()) == 1 && (String) adm-root() == adm-home() ++ "/.cache/form-model"
-    && (Comparable) adm-wait-ms() == want && (Comparable) hfs-env-int("MODEL_ADMISSION_BAND_SURELY_UNSET_NAME", 7) == 7;
+     && adm-wait-ms() == want && nothing?(adm-wait-value(nothing())) && adm-wait-value("0")==0 && adm-wait-value("17")==17
+     && all?(adm-wait-valid,[nothing(),0,17,4611686018427387903]) && !any?(adm-wait-valid,[-1,"no",1.5])
+     && adm-admit-for("invalid allowance","absent",-1,0)[0]==0 && !adm-wait-expired([host_monotonic_ms(),nothing()])
+     && !adm-wait-expired([host_monotonic_ms(),4611686018427387903]) && adm-wait-expired([host_monotonic_ms() - 50,1])
+     && (Comparable) hfs-env-int("MODEL_ADMISSION_BAND_SURELY_UNSET_NAME", 7) == 7;
   }
   def mab-c-scripted() {
    let me = host_pid();
@@ -80,14 +84,46 @@ section [form.bml] {
     let reserved=adm-position-with(root,next,[lease])==0 && host_path_is_dir(adm-queue(root)+"/"+first)==1 && adm-note-lines(root,host_pid())==[path];
     let unrelated=append(lease[0:2],cons("different model",lease[3:]));
     let preserved=adm-position-with(root,next,[unrelated])==1 && adm-position-with(root,next,[])==1 && nothing?(adm-position-with(root,"missing",[lease]));
+     let shared=adm-admit-file(root,"shared session",host_pid(),path,1,0,1);
+      let both=shared[0]==1 && shared[2]=="" && shared[3]==1 && adm-note-lines(root,host_pid())==[path,path];
+      let release=record_new(0);
+      let dropped=adm-drop-owned-at(root,host_pid(),path,release);
+      let retained=dropped && adm-note-lines(root,host_pid())==[path];
+      adm-note-add(root,host_pid(),path);
+      let repeated=adm-drop-owned-at(root,host_pid(),path,release) && adm-note-lines(root,host_pid())==[path,path];
+      let absent=adm-admit-file(root,"no file",host_pid(),path,0,0,1);
+      let noNote=absent[0]==1 && absent[3]==0 && adm-note-lines(root,host_pid())==[path,path];
+      let uncertain=record_new(0,"residency-before",[path],"residency-after",[]);
+      let unchanged=!adm-drop-owned-at(root,host_pid(),path,uncertain) && adm-note-lines(root,host_pid())==[path,path];
     let cleaned = host_dir_rmdir(dir);
-    waiting && reserved && preserved && (mab-darwin?() ? (theirs && !ours && !after && nil?(notes)) : (!theirs && !ours && !after && nil?(notes)));
+      waiting && reserved && preserved && both && retained && repeated && noNote && unchanged && (mab-darwin?() ? (theirs && !ours && !after && nil?(notes)) : (!theirs && !ours && !after && nil?(notes)));
+  }
+  def mab-c-scoped() {
+   let root=mab-dir()+"-scoped";let me=host_pid();let stamp=now_unix_ms();
+   let owned=adm-enter-owned(root,me,stamp);
+   let live=!nothing?(owned) && adm-ticket-live?(root,owned)==1 && adm-tickets(root)==[owned];
+   let lease=record_get(ADM-TICKET-LEASES,adm-queue(root)+"/"+owned);
+   nps-file-settle(lease);
+   let inert=adm-ticket-live?(root,owned)==0 && nil?(adm-tickets(root)) && host_alive(me)==1;
+   adm-loaded-at(root,owned);
+   let failed=try {
+    let ticket=adm-enter-owned(root,me,stamp+1);
+    defer adm-loaded-at(root,ticket);
+    form_error("scoped admission release probe");
+   } catch 1;
+   let ordinary=failed==1 && nil?(adm-tickets(root));
+   let legacy=adm-enter-at(root,me,stamp+2);let unknown=adm-enter-at(root,me,stamp+3);
+   host_dir_mkdir(adm-ticket-owner(root,unknown));
+   let conservative=adm-ticket-live?(root,legacy)==1 && nothing?(adm-ticket-live?(root,unknown)) && adm-tickets(root)==[legacy,unknown];
+   host_dir_rmdir(root);
+   mab-say("scoped queue",[live,inert,ordinary,conservative]);
+   live && inert && ordinary && conservative;
   }
   def mab-run() {
    let b1 = mab-c-env() ? 1 : 0;
    let b2 = mab-c-scripted() ? 2 : 0;
    let b4 = mab-c-live() ? 4 : 0;
-   let b8 = mab-c-held() ? 8 : 0;
+   let b8 = mab-c-held() && mab-c-scoped() ? 8 : 0;
    let verdict = b1 + b2 + b4 + b8;
    let shown = print(["model-admission-band", "verdict", verdict]);
    verdict;

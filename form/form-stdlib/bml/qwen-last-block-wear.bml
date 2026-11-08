@@ -118,25 +118,34 @@ section [form.bml] {
    : qlbj-pair-why("worn", dir, qlbj-layer(c), geo[10], record_get(c, "rank"), geo[0]);
   // the bytes the wear holds beside the context, for the memory lease: the pair as the file holds it, and u at the context's span
   def qlwe-own-bytes(wear, span) = nothing?(wear) ? 0 : qlwe-own-of(wear[0], qlbj-config(wear[0]), span);
-  def qlwe-own-of(dir, c, span) = !qlbj-pos?(record_get(c, "rank")) ? 0 : (file_size(qlbj-st(dir)) < 0 ? 0 : file_size(qlbj-st(dir))) + record_get(c, "rank") * span * 4;
+   def qlwe-own-of(dir, c, span) = !qlbj-pos?(record_get(c, "rank")) ? 0 : sum(map(len,qlbj-pair-bytes(dir,qlbj-layer(c)))) + record_get(c, "rank") * span * 4;
   // the records by layer: this record on L, nothing elsewhere
   def qlwe-records(rec, L, nL) = map(l => (Comparable) l == L ? [rec] : [], range(0, nL));
   def qlwe-ctx(ctx, table, rec, info) = [ctx[0], append(ctx[1], [rec[3], rec[4], rec[5]]), ctx[2], table, ctx[4], ctx[5], ctx[6], ctx[7], ctx[8], ctx[9], ctx[10], info];
-  // ["worn", the worn context] or ["refused", why]; a refusal frees what it took and leaves the opened context as it was
-  def qlwe-open(ctx, wear) = len(qlwe-why(wear[0], ctx[2])) > 0 ? ["refused", qlwe-why(wear[0], ctx[2])] : qlwe-open-read(ctx, wear[0], qlbj-config(wear[0]), wear[1]);
-  def qlwe-open-read(ctx, dir, c, scaleOver) {
+   // ["worn", context] or ["refused", why]. The native session supplies its
+   // retained allocator and keeps partial allocations for its release boundary.
+   def qlwe-open(ctx,wear) = qlwe-open-by(ctx,wear,metal_buf_alloc,qlwe-refuse);
+   def qlwe-open-by(ctx, wear,allocate,refuse) = len(qlwe-why(wear[0], ctx[2])) > 0 ? ["refused", qlwe-why(wear[0], ctx[2])] : qlwe-open-read-by(ctx, wear[0], qlbj-config(wear[0]), wear[1],allocate,refuse);
+   def qlwe-open-read(ctx,dir,c,scaleOver) = qlwe-open-read-by(ctx,dir,c,scaleOver,metal_buf_alloc,qlwe-refuse);
+   def qlwe-open-read-by(ctx, dir, c, scaleOver,allocate,refuse) {
    let geo = ctx[2];
    let L = qlbj-layer(c);
    let r = record_get(c, "rank");
    let scale = nothing?(scaleOver) ? record_get(c, "scale") : scaleOver;
    let ab = qlbj-pair-bytes(dir, L);
-   let rec = qlh-rr-open(4, ab[0], ab[1], geo[10], r, geo[0], scale, q38-ctx-span(ctx));
-   nil?(rec) ? ["refused", "worn adapter " ++ qlbj-st(dir) ++ ": the pair did not open on the device"] : qlwe-admit(ctx, dir, L, scale, rec, qlh-rr-nonfinite(rec));
+    // Validate the exact supplied bytes before device allocation. This removes
+    // a temporary GPU counter and its independent release from admission.
+    !qlh-finite-bytes?(ab[0],0,geo[10]*r) || !qlh-finite-bytes?(ab[1],0,r*geo[0]) ? ["refused","worn adapter "+qlbj-st(dir)+" carries non-finite words"] : {
+     let rec = qlh-rr-open-by(4, ab[0], ab[1], geo[10], r, geo[0], scale, q38-ctx-span(ctx),allocate);
+     !qlh-rr-valid?(rec) ? refuse(rec,"worn adapter " ++ qlbj-st(dir) ++ ": the pair did not open on the device") : qlwe-admit-by(ctx,dir,L,scale,rec,0,refuse);
+    };
   }
-  def qlwe-admit(ctx, dir, L, scale, rec, bad) = nothing?(bad) ? qlwe-refuse(rec, "worn adapter " ++ qlbj-st(dir) ++ ": the device's finite count did not arrive")
-   : bad > 0 ? qlwe-refuse(rec, "worn adapter " ++ qlbj-st(dir) ++ " carries " ++ bad.str() ++ " words that are not finite")
-   : qlwe-tabled(ctx, dir, L, scale, rec, qlh-rr-table(ctx[3], qlwe-records(rec, L, ctx[2][21]), ctx[2][22], q38-ctx-span(ctx)));
-  def qlwe-tabled(ctx, dir, L, scale, rec, table) = nothing?(table) ? qlwe-refuse(rec, "worn adapter " ++ qlbj-st(dir) ++ ": the layer table refused the record (" ++ qlh-rr-refusal(qlwe-records(rec, L, ctx[2][21]), ctx[2][22], q38-ctx-span(ctx)) ++ ")")
+   def qlwe-admit(ctx,dir,L,scale,rec,bad) = qlwe-admit-by(ctx,dir,L,scale,rec,bad,qlwe-refuse);
+   def qlwe-admit-by(ctx, dir, L, scale, rec, bad,refuse) = nothing?(bad) ? refuse(rec, "worn adapter " ++ qlbj-st(dir) ++ ": the device's finite count did not arrive")
+    : bad > 0 ? refuse(rec, "worn adapter " ++ qlbj-st(dir) ++ " carries " ++ bad.str() ++ " words that are not finite")
+    : qlwe-tabled-by(ctx, dir, L, scale, rec, qlh-rr-table(ctx[3], qlwe-records(rec, L, ctx[2][21]), ctx[2][22], q38-ctx-span(ctx)),refuse);
+   def qlwe-tabled(ctx,dir,L,scale,rec,table) = qlwe-tabled-by(ctx,dir,L,scale,rec,table,qlwe-refuse);
+   def qlwe-tabled-by(ctx, dir, L, scale, rec, table,refuse) = nothing?(table) ? refuse(rec, "worn adapter " ++ qlbj-st(dir) ++ ": the layer table refused the record (" ++ qlh-rr-refusal(qlwe-records(rec, L, ctx[2][21]), ctx[2][22], q38-ctx-span(ctx)) ++ ")")
    : ["worn", qlwe-ctx(ctx, table, rec, ["qwen-wear-v1", dir, hex-encode(sha256-stream-string(read_file(qlbj-st(dir)) ?? "")), scale, rec, L])];
   def qlwe-refuse(rec, why) {
    let settled = metal_sync();

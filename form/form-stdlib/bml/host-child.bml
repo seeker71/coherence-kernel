@@ -44,6 +44,8 @@ import form-stdlib/line-grammar.fk;
 import form-stdlib/bml/spawn-guard.bml;
 import form-stdlib/bml/cell-said.bml;
 import form-stdlib/bml/fatal-signal.bml;
+import form-stdlib/bml/native-owner-clock.bml;
+import form-stdlib/bml/json-view.bml;
 section [form.bml] {
  class HostChild {
   def hch-dir() = ".hearth/walk-io";
@@ -77,7 +79,7 @@ section [form.bml] {
   // found through it. A pass adds the rows whose parent is already in the set, until a pass adds none.
   def hch-roster() {
    let rows = host_processes("fkwu*");
-   (String) value_kind(rows) == "list" ? rows : [];
+   (String) value_kind(rows) == "list" ? rows : nothing();
   }
   def hch-row-ok?(row) = (String) value_kind(row) == "list" && len(row) > 5 && (String) value_kind(row[0]) == "int" && (String) value_kind(row[5]) == "int";
   def hch-in?(xs, x) = nil?(xs) ? false : ((Comparable) xs[0] == x) || hch-in?(xs[1:], x);
@@ -85,26 +87,30 @@ section [form.bml] {
    let more = filter(row => hch-row-ok?(row) && !hch-in?(set, row[0]) && hch-in?(set, row[5]), rows);
    nil?(more) ? set : hch-grow(rows, append(set, more |> map(row => row[0])));
   }
-  def hch-lineage(pid) = hch-grow(hch-roster(), [pid]);
-  def hch-asked(family) = foldl((acc, one) => host_kill(one), 0, family);
-  def hch-gone-all?(family, until) = nil?(filter(one => (Comparable) host_alive(one) == 1, family)) ? true : host_monotonic_ms() >= until ? false : hch-gone-again(family, until, host_sleep_ms(50));
+  def hch-lineage(pid) {let rows=hch-roster();nothing?(rows) ? nothing() : hch-grow(rows,[pid]);}
+  def hch-entry(pid) {let row=host_process(pid);[pid,value_kind(row)=="list" && len(row)>5 ? row[5] : nothing()];}
+  def hch-entry-live?(entry) {let current=hch-entry(entry[0]);host_alive(entry[0])==1 && !nothing?(entry[1]) && entry[1]>0 && current[1]==entry[1];}
+  def hch-entry-ended?(entry) = noc-process-ended?(entry);
+  def hch-asked(family) = foldl((acc, entry) => hch-entry-live?(entry) ? host_kill(entry[0]) : acc, 0, family);
+  def hch-gone-all?(family, until) = all?(hch-entry-ended?, family) ? true : host_monotonic_ms() >= until ? false : hch-gone-again(family, until, host_sleep_ms(50));
   def hch-gone-again(family, until, rested) = hch-gone-all?(family, until);
-  def hch-standing(family) = filter(one => (Comparable) host_alive(one) == 1, family);
+  def hch-standing(family) = filter(hch-entry-live?, family);
   // The survivors are ended with SIGKILL through the host_signal door, one signal each. The answer is how many the host
   // refused (0: every one was sent), or nothing() when this fkwu has no such door: it names the missing binding when
   // the file is lowered and answers nothing for the call, and a deadline that cannot end its child says so below
   // rather than waiting on a child it did not end.
   def hch-door?() = !nothing?(host_signal(0, 9));
-  def hch-ended(family) = hch-door?() ? foldl((acc, one) => host_signal(one, 9) < 0 ? acc + 1 : acc, 0, hch-standing(family)) : nothing();
+  def hch-ended(family) = hch-door?() ? foldl((acc, entry) => host_signal(entry[0], 9) < 0 ? acc + 1 : acc, 0, hch-standing(family)) : nothing();
   // past its deadline: the lineage is asked to stop, given its grace, and the survivors ended; the child's exit is read
   // for the reaping, never believed
   def hch-stop(pid) {
-   let family = hch-lineage(pid);
+   let discovered=hch-lineage(pid); let family=map(hch-entry,nothing?(discovered) ? [pid] : discovered);
    let asked = hch-asked(family);
    let gone = hch-gone-all?(family, host_monotonic_ms() + hch-grace-ms());
    let forced = gone ? 0 : hch-ended(family);
-   let reaped = nothing?(forced) ? 0 : host_wait(pid);
-   [nothing(), "deadline: the child ran past its deadline and was stopped" ++ (len(family) > 1 ? " with " ++ (len(family) - 1).str() ++ " descendant(s)" : "") ++ (gone ? "" : nothing?(forced) ? " (NOT ended: this fkwu has no host_signal door; rebuild it from runtime/fkwu-uni.c)" : " (ended with SIGKILL)")];
+   let settled=!nothing?(discovered) && (gone || (!nothing?(forced) && hch-gone-all?(family,host_monotonic_ms()+hch-grace-ms())));
+   let reaped = host_alive(pid)==0 ? host_wait(pid) : nothing();
+   [nothing(), "deadline: the child ran past its deadline; " ++ (settled ? "its observed process family ended" : "process-family release remains unverified for " ++ str(family)) ++ (len(family)>1 ? " with " ++ (len(family) - 1).str() ++ " descendant(s)" : "") ++ (nothing?(forced) ? " (host_signal unavailable)" : "")];
   }
   // the step's reading, one line beside its output
   def hch-exit-line(status, why) = nothing?(status) ? "none " ++ why : status.str();
@@ -152,12 +158,14 @@ section [form.bml] {
   //   text    what the cell printed (the value it ended on is the record's, not a last line to be read back); a stop is named
   //           on the text's last line, as a spawned run's stderr named it
   //   why     "" when it ran, else the reason, named as hch-run names one ("birth refused: ...", "deadline: ...")
-  //   [3]     the record {value, out, err, diag, stopped, errors, resident, ms, cpu_us}, nothing() when no record came
+   //   [3]     the cell record, including entered_ms, deadline_ms and allowance_ms
+   //           observed after setup; nothing() when no record came
   // The step's evidence stands as it does for a child: <io>/<step>.{in,out,err,exit} (err is the stderr text the cell said:
   // its diagnostics and organ-health rows, cs-stderr of cell-said.bml; the exit line is the reading above), the run before
   // it beside it as .prev.*. `until` is a time on
   // host_monotonic_ms as it is for hch-run; the cell's budget is what is left of it (a deadline instead of a kill).
-  def hch-cell-left(until) = nothing?(until) ? nothing() : until - host_monotonic_ms() < 1 ? 1 : until - host_monotonic_ms();
+   def hch-cell-left-at(until,now) = nothing?(until) ? nothing() : until - now < 1 ? 1 : until - now;
+   def hch-cell-left(until) = hch-cell-left-at(until,host_monotonic_ms());
   def hch-cell-input-lines(input) {
    let lines = split-on(input, "\n");
    len(lines) > 0 && (String) lines[len(lines) - 1] == "" ? take(len(lines) - 1, lines) : lines;
@@ -177,21 +185,26 @@ section [form.bml] {
    let out = hch-out-path(io, step);
    let cleared = host_path_remove(out);
    let from = hch-input(io, step, input);
-   let rec = cell_run(path, 0, hch-cell-left(until), hch-cell-stdin(input));
+    let lines=hch-cell-stdin(input);
+    let entered=host_monotonic_ms();let allowance=hch-cell-left-at(until,entered);
+    let rec = cell_run(path, 0, allowance, lines);
+    if nothing?(rec) then 0 else {record_set(rec,"entered_ms",entered);record_set(rec,"deadline_ms",until);record_set(rec,"allowance_ms",allowance);};
    hch-cell-answer(io, step, out, rec);
   }
   def hch-cell-answer(io, step, out, rec) {
    let status = hch-cell-status(rec);
    let why = hch-cell-why(rec);
    let text = hch-cell-text(rec);
-   let observed = hch-cell-observe(io, step, rec);
    let wrote = write_file_text(out, nothing?(rec) ? "[host-child] " ++ why ++ "\n" : text);
    let heard = write_file_text(hch-err-path(io, step), cs-stderr(rec));
    let noted = write_file_text(hch-exit-path(io, step), hch-exit-line(status, why) ++ "\n");
+   let observed = hch-cell-observe(io, step, rec);
    [status, text, why, rec];
   }
+  // Cell stop/diagnostic records are execution evidence, not persistent nodes.
+  def hch-cell-detail(value) = nothing?(value) ? jv-null() : record?(value) ? jv-object(map(key=>jv-pair(key,hch-cell-detail(record_get(value,key))),record_keys(value))) : value_kind(value)=="list" ? jv-array(map(hch-cell-detail,value)) : value_kind(value)=="int" ? jv-int(value) : value_kind(value)=="string" ? jv-string(value) : jv-string(value.str());
   def hch-cell-observe(owner, step, rec) {
-   let observed = nothing?(rec) ? 0 : fb_record(intern_node(intern_trivial_string("in-process-cell-return"), [intern_trivial_string(owner), intern_trivial_string(step), intern_trivial_string(hch-cell-field(hch-cell-field(rec,"stopped"),"kind") ?? ""), intern_trivial_int(record_get(rec,"resident")), intern_trivial_int(record_get(rec,"ms")), intern_trivial_int(record_get(rec,"cpu_us")), intern_trivial_int(record_get(rec,"errors")), intern_trivial_string(value_kind(record_get(rec,"value"))),hch-cell-stop(rec),record_get(rec,"diag")]), "host-child.bml", 201);
+    let observed = nothing?(rec) ? 0 : fb_record(jv-frame-word(jv-object([jv-s("kind","in-process-cell-return"),jv-s("owner",owner),jv-s("step",step),jv-n("resident",record_get(rec,"resident")),jv-n("ms",record_get(rec,"ms")),jv-n("cpu_us",record_get(rec,"cpu_us")),jv-n("errors",record_get(rec,"errors")),jv-s("value_kind",value_kind(record_get(rec,"value"))),jv-pair("entered_ms",hch-cell-detail(record_get(rec,"entered_ms"))),jv-pair("deadline_ms",hch-cell-detail(record_get(rec,"deadline_ms"))),jv-pair("allowance_ms",hch-cell-detail(record_get(rec,"allowance_ms"))),jv-pair("stopped",hch-cell-detail(hch-cell-stop(rec))),jv-pair("diag",hch-cell-detail(record_get(rec,"diag")))])), "host-child.bml", 201);
    rec;
   }
   def hch-err-path(io, step) = io ++ "/" ++ step ++ ".err";

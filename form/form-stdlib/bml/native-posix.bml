@@ -19,8 +19,50 @@ section [form.bml] {
   }
   def nps-call(linux,darwin,args) = nli-platform ? nli-call(linux,args) : { let answer = nps-darwin-call(darwin,args); let result = nli-signed(answer[0]); cons(result == -35 ? -11 : result,answer[1:]); };
   def nps-result(linux,darwin,args) = nps-call(linux,darwin,args)[0];
+   // Atomic publication without replacing even an empty destination directory.
+   // Linux x86-64 renameat2(RENAME_NOREPLACE); Darwin renameatx_np(RENAME_EXCL).
+   def nps-rename-exclusive(source,destination) = nps-result(316,488,[nli-platform ? -100 : -2,source,nli-platform ? -100 : -2,destination,nli-platform ? 1 : 4]);
   def nps-close(fd) = nps-result(3,6,[fd]);
-  def nps-fork() = nps-result(57,2,[]);
+  // The lease carries the evaluator-unwind responsibility; the recipes retain
+  // byte interpretation and publication. Never close its descriptor directly.
+  def nps-file-lease(path,writing) = float_leaf(60,["open",path,writing]);
+  // Regular-file refusal retains negative errno; a successful handle is [id,fd].
+  def nps-file-open(path,writing) = float_leaf(60,["regular-open",path,writing]);
+  def nps-file-try-exclusive(fd) = nps-result(73,131,[fd,6]);
+  def nps-file-mode(lease) = nothing?(lease) ? nothing() : float_leaf(60,["mode",lease[0]]);
+  def nps-file-release(lease) = nothing?(lease) ? 1 : float_leaf(60,["close",lease[0]]);
+  def nps-file-held(lease) = nothing?(lease) ? 0 : float_leaf(60,["held",lease[0]]);
+   def nps-file-status(lease) = nothing?(lease) ? [0,0] : float_leaf(60,["status",lease[0]]);
+   def nps-file-identity(lease) = nothing?(lease) ? nothing() : float_leaf(60,["identity",lease[0]]);
+   def nps-file-stamp(lease) = nothing?(lease) ? nothing() : float_leaf(60,["stamp",lease[0]]);
+  def nps-file-settle(lease) = nps-file-release(lease)==1 ? 0 : form_error("native file lease release incomplete");
+   def nps-publication-release(result) = !record?(result) ? 0 : record_get(result,"released")==1 ? 1 : {
+    let leases=record_get(result,"release_leases");
+    value_kind(leases)!="list" || nil?(leases) ? 0 : {
+     let done=all?(released=>released==1,map(id=>nps-file-release([id]),leases));
+     if done then record_set(result,"released",1) else 0;done;
+    };
+   }
+  def nps-with-file(path,writing,body) {
+   let lease=nps-file-lease(path,writing);
+   nothing?(lease) ? nothing() : {
+    defer nps-file-settle(lease);
+    body(lease[1]);
+   };
+  }
+  def nps-file-size(fd) = nps-result(8,199,[fd,0,2]);
+  def nps-file-resize(fd,bytes) = nps-result(77,201,[fd,bytes]);
+  def nps-file-sync(fd) = nps-result(74,95,[fd]);
+  def nps-read-at(fd,offset,count) {
+   count<0 || offset<0 ? form_error("native file read geometry refused") : {
+    let result=nps-call(17,153,[fd,[nli-zero(count)],count,offset]);
+    [result[0],result[0]>0 ? substring(result[1],0,result[0]) : ""];
+   };
+  }
+  def nps-write-at(fd,offset,bytes) = offset<0 || value_kind(bytes)!="string" ? form_error("native file write geometry refused") : nps-result(18,154,[fd,bytes,len(bytes),offset]);
+  // The physical continuation uses libc's fork bookkeeping. Active scoped
+  // file leases and borrowed generations require release or a handoff first.
+  def nps-fork() = float_leaf(60,["fork",0]);
   def nps-exit(status) = nps-result(60,1,[status]);
   def nps-no-sigpipe(fd) = nli-platform ? 0 : nps-result(54,105,[fd,65535,4130,nli-le(1,4),4]);
   def nps-socket() { let fd = nps-result(41,97,[2,1,0]); fd<0 ? fd : nps-no-sigpipe(fd) != 0 ? { nps-close(fd); form_error("native socket signal ownership failed"); } : fd; }

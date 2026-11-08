@@ -32,12 +32,15 @@ compile's). It answers one record, always (a call that cannot be made is a stopp
 | field | meaning |
 | --- | --- |
 | `value` | the unit's final value as the Form value it is, no stringification; `nothing()` when it stopped |
+| `execution_complete` | 1 when the unit returned normally, even if a later deadline or release check stopped the call; 0 for a check, refusal or interrupted execution |
+| `completed_value` | the normally returned value retained when a later check stopped the call; otherwise `nothing()`. It is execution evidence, not a successful call verdict |
 | `out` | empty for `cell_call`; captured printed text for the `cell_run` adapter, never written to fd 1 |
 | `err` | empty for `cell_call`; captured diagnostic text for the `cell_run` adapter. `diag` carries structured compiler rows, replayed on resident calls. `form/form-stdlib/bml/cell-said.bml` renders the adapter's diagnostic evidence when text is needed |
 | `diag` | a list of records, one per organ voicing or compile diagnostic: `organ aspect stage observed detail path name line health at_ms` |
 | `stopped` | `nothing()`, or `{kind, message, recipe, unit}`: kind `"stop"` (a Form-level stop, the `attempt` mechanism's catch: the same line a spawned run dies with), `"deadline"` (the budget ended it), `"unrunnable"` (it would not read as a program), `"refused"` (the call itself was malformed), `"stack-depth"` (a stack that ended, named before it was ever a crash: the message reads `stack-depth: <unit> <function> (...)`, `recipe` and `unit` say where, `frames` is the walker's chain, innermost first, as `"<function> (<unit>)"` (up to 24), and `depth` how many frames deep it was; see "A stack that ends is a stop") |
 | `errors` | the compile errors counted in `diag` (a spawned `fkwu` exits 1 on them) |
 | `resident` | 1 when the unit was already parsed here, 0 when this call loaded it |
+| `source_owner` | process-local reflection handle for a parsed program, including check mode; absent if no program was created. `kernel_ast(pid,["syntax-program",handle])` exposes retained source and actual bindings. It is not a durable content identity |
 | `ms`, `cpu_us` | elapsed time from the monotonic clock and process CPU spent in the call |
 
 There is no exit code: "exit 1" is `stopped` not nothing, or `errors > 0`. There is no last line: the answer is `value`. There is
@@ -46,11 +49,10 @@ no stderr to re-read: a diagnostic is a row. A leg is judged in `form/form-stdli
 
 ### The sinks
 
-Every byte the seed writes to stdout goes through `putchar` or `printf`; every stderr line through `fk_write_all_raw`, `dprintf` or
-`vdprintf`. One definition of each, at the top of `runtime/fkwu-uni.c`, is the whole sink: with no cell running each passes straight
-to libc (one load and one branch); with one running, stdout appends to the call's buffer and stderr is dropped, because the four
-producers of organ voicings (`fk_sig_head`, `fk_stop_voice`, the two diagnostic signals) hand the row to `fk_dg_*` at the source,
-with its fields, instead of composing a JSON line that a parser must read again. `read_line` and `file_read(0, n)` draw from the call's stdin value
+The rewrite's `runtime_output` and `runtime_error` select the current cell's sinks.
+`cell_run` captures their bytes; `cell_call` discards their text while preserving
+structured diagnostics. With no cell running, the sinks are stdout and stderr.
+`read_line` and `file_read(0, n)` draw from the call's stdin value
 instead of fd 0 (`file_read` takes up to n bytes of what is left; cell-run-band claim 524288). A function row an earlier load gave back is
 numbered again by the next, and the owner cached for it is asked again (claim 1048576: `fact.fk` after a gate cell). Sinks nest: a cell may call `cell_run`; the inner call's output, rows and input are its own, and the outer's are put
 back when it returns (bit 16384).
@@ -58,12 +60,18 @@ back when it returns (bit 16384).
 ### The budget
 
 A cell's budget and elapsed time use the same monotonic clock as `host_monotonic_ms`; diagnostic timestamps retain calendar time.
-A walker step counts; every 16384th compares that clock to the deadline (`FK_CELL_TICK` in `fk_walk` and `fk_walk_body`). When the
+A walker step counts; entry and every 16384th step compare that clock to the deadline (`CellCall.deadline_steps` in `drive`). This polling cadence does not limit the steps a cell may execute. When the
 budget is spent the walker jumps straight to the call's own recover point, past any `attempt` the cell holds, so an inner `try` cannot
 swallow the end. The cell comes back `stopped: "deadline"` with what it had printed (bit 4096: a cell that never ends returns at its
-300 ms, measured 300 ms). What this cannot end: a unit inside a crystallized hot leaf (the check is the walker's), a blocking
-host call (`host_wait` on a hung child, an uninterruptible GPU wait) and `fk_die` (out of memory, a broken table), which end the process
-as they always did. Those are the reasons a wedge-prone worker is a service, below.
+300 ms, measured 300 ms). Socket waits, audio admission/drain and `host_sleep_ms`
+also honor that deadline. HTTP request sockets belong to their cell until closed;
+unwinding releases an interrupted exchange. An explicitly returned socket handle
+keeps its own lifetime and does not retain its originating cell's deadline.
+The return boundary checks the clock too: a blocking host call that finishes
+between evaluator polls cannot turn an exhausted allowance into a successful
+call. If execution did return normally, `execution_complete` and `completed_value`
+retain that completed work beside the deadline stop. This does not make a host
+operation interruptible while it is blocked.
 
 `cell_path()` returns the active root's source path, including direct source execution.
 Nested calls restore the outer root. `cs-entry?(path)` in `bml/cell-said.bml`

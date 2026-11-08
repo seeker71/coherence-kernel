@@ -17,9 +17,20 @@ section [form.bml] {
   def frbg-valid-session(session) = (fcms-live?(session) && (fcms-pending(session) >= 0));
   def frbg-stopped(session) = (frbg-valid-session(session) && fcms-stopped?(session));
   def frbg-refuse(session,first,reason) = frbg-result(session,first,frbg-empty(session),"","none","",0,reason);
-  def frbg-reserve-fits(session,added,reserve) = (((fcms-pos(session) + added) + reserve) < fcms-maxpos(session));
-  def frbg-reserve-with-handoff(session,reasoning,answer,handoff) = frbg-reserve-fits(session,(reasoning + handoff),answer);
-  def frbg-stage-observation(used,reasoning,answer) = ("Form runtime observation: the initial generation stage ended after " + (used.str() + (" tokens, within an allowance of " + (reasoning.str() + (". The controller is opening a separate final-response stage with " + (answer.str() + " output tokens. "))))));
+  def frbg-natural(value) = value_kind(value)=="int" && value>=0;
+  def frbg-allowance-sum(parts) = foldl((total,value)=>nothing?(total) || !frbg-natural(value) || value>4611686018427387903 - total ? nothing() : total+value,0,parts);
+  def frbg-answer-reserve(answer) = nothing?(answer) ? 0 : answer;
+  def frbg-answer-valid(answer) = nothing?(answer) || (frbg-natural(answer) && answer>0);
+  // Compare against measured remaining positions without adding untrusted
+  // allowances. The strict inequality retains one spare decoding position.
+  def frbg-reserve-fits(session,added,reserve) {
+   let pos=fcms-pos(session);let limit=fcms-maxpos(session);
+   if !frbg-natural(pos) || !frbg-natural(limit) || pos>=limit || !frbg-natural(added) || !frbg-natural(reserve) then 0 else {
+    let room=limit - pos;added<room && reserve<room - added;
+   };
+  }
+  def frbg-reserve-with-handoff(session,reasoning,answer,handoff) = frbg-natural(handoff) && frbg-reserve-fits(session,reasoning,answer) && handoff<fcms-maxpos(session) - fcms-pos(session) - reasoning - answer;
+  def frbg-stage-observation(used,reasoning,answer) = "Form runtime observation: the initial generation stage ended after " + used.str() + " tokens, within an allowance of " + reasoning.str() + ". The controller is opening a separate final-response stage " + (nothing?(answer) ? "without a caller output-token cutoff. " : "with " + answer.str() + " output tokens. ");
   def frbg-count-instruction() = "Native computation can count words after generation; do not enumerate words to count them. ";
   def frbg-observation(used,reasoning,answer) = (frbg-stage-observation(used,reasoning,answer) + ("Return the response requested by the original enquiry now. " + (frbg-count-instruction() + "This observation supplies no new domain evidence.")));
   def frbg-task-observation(used,reasoning,answer,task) = if ((String) task == "") then frbg-observation(used,reasoning,answer) else (frbg-stage-observation(used,reasoning,answer) + ("Return the next response for the CURRENT task below, using its latest observed failure and correction instructions. The original goal, source documents and caller constraints still apply. " + (frbg-count-instruction() + ("This is retained controller state, with no new domain evidence.\nCURRENT TASK: " + task))));
@@ -28,14 +39,15 @@ section [form.bml] {
   def frbg-observation-ids(session,text) = fcms-direct-answer-observation-ids(session,text);
   // Reserve the current final-stage request before spending the reasoning
   // allowance. The indexed crossing includes its pending/close control IDs.
-  def frbg-task-reserve-fits(session,reasoning,answer,task) = if (!frbg-valid-session(session)) then 0 else if (!frbg-reserve-fits(session,reasoning,answer)) then 0 else {
+  def frbg-task-reserve-fits(session,reasoning,answer,task) = if (!frbg-valid-session(session)) then 0 else if (!frbg-answer-valid(answer) || !frbg-reserve-fits(session,reasoning,frbg-answer-reserve(answer))) then 0 else {
    let notice = frbg-task-observation(reasoning,reasoning,answer,task);
-   frbg-reserve-with-handoff(session,reasoning,answer,len(frbg-observation-ids(session,notice)));
+   frbg-reserve-with-handoff(session,reasoning,frbg-answer-reserve(answer),len(frbg-observation-ids(session,notice)));
   };
   def frbg-bridge(session,text,reserve) {
    let ids = frbg-observation-ids(session,text);
-   if (!frbg-reserve-fits(session,len(ids),reserve)) then fcms-refuse(session,"final-response-reserve-does-not-fit")
-   else fcms-observe-ids(session,ids,"reasoning-budget-observation-refused");
+   let owner=nothing?(reserve) ? fcms-ensure-room(session,len(ids)+1) : session;
+   if !frbg-valid-session(owner) then owner else if (!frbg-reserve-fits(owner,len(ids),frbg-answer-reserve(reserve))) then fcms-refuse(owner,"final-response-reserve-does-not-fit")
+   else fcms-observe-ids(owner,ids,"reasoning-budget-observation-refused");
   }
   def frbg-decode(session,ids) = tkz-decode-text(fcms-src(session),ids);
    def frbg-after(first,reasoning,answer,closing,generate,bridge,decode) = frbg-after-task(first,reasoning,answer,closing,generate,bridge,decode,"",first=>nothing());
@@ -63,8 +75,8 @@ section [form.bml] {
    };
   }
    def frbg-with(session,reasoning,answer,closing,generate,bridge,decode) = frbg-with-task(session,reasoning,answer,closing,generate,bridge,decode,"",first=>nothing());
-   def frbg-with-task(session,reasoning,answer,closing,generate,bridge,decode,task,completed) = if ((!frbg-valid-session(session)) || ((reasoning <= 0) || ((answer <= 0) || (closing < 0)))) then frbg-refuse(session,frbg-empty(session),"reasoning-budget-input-refused")
-   else if (!frbg-reserve-fits(session,reasoning,answer)) then frbg-refuse(session,frbg-empty(session),"reasoning-and-answer-reserves-do-not-fit")
+   def frbg-with-task(session,reasoning,answer,closing,generate,bridge,decode,task,completed) = if ((!frbg-valid-session(session)) || ((!frbg-natural(reasoning) || reasoning <= 0) || ((!frbg-answer-valid(answer)) || (closing < 0)))) then frbg-refuse(session,frbg-empty(session),"reasoning-budget-input-refused")
+   else if (!frbg-reserve-fits(session,reasoning,frbg-answer-reserve(answer))) then frbg-refuse(session,frbg-empty(session),"reasoning-and-answer-reserves-do-not-fit")
     else frbg-after-task(generate(session,reasoning),reasoning,answer,closing,generate,bridge,decode,task,completed);
   // The caller opens a reasoning profile. The close ID is obtained from
   // the same tokenizer that owns the session, including its reference fallback.

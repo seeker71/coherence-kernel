@@ -85,7 +85,8 @@ section [form.bml] {
    hlb-refused(hw-reading-at(io, none, hlb-far()), "reading", none) && hlb-refused(hw-rows-at(io, none), "rows-record", none) && hlb-refused(hw-rows-at(io, none), "rows-native", none) && hlb-refused(hw-lift-at(io, none, hlb-far()), "lift", none) && hlb-refused(hw-proof-at(io, none), "proof", none) && hlb-refused(hw-gaps-at(io, none), "gaps", none)
    && (Comparable) host_path_exists(io ++ "/reading.out") == 0 && (Comparable) host_path_exists(io ++ "/lift.out") == 0;
   }
-  // ---- 16 deadline
+   // The caller's deadline includes startup. Preserve any emitted marker;
+   // a child stopped before its first write need not have emitted one.
   def hlb-c-deadline(ctx) {
    let hung = hlb-stub(ctx, "hung", "print_str(\"[native-reading] voice q: began\");\n host_sleep_ms(30000);\n 0;");
    let began = host_monotonic_ms();
@@ -95,8 +96,8 @@ section [form.bml] {
    let beganLift = host_monotonic_ms();
    let lifted = hw-lift-at(hlb-io(ctx), hungLift, beganLift + 5000 - hw-backstop-ms());
    let wallLift = host_monotonic_ms() - beganLift;
-   (wall < 20000) && hlb-has(line, "[native-reading] voice q: began") && hlb-has(line, "deadline: the child ran past its deadline")
-   && (wallLift < 20000) && hlb-has(lifted, "[lift] window: began") && hlb-has(lifted, "deadline: the child ran past its deadline");
+    (wall < 20000) && hlb-has(line, "[native-reading] voice q: began")==hlb-has(read_file(hlb-io(ctx)+"/reading.out") ?? "","[native-reading] voice q: began") && hlb-has(line, "deadline: the child ran past its deadline") && hlb-has(line,"its observed process family ended")
+    && (wallLift < 20000) && hlb-has(lifted, "[lift] window: began")==hlb-has(read_file(hlb-io(ctx)+"/lift.out") ?? "","[lift] window: began") && hlb-has(lifted, "deadline: the child ran past its deadline") && hlb-has(lifted,"its observed process family ended");
   }
   // ---- 32 paths
   def hlb-strings(nodes) = map(n => json-string-value(n), nodes);
@@ -132,19 +133,15 @@ section [form.bml] {
   // ---- 128 the 27B's gate
   def hlb-better() = "[lift] judged on x: better 1 parent_loss_milli 2 child_loss_milli 1";
   def hlb-worse() = "[lift] judged on x: better 0 parent_loss_milli 1 child_loss_milli 2";
-  def hlb-grant(need) = [1, "room", 1, 1, 1];
-  def hlb-refuse(need) = [0, "capacity", 1, 1, 1];
   def hlb-gate-holds?(why, doors) {
    let far = hw-lift-27b-floor-ms();
-   (String) why(hlb-better(), far, doors, hlb-grant) == ""
-   && hlb-has(why(hlb-worse(), far, doors, hlb-grant), "did not read better 1") && hlb-has(why("[lift] cadence: a lift begins at 8", far, doors, hlb-grant), "did not read better 1")
-   && hlb-has(why(hlb-better(), far - 1, doors, hlb-grant), "cannot hold")
-   && hlb-has(why(hlb-better(), far, doors, hlb-refuse), "held by the memory governor")
-   && hlb-has(why(hlb-better(), far, ["/no/such/door.bml"], hlb-grant), "does not stand");
+    (String) why(hlb-better(), far, doors) == ""
+    && hlb-has(why(hlb-worse(), far, doors), "did not read better 1") && hlb-has(why("[lift] cadence: a lift begins at 8", far, doors), "did not read better 1")
+    && hlb-has(why(hlb-better(), far - 1, doors), "cannot hold")
+    && hlb-has(why(hlb-better(), far, ["/no/such/door.bml"]), "does not stand");
   }
-  def hlb-plant-blind-3b(lifted, left, doors, ask) = hw-lift-27b-why(hlb-better(), left, doors, ask);
-  def hlb-plant-blind-time(lifted, left, doors, ask) = hw-lift-27b-why(lifted, hw-lift-27b-floor-ms(), doors, ask);
-  def hlb-plant-blind-room(lifted, left, doors, ask) = hw-lift-27b-why(lifted, left, doors, hlb-grant);
+   def hlb-plant-blind-3b(lifted, left, doors) = hw-lift-27b-why(hlb-better(), left, doors);
+   def hlb-plant-blind-time(lifted, left, doors) = hw-lift-27b-why(lifted, hw-lift-27b-floor-ms(), doors);
   def hlb-c-lift-27b(ctx) {
    let rows = hlb-printer(ctx, "rows27", ["[27b-rows] 44 rows"]);
    let train = hlb-printer(ctx, "train27", ["[27b-train] exported"]);
@@ -153,23 +150,27 @@ section [form.bml] {
    let io = hlb-root(ctx) ++ "/io-27b";
    let doors = [rows, train, judge];
    let until = host_monotonic_ms() + 7200000;
-   let line = hw-lift-27b-at(io, doors, until, hlb-better(), hlb-grant);
+    let line = hw-lift-27b-at(io, doors, until, hlb-better());
    let heard = parse-json("train", read_file(io ++ "/lift-27b-train.in") ?? "{}");
    let heardJudge = parse-json("judge", read_file(io ++ "/lift-27b-judge.in") ?? "{}");
    let io2 = hlb-root(ctx) ++ "/io-27b-2";
-   let dead = hw-lift-27b-at(io2, [rows, dying, judge], until, hlb-better(), hlb-grant);
+    let dead = hw-lift-27b-at(io2, [rows, dying, judge], until, hlb-better());
    let io3 = hlb-root(ctx) ++ "/io-27b-3";
-   let held = hw-lift-27b-at(io3, doors, until, hlb-worse(), hlb-grant);
-   hlb-gate-holds?(hw-lift-27b-why, doors) && !hlb-gate-holds?(hlb-plant-blind-3b, doors) && !hlb-gate-holds?(hlb-plant-blind-time, doors) && !hlb-gate-holds?(hlb-plant-blind-room, doors)
+    let held = hw-lift-27b-at(io3, doors, until, hlb-worse());
+    let refused=hlb-stub(ctx,"memory27","print_str(\"[memory] held exact training geometry\");\n form_error(\"training admission held\");");
+    let io4=hlb-root(ctx)+"/io-27b-memory";
+    let memory=hw-lift-27b-at(io4,[rows,refused,judge],until,hlb-better());
+    hlb-gate-holds?(hw-lift-27b-why, doors) && !hlb-gate-holds?(hlb-plant-blind-3b, doors) && !hlb-gate-holds?(hlb-plant-blind-time, doors)
    && hlb-has(line, "[27b-rows] 44 rows") && hlb-has(line, "[27b-train] exported") && hlb-has(line, "[27b-judge] better 1")
    && (str_find(line, "[27b-rows]", 0) < str_find(line, "[27b-train]", 0)) && (str_find(line, "[27b-train]", 0) < str_find(line, "[27b-judge]", 0))
    && fhn-count(heard, "wall_s") > 3000 && fhn-count(heard, "wall_s") <= (7200000 - hw-lift-27b-judge-ms()) / 1000 && (String) fhn-text(heard, "out") == hw-lift-27b-out() && (String) fhn-text(heardJudge, "child") == hw-lift-27b-out()
    && hlb-has(dead, "[27b-train] stopped") && hlb-has(dead, "[lift-27b-train] exit 1") && (Comparable) host_path_exists(io2 ++ "/lift-27b-judge.out") == 0
-   && hlb-has(held, "[lift-27b] not this walk: this walk's 3B lift did not read better 1") && (Comparable) host_path_exists(io3 ++ "/lift-27b-rows.out") == 0;
+    && hlb-has(held, "[lift-27b] not this walk: this walk's 3B lift did not read better 1") && (Comparable) host_path_exists(io3 ++ "/lift-27b-rows.out") == 0
+    && hlb-has(memory,"[memory] held exact training geometry") && host_path_exists(io4+"/lift-27b-judge.out")==0;
   }
   // ---- 512 home-free
   def hlb-sink-held?(code, sink, follows) { let after = split-on(code, sink)[1:]; !nil?(after) && all?(p => (String) follows == "" || ((len(p) >= len(follows)) && (String) substring(p, 0, len(follows)) == follows), after); }
-  def hlb-writer-holds?(w) { let held = hlb-sink-held?(read_file(w[1]) ?? "", w[2], w[3]); let said = held ? 0 : print_str("[host-walk-learn-band] a bare writer: " ++ w[0] ++ " in " ++ w[1]); held; }
+   def hlb-writer-holds?(w) { let code=read_file(w[1]) ?? ""; let held = hlb-sink-held?(code, w[2], w[3]) && (len(w)<5 || all?(e=>hlb-has(code,e),w[4])); let said = held ? 0 : print_str("[host-walk-learn-band] a bare writer: " ++ w[0] ++ " in " ++ w[1]); held; }
   def hlb-named?(table, p) = any?(w => (String) w[0] == p, table);
   // the sweep the table cannot do for itself: a def anywhere in the source that returns a carried ledger, and a line that appends to it, passes the sink. A writer nobody named still reads here
   def hlb-def-of(line, ledger) { let tail = "() = \"" ++ ledger ++ "\";"; let z = str_find(line, tail, 0); let a = str_find(line, "def ", 0); a < 0 || z < a ? "" : substring(line, a + 4, z); }

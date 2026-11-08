@@ -1,0 +1,503 @@
+// The source view owns lexical slots and the legacy node projection in Form.
+// kernel_ast's syntax-* readings transport the admitted parser objects only.
+import form-stdlib/core.fk;
+import form-stdlib/bml-source.fk;
+import form-stdlib/bml/string-join.bml;
+import form-stdlib/bml/json-view.bml;
+section [form.bml] {
+ let kas-surfaces=record_new(0);
+ let kas-source-hashes=record_new(0);
+ def kas-raw(pid,query)=kernel_ast(pid,query);
+  // Counts are measured at actual Form body entry. Selection and the legacy
+  // text surface belong here, beside the source metadata they describe.
+  def kas-hot-sort(rows,key) = len(rows)<2 ? rows : {
+   let pivot=rows[len(rows)/2][key];
+   append(kas-hot-sort(filter(row=>row[key]>pivot,rows),key),append(filter(row=>row[key]==pivot,rows),kas-hot-sort(filter(row=>row[key]<pivot,rows),key)));
+  };
+  def kas-hot-rows(n,key) = value_kind(n)!="int" ? nothing() : n<=0 ? [] : take(n,kas-hot-sort(filter(row=>row[key]>0,kas-raw(host_pid(),["syntax-heat",0])),key));
+  def kernel_hot_rows(n) = kas-hot-rows(n,0);
+  def kernel_box_rows(n) = kas-hot-rows(n,5);
+  def kernel_hot(n) = str-join-with(map(row=>row[0].str()+"|"+row[1]+"|"+row[2]+"|"+row[3].str()+"|"+row[4].str()+"\n",kernel_hot_rows(n)),"");
+  // The rewrite has no retained asynchronous/foreign heat sampler. Absence is
+  // distinct from an observed empty ranking in the current process.
+  def kernel_page_hot(pid,n) = pid != host_pid() || n==0 ? nothing() : kas-hot-rows(n<0 ? 0 - n : n,n<0 ? 9 : 0);
+  def kernel_page_box(pid,n) = pid != host_pid() ? nothing() : kas-hot-rows(n<0 ? 0 - n : n,n<0 ? 8 : 5);
+ // Binding admission is a source operation. The seed supplies syntax and applies
+ // the resulting unresolved sites; it does not carry a second lexical grammar.
+ def kas-check-node(state,id) {
+  let nodes=record_get(state,"nodes"); let key=id.str(); let held=record_get(nodes,key);
+  nothing?(held) ? {let node=kas-raw(record_get(state,"pid"),["syntax-node",id]);record_set(nodes,key,node);node;} : held;
+ }
+ def kas-check-head(state,node)=node[0]=="group" && len(node[2])>0 ? kas-check-node(state,node[2][0])[1] : nothing();
+ def kas-check-globals(state,ids) {
+  map(id=>{
+   let node=kas-check-node(state,id); let head=kas-check-head(state,node);
+   head=="do" ? kas-check-globals(state,node[2][1:]) : head=="let" && len(node[2])==3 ? record_set(record_get(state,"names"),kas-check-node(state,node[2][1])[1],1) : 0;
+  },ids); 0;
+ }
+ def kas-check-known(state,name,env) {
+   name=="true" || name=="false" || record_has(record_get(state,"names"),name) ? 1 : {
+   let operations=record_get(state,"operations"); let held=record_get(operations,name);
+    let known=nothing?(held) ? {let observed=kas-raw(record_get(state,"pid"),["syntax-declared-operation",name]);record_set(operations,name,observed);observed;} : held;
+    // Positive global/operation membership is indexed. A negative operation
+    // observation still permits a lexical binding in this exact scope.
+    known==1 || !nothing?(kas-env(env,name));
+  };
+ }
+ def kas-check-missing(state,id,node,name,refuse) {
+  let missing=record_get(state,"missing");
+  record_has(missing,id.str()) ? 0 : {
+   let detail="unresolved binding: "+name;
+   let source=kas-raw(record_get(state,"pid"),["syntax-source",id]);
+   let line=1+len(filter(i=>char_at(source,i)=="\n",range(0,node[4]))); let at=now_unix_ms();
+   let diagnostic=record_new(0,"organ","fkwu-compiler","aspect","diagnostic","stage","observe","observed","binding-missing","detail",detail,"path",node[3],"name",name,"line",line,"health",0,"at_ms",at);
+   let text="form-organ health "+jv-emit(jv-object([jv-s("organ","fkwu-compiler"),jv-s("aspect","diagnostic"),jv-s("stage","observe"),jv-s("observed","binding-missing"),jv-s("detail",detail),jv-s("path",node[3]),jv-s("name",name),jv-n("line",line),jv-n("health",0),jv-n("at_ms",at)]))+"\n";
+   record_set(missing,id.str(),[id,diagnostic,text,refuse]);
+  };
+ }
+ def kas-check-sequence(state,ids,env) {
+  nil?(ids) ? 0 : {
+   kas-check-expression(state,ids[0],env);
+   let next=kas-check-bound(state,ids[0],env);
+   kas-check-sequence(state,ids[1:],next);
+  };
+ }
+ // BML destructuring lowers to a do of ordinary unscoped lets. A do forwards
+ // those bindings to the following statement just as the executing scope does;
+ // scoped lets and conditional alternatives keep their own environments.
+ def kas-check-bound(state,id,env) {
+  let node=kas-check-node(state,id); let head=kas-check-head(state,node);
+  head=="do" ? foldl((scope,child)=>kas-check-bound(state,child,scope),env,node[2][1:]) :
+  (head=="let" && len(node[2])==3) || (head=="defn" && len(node[2])==4) ? cons([kas-check-node(state,node[2][1])[1],1],env) : env;
+ }
+ def kas-check-expression(state,id,env) {
+  let node=kas-check-node(state,id);
+  node[0]=="name" ? (kas-check-known(state,node[1],env) ? 0 : kas-check-missing(state,id,node,node[1],1)) : node[0]!="group" || nil?(node[2]) ? 0 : {
+   let ids=node[2]; let head=kas-check-head(state,node);
+   head=="defn" && len(ids)==4 ? {
+    let name=kas-check-node(state,ids[1])[1]; let params=kas-check-node(state,ids[2])[2];
+    kas-check-expression(state,ids[3],append(map(p=>[kas-check-node(state,p)[1],1],params),cons([name,1],env)));
+   } : head=="lambda" && len(ids)==3 ? {
+    let params=kas-check-node(state,ids[1])[2]; kas-check-expression(state,ids[2],append(map(p=>[kas-check-node(state,p)[1],1],params),env));
+   } : head=="let" && len(ids)>=3 ? {
+    kas-check-expression(state,ids[2],env);
+    len(ids)>3 ? kas-check-sequence(state,ids[3:],cons([kas-check-node(state,ids[1])[1],1],env)) : 0;
+   } : head=="do" ? kas-check-sequence(state,ids[1:],env) : {
+    let named=kas-check-node(state,ids[0])[0]=="name";
+    named && !kas-check-known(state,head,env) ? kas-check-missing(state,id,node,head,0) : {
+     named ? 0 : kas-check-expression(state,ids[0],env);
+     map(child=>kas-check-expression(state,child,env),ids[1:]); 0;
+    };
+   };
+  };
+ }
+ def kas-check(pid) {
+  let state=record_new(0,"pid",pid,"nodes",record_new(0),"names",record_new(0),"operations",record_new(0),"missing",record_new(0));
+  let units=kas-raw(pid,["syntax-all-roots"]); let header=kas-raw(pid,["syntax-header"]);
+  map(i=>record_set(record_get(state,"names"),kas-raw(pid,["syntax-function",i])[0],1),range(0,header[1]));
+  map(unit=>kas-check-globals(state,unit[1]),units);
+  // An imported incarnation retains its first admission's lexical outcome.
+  // A later caller's names cannot heal or invalidate that owner's syntax.
+  map(unit=>nothing?(unit[2]) ? kas-check-sequence(state,unit[1],[]) : map(row=>record_set(record_get(state,"missing"),row[0].str(),row),unit[2]),units);
+  let missing=record_get(state,"missing"); map(key=>record_get(missing,key),record_keys(missing));
+ }
+ def kas-state(pid) {
+  let header=kas-raw(pid,["syntax-header"]);
+  nothing?(header) ? nothing() : {
+   let key=pid.str()+":"+header[0].str();
+   let held=record_get(kas-surfaces,key);
+   nothing?(held) ? {
+     let state=record_new(0,"pid",pid,"header",header,"nodes",record_new(0),"rows",record_new(0),"strings",record_new(0),"source","","sources",record_new(0),"next",1,"slot",0,"names",record_new(0),"owned",record_new(0),"functions",record_new(0),"function_ids",record_new(0),"next_function",header[1]+1,"programs",record_new(0),"prepared",record_new(0),"globals",record_new(0),"global_names",record_new(0),"initializers",record_new(0),"active_owner",header[0],"active_fn",-1);
+    range(0,header[1]) |> map(j=>{
+     let row=kas-raw(pid,["syntax-function",j]);
+     let body=kas-raw(pid,["syntax-node",row[2]]);
+     record_set(record_get(state,"names"),row[0],j+1);
+     record_set(record_get(state,"owned"),body[3]+"\n"+row[0],j+1);
+      record_set(record_get(state,"functions"),(j+1).str(),record_new(0,"raw",row,"parent",-1,"captures",[]));
+      record_set(record_get(state,"function_ids"),kas-function-key(row),j+1);
+    });
+    record_set(kas-surfaces,key,state); state;
+   } : held;
+  };
+ }
+  def kas-function-key(raw)=raw[5].str()+":"+raw[2].str();
+  def kas-program(state,owner) {
+   let programs=record_get(state,"programs");let key=owner.str();
+   !record_has(programs,key) ? {let raw=kas-raw(record_get(state,"pid"),["syntax-program",owner]);record_set(programs,key,raw);raw;} : record_get(programs,key);
+  }
+  def kas-register(state,raw,parent,captures) {
+   let key=kas-function-key(raw);let ids=record_get(state,"function_ids");let prior=record_get(ids,key);
+   let index=nothing?(prior) ? record_get(state,"next_function") : prior;
+   if nothing?(prior) then {
+    record_set(state,"next_function",index+1);record_set(ids,key,index);
+    record_set(record_get(state,"functions"),index.str(),record_new(0,"raw",raw,"parent",parent,"captures",captures));
+   } else if parent>=0 then {
+    let entry=record_get(record_get(state,"functions"),index.str());record_set(entry,"parent",parent);record_set(entry,"captures",captures);
+   } else 0;index;
+  }
+  def kas-global-declarations(state,owner,ids) {
+   map(id=>{
+    let node=kas-raw(record_get(state,"pid"),["syntax-node",id]);let head=kas-head(state,node);
+    head=="do" ? kas-global-declarations(state,owner,node[2][1:]) : head=="let" && len(node[2])==3 ? {
+     let name=kas-raw(record_get(state,"pid"),["syntax-node",node[2][1]])[1];let row=[node[2][2],owner,node[3],name];
+     record_set(record_get(state,"globals"),owner.str()+":"+node[3]+"\n"+name,row);
+     record_set(record_get(state,"global_names"),owner.str()+":"+name,row);
+    } : 0;
+   },ids);0;
+  }
+  def kas-prepare-program(state,owner) {
+   let key=owner.str();let prepared=record_get(state,"prepared");
+   record_has(prepared,key) ? 1 : {
+    record_set(prepared,key,1);let raw=kas-program(state,owner);
+    nothing?(raw) ? 0 : {
+     map(binding=>{
+      let fn=[binding[0],binding[5],binding[4],binding[7],binding[6],binding[1],[]];
+      let index=kas-register(state,fn,-1,[]);let path=kas-raw(record_get(state,"pid"),["syntax-node",binding[4]])[3];
+      record_set(record_get(state,"owned"),key+":"+binding[0],index);
+      record_set(record_get(state,"owned"),key+":"+path+"\n"+binding[0],index);
+     },raw[3]);
+     map(source=>kas-global-declarations(state,owner,source[3]),kas-source-order(raw[2]));1;
+    };
+   };
+  }
+  def kas-source-order(sources) = len(sources)<2 ? sources : {
+   let pivot=sources[len(sources)/2][4];
+   append(kas-source-order(filter(row=>row[4]<pivot,sources)),append(filter(row=>row[4]==pivot,sources),kas-source-order(filter(row=>row[4]>pivot,sources))));
+  };
+  def kas-head(state,node)=node[0]=="group" && !nil?(node[2]) ? kas-raw(record_get(state,"pid"),["syntax-node",node[2][0]])[1] : nothing();
+  def kas-has-name(names,name)=any?(held=>held==name,names);
+  def kas-free-sequence(state,ids,bound) = nil?(ids) ? [] : {
+   let node=kas-raw(record_get(state,"pid"),["syntax-node",ids[0]]);let head=kas-head(state,node);
+   let next=(head=="let" && len(node[2])==3) || (head=="defn" && len(node[2])==4) ? cons(kas-raw(record_get(state,"pid"),["syntax-node",node[2][1]])[1],bound) : bound;
+   append(kas-free(state,ids[0],bound),kas-free-sequence(state,ids[1:],next));
+  }
+  def kas-free(state,id,bound) {
+   let node=kas-raw(record_get(state,"pid"),["syntax-node",id]);let head=kas-head(state,node);let ids=node[2];
+   node[0]=="name" ? kas-has-name(bound,node[1]) ? [] : [node[1]] : node[0]!="group" ? [] : head=="do" ? kas-free-sequence(state,ids[1:],bound)
+    : head=="lambda" || head=="defn" ? {
+     let at=head=="lambda" ? 1 : 2;let params=kas-raw(record_get(state,"pid"),["syntax-node",ids[at]])[2];
+     kas-free(state,ids[at+1],append(map(p=>kas-raw(record_get(state,"pid"),["syntax-node",p])[1],params),bound));
+    } : head=="let" && len(ids)>=3 ? append(kas-free(state,ids[2],bound),len(ids)>3 ? kas-free-sequence(state,ids[3:],cons(kas-raw(record_get(state,"pid"),["syntax-node",ids[1]])[1],bound)) : [])
+    : foldl((names,child)=>append(names,kas-free(state,child,bound)),[],ids);
+  }
+  def kas-lambda-register(state,node,owner,parent,names) {
+   let params=map(p=>kas-raw(record_get(state,"pid"),["syntax-node",p])[1],kas-raw(record_get(state,"pid"),["syntax-node",node[2][1]])[2]);
+   let free=kas-free(state,node[2][2],params);let seen=record_new(0);
+   let captures=filter(name=>!kas-has-name(free,name) || record_has(seen,name) ? 0 : {record_set(seen,name,1);1;},names);
+   let raw=["",params,node[2][2],nothing(),node[4],owner,captures];
+   kas-register(state,raw,parent,captures);
+  }
+  def kas-discover-sequence(state,ids,owner,parent,names) {
+   nil?(ids) ? 0 : {
+    let node=kas-raw(record_get(state,"pid"),["syntax-node",ids[0]]);let head=kas-head(state,node);
+    kas-discover(state,ids[0],owner,parent,names);
+    let next=head=="let" && len(node[2])==3 ? cons(kas-raw(record_get(state,"pid"),["syntax-node",node[2][1]])[1],names) : names;
+    kas-discover-sequence(state,ids[1:],owner,parent,next);
+   };
+  }
+  def kas-discover(state,id,owner,parent,names) {
+   let node=kas-raw(record_get(state,"pid"),["syntax-node",id]);let head=kas-head(state,node);
+   node[0]!="group" ? 0 : head=="lambda" ? {
+    let index=kas-lambda-register(state,node,owner,parent,names);let entry=record_get(record_get(state,"functions"),index.str());
+    kas-discover(state,node[2][2],owner,index,append(record_get(entry,"raw")[1],record_get(entry,"captures")));
+   } : head=="let" && len(node[2])>=3 ? {
+    kas-discover(state,node[2][2],owner,parent,names);
+    let name=kas-raw(record_get(state,"pid"),["syntax-node",node[2][1]])[1];
+    kas-discover-sequence(state,node[2][3:],owner,parent,cons(name,names));
+   } : head=="defn" && len(node[2])==4 ? {
+    let name=kas-raw(record_get(state,"pid"),["syntax-node",node[2][1]])[1];
+    let params=map(p=>kas-raw(record_get(state,"pid"),["syntax-node",p])[1],kas-raw(record_get(state,"pid"),["syntax-node",node[2][2]])[2]);
+    let free=kas-free(state,node[2][3],cons(name,params));let captures=filter(held=>kas-has-name(free,held),names);
+    let index=kas-register(state,[name,params,node[2][3],nothing(),node[4],owner,captures],parent,captures);
+    kas-discover(state,node[2][3],owner,index,append(params,captures));
+   } : head=="do" ? kas-discover-sequence(state,node[2][1:],owner,parent,names) : {map(child=>kas-discover(state,child,owner,parent,names),node[2]);0;};
+  }
+  def kas-callable-index(state,callable) {
+   let raw=kas-raw(record_get(state,"pid"),["syntax-function",callable]);
+   nothing?(raw) ? nothing() : {
+    kas-prepare-program(state,raw[5]);
+    let free=kas-free(state,raw[2],raw[1]);let captures=filter(name=>kas-has-name(free,name),raw[6]);
+    let index=kas-register(state,raw,-1,captures);let path=kas-raw(record_get(state,"pid"),["syntax-node",raw[2]])[3];
+    let functions=record_get(state,"functions");
+    map(key=>{let entry=record_get(functions,key);let candidate=record_get(entry,"raw");
+     candidate[5]==raw[5] && kas-raw(record_get(state,"pid"),["syntax-node",candidate[2]])[3]==path ? kas-discover(state,candidate[2],raw[5],str_to_int(key),append(candidate[1],record_get(entry,"captures"))) : 0;
+    },record_keys(functions));
+    nil?(record_get(record_get(functions,index.str()),"captures")) ? index : nothing();
+   };
+  }
+ def kas-node(state,tag,a,b,c) {
+  let id=record_get(state,"next"); record_set(state,"next",id+1);
+  record_set(record_get(state,"nodes"),id.str(),[tag,a,b,c]); id;
+ }
+ def kas-int(state,value)=kas-node(state,1,value,0,0);
+ def kas-slot(state) { let slot=record_get(state,"slot"); record_set(state,"slot",slot+1); slot; }
+ def kas-env(env,name)=nil?(env) ? nothing() : env[0][0]==name ? env[0][1] : kas-env(env[1:],name);
+ def kas-text(state,text) {
+  let source=record_get(state,"source"); let at=len(source);
+   // An empty literal still owns a distinct pool coordinate. The separator is
+   // outside its byte span and prevents the next literal from sharing its ID.
+   record_set(state,"source",source+text+byte_to_str(0));
+  let id=kas-node(state,24,at,len(text),0);
+  record_set(record_get(state,"strings"),id.str(),text); id;
+ }
+ def kas-lookup(state,path,name) {
+   kas-lookup-owner(state,record_get(state,"active_owner"),path,name);
+  }
+  def kas-lookup-owner(state,owner,path,name) {
+   owner<=0 ? nothing() : {
+    kas-prepare-program(state,owner);let bindings=record_get(state,"owned");
+    let owned=record_get(bindings,owner.str()+":"+path+"\n"+name) ?? record_get(bindings,owner.str()+":"+name);
+    !nothing?(owned) ? owned : kas-lookup-owner(state,kas-program(state,owner)[4],path,name);
+   };
+  }
+  def kas-global(state,path,name) {
+   kas-global-owner(state,record_get(state,"active_owner"),name);
+  }
+  def kas-global-owner(state,owner,name) {
+   owner<=0 ? nothing() : {
+    kas-prepare-program(state,owner);let held=record_get(record_get(state,"global_names"),owner.str()+":"+name);
+    !nothing?(held) ? held : kas-global-owner(state,kas-program(state,owner)[4],name);
+   };
+  }
+  def kas-initializer(state,row) {
+   let key=row[1].str()+":"+row[0].str();let initializers=record_get(state,"initializers");let held=record_get(initializers,key);
+   !nothing?(held) ? held : {
+    let id=kas-node(state,190,0,0,0);record_set(initializers,key,id);
+    let previous=record_get(state,"active_owner");record_set(state,"active_owner",row[1]);
+    let value=kas-expr(state,row[0],[]);record_set(state,"active_owner",previous);
+    record_set(record_get(state,"nodes"),id.str(),[190,value,0,0]);id;
+   };
+  }
+  def kas-name(state,node,env) {
+   let slot=kas-env(env,node[1]);
+   !nothing?(slot) ? kas-node(state,110,kas-int(state,slot),0,0) : node[1]=="true" ? kas-int(state,1) : node[1]=="false" ? kas-int(state,0) : {
+    let global=kas-global(state,node[3],node[1]);let function=kas-lookup(state,node[3],node[1]);
+    !nothing?(global) ? kas-initializer(state,global) : !nothing?(function) ? kas-node(state,243,function,-1,0) : node[1]=="empty" ? kas-node(state,18,0,0,0) : node[1]=="nothing" || node[1]=="fail" || node[1]=="stop" ? kas-node(state,137,0,0,0) : kas-unavailable(state,node,env,nothing(),function);
+   };
+ }
+  // Unsupported projection retains its source and lexical owner, so the caller
+  // can resolve the missing meaning from this admission's diagnostic.
+  def kas-unavailable(state,node,env,operation,callee) {
+   let id=kas-node(state,0,0,0,0);let diagnostics=record_get(state,"diagnostics") ?? record_new(0);
+   record_set(diagnostics,id.str(),record_new(0,"kind","projection-unsupported","node",id,"syntax",node,"owner",record_get(state,"active_owner"),"function",record_get(state,"active_fn"),"bindings",map(binding=>binding[0],env),"operation",operation,"callee",callee));
+   record_set(state,"diagnostics",diagnostics);id;
+  }
+  def kas-expr(state,id,env) {
+  let node=kas-raw(record_get(state,"pid"),["syntax-node",id]);
+   node[0]=="int" ? kas-int(state,node[1]) : node[0]=="float" ? kas-node(state,53,kas-text(state,node[1].str()),0,0) : node[0]=="text" ? kas-text(state,node[1]) : node[0]=="name" ? kas-name(state,node,env) : kas-group(state,node,env);
+ }
+ def kas-sequence(state,ids,env) {
+  nil?(ids) ? kas-node(state,18,0,0,0) : len(ids)==1 ? kas-expr(state,ids[0],env) : {
+   let node=kas-raw(record_get(state,"pid"),["syntax-node",ids[0]]);
+   let head=node[0]=="group" && len(node[2])>0 ? kas-raw(record_get(state,"pid"),["syntax-node",node[2][0]]) : nothing();
+   !nothing?(head) && head[0]=="name" && head[1]=="let" && len(node[2])==3 ? {
+    let name=kas-raw(record_get(state,"pid"),["syntax-node",node[2][1]])[1];
+    let value=kas-expr(state,node[2][2],env); let slot=kas-slot(state);
+    kas-node(state,109,kas-int(state,slot),value,kas-sequence(state,ids[1:],cons([name,slot],env)));
+   } : !nothing?(head) && head[0]=="name" && head[1]=="defn" ? kas-sequence(state,ids[1:],env) : {
+    let value=kas-expr(state,ids[0],env); let slot=kas-slot(state);
+    kas-node(state,109,kas-int(state,slot),value,kas-sequence(state,ids[1:],env));
+   };
+  };
+ }
+  def kas-chain(state,ids,env)=nil?(ids) ? -1 : kas-node(state,242,kas-expr(state,ids[0],env),kas-chain(state,ids[1:],env),0);
+ def kas-list(state,ids,env)=nil?(ids) ? kas-node(state,18,0,0,0) : kas-node(state,19,kas-expr(state,ids[0],env),kas-list(state,ids[1:],env),0);
+ def kas-rewrite(state,program,args,stack) {
+  nil?(program) ? head(stack) : program[0]==0 ? kas-rewrite(state,program[2:],args,cons(args[program[1]],stack)) : program[0]==1 ? kas-rewrite(state,program[2:],args,cons(kas-int(state,program[1]),stack)) : {
+   let arity=program[2]; let children=reverse(stack[:arity]);
+   let node=kas-node(state,program[1],arity>0 ? children[0] : 0,arity>1 ? children[1] : 0,arity>2 ? children[2] : 0);
+   kas-rewrite(state,program[3:],args,cons(node,stack[arity:]));
+  };
+ }
+ def kas-group(state,node,env) {
+  let ids=node[2];
+  nil?(ids) ? kas-node(state,18,0,0,0) : {
+   let head=kas-raw(record_get(state,"pid"),["syntax-node",ids[0]]);
+    head[0]!="name" ? kas-node(state,244,kas-expr(state,ids[0],env),kas-chain(state,ids[1:],env),0) : {
+    let name=head[1]; let args=ids[1:];
+     !nothing?(kas-env(env,name)) ? kas-node(state,244,kas-expr(state,ids[0],env),kas-chain(state,args,env),0) : name=="do" ? kas-sequence(state,args,env) : name=="list" ? kas-list(state,args,env) : name=="lambda" ? {
+      let index=kas-lambda-register(state,node,record_get(state,"active_owner"),record_get(state,"active_fn"),map(binding=>binding[0],env));
+      let captures=record_get(record_get(record_get(state,"functions"),index.str()),"captures");
+      let chain=foldl((rest,capture)=>kas-node(state,242,kas-node(state,110,kas-int(state,kas-env(env,capture)),0,0),rest,0),-1,reverse(captures));
+      kas-node(state,243,index,chain,0);
+     } : name=="let" && len(args)>=2 ? {
+      let binding=kas-raw(record_get(state,"pid"),["syntax-node",args[0]])[1];let value=kas-expr(state,args[1],env);let slot=kas-slot(state);
+      kas-node(state,109,kas-int(state,slot),value,len(args)>2 ? kas-sequence(state,args[2:],cons([binding,slot],env)) : kas-node(state,110,kas-int(state,slot),0,0));
+     } : name=="if" && len(args)==3 ? kas-node(state,6,kas-expr(state,args[0],env),kas-expr(state,args[1],env),kas-expr(state,args[2],env)) : {
+     let op=kas-raw(record_get(state,"pid"),["syntax-operation",name]);
+     let callee=kas-lookup(state,node[3],name);
+      !nothing?(op) && (op[0]==64 || op[0]==239) ? kas-node(state,op[0],kas-list(state,args,env),0,0) : !nothing?(op) && (!nil?(op[4]) || (op[0]>0 && len(args)<=3)) ? {
+      let lowered=map(arg=>kas-expr(state,arg,env),args);
+      !nil?(op[4]) ? kas-rewrite(state,op[4],lowered,[]) : kas-node(state,op[0],len(lowered)>0 ? lowered[0] : 0,len(lowered)>1 ? lowered[1] : 0,len(lowered)>2 ? lowered[2] : 0);
+      } : !nothing?(callee) ? kas-node(state,241,callee,kas-chain(state,args,env),0) : kas-unavailable(state,node,env,op,callee);
+    };
+   };
+  };
+ }
+ def kas-row(state,j) {
+  let rows=record_get(state,"rows"); let key=j.str(); let held=record_get(rows,key);
+  nothing?(held) ? {
+    let entry=record_get(record_get(state,"functions"),(j+1).str());
+    nothing?(entry) ? nothing() : {
+     let raw=record_get(entry,"raw");let previousOwner=record_get(state,"active_owner");let previousFn=record_get(state,"active_fn");
+     record_set(state,"active_owner",raw[5]);record_set(state,"active_fn",j+1);
+     let params=append(raw[1],record_get(entry,"captures")); let env=map(i=>[params[i],i],range(0,len(params)));
+    record_set(state,"slot",len(params));
+    let body=kas-expr(state,raw[2],env);
+     let slots=record_get(state,"slot");
+     let framed=kas-node(state,111,kas-int(state,slots > 0 ? slots - 1 : 0),body,0);
+    let bodySource=kas-raw(record_get(state,"pid"),["syntax-node",raw[2]]);
+     let sourceKey=raw[5].str()+":"+bodySource[3]; let heldBase=record_get(record_get(state,"sources"),sourceKey);
+    let base=nothing?(heldBase) ? {
+     let source=record_get(state,"source");
+     let admitted=kas-raw(record_get(state,"pid"),["syntax-source",raw[2]]);
+     record_set(state,"source",source+admitted); record_set(record_get(state,"sources"),sourceKey,len(source)); len(source);
+    } : heldBase;
+    let at=base+raw[4];
+    let named=substring(record_get(state,"source"),at,at+len(raw[0]));
+    let actual=named==raw[0] ? at : {let source=record_get(state,"source"); record_set(state,"source",source+raw[0]); len(source);};
+     let row=[actual,len(raw[0]),j+1,framed]; record_set(rows,key,row);
+     record_set(state,"active_owner",previousOwner);record_set(state,"active_fn",previousFn);row;
+   };
+  } : held;
+ }
+  def kas-index(state,requested)=value_kind(requested)=="int" ? record_has(record_get(state,"functions"),requested.str()) ? requested : nothing() :
+   value_kind(requested)=="string" ? record_get(record_get(state,"names"),requested) : kas-callable-index(state,requested);
+ def kas-function(state,requested) {
+  let index=kas-index(state,requested);
+   nothing?(index) ? nothing() : {let entry=record_get(record_get(state,"functions"),index.str());nil?(record_get(entry,"captures")) ? [kas-row(state,index - 1)[3],len(record_get(entry,"raw")[1])] : nothing();};
+ }
+ def kas-source-hash(row) {
+  let key=row[2].str(); let held=record_get(kas-source-hashes,key);
+  nothing?(held) ? {let fingerprint=bml-source-fingerprint(row[1]); record_set(kas-source-hashes,key,fingerprint); fingerprint;} : held;
+ }
+ // Length-framed values preserve names and source paths without delimiter guesses.
+ def kas-wire(value)=value_kind(value)=="list" ? "l"+len(value).str()+":"+str-join-with(map(kas-wire,value),"") : value_kind(value)=="string" ? "s"+len(value).str()+":"+value : value_kind(value)=="int" ? "i"+value.str()+";" : form_error("source admission contains an unsupported identity field");
+ def kas-admission-visit(pid,owner,graph) {
+  owner==0 ? -1 : {
+   let key=owner.str(); let seen=record_get(record_get(graph,"seen"),key);
+   !nothing?(seen) ? seen : {
+    let index=record_get(graph,"next"); record_set(graph,"next",index+1);
+    record_set(record_get(graph,"seen"),key,index);
+    let raw=kas-raw(pid,["syntax-program",owner]);
+    nothing?(raw) ? form_error("admitted source owner is unavailable") : {
+     let sources=map(row=>[row[0],len(row[1]),kas-source-hash(row)],raw[2]);
+     let bindings=map(row=>[row[0],kas-admission-visit(pid,row[1],graph),row[2],row[3]],raw[3]);
+     let parent=kas-admission-visit(pid,raw[4],graph);
+     record_set(record_get(graph,"members"),index.str(),[raw[1],sources,bindings,parent]); index;
+    };
+   };
+  };
+ }
+ def kas-identity(state,requested) {
+   let selected=value_kind(requested)=="string" || value_kind(requested)=="int" ? kas-index(state,requested) : requested;
+   (value_kind(requested)=="string" || value_kind(requested)=="int") && nothing?(selected) ? nothing() : {
+   let pid=record_get(state,"pid"); let owner=value_kind(selected)=="int" ? record_get(record_get(record_get(state,"functions"),selected.str()),"raw")[5] : kas-raw(pid,["syntax-owner",selected]);
+   kas-owner-identity(state,owner);
+   };
+  }
+  def kas-owner-identity(state,owner) {
+  nothing?(owner) ? nothing() : {
+  let key="identity:"+owner.str(); let held=record_get(state,key);
+  !nothing?(held) ? held : {
+   let graph=record_new(0,"next",0,"seen",record_new(0),"members",record_new(0));
+    let pid=record_get(state,"pid");kas-admission-visit(pid,owner,graph);
+   let members=map(i=>record_get(record_get(graph,"members"),i.str()),range(0,record_get(graph,"next")));
+   let identity=[kas-raw(pid,["syntax-builder"]),"fk-unit-v4|form-surface-v1|"+bml-source-fingerprint(kas-wire(members))];
+   record_set(state,key,identity); identity;
+    }; };
+  }
+  def kas-function-meta(state,requested) {
+   let index=kas-index(state,requested);
+   nothing?(index) ? nothing() : {
+    let entry=record_get(record_get(state,"functions"),index.str());let raw=record_get(entry,"raw");
+    [kas-row(state,index - 1)[3],len(raw[1]),len(record_get(entry,"captures")),record_get(entry,"parent"),kas-owner-identity(state,raw[5])];
+   };
+  }
+  def kas-top-expression(state,id) {
+   let node=kas-raw(record_get(state,"pid"),["syntax-node",id]);let head=kas-head(state,node);
+   head=="defn" ? -1 : head=="do" ? kas-top-sequence(state,node[2][1:]) : head=="let" && len(node[2])==3 ? {
+    let name=kas-raw(record_get(state,"pid"),["syntax-node",node[2][1]])[1];
+    kas-initializer(state,[node[2][2],record_get(state,"active_owner"),node[3],name]);
+   } : kas-expr(state,id,[]);
+  }
+  def kas-top-sequence(state,ids) = foldl((prior,id)=>{
+   let next=kas-top-expression(state,id);next<0 ? prior : prior<0 ? next : kas-node(state,69,prior,next,0);
+  },-1,ids);
+  def kas-export-names(state,roots,outer) = foldl((names,id)=>{
+   let node=kas-raw(record_get(state,"pid"),["syntax-node",id]);let head=kas-head(state,node);
+   head=="defn" ? append(names,[kas-raw(record_get(state,"pid"),["syntax-node",node[2][1]])[1]]) : head=="do" && outer ? append(names,kas-export-names(state,node[2][1:],0)) : names;
+  },[],roots);
+  def kas-catalog-visit(state,owner,graph) {
+   let seen=record_get(graph,"seen");let key=owner.str();
+   record_has(seen,key) ? 0 : {
+    record_set(seen,key,1);kas-prepare-program(state,owner);let raw=kas-program(state,owner);
+    map(edge=>kas-catalog-visit(state,edge[3],graph),raw[6]);
+    record_set(graph,"order",append(record_get(graph,"order"),[owner]));0;
+   };
+  }
+  def kas-catalog-sources(state,order) {
+   let owners=record_new(0);let sources=record_new(0);
+   map(owner=>map(source=>{
+    let key=source[2].str();
+    if !record_has(sources,key) then {record_set(sources,key,source);record_set(owners,key,owner);} else 0;
+   },kas-program(state,owner)[2]),order);
+   map(source=>[record_get(owners,source[2].str()),source],kas-source-order(map(key=>record_get(sources,key),record_keys(sources))));
+  }
+  def kas-catalog(state,requested) {
+   let index=kas-index(state,requested);
+   nothing?(index) ? nothing() : {
+    let entry=record_get(record_get(state,"functions"),index.str());let owner=record_get(entry,"raw")[5];let key="catalog:"+owner.str();let held=record_get(state,key);
+    !nothing?(held) ? kas-catalog-copy(held) : {
+     let graph=record_new(0,"seen",record_new(0),"order",[]);kas-catalog-visit(state,owner,graph);
+     let order=record_get(graph,"order");let sources=kas-catalog-sources(state,order);let exports=record_new(0,"rows",[]);let constants=record_new(0,"rows",[]);let contexts=record_new(0,"rows",[]);
+     let previousOwner=record_get(state,"active_owner");let previousFn=record_get(state,"active_fn");
+     let units=map(at=>{
+      let unitOwner=sources[at][0];let source=sources[at][1];let unit=source[2];let raw=kas-program(state,unitOwner);record_set(state,"active_owner",unitOwner);record_set(state,"active_fn",-1);
+       // An admitted empty unit retains its source identity and imports, but
+       // has no executable root whose initialization needs ordering.
+       !nil?(source[3]) && source[4]<=0 ? form_error("source initialization order unavailable") : 0;
+       let sourcePath=nil?(source[3]) ? source[0] : kas-raw(record_get(state,"pid"),["syntax-node",source[3][0]])[3];
+      let sequence=kas-top-sequence(state,source[3]);
+       map(name=>{let fn=kas-lookup-owner(state,unitOwner,sourcePath,name);let descriptor=record_get(record_get(record_get(state,"functions"),fn.str()),"raw");
+       record_set(exports,"rows",append(record_get(exports,"rows"),[[name,fn,len(descriptor[1]),unit]]));
+      },kas-export-names(state,source[3],1));
+      let globals=record_get(state,"globals");map(name=>{let row=record_get(globals,name);
+        row[1]==unitOwner && row[2]==sourcePath ? record_set(constants,"rows",append(record_get(constants,"rows"),[[row[3],kas-initializer(state,row),unit]])) : 0;
+      },record_keys(globals));
+      raw[4]>0 ? record_set(contexts,"rows",append(record_get(contexts,"rows"),[[unit,kas-owner-identity(state,raw[4])]])) : 0;
+      let members=map(row=>row[2],raw[2]);
+      [unit,source[0],sequence,at,members,record_new(0,"kind","raw","bytes",len(source[1]),"digest",kas-source-hash(source))];
+     },range(0,len(sources)));
+     record_set(state,"active_owner",previousOwner);record_set(state,"active_fn",previousFn);
+     let identity=kas-owner-identity(state,owner);
+     let catalog=record_new(0,"kind","cell-admission-v1","builder",identity[0],"closure",identity[1],"root_unit",kas-program(state,owner)[7],"units",units,"exports",record_get(exports,"rows"),"constants",record_get(constants,"rows"),"contexts",record_get(contexts,"rows"));
+     record_set(state,key,catalog);kas-catalog-copy(catalog);
+    };
+   };
+ }
+  def kas-catalog-copy(catalog) {
+   let copy=record_new(0);map(key=>record_set(copy,key,record_get(catalog,key)),record_keys(catalog));
+   record_set(copy,"units",map(unit=>{
+    let source=unit[5];append(take(5,unit),[record_new(0,"kind",record_get(source,"kind"),"bytes",record_get(source,"bytes"),"digest",record_get(source,"digest"))]);
+   },record_get(catalog,"units")));copy;
+  }
+ def kas-query(pid,query) {
+  let state=kas-state(pid);
+  nothing?(state) ? nothing() : value_kind(query)=="int" ? query<0 ? [record_get(state,"next"),len(record_get(state,"source")),record_get(state,"header")[1],record_get(state,"header")[1]+1,0,0,0,0,0,""] : record_get(record_get(state,"nodes"),query.str()) : value_kind(query)!="list" || nil?(query) ? nothing() :
+   query[0]=="defn" ? kas-row(state,query[1]) :
+   query[0]=="index" ? kas-index(state,query[1]) :
+   query[0]=="fn" ? kas-function(state,query[1]) :
+   query[0]=="identity" ? kas-identity(state,len(query)>1 ? query[1] : nothing()) :
+    query[0]=="fnmeta" ? kas-function-meta(state,query[1]) :
+     query[0]=="catalog" ? kas-catalog(state,query[1]) :
+     query[0]=="diagnostic" ? {
+      let diagnostics=record_get(state,"diagnostics");let held=nothing?(diagnostics) ? nothing() : record_get(diagnostics,query[1].str());
+      nothing?(held) ? nothing() : {let copy=record_new(0);map(key=>record_set(copy,key,record_get(held,key)),record_keys(held));copy;};
+     } :
+    // Parsed-source v3 caches do not own legacy function/body relocation.
+    query[0]=="image" ? nothing() :
+   query[0]=="src" ? substring(record_get(state,"source"),query[1],query[1]+query[2]) :
+   query[0]=="str" ? record_get(record_get(state,"strings"),query[1].str()) : nothing();
+ }
+}

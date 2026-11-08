@@ -233,7 +233,7 @@ positional is in it. Measured (`form-path-band.fk`, claim 4): editing another de
 span and line but not its id; the same text in a second file is the same id (and one interned node, `eq`; two hits, the node's provenance is the hit:
 `fp:hit(node, path, start, end, line)`); `7783e3effb19c` was the id of one fixture def in two separate processes. The host field's own cell index (`node_inst` of the interned
 node) is **not** the identity: it is the order cells were first made in (two new texts interned in the other order take the other order), stable across
-`cell_run` and processes only while the shared field lives and the cell was already made, and meaningless after a `field_reset`. A hit's span is checked, not trusted:
+`cell_run` and processes in the shared journal. A logical `field_reset` starts a new interning epoch while retaining historical coordinates and held values; those coordinates still do not identify source content. A hit's span is checked, not trusted:
 `fpa-hit-fresh?` re-hashes the span's text against the id. In process, a result is `fp:set(fp:hit(...))`; `fpa-where(set, "arity", test)` and `fpa-count(set)` are stages
 over it, `fpa-render(s, set, "ids"|"text"|"rows"|"count")` the edge (the hook `fpa-renders()` counts text made: 1 for a path, a filter, a count and a render).
 

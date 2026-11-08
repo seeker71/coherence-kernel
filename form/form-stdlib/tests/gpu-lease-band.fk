@@ -57,21 +57,31 @@ section [form.bml] {
   def glb-seq(a, b) = (String) a == b ? 1 : 0;
   def glb-sum(xs) = nil?(xs) ? 0 : xs[0] + glb-sum(xs[1:]);
   def glb-all(xs) = (Comparable) glb-sum(xs) == len(xs);
-  def glb-again(path, n) {
+  let glb-children = record_new(0);
+  def glb-again(path, pid) {
    let s = host_sleep_ms(50);
-   glb-await(path, n - 1);
+   glb-await(path, pid);
   }
-  def glb-await(path, n) {
+  def glb-await(path, pid) {
    let t = read_file(path);
-   (nothing?(t) && (n > 0)) ? glb-again(path, n) : t;
+   // Admission time is not a failed lease. The spawned child owns this reply
+   // until it publishes it or is observed ended; the release runner owns time.
+   nothing?(t) ? (host_alive(pid) == 0 ? read_file(path) : glb-again(path, pid)) : t;
   }
-  def glb-ans(tag, name) = glb-await(glb-dir() ++ "/" ++ name ++ "-" ++ tag, 300);
+  def glb-ans(tag, name) {
+   let reply=glb-await(glb-dir() ++ "/" ++ name ++ "-" ++ tag, record_get(glb-children,tag));
+   nothing?(reply) ? form_error("lease fixture child ended without "+name+": "+(read_file(glb-dir()+"/child-"+tag+".err") ?? "no diagnostic")) : reply;
+  }
   def glb-line(a, i) = nothing?(a) ? "no-answer" : glb-line-of(gpl-lines(a), i);
   def glb-line-of(ls, i) = len(ls) > i ? ls[i] : "no-answer";
   // the child's request goes to a file named for the child's pid, which only the spawn tells us
   def glb-spawn(mode, lock, tag, hold, wait, go) {
    let pid = host_spawn_at(["./fkwu", "form/form-stdlib/tests/gpu-lease-child-run.fk"], ["/dev/null", "/dev/null", glb-dir() ++ "/child-" ++ tag ++ ".err"]);
-   let w = write_file(glb-dir() ++ "/req-" ++ pid.str(), mode ++ glb-nl() ++ lock ++ glb-nl() ++ tag ++ glb-nl() ++ hold.str() ++ glb-nl() ++ wait.str() ++ glb-nl() ++ go);
+   let admitted=value_kind(pid)=="int" && pid>0 ? 1 : form_error("lease fixture child spawn failed: "+str(pid));
+   let held = record_set(glb-children, tag, pid);
+   let path=glb-dir() ++ "/req-" ++ pid.str();
+   let w = write_file(path+".new", mode ++ glb-nl() ++ lock ++ glb-nl() ++ tag ++ glb-nl() ++ hold.str() ++ glb-nl() ++ wait.str() ++ glb-nl() ++ go ++ glb-nl() ++ host_pid().str());
+   let published=w>0 && host_path_rename(path+".new",path)==0 ? 1 : form_error("lease fixture request publication failed");
    pid;
   }
   // a lease record as a client would have left it: the pid and start time are the claim a judge checks
@@ -90,13 +100,49 @@ section [form.bml] {
    let first = gpl-read(lock)[1];
    let kept = gpu-lease-door-yield();
    let pid = glb-spawn("hold", lock, tag, 100, 3000, "");
-   let waiting = glb-await(gpl-wait-dir(lock) ++ "/" ++ pid.str(), 300);
+   let waiting = glb-await(gpl-wait-dir(lock) ++ "/" ++ pid.str(), pid);
    let yielded = gpu-lease-door-yield();
    let child = glb-ans(tag, "ans");
    let w = host_wait(pid);
    [first, kept, yielded, glb-line(child, 0), gpl-read(lock)[1], nothing?(waiting) ? "no-ticket" : "ticket"];
   }
   def glb-ms-since(t0) = host_monotonic_ms() - t0;
+  def glb-wait-contract() {
+   let lock=glb-lock("allowance");let zero=gpu-lease-take(lock,"zero",0);let released=gpu-lease-give(lock,zero);
+   let invalid=map(x=>gpu-lease-take(lock,"invalid",x),[-1,"1",1.5]);
+   let ticket=gpl-ticket-open(lock);let queued=gpl-enqueue(lock,1);
+   defer gpl-ticket-close(lock,ticket);
+   let c=[lock,"expired",[1,100,60000,[]],host_monotonic_ms() - 2];
+   let late=gpl-wait-again(c,["queued"]);
+   let huge=[lock,"large",[4611686018427387903,100,60000,[]],5];
+   gpu-lease-held?(zero) && released[0]=="released" && all?(r=>r[1]=="invalid-wait-allowance",invalid)
+   && late[0]=="refused" && host_path_exists(lock)==0 && nothing?(gpl-wait-ms()) && gpl-wait-left(huge,10)==4611686018427387898;
+  }
+  def glb-cell-deadline() {
+   let child=glb-dir()+"/cell-"+glb-tag("deadline")+".bml";let lock=glb-lock("deadline");
+   let source="import form/form-stdlib/gpu-lease.bml;\nsection [form.bml] { let request=cell_input(); request[0]==\"warm\" ? 42 : gpu-lease-take-with(request[1],\"deadline\",[nothing(),10,60000,[]]); }\n";
+   write_file(child,source);let warm=cell_run(child,["warm",lock],0,[]);host_dir_mkdir(lock);
+   let result=cell_run(child,["wait",lock],300,[]);let text=read_file(gpl-ticket-path(lock));let row=gpl-wait-row(lock,str(host_pid()));
+   host_dir_rmdir(lock);
+   let tag=glb-tag("after-deadline");let pid=glb-spawn("hold",lock,tag,10,1000,"");let answer=glb-ans(tag,"ans");let waited=host_wait(pid);
+   record_get(warm,"value")==42 && record_get(record_get(result,"stopped"),"kind")=="deadline" && !nothing?(text) && nil?(row) && glb-line(answer,0)=="held" && waited==0;
+  }
+  def glb-claim-continuation() {
+   let phases=map(phase=>{
+    let lock=glb-lock("claim-" + phase);let retained=record_new(0);
+    let c=[lock,"claim",[0,1,60000,[]],host_monotonic_ms(),held=>record_set(retained,"lease",held)];
+    let interrupted=try gpl-claim-observed(c,0,nothing(),(seen,owner)=>seen==phase ? form_error("planted lease publication interruption") : 0) catch nothing();
+    let held=record_get(retained,"lease");let claim=held[2];let before=phase=="prepared" ? host_path_exists(lock)==0 && host_path_exists(record_get(claim,"stage"))==1 : gpl-mine?(gpl-read(lock),held[1]);
+    let released=gpu-lease-give(lock,held);
+    nothing?(interrupted) && before && released[0]=="released" && host_path_exists(lock)==0 && host_path_exists(record_get(claim,"stage"))==0;
+   },["prepared","published"]);
+   let lock=glb-lock("release-resume");let first=gpu-lease-take(lock,"first",0);let token=gpu-lease-token(first);
+   let interrupted=try gpl-release-remove(lock,token,path=>form_error("planted interruption after lease detach")) catch nothing();
+   let next=gpu-lease-take(lock,"successor",0);let repeated=gpu-lease-give(lock,first);let kept=gpl-read(lock);
+   let compact=gpl-claim-of(token);let replay=gpu-lease-give(lock,first);
+   let released=gpu-lease-give(lock,next);
+   all?(x=>x,phases) && nothing?(interrupted) && gpu-lease-held?(next) && repeated[0]=="released" && replay[0]=="released" && record_get(compact,"phase")=="released" && !record_has(compact,"stage") && kept[1]==gpu-lease-token(next) && released[0]=="released" && host_path_exists(lock)==0;
+  }
   def glb-round(k) {
    let lock = glb-lock("r" ++ k.str());
    let go = glb-dir() ++ "/go-" ++ glb-tag("r" ++ k.str());
@@ -105,7 +151,8 @@ section [form.bml] {
    let tb = glb-tag("rb" ++ k.str());
    let pa = glb-spawn("hold", lock, ta, 2500, 1500, go);
    let pb = glb-spawn("hold", lock, tb, 2500, 1500, go);
-   let ready = host_sleep_ms(1200);
+   let ready-a = glb-ans(ta, "ready");
+   let ready-b = glb-ans(tb, "ready");
    let g = write_file(go, "1");
    let ka = glb-line(glb-ans(ta, "ans"), 0);
    let kb = glb-line(glb-ans(tb, "ans"), 0);
@@ -138,7 +185,7 @@ section [form.bml] {
   let a1 = glb-take(l1, glb-opts(1000, 60000, gpl-markers()));
   let r1 = gpl-read(l1);
   let s1 = glb-say("take", a1);
-  let b1 = glb-bit(glb-all([glb-seq(a1[0], "held"), glb-seq(r1[0], "rec"), glb-eq(r1[2], host_pid()), glb-eq(r1[3], gpl-me-start()), glb-seq(r1[1], a1[1]), glb-seq(r1[6], "band")]), 1);
+  let b1 = glb-bit(glb-claim-continuation() && glb-wait-contract() && glb-all([glb-seq(a1[0], "held"), glb-seq(r1[0], "rec"), glb-eq(r1[2], host_pid()), glb-eq(r1[3], gpl-me-start()), glb-seq(r1[1], a1[1]), glb-seq(r1[6], "band")]), 1);
   let g1 = gpu-lease-give(l1, a1);
   let s2 = glb-say("give", g1);
   let b2 = glb-bit(glb-all([glb-seq(g1[0], "released"), glb-seq(g1[1], a1[1]), (Comparable) host_path_exists(l1) == 0 ? 1 : 0]), 2);
@@ -161,10 +208,10 @@ section [form.bml] {
   let r3b = gpl-read(l3);
   let s8 = glb-say("live holder", [w3, ms3]);
   let b8 = glb-bit(glb-all([glb-seq(w3[0], "refused"), glb-seq(w3[1], "held-by-live-owner"), ms3 >= 1100 ? 1 : 0, glb-seq(r3b[1], c3)]), 8);
-  let w3b = glb-take(l3, glb-opts(15000, 60000, gpl-markers()));
+  let w3b = glb-take(l3, glb-opts(nothing(), 60000, gpl-markers()));
   let s16 = glb-say("waited for the live holder", w3b);
   let rel3 = glb-ans(t3, "rel");
-  let b16 = glb-bit(glb-all([glb-seq(w3b[0], "waited"), w3b[1] >= 500 ? 1 : 0, glb-seq(glb-line(rel3, 0), "released"), (Comparable) host_path_exists(l3 ++ ".wait/" ++ host_pid().str()) == 0 ? 1 : 0]), 16);
+   let b16 = glb-bit(glb-all([glb-seq(w3b[0], "waited"), glb-seq(w3b[0], "waited") ? (w3b[1] >= 500 ? 1 : 0) : 0, glb-seq(glb-line(rel3, 0), "released"), (Comparable) host_path_exists(l3 ++ ".wait/" ++ host_pid().str()) == 0 ? 1 : 0]), 16);
   let g3 = gpu-lease-give(l3, w3b);
   let h3 = host_wait(p3);
 
@@ -265,7 +312,7 @@ section [form.bml] {
   let a15 = glb-take(l15,glb-opts(1000,60000,gpl-markers()));
   let t15 = glb-tag("fifo");
   let p15 = glb-spawn("hold",l15,t15,150,5000,"");
-  let waiting15 = glb-await(gpl-wait-dir(l15) ++ "/" ++ p15.str(),300);
+   let waiting15 = glb-await(gpl-wait-dir(l15) ++ "/" ++ p15.str(),p15);
   let gave15 = gpu-lease-give(l15,a15);
   let rejoined15 = glb-take(l15,glb-opts(5000,60000,gpl-markers()));
   let child15 = glb-ans(t15,"ans");
@@ -312,7 +359,7 @@ section [form.bml] {
   let r19b = gpl-read(l19b);
   let g19b = gpu-lease-release(l19b, r19b[1] ?? "");
   let s131072 = glb-say("a reading that stops, one that did not settle", [d19, gone19, a19, d19b, r19b, g19b]);
-  let b131072 = glb-bit(glb-all([glb-seq(d19, "stopped"), gone19, glb-seq(a19[0], "held"), glb-seq(g19[0], "released"), glb-seq(d19b, "stopped"), glb-seq(r19b[0], "rec"), glb-eq(r19b[2], host_pid()), glb-seq(g19b[0], "released")]), 131072);
+  let b131072 = glb-bit(glb-cell-deadline() && glb-all([glb-seq(d19, "stopped"), gone19, glb-seq(a19[0], "held"), glb-seq(g19[0], "released"), glb-seq(d19b, "stopped"), glb-seq(r19b[0], "rec"), glb-eq(r19b[2], host_pid()), glb-seq(g19b[0], "released")]), 131072);
 
   // ===== 262144: a lent lease is no bystander's =====
   let keeper = host_spawn_at(["./fkwu", "form/form-stdlib/tests/host-sleeper-run.fk"], ["/dev/null", "/dev/null", "/dev/null"]);

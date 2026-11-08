@@ -913,10 +913,10 @@ host-doors-band          -> 131071  host_spawn_at, host_alive and fs_mkfifo: the
 host-signal-band         -> 127     host_signal pid sig: any signal to one process, so a worker that will not
                                     hear SIGTERM is ended with SIGKILL and no foreign program (voice-track,
                                     the host walk's deadline). A fkwu built before the door reads "door absent"
-host-fs-band             -> 32767   leaf-door modes 35-49, one syscall each, Form names in bml/host-fs.bml: chmod, symlink,
+host-fs-band             -> 32767   Form filesystem owners plus the native physical carrier: chmod, symlink,
                                     link (the atomic create-if-absent publish), sync, getenv, mkdir with a mode, localtime,
-                                    os, file holders (Darwin libproc), file mode (with the type nibble), file copy (a fixed
-                                    1 MiB buffer), file identity, utimes, realpath, pwrite. A fkwu built before them reads "door absent"
+                                    os, file holders (Darwin libproc), file mode (with the type nibble), streaming file copy
+                                    through managed handles, file identity, utimes, realpath, pwrite. Missing bindings refuse admission.
 cell-run-band            -> 524287  cell_run(path, arg, deadline_ms, stdin) (leaf-door mode 50): a unit of Form run in this process answers
                                     {value, out, diag, stopped, errors, resident, ms, cpu_us}, held to the child it replaces on five
                                     tree bands and the fixtures (print, stop, unresolved name, stdin, .bml), with name windows, residency,

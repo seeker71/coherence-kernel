@@ -46,6 +46,11 @@
         (str_concat (byte_to_str (mod (floor (div v 65536)) 256))
                     (byte_to_str (mod (floor (div v 16777216)) 256))))))
     (defn md-f32 (n) (md-u32 (md-bits n)))
+    (defn md-repeat (s n)
+        (if (le n 0) ""
+            (do (let half (md-repeat s (div n 2)))
+                (let both (str_concat half half))
+                (if (eq (mod n 2) 0) both (str_concat both s)))))
 
     ; ---- the model argument, exactly the layout the carrier documents ------------------
     (defn md-seq (i n acc) (if (gt i n) acc (md-seq (add i 1) n (str_concat acc (md-f32 i)))))
@@ -93,5 +98,23 @@
     (let sum-ok (md-has reply (str_concat "sum=" (int_to_str (md-expect-sum 0 0)))))
     (let elems-ok (md-has reply "y=30 70 110 150"))
 
+    ; Completed report readback crosses both the initial copy and former8192
+    ; display cap, without repeating dispatch. Every output is independently1.
+    (let large-model (str_concat (md-u32 4096) (str_concat (md-u32 1)
+        (str_concat (md-repeat (md-f32 1) 4096) (md-f32 1)))))
+    (let large (metal_matvec_f32 (md-msl) "form_fkwu_generic_matvec_f32" large-model))
+    (let all-ones (str_concat "y=" (str_concat (md-repeat "1 " 4095) "1\n")))
+    (let report-ok (and (gt (len large) 8192) (and (md-has large "sum=4096\n")
+        (and (md-has large all-ones) (eq (md-has large " ...") 0)))))
+    (let overflow (metal_matvec_f32 (md-msl) "form_fkwu_generic_matvec_f32"
+        (str_concat (md-u32 4294967295) (md-u32 4294967295))))
+    (let overflow-ok (str_eq overflow "FAIL fkwu-form-cli-metal-matvec-f32 model dimensions overflow its byte span\n"))
+    (let bad-name (str_concat "missing" (str_concat (byte_to_str 0) "tail")))
+    (let missing (metal_matvec_f32 (md-msl) bad-name (md-model)))
+    (let nul-ok (md-has missing (str_concat "msl has no kernel named " (str_concat bad-name "\n"))))
+    (let fixture-ok (md-has (metal_matvec_fixture) "metal_device=true"))
+    (print (list "matvec-retained-report" report-ok overflow-ok nul-ok fixture-ok (len large)))
+
     (print_str (str_concat "expected-sum " (int_to_str (md-expect-sum 0 0))))
-    (add (mul loaded 1) (add (mul passed 2) (add (mul sum-ok 4) (mul elems-ok 8)))))
+    (add (mul (and loaded fixture-ok) 1) (add (mul (and passed overflow-ok) 2)
+        (add (mul sum-ok 4) (mul (and elems-ok (and report-ok nul-ok)) 8)))))

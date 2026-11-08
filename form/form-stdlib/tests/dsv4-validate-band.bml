@@ -4,6 +4,7 @@
 // All existing claims: 32767.
 // preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/dsv4-fixture-gguf.fk form-stdlib/bml/dsv4-validate.bml
 section [form.bml] {
+ let DVB-EVIDENCE=record_new(0,"root",temp_dir() + "/dsv4-validation-evidence-" + host_pid().str(),"sequence",0);
  class Dsv4ValidateBand {
   def dvb-bit(held, bit) = held ? bit : 0;
   def dvb-iq2() = "/Users/ursmuff/models/ds4-engine/gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf";
@@ -39,7 +40,7 @@ section [form.bml] {
    let shared = dls-shared(m, 64, 64);
    let control = dvr-stages(m, parse-json("opts", "{\"arena_slots\":0}"));
    let said = print_str("  plan shared " ++ shared.str() ++ " stages " ++ [stages[0][1], stages[1][1], stages[2][1], stages[3][1], stages[4][1], stages[5][1], stages[6][1]].str() ++ " of " ++ len(stages).str() ++ " (control " ++ len(control).str() ++ ") layers " ++ layers[0].str() ++ " " ++ layers[42].str());
-   shared == 26787475292 && dls-dense(m) == 7290857308 && dls-cache(m, 64) == 19478347776 && dvl-kv-total(m, 64) == 18270208 && mg-kv-margin() == dvb-gib(8)
+    shared == 7290857308 && shared==dls-dense(m) && dls-cache(m, 64) == 19478347776 && dvl-kv-total(m, 64) == 18270208 && dls-own(m,64,64)==dls-cache(m,64)+4*record_get(m,"used")+dvl-kv-total(m,64)+dso-plan-bytes(dso-scratch-plan(m,64))
     && stages[0][1] == 536870912 && stages[1][1] == 538496268 && stages[2][0] == "arena" && stages[2][1] == 19478347776 && stages[3][1] == 18270208 && stages[4][0] == "wirespan" && stages[4][1] == 2162688 && dvr-stack(m) == 553648128 && dvr-slice(m) == 2162688
     && stages[5][0] == "head" && stages[5][1] == 562774036 && stages[6][1] == 19478347776 && stages[7][1] == 19478347776 && stages[7][0] == "stream"
     && len(stages) == 8 && dvr-index-of(map(s => s[0], stages), "layers", 0) == 0 - 1 && dvr-arena-slots(opts) == 64
@@ -49,19 +50,26 @@ section [form.bml] {
   // ---- 2: the dry door, nested ---------------------------------------------------------------------------------------------------------
   def dvb-lease-names() = fs_list(mg-lease-dir()) ?? [];
   // the door run three ways: {"dry":1}, {} and an empty stdin: all three print the plan, take no lease and write no row
-  def dvb-run-door(cmd) {
+   def dvb-door-text(input) {
+    let root=record_get(DVB-EVIDENCE,"root");host_dir_mkdir(root);let sequence=record_get(DVB-EVIDENCE,"sequence")+1;record_set(DVB-EVIDENCE,"sequence",sequence);
+    let path=root + "/" + sequence.str();write_file(path + ".in",input);
+    let result=cell_run("observe/dsv4-validate-run.bml",nothing(),nothing(),len(input)==0 ? [] : [input]);
+    write_file(path + ".out",record_get(result,"out"));write_file(path + ".err",record_get(result,"err"));write_file(path + ".result",value_str([record_get(result,"errors"),record_get(result,"stopped"),record_get(result,"diag")]));
+    record_get(result,"errors")>0 || !nothing?(record_get(result,"stopped")) ? form_error("native validation cell did not complete; evidence " + path) : record_get(result,"out") + record_get(result,"err");
+   }
+   def dvb-run-door(input) {
    let before = dvb-lease-names();
    let rowsBefore = file_size(dvr-receipt-path());
-   let text = host-exec(cmd, "") ?? "";
+    let text = dvb-door-text(input);
    let rowsAfter = file_size(dvr-receipt-path());
    let after = dvb-lease-names();
-   let said = print_str("  door [" ++ cmd ++ "]: " ++ len(text).str() ++ " bytes");
+    let said = print_str("  native door input [" ++ input ++ "]: " ++ len(text).str() ++ " bytes");
    rowsBefore == rowsAfter && len(before) == len(after) && dvb-plan-text-ok?(text);
   }
-  def dvb-dry-door() = dvb-run-door("echo '{\"dry\":1}' | ./fkwu observe/dsv4-validate-run.bml 2>&1") && dvb-run-door("echo '{}' | ./fkwu observe/dsv4-validate-run.bml 2>&1") && dvb-run-door("./fkwu observe/dsv4-validate-run.bml </dev/null 2>&1");
+   def dvb-dry-door() = all?(passed=>passed,map(dvb-run-door,["{\"dry\":1}","{}",""]));
   def dvb-plan-text-ok?(text) {
    dvb-has?(text, "[dsv4-validate] DRY: the plan below is what the window WILL do; nothing is opened, nothing mapped, no lease taken, no row written")
-    && dvb-has?(text, "lease: shared 24.9 GiB (26787475292 B: dense 7290857308 + 64 experts a layer 19478347776 + KV at 64 positions 18270208), own 8.0 GiB, derived and not measured")
+     && dvb-has?(text, "lease: shared mapped weights 6.8 GiB (7290857308 B), private arena, KV and scratch ") && dvb-has?(text,"; arena_slots 64, capacity 64; derived and not measured")
     && dvb-has?(text, "stage compile: ask 0.5 GiB (536870912 B)") && dvb-has?(text, "stage wirespan: ask 0.0 GiB (2162688 B)") && dvb-has?(text, "stage logits: ask 18.1 GiB (19478347776 B)")
     && dvb-has?(text, "stage arena: ask 18.1 GiB (19478347776 B); the slot arena: 64 experts a layer in buffers allocated once") && dvb-has?(text, "the routed expert stacks are NOT mapped")
     && dvb-has?(text, "layer prices (the token door's expected curve; no layer is staged here): 43 layers, each the bytes of the tensors its dispatches can touch, whole stacks included: the largest 3018191320 B (2.8 GiB, layer 0), the smallest 1959129560 B (layer 1), layer 0 with token_embd 3018191320 B, the last 1972815320 B")
@@ -106,11 +114,12 @@ section [form.bml] {
   def dvb-ask(m) {
    let empty = dvb-vm(128, 64, 4, 0);
    let shared = dls-shared(m, 64, 64);
-   let derived = shared + mg-kv-margin();
+    let own=dls-own(m,64,64);
+    let derived = shared + own;
    let file = file_size(dvb-iq2());
    let kinds = [dvr-wirespan-kind(2162688, 2162688, 553648128), dvr-wirespan-kind(dvb-mib(300), 2162688, 553648128), dvr-wirespan-kind(dvb-mib(100), 2162688, 553648128), dvr-wirespan-kind(0, 2162688, 553648128)];
    let said = print_str("  ask kinds " ++ kinds.str());
-   dvr-ask-reason(empty, dvb-gib(1)) == "" && dvr-ask-reason(empty, derived) == "" && dvr-ask-reason(empty, file + mg-kv-margin()) == "ask-denied:capacity"
+    derived==dls-total(m,64,64) && dvr-ask-reason(empty, dvb-gib(1)) == "" && dvr-ask-reason(empty, derived) == "" && dvr-ask-reason(empty, file + own) == "ask-denied:capacity"
     && dvr-ask-reason(dvb-vm(128, 20, 4, 0), dvb-gib(10)) == "" && dvr-ask-reason(dvb-vm(128, 110, 70, 0), dvb-gib(10)) == "" && dvr-ask-reason([], dvb-gib(1)) == "ask-denied:memory-unreadable"
     && kinds == ["slice", "stack", "between", "slice"] && dvb-probe(m);
   }
@@ -176,7 +185,7 @@ section [form.bml] {
   }
 
   // ---- 64: the receipt row and the gaps --------------------------------------------------------------------------------------------------
-  def dvb-record() = record_new(0, "status", "aborted", "reason", "stage-refused", "file", "/m/x.gguf", "bytes", 86720111488, "shared", 26787475292, "cap", 64, "cache", 64, "arena", 64,
+   def dvb-record() = record_new(0, "status", "aborted", "reason", "stage-refused", "file", "/m/x.gguf", "bytes", 86720111488, "shared", 26787475292, "own",123456789,"cap", 64, "cache", 64, "arena", 64,
     "stages", [["compile", 536870912, 1048576, 1200, 475136, [90194313216, 4194304, 2952790016, 0, 0, 0, 0]], ["map", 538496264, 2097152, 8000, 3178496, [88046829568, 6291456, 2952790016, 1234, 5, 0, 0]]],
     "organs", dvr-organs-json(dvb-organs()), "moved", dvr-moved-json(dvr-organs-moved(dvb-organs-before(), dvb-organs())),
     "denied", dvr-denied-json(dvb-g-busy(dvb-gib(1)), dvb-gib(1), 1824749), "vmwin", dvr-window-vm-json(dvb-vm-counters(dvb-vm(128, 100, 10, 1), 1234, 5, 0, 0), dvb-vm(128, 100, 10, 1), 1824749),
@@ -184,7 +193,7 @@ section [form.bml] {
     "ids", [11111, 16, 455], "margins", dvb-margins(), "rgaps", dvb-rgaps(), "deterministic", 1, "logits", dvr-logits-json([0.99, 9, 2581, 2581, 1.5, 0.25, 1]), "gaps", ["attn_q_a.weight type 8 (the block reads MXFP8)"], "elapsed", 91000);
   def dvb-row-ok(row) {
    let doc = parse-json("dsv4-validation-row", row);
-   dvr-text(doc, "schema", "") == "dsv4-validation-v1" && dvr-text(doc, "status", "") == "aborted" && dvr-text(doc, "reason", "") == "stage-refused" && dvr-int(doc, "lease_shared", 0) == 26787475292 && dvr-int(doc, "lease_own", 0) == dvb-gib(8)
+    dvr-text(doc, "schema", "") == "dsv4-validation-v1" && dvr-text(doc, "status", "") == "aborted" && dvr-text(doc, "reason", "") == "stage-refused" && dvr-int(doc, "lease_shared", 0) == 26787475292 && dvr-int(doc, "lease_own", 0) == 123456789
     && dvr-int(doc, "stream_matched", 0) == 24 && dvr-int(doc, "stream_of", 0) == 24 && dvr-int(doc, "deterministic", 0) == 1 && !json-object-has?(doc, "cold_token_ms") && !json-object-has?(doc, "wired_noise") && !json-object-has?(doc, "rereads") && dvr-text(doc, "date", "") == "2026-10-03 03:00:00 WITA"
     && json-object-has?(doc, "wirespan") && json-object-has?(doc, "stages") && json-object-has?(doc, "logits") && json-object-has?(doc, "driver_gaps") && json-object-has?(json-object-get(doc, "logits"), "finite") && len(json-array-elements(json-object-get(doc, "stages"))) == 2
     && dvr-int(json-array-elements(json-object-get(doc, "stages"))[1], "own_delta", 0 - 1) == 3178496 && dvr-int(json-array-elements(json-object-get(doc, "stages"))[0], "wired_delta", 0) == 1048576
@@ -232,18 +241,33 @@ section [form.bml] {
    let truth = dvr-step(ours, 2);
    dvr-step(ours, 0)[2] != truth[2] && dvr-step(ours, 3)[2] != truth[2] && (dvr-two(ours)[2] != dvr-two(ours)[1]) && (dvr-two(ours)[1] - dvr-two(ours)[2]) == truth[1];
   }
-  // ---- 256: the go path with gaps maps nothing, writes the row, gives the lease back; the steps; the waits ----------------------------------------------------
+   // A pre-admission refusal never releases another operation's reservation.
   def dvb-refuse-gaps(m, path, receipt) {
    let held = mg-lease("dsv4-validate-band", "", dvb-mib(1), dvb-mib(1));
-   let leaseFile = mg-lease-path(mg-lease-dir(), host_pid());
+    let token=mg-reservation-of(held);let leaseFile=record_get(token,"path");
    let took = mg-granted?(held) && file_size(leaseFile) > 0;
    let opts = parse-json("opts", "{\"go\":1,\"receipt\":\"" ++ receipt ++ "\"}");
    let r = dvr-refuse-gaps(opts, path, file_size(path), m);
    let text = read_file(receipt) ?? "";
    let doc = len(text) > 0 ? parse-json("row", trim(text)) : json-node-object([]);
    let said = print_str("  go with gaps: lease taken " ++ took.str() ++ ", exit " ++ r.str() ++ ", row " ++ len(text).str() ++ " bytes, lease file after " ++ file_size(leaseFile).str());
-   took && r == 1 && dvr-text(doc, "status", "") == "refused" && dvr-text(doc, "reason", "") == "driver-gaps" && len(json-array-elements(json-object-get(doc, "driver_gaps"))) == 4 && !(file_size(leaseFile) > 0);
+    let preserved=file_size(leaseFile)>0;let released=mg-reservation-release(token);
+    took && r == 1 && dvr-text(doc, "status", "") == "refused" && dvr-text(doc, "reason", "") == "driver-gaps" && len(json-array-elements(json-object-get(doc, "driver_gaps"))) == 4 && preserved && released;
   }
+   def dvb-finish-continuation(m,path) {
+    let prior=record_get(DVR-OWNED,"current");defer record_set(DVR-OWNED,"current",prior);
+    let receipt=path+".continuation";defer host_path_remove(receipt);
+    let opts=json-node-object([json-node-pair("receipt",json-node-string(receipt))]);
+    let env=dvr-env("fixture",m,1,0,8,4,0,0);record_set(env,"vm0",mg-sense());
+    let session=fcms-none("validation-continuation-fixture");let seen=record_new(0,"release",0);
+    fcms-retain-finalizer(session,"fixture",()=>{let n=record_get(seen,"release")+1;record_set(seen,"release",n);n>1;});
+    record_set(env,"session",session);record_set(env,"opts",opts);record_set(DVR-OWNED,"current",env);
+    let first=dvr-finish(env,opts,"");let retained=record_get(env,"finished")==0;
+    let resumed=dvr-window(json-node-object([]));let before=read_file(receipt);
+    let repeated=dvr-finish(env,opts,"replacement reason must not overwrite the original");
+    let rows=filter(row=>len(trim(row))>0,split-on(before,"\n"));
+    first==1 && retained && resumed==0 && repeated==0 && record_get(seen,"release")==2 && record_get(env,"original-why")=="" && read_file(receipt)==before && len(rows)==2 && all?(row=>dvr-text(parse-json("receipt",row),"status","")=="completed",rows) && dvr-int(parse-json("first",rows[0]),"release_ok",-1)==0 && dvr-int(parse-json("settled",rows[1]),"release_ok",-1)==1;
+   }
   def dvb-steps(m) {
    let none = json-node-object([]);
    let withIds = parse-json("opts", "{\"logits_prompt_ids\":[1,2,3]}");
@@ -274,7 +298,7 @@ section [form.bml] {
    let wrongTokens = dvb-row-doc(0, dvb-sys(), dvr-prompt(), 13, dvb-pin());
    let noSystem = dvb-row-doc(0, [], dvr-prompt(), 14, append([0, 128803], append(dvr-prompt(), [128804, 128821])));
    let bosNone = dvb-row-doc(0 - 1, dvb-sys(), dvr-prompt(), 14, cons(0 - 1, dvb-pin()[1:14]));
-   let supplied = host-exec("echo '{\"logits_prompt_ids\":[1,2,3]}' | ./fkwu observe/dsv4-validate-run.bml 2>&1", "") ?? "";
+    let supplied = dvb-door-text("{\"logits_prompt_ids\":[1,2,3]}");
    let said = print_str("  pinned ids " ++ dvr-ids-json(ids) ++ ", from " ++ dvr-logits-from(none) ++ ", supplied " ++ dvr-logits-from(given));
    ids == dvb-pin() && len(ids) == 14 && ids[0] == 0 && ids[6] == 128803 && ids[7:12] == dvr-prompt() && ids[12] == 128804 && ids[13] == 128821 && dvr-chat-ids-ok?(ids, row)
     && dvr-pinned-ids() == dvb-pin() && dvr-logits-ids(none) == dvb-pin() && dvr-logits-from(none) == "pinned" && dvr-logits-ids(given) == [1, 2, 3] && dvr-logits-from(given) == "supplied"
@@ -469,14 +493,15 @@ section [form.bml] {
  let c64 = dvb-bit(try dvb-row-ok(dvr-receipt-row("2026-10-03 03:00:00 WITA", 1790000000000, dvb-record())) && dvb-gaps(mIq2, mReap, mFix, mDoc) catch false, 64);
  let c128 = dvb-bit(try dvb-can-fail() catch false, 128);
  let receiptPath = temp_dir() ++ "/dsv4-validate-band-receipt-" ++ now_unix_ms().str() ++ ".jsonl";
- let c256 = dvb-bit(try dvb-refuse-gaps(mDoc, docPath, receiptPath) && dvb-steps(mIq2) catch false, 256);
+  let c256 = dvb-bit(try dvb-refuse-gaps(mDoc, docPath, receiptPath) && dvb-steps(mIq2) && dvb-finish-continuation(mFix,receiptPath) catch false, 256);
  let c512 = dvb-bit(try dvb-step-reads() && dvb-margin-row() && dvb-margin-plants() catch false, 512);
  let c1024 = dvb-bit(try dvb-pinned() catch false, 1024);
  let c2048 = dvb-bit(try dvb-organs-claim(mIq2) catch false, 2048);
  let c4096 = dvb-bit(try dvb-backoff() catch false, 4096);
  let c8192 = dvb-bit(try dvb-layer-price(mIq2) catch false, 8192);
  let c16384 = dvb-bit(try dvb-date() catch false, 16384);
- let removed = host_path_remove(fixPath) + host_path_remove(receiptPath) + host_path_remove(docPath);
+  let verdict=c1+c2+c4+c8+c16+c32+c64+c128+c256+c512+c1024+c2048+c4096+c8192+c16384;
+  let removed = verdict==32767 ? host_path_remove(fixPath) + host_path_remove(receiptPath) + host_path_remove(docPath) : {print(["retained validation fixtures",fixPath,receiptPath,docPath,record_get(DVB-EVIDENCE,"root")]);nothing();};
  print_str("dsv4-validate-band claims " ++ c1.str() ++ " " ++ c2.str() ++ " " ++ c4.str() ++ " " ++ c8.str() ++ " " ++ c16.str() ++ " " ++ c32.str() ++ " " ++ c64.str() ++ " " ++ c128.str() ++ " " ++ c256.str() ++ " " ++ c512.str() ++ " " ++ c1024.str() ++ " " ++ c2048.str() ++ " " ++ c4096.str() ++ " " ++ c8192.str() ++ " " ++ c16384.str() ++ " removed " ++ removed.str());
- c1 + c2 + c4 + c8 + c16 + c32 + c64 + c128 + c256 + c512 + c1024 + c2048 + c4096 + c8192 + c16384;
+  verdict;
 }

@@ -26,7 +26,6 @@ section [form.bml] {
         def cvg-malformed() = "form/conformance/formbin2-malformed-vectors.json";
         def cvg-schema() = "form-canonical-conformance-v1";
         def cvg-malformed-schema() = "formbin2-malformed-conformance-v1";
-        def cvg-max-bytes() = 67108864;
         def cvg-when(cond, msg) = cond ? [msg] : [];
         def cvg-py(s) = lx-py-str(s);
 
@@ -68,12 +67,13 @@ section [form.bml] {
 
         // ---- one expression on fkwu: the form is written to a unit of its own and this process runs it
         // (cell_run, in process: no child, no stdout to read back); the answer is the text a run of the
-        // unit prints, what it printed and then its value as the program prints it; the unit leaves with the reading
-        // (a cell_run writes no image beside its unit) ----
+        // unit prints, what it printed and then its value as the program prints it;
+        // the temporary source and its admitted cache leave with the reading ----
         def cvg-scratch(tag) = temp_dir() ++ "/canonical-conformance-" ++ host_pid().str() ++ "-" ++ tag;
         def cvg-deadline-ms() = 60000;
         def cvg-leave(path) {
             let a = fs_remove(path);
+            let image = fs_remove(path ++ ".cell.fkb");
             0;
         }
         // what this process left in the scratch directory, by the body's own directory door: the
@@ -154,7 +154,35 @@ section [form.bml] {
             !fbc-good(encoded) ? ["Form codec emission failed: " ++ fbc-error(encoded)]
             : append(cvg-when(!((String) fbc-value(encoded) == cvg-hex-str(cvg-form-hex())), "the Form codec's artifact is not its pinned bytes"),
                      append(cvg-when(!((String) fbc-hash(fbc-value(encoded)) == cvg-form-sha256()), "the Form codec's artifact does not hold its pinned SHA-256"),
-                            cvg-native-decoded(fbc-value(encoded), fbc-decode(fbc-value(encoded)))));
+                            append(cvg-native-decoded(fbc-value(encoded), fbc-decode(fbc-value(encoded))),append(cvg-native-integers(),cvg-native-data-keys()))));
+        }
+        def cvg-native-data-keys() {
+            let numbers=append(map(hex=>float_leaf(35,[3,cvg-hex-str(hex),"value"]),["0000000000000080","ffffffffffffffbf","0000000000000040","ffffffffffffff7f"]),map(hex=>float_leaf(35,[2,cvg-hex-str(hex),"value"]),["0000000000000000","0000000000000080","010000000000f87f","000000000000f07f"]));
+            let aliases=[fbc-data-inert-value(fbc-composite(FBC-BYTES,[fbc-data(2),fbc-number(3,"ok"+fbc-data-padding(6))])),fbc-data-inert-value(fbc-composite(FBC-DOTTED,[fbc-data([1]),fbc-data([2])]))];
+            let values=append(numbers,append(aliases,[nothing(),[],[1,"nested",[nothing(),2.5]],cons(1,cons("two",3)),"","nul"+byte_to_str(0)+"end","café","λafter🙂tail",byte_to_str(255),"1234567"+byte_to_str(255),"12345678"+byte_to_str(255)]));
+            let nested=foldl((value,i)=>i%2==0 ? [value] : cons(value,"tail"),0,range(0,96));
+            let spine=foldl((value,i)=>cons(i,value),"tail",range(0,257));
+            let errors=foldl((found,value)=>append(found,append(cvg-when(fbc-data-key(value)!=fbc-structural(fbc-data(value)),"ordinary structural key differs for "+value_kind(value)),cvg-when(fbc-encode(fbc-data(value))!=fbc-encode-by(pool=>fbc-emit-data(pool,value)),"ordinary emission differs for "+value_kind(value)))),[],append(values,[nested,spine]));
+            let unicode=["λafter🙂tail","λ"+byte_to_str(255)+"after","x"+byte_to_str(237)+byte_to_str(160)+byte_to_str(128)+"tail"];
+            let utf8=all?(text=>fbc-utf8(text,0)==fbc-utf8-pure(text,0),unicode) && fbc-utf8("xλafter",1)==1 && fbc-utf8("xλafter",2)==0 && fbc-utf8("xλafter",3)==1;
+            let refused=all?(value=>(try {fbc-data-key(value);0;} catch 1)==1 && (try {fbc-structural(fbc-data(value));0;} catch 1)==1,[record_new(0),x=>x,[record_new(0)],cons(1,x=>x)]);
+            append(errors,append(cvg-when(!utf8,"ordinary emission changed UTF-8 resumption or offset validity"),append(cvg-when(!refused,"ordinary structural key admitted an unsupported value"),cvg-when(fbc-data-key(aliases[0])!=fbc-data-key("ok") || fbc-data-key(aliases[1])!=fbc-data-key([1,2]),"ordinary structural key skipped alias normalization"))));
+        }
+        def cvg-native-integers() {
+            // Wire int64 payloads are wider than Form's signed63 arithmetic.
+            // Construct their edges from bytes so source wrapping cannot make
+            // this transport observation silently test different values.
+            let wide=map(hex=>node_value(float_leaf(35,[3,cvg-hex-str(hex)])),["0000000000000080","ffffffffffffffbf","0000000000000040","ffffffffffffff7f"]);
+            let values=append(wide,[-4611686018427387904,-2147483649,-2147483648,-1,0,2147483647,2147483648,4294967295,4294967296,4611686018427387903,now_unix_ms()]);
+            foldl((errors,value)=>{
+                let node=intern_trivial_int(value); let data=fbc-native-data(node); let encoded=fbc-encode(data);
+                let decoded=fbc-good(encoded) ? fbc-native-result(fbc-decode(fbc-value(encoded))) : nothing();
+                let narrow=value>=-2147483648 && value<=2147483647;
+                let shape=narrow ? data[0]==0 && data[4]==(value<0 ? value+4294967296 : value) : data[0]==3;
+                let wrapped=json-node-object([json-node-pair("value",node)]);
+                let restored=bytes_to_recipe(recipe_to_bytes(wrapped));
+                append(errors,cvg-when(!shape || !node_eq(decoded,node) || node_value(decoded)!=value || !node_eq(restored,wrapped),"native integer transport failed: "+value.str()));
+            },[],values);
         }
         def cvg-native-decoded(bytes, decoded) = !fbc-good(decoded) ? ["the Form codec refused its own artifact: " ++ fbc-error(decoded)]
             : append(cvg-when(!((String) cvg-render(fbc-value(decoded)) == cvg-form-expected()), "the Form codec's artifact decodes to " ++ cvg-py(cvg-render(fbc-value(decoded))) ++ ", not " ++ cvg-py(cvg-form-expected())), cvg-repacked(bytes, fbc-encode(fbc-value(decoded)), "the Form codec's own artifact"));
@@ -173,8 +201,10 @@ section [form.bml] {
         }
         def cvg-malformed-done(path, acc) = (Comparable) len(acc) == 0 ? ["refused", path ++ ": cases must be a non-empty list"] : ["ok", reverse(acc)];
         def cvg-malformed-one(path, node, rest, i, acc) {
+            let maximum=json-object-has?(node,"maximum_bytes") ? node_value(json-object-get(node,"maximum_bytes")) : 0;
             ((Comparable) cvg-field-ok?(node, "name") == 0) || ((Comparable) cvg-field-ok?(node, "expected_error") == 0) ? ["refused", path ++ ": case " ++ i.str() ++ " has invalid metadata"]
-            : cvg-malformed-list(path, rest, i + 1, cons([node_value(json-object-get(node, "name")), cvg-str-field(node, "builder"), cvg-builder-arg(node), node_value(json-object-get(node, "expected_error"))], acc));
+            : value_kind(maximum)!="int" || maximum<0 || (cvg-str-field(node,"builder")=="oversized-artifact" && maximum==0) ? ["refused",path+": case "+i.str()+" has invalid caller byte allowance"]
+            : cvg-malformed-list(path, rest, i + 1, cons([node_value(json-object-get(node, "name")), cvg-str-field(node, "builder"), cvg-builder-arg(node), node_value(json-object-get(node, "expected_error")),maximum], acc));
         }
         def cvg-str-field(node, key) = json-object-has?(node, key) ? node_value(json-object-get(node, key)) : "";
         // hex keeps its text; nested-composite keeps its depth as text; oversized carries nothing
@@ -183,6 +213,7 @@ section [form.bml] {
         def cvg-m-builder(m) = m[1];
         def cvg-m-arg(m) = m[2];
         def cvg-m-expected(m) = m[3];
+        def cvg-m-maximum(m) = m[4];
         // the nested composite as hex: leaf = five u32 words; node = u32(1) leaf u32(1) node, depth times; FORMBIN2 u32(0) node
         def cvg-u32(n) = cvg-hex8(n, 8, "");
         def cvg-hex8(n, k, acc) = (Comparable) k == 0 ? acc : cvg-hex8(n / 16, k - 1, cvg-hex-digit(n % 16) ++ acc);
@@ -196,7 +227,7 @@ section [form.bml] {
             let base = cvg-scratch("malformed-" ++ i.str());
             (String) cvg-m-builder(m) == "hex" ? cvg-hex-file(base, cvg-m-arg(m))
             : (String) cvg-m-builder(m) == "nested-composite" ? cvg-hex-file(base, cvg-composite-hex(str_to_int(cvg-m-arg(m))))
-            : (String) cvg-m-builder(m) == "oversized-artifact" ? cvg-oversized-file(base)
+            : (String) cvg-m-builder(m) == "oversized-artifact" ? cvg-oversized-file(base,cvg-m-maximum(m))
             : ["malformed case " ++ cvg-m-name(m) ++ ": unknown builder " ++ cvg-py(cvg-m-builder(m))];
         }
         def cvg-hex-file(base, hex) {
@@ -206,13 +237,13 @@ section [form.bml] {
             let wrote = host_file_append_bytes(path, bytes);
             cvg-when((wrote < 0) || (!((Comparable) (len(bytes) * 2) == len(hex))), "could not build a malformed artifact from hex: wrote " ++ wrote.str() ++ " of " ++ (len(hex) / 2).str());
         }
-        // One byte over the ceiling, made by naming its length: the header is eight real bytes and
+        // One byte over this caller's allowance, made by naming its length: the header is eight real bytes and
         // fs_truncate sets the extent, sparse, so the file whose whole point is how long it is costs nothing.
-        def cvg-oversized-file(base) {
+        def cvg-oversized-file(base,maximum) {
             let path = base ++ ".fkb";
             let cleared = (Comparable) fs_exists(path) == 1 ? fs_remove(path) : 0;
             let header = host_file_append_bytes(path, [70, 79, 82, 77, 66, 73, 78, 50]);
-            let want = cvg-max-bytes() + 1;
+            let want = maximum + 1;
             let got = fs_truncate(path, want);
             cvg-when((header < 0) || (!((Comparable) got == want)), "could not build the oversized artifact: extent " ++ got.str() ++ " of " ++ want.str());
         }
@@ -223,7 +254,7 @@ section [form.bml] {
         }
         def cvg-malformed-judge(m, i) {
             let artifact = cvg-scratch("malformed-" ++ i.str()) ++ ".fkb";
-            let native = fbc-load(artifact);
+            let native = fbc-load-limited(artifact,cvg-m-maximum(m));
             let left = fs_remove(artifact);
             let errors = cvg-when(fbc-good(native) || (!((String) fbc-error(native) == cvg-m-expected(m))), "Form codec accepted or misclassified " ++ cvg-m-name(m) ++ ": " ++ fbc-error(native));
             [(Comparable) len(errors) == 0 ? 1 : 0,

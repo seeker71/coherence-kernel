@@ -44,12 +44,10 @@
 // The reply is key=value lines, the shape the kernel's own SKIP text already uses, so a reader that
 // handled SKIP handles this without learning a second format.
 //
-// WHAT THIS DOOR IS NOT. One call is one dispatch that returns TEXT, capped by the kernel at 8192
-// bytes. That fits a witness — prove a Form cell can drive this GPU, and prove the number is right.
-// It does NOT fit a 43-layer decode, which is ~2600 dispatches per token carrying activations that
-// exceed this cap by themselves and must stay resident on the device between calls. Saying so here
-// so that no one reads a working matvec as a working model. The decode loop needs a door that
-// passes HANDLES rather than text; this one earns the right to ask for that door.
+// One matvec call dispatches once and retains its complete text report. A later
+// larger read copies that report without repeating GPU work. Model decode uses
+// the handle operations below so activations remain resident between dispatches;
+// a completed matvec is evidence for that operation, not for a whole model.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // THE HANDLE DOOR (added 2026-08-04), and the measurement that shaped it.
@@ -154,6 +152,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <objc/runtime.h>
+#import <AudioToolbox/AudioToolbox.h>
 #include <dispatch/dispatch.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -163,7 +162,398 @@
 #include <dlfcn.h>
 #include <pthread.h>
 #include <stdlib.h>
+#include <limits.h>
 #include <unistd.h>
+#include <time.h>
+
+// AudioQueue is another optional host ABI in this carrier. It never initializes
+// Metal. PCM, WAV parsing and sample statistics remain Form values/recipes.
+static struct {
+    void *library;
+    OSStatus (*input)(const AudioStreamBasicDescription *, AudioQueueInputCallback, void *, CFRunLoopRef, CFStringRef, UInt32, AudioQueueRef *);
+    OSStatus (*output)(const AudioStreamBasicDescription *, AudioQueueOutputCallback, void *, CFRunLoopRef, CFStringRef, UInt32, AudioQueueRef *);
+    OSStatus (*allocate)(AudioQueueRef, UInt32, AudioQueueBufferRef *);
+    OSStatus (*enqueue)(AudioQueueRef, AudioQueueBufferRef, UInt32, const AudioStreamPacketDescription *);
+    OSStatus (*start)(AudioQueueRef, const AudioTimeStamp *);
+    OSStatus (*stop)(AudioQueueRef, Boolean);
+    OSStatus (*dispose)(AudioQueueRef, Boolean);
+    OSStatus (*get_property)(AudioQueueRef, AudioQueuePropertyID, void *, UInt32 *);
+    OSStatus (*listen)(AudioQueueRef, AudioQueuePropertyID, AudioQueuePropertyListenerProc, void *);
+} fk_audio;
+
+typedef struct FKAudioChunk {
+    struct FKAudioChunk *next;
+    size_t length, used;
+    unsigned char bytes[];
+} FKAudioChunk;
+typedef struct FKAudioInput {
+    AudioQueueRef queue;
+    pthread_mutex_t mutex;
+    pthread_cond_t changed;
+    FKAudioChunk *head, *tail;
+    size_t available;
+    int stopping;
+    OSStatus error;
+    struct FKAudioInput *retired_next;
+} FKAudioInput;
+static FKAudioInput *fk_audio_stream, *fk_audio_retired;
+static NSData *fk_audio_reading;
+
+long long fk_audio_available_external(void) {
+    if (fk_audio.library != NULL) return 1;
+    void *library = dlopen("/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox", RTLD_NOW | RTLD_LOCAL);
+    if (library == NULL) return 0;
+#define FK_AUDIO_SYMBOL(field, name) do { fk_audio.field = (__typeof__(fk_audio.field))dlsym(library,name); if (fk_audio.field == NULL) { dlclose(library); return 0; } } while (0)
+    FK_AUDIO_SYMBOL(input,"AudioQueueNewInput"); FK_AUDIO_SYMBOL(output,"AudioQueueNewOutput"); FK_AUDIO_SYMBOL(allocate,"AudioQueueAllocateBuffer");
+    FK_AUDIO_SYMBOL(enqueue,"AudioQueueEnqueueBuffer"); FK_AUDIO_SYMBOL(start,"AudioQueueStart");
+    FK_AUDIO_SYMBOL(stop,"AudioQueueStop"); FK_AUDIO_SYMBOL(dispose,"AudioQueueDispose");
+    FK_AUDIO_SYMBOL(get_property,"AudioQueueGetProperty"); FK_AUDIO_SYMBOL(listen,"AudioQueueAddPropertyListener");
+#undef FK_AUDIO_SYMBOL
+    fk_audio.library = library; return 1;
+}
+
+static uint64_t fk_audio_ms(void) {
+    struct timespec now; clock_gettime(CLOCK_MONOTONIC,&now);
+    return (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000;
+}
+static void fk_audio_input_callback(void *opaque, AudioQueueRef queue, AudioQueueBufferRef buffer, const AudioTimeStamp *when, UInt32 packets, const AudioStreamPacketDescription *descriptions) {
+    (void)when; (void)packets; (void)descriptions;
+    FKAudioInput *owner = opaque;
+    pthread_mutex_lock(&owner->mutex);
+    if (!owner->stopping && owner->error == 0) {
+        size_t length = buffer->mAudioDataByteSize;
+        if (length > buffer->mAudioDataBytesCapacity || length % 2 != 0 || length > SIZE_MAX - owner->available || length > SIZE_MAX - sizeof(FKAudioChunk)) owner->error = -50;
+        else if (length != 0) {
+            FKAudioChunk *chunk = malloc(sizeof *chunk + length);
+            if (chunk == NULL) owner->error = -108;
+            else {
+                chunk->next = NULL; chunk->length = length; chunk->used = 0;
+                memcpy(chunk->bytes,buffer->mAudioData,length);
+                if (owner->tail != NULL) owner->tail->next = chunk; else owner->head = chunk;
+                owner->tail = chunk; owner->available += length;
+            }
+        }
+        if (owner->error == 0) owner->error = fk_audio.enqueue(queue,buffer,0,NULL);
+        pthread_cond_broadcast(&owner->changed);
+    }
+    pthread_mutex_unlock(&owner->mutex);
+}
+
+// Synchronous disposal ends callbacks before their context is freed. A failed
+// disposal keeps the owner reachable so a subsequent call can retry release.
+static int fk_audio_input_close(FKAudioInput **slot) {
+    FKAudioInput *owner = *slot;
+    if (owner == NULL) return 0;
+    pthread_mutex_lock(&owner->mutex); owner->stopping = 1; pthread_cond_broadcast(&owner->changed); pthread_mutex_unlock(&owner->mutex);
+    OSStatus stopped = owner->queue == NULL ? 0 : fk_audio.stop(owner->queue,true);
+    OSStatus disposed = owner->queue == NULL ? 0 : fk_audio.dispose(owner->queue,true);
+    if (disposed != 0) { fprintf(stderr,"audio: queue release incomplete (%d)\n",(int)disposed); return -1; }
+    while (owner->head != NULL) { FKAudioChunk *chunk = owner->head; owner->head = chunk->next; free(chunk); }
+    pthread_cond_destroy(&owner->changed); pthread_mutex_destroy(&owner->mutex); free(owner); *slot = NULL;
+    if (stopped != 0) fprintf(stderr,"audio: queue stop reported %d; disposal completed\n",(int)stopped);
+    return 0;
+}
+static int fk_audio_retry_retired(void) {
+    FKAudioInput **cursor = &fk_audio_retired;
+    while (*cursor != NULL) {
+        FKAudioInput *owner = *cursor, *next = owner->retired_next;
+        FKAudioInput *held = owner; fk_audio_input_close(&held);
+        if (held == NULL) *cursor = next; else cursor = &owner->retired_next;
+    }
+    return fk_audio_retired == NULL ? 0 : -1;
+}
+static FKAudioInput *fk_audio_input_open(uint64_t until) {
+    if (fk_audio_ms() >= until) return NULL;
+    if (!fk_audio_available_external()) return NULL;
+    fk_audio_retry_retired();
+    if (fk_audio_ms() >= until) return NULL;
+    FKAudioInput *owner = calloc(1,sizeof *owner);
+    if (owner == NULL) return NULL;
+    if (pthread_mutex_init(&owner->mutex,NULL) != 0) { free(owner); return NULL; }
+    if (pthread_cond_init(&owner->changed,NULL) != 0) { pthread_mutex_destroy(&owner->mutex); free(owner); return NULL; }
+    AudioStreamBasicDescription format = {0};
+    format.mSampleRate = 16000; format.mFormatID = kAudioFormatLinearPCM;
+    format.mFormatFlags = kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked;
+    format.mBytesPerPacket = 2; format.mFramesPerPacket = 1; format.mBytesPerFrame = 2; format.mChannelsPerFrame = 1; format.mBitsPerChannel = 16;
+    owner->error = fk_audio.input(&format,fk_audio_input_callback,owner,NULL,NULL,0,&owner->queue);
+    if (owner->error == 0 && owner->queue != NULL) {
+        for (size_t i = 0; i < 4 && owner->error == 0; ++i) {
+            AudioQueueBufferRef buffer = NULL;
+            owner->error = fk_audio.allocate(owner->queue,3200,&buffer);
+            if (owner->error == 0) owner->error = buffer == NULL ? -108 : fk_audio.enqueue(owner->queue,buffer,0,NULL);
+        }
+        if (owner->error == 0 && fk_audio_ms() >= until) owner->error = ETIMEDOUT;
+        if (owner->error == 0) {
+            OSStatus started = fk_audio.start(owner->queue,NULL);
+            pthread_mutex_lock(&owner->mutex);
+            if (started != 0 && owner->error == 0) owner->error = started;
+            OSStatus admitted = owner->error;
+            pthread_mutex_unlock(&owner->mutex);
+            if (admitted == 0) return owner;
+        }
+    }
+    fprintf(stderr,"audio: input admission refused (%d)\n",(int)owner->error);
+    FKAudioInput *held = owner; fk_audio_input_close(&held);
+    if (held != NULL) { held->retired_next = fk_audio_retired; fk_audio_retired = held; }
+    return NULL;
+}
+static NSData *fk_audio_input_take(FKAudioInput *owner, size_t maximum, uint64_t until, int wait_full, int finish) {
+    if (owner == NULL || maximum == 0) return [NSData data];
+    pthread_mutex_lock(&owner->mutex);
+    while (!owner->stopping && owner->error == 0 && (wait_full ? owner->available < maximum : owner->available == 0)) {
+        uint64_t now = fk_audio_ms(); if (now >= until) break;
+        uint64_t left = until - now; struct timespec span = {(time_t)(left / 1000),(long)(left % 1000) * 1000000};
+        int result = pthread_cond_timedwait_relative_np(&owner->changed,&owner->mutex,&span);
+        if (result != 0 && result != ETIMEDOUT && result != EINTR) { owner->error = result; break; }
+    }
+    if (finish) { owner->stopping = 1; pthread_cond_broadcast(&owner->changed); }
+    if (owner->error != 0) { pthread_mutex_unlock(&owner->mutex); return nil; }
+    size_t amount = owner->available < maximum ? owner->available : maximum;
+    NSMutableData *result = [NSMutableData dataWithLength:amount]; unsigned char *bytes = result.mutableBytes; size_t at = 0;
+    while (at < amount) {
+        FKAudioChunk *chunk = owner->head; size_t take = chunk->length - chunk->used;
+        if (take > amount - at) take = amount - at;
+        memcpy(bytes + at,chunk->bytes + chunk->used,take); at += take; chunk->used += take; owner->available -= take;
+        if (chunk->used == chunk->length) { owner->head = chunk->next; if (owner->head == NULL) owner->tail = NULL; free(chunk); }
+    }
+    pthread_mutex_unlock(&owner->mutex); return result;
+}
+long long fk_audio_stream_start_external(long long wait_ms) {
+    if (fk_audio_stream != NULL) {
+        pthread_mutex_lock(&fk_audio_stream->mutex);
+        int failed = fk_audio_stream->stopping || fk_audio_stream->error != 0;
+        pthread_mutex_unlock(&fk_audio_stream->mutex);
+        return failed ? -1 : 0;
+    }
+    uint64_t until = wait_ms < 0 ? UINT64_MAX : fk_audio_ms()+(uint64_t)wait_ms;
+    fk_audio_stream = fk_audio_input_open(until); return fk_audio_stream == NULL ? -1 : 0;
+}
+long long fk_audio_stream_held_external(void) { return fk_audio_stream != NULL; }
+long long fk_audio_stream_stop_external(void) {
+    int stopped = fk_audio_input_close(&fk_audio_stream);
+    int retired = fk_audio_retry_retired();
+    return stopped == 0 && retired == 0 ? 0 : -1;
+}
+const char *fk_audio_stream_read_external(long long maximum, long long wait_ms, long long *length) {
+    *length = -1;
+    if (maximum < 0 || wait_ms < 0) return NULL;
+    fk_audio_reading = fk_audio_input_take(fk_audio_stream,(size_t)maximum & ~(size_t)1,fk_audio_ms() + (uint64_t)wait_ms,1,0);
+    if (fk_audio_reading == nil) return NULL;
+    *length = (long long)fk_audio_reading.length; return *length == 0 ? "" : fk_audio_reading.bytes;
+}
+const char *fk_audio_capture_external(long long milliseconds, long long *length) {
+    *length = -1;
+    if (milliseconds < 0) return NULL;
+    if (milliseconds == 0) { *length = 0; return ""; }
+    uint64_t until = fk_audio_ms() + (uint64_t)milliseconds;
+    FKAudioInput *owner = fk_audio_input_open(until); if (owner == NULL) return NULL;
+    // A private capture never consumes or closes an already standing stream.
+    // Close admission under the same lock as the final drain. Complete buffers
+    // delivered before the cutoff are retained; no later callback is discarded
+    // after a successful take and before disposal.
+    fk_audio_reading = fk_audio_input_take(owner,SIZE_MAX & ~(size_t)1,until,1,1);
+    int released = fk_audio_input_close(&owner);
+    if (owner != NULL) { owner->retired_next = fk_audio_retired; fk_audio_retired = owner; }
+    if (released != 0 || fk_audio_reading == nil) return NULL;
+    *length = (long long)fk_audio_reading.length; return *length == 0 ? "" : fk_audio_reading.bytes;
+}
+
+typedef struct FKAudioOutputBuffer {
+    AudioQueueBufferRef buffer;
+    int available;
+    struct FKAudioOutputBuffer *next;
+} FKAudioOutputBuffer;
+typedef struct FKAudioOutput {
+    AudioQueueRef queue;
+    pthread_mutex_t mutex;
+    pthread_cond_t changed;
+    FKAudioOutputBuffer *buffers;
+    long long rate;
+    int started, accepting, running, observed_running;
+    size_t pending;
+    OSStatus error;
+    struct FKAudioOutput *retired_next;
+} FKAudioOutput;
+static FKAudioOutput *fk_audio_output, *fk_audio_output_retired;
+static void fk_audio_output_callback(void *opaque, AudioQueueRef queue, AudioQueueBufferRef buffer) {
+    (void)queue; FKAudioOutput *owner = opaque;
+    pthread_mutex_lock(&owner->mutex);
+    ((FKAudioOutputBuffer *)buffer->mUserData)->available = 1;
+    if (owner->pending != 0) --owner->pending;
+    pthread_cond_broadcast(&owner->changed); pthread_mutex_unlock(&owner->mutex);
+}
+static void fk_audio_output_changed(void *opaque, AudioQueueRef queue, AudioQueuePropertyID property) {
+    (void)property; FKAudioOutput *owner = opaque; UInt32 running = 0, size = sizeof running;
+    pthread_mutex_lock(&owner->mutex);
+    OSStatus status = fk_audio.get_property(queue,kAudioQueueProperty_IsRunning,&running,&size);
+    if (status != 0 && owner->error == 0) owner->error = status;
+    if (status == 0) { owner->running = running != 0; if (running != 0) owner->observed_running = 1; }
+    pthread_cond_broadcast(&owner->changed); pthread_mutex_unlock(&owner->mutex);
+}
+static int fk_audio_output_wait(FKAudioOutput *owner, uint64_t until, int pending) {
+    int failed = 0;
+    pthread_mutex_lock(&owner->mutex);
+    while ((pending == 2 ? !owner->observed_running : pending == 1 ? owner->pending != 0 : owner->running) && owner->error == 0) {
+        int result;
+        if (until == UINT64_MAX) result = pthread_cond_wait(&owner->changed,&owner->mutex);
+        else {
+            uint64_t now = fk_audio_ms(); if (now >= until) { failed = 1; break; }
+            uint64_t left = until - now; struct timespec span = {(time_t)(left/1000),(long)(left%1000)*1000000};
+            result = pthread_cond_timedwait_relative_np(&owner->changed,&owner->mutex,&span);
+        }
+        if (result != 0 && result != EINTR && result != ETIMEDOUT) { failed = 1; break; }
+    }
+    failed |= owner->error != 0; pthread_mutex_unlock(&owner->mutex); return failed;
+}
+static int fk_audio_output_close(FKAudioOutput **slot, long long wait_ms) {
+    FKAudioOutput *owner = *slot; if (owner == NULL) return 0;
+    pthread_mutex_lock(&owner->mutex); owner->accepting = 0;
+    int started = owner->started, failed = owner->error != 0; pthread_mutex_unlock(&owner->mutex);
+    uint64_t until = wait_ms < 0 ? UINT64_MAX : fk_audio_ms() + (uint64_t)wait_ms;
+    if (owner->queue != NULL && started && !failed) {
+        // IsRunning can still be zero just after Start. Every accepted buffer
+        // must first be returned; only then does the stopped property prove
+        // that the device drained its remaining output.
+        failed = fk_audio_output_wait(owner,until,2);
+        if (!failed) failed = fk_audio_output_wait(owner,until,1);
+        OSStatus stop = failed ? -1 : fk_audio.stop(owner->queue,false);
+        if (stop != 0) failed = 1;
+        else {
+            fk_audio_output_changed(owner,owner->queue,kAudioQueueProperty_IsRunning);
+            failed = fk_audio_output_wait(owner,until,0);
+        }
+    }
+    if (owner->queue != NULL && failed) fk_audio.stop(owner->queue,true);
+    OSStatus disposed = owner->queue == NULL ? 0 : fk_audio.dispose(owner->queue,true);
+    if (disposed != 0) { fprintf(stderr,"audio: output release incomplete (%d)\n",(int)disposed); return -1; }
+    while (owner->buffers != NULL) { FKAudioOutputBuffer *next = owner->buffers->next; free(owner->buffers); owner->buffers = next; }
+    pthread_cond_destroy(&owner->changed); pthread_mutex_destroy(&owner->mutex); free(owner); *slot = NULL;
+    return failed ? -1 : 0;
+}
+static void fk_audio_output_retain(FKAudioOutput *owner) {
+    if (owner != NULL) { owner->retired_next = fk_audio_output_retired; fk_audio_output_retired = owner; }
+}
+static int fk_audio_output_retry(void) {
+    FKAudioOutput **cursor = &fk_audio_output_retired;
+    while (*cursor != NULL) {
+        FKAudioOutput *owner = *cursor, *next = owner->retired_next, *held = owner;
+        fk_audio_output_close(&held,0);
+        if (held == NULL) *cursor = next; else cursor = &owner->retired_next;
+    }
+    return fk_audio_output_retired == NULL ? 0 : -1;
+}
+static FKAudioOutput *fk_audio_output_open(long long rate, uint64_t until) {
+    if (fk_audio_ms() >= until) return NULL;
+    if (rate < 4000 || rate > 192000 || !fk_audio_available_external()) return NULL;
+    fk_audio_output_retry();
+    if (fk_audio_ms() >= until) return NULL;
+    FKAudioOutput *owner = calloc(1,sizeof *owner); if (owner == NULL) return NULL;
+    if (pthread_mutex_init(&owner->mutex,NULL) != 0) { free(owner); return NULL; }
+    if (pthread_cond_init(&owner->changed,NULL) != 0) { pthread_mutex_destroy(&owner->mutex); free(owner); return NULL; }
+    owner->rate = rate; owner->accepting = 1;
+    AudioStreamBasicDescription format = {0};
+    format.mSampleRate = rate; format.mFormatID = kAudioFormatLinearPCM;
+    format.mFormatFlags = kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked;
+    format.mBytesPerPacket = 2; format.mFramesPerPacket = 1; format.mBytesPerFrame = 2; format.mChannelsPerFrame = 1; format.mBitsPerChannel = 16;
+    owner->error = fk_audio.output(&format,fk_audio_output_callback,owner,NULL,NULL,0,&owner->queue);
+    if (owner->error == 0 && owner->queue != NULL) {
+        OSStatus listened = fk_audio.listen(owner->queue,kAudioQueueProperty_IsRunning,fk_audio_output_changed,owner);
+        pthread_mutex_lock(&owner->mutex);
+        if (listened != 0 && owner->error == 0) owner->error = listened;
+        int ready = owner->error == 0; pthread_mutex_unlock(&owner->mutex);
+        if (ready) return owner;
+    }
+    FKAudioOutput *held = owner; fk_audio_output_close(&held,0); fk_audio_output_retain(held); return NULL;
+}
+static long long fk_audio_output_append(FKAudioOutput *owner, const char *bytes, long long length, uint64_t until) {
+    if (length < 0 || length % 2 != 0 || (bytes == NULL && length != 0)) return -2;
+    if (length == 0) return 0;
+    if (owner == NULL) return -1;
+    pthread_mutex_lock(&owner->mutex);
+    if (!owner->accepting || owner->error != 0) { pthread_mutex_unlock(&owner->mutex); return -1; }
+    size_t at = 0;
+    while (at < (size_t)length && owner->error == 0) {
+        if (fk_audio_ms() >= until) { owner->error = ETIMEDOUT; break; }
+        size_t amount = (size_t)length - at;
+        if (amount > (UINT32_MAX & ~(uint32_t)1)) amount = UINT32_MAX & ~(uint32_t)1;
+        FKAudioOutputBuffer *held = owner->buffers;
+        while (held != NULL && (!held->available || held->buffer->mAudioDataBytesCapacity < amount)) held = held->next;
+        if (held == NULL) {
+            held = calloc(1,sizeof *held);
+            if (held == NULL) { owner->error = -108; break; }
+            owner->error = fk_audio.allocate(owner->queue,(UInt32)amount,&held->buffer);
+            if (owner->error != 0 || held->buffer == NULL) { if (owner->error == 0) owner->error = -108; free(held); break; }
+            held->buffer->mUserData = held; held->next = owner->buffers; owner->buffers = held;
+        }
+        held->available = 0; memcpy(held->buffer->mAudioData,bytes+at,amount); held->buffer->mAudioDataByteSize = (UInt32)amount;
+        if (fk_audio_ms() >= until) { owner->error = ETIMEDOUT; held->available = 1; break; }
+        ++owner->pending;
+        owner->error = fk_audio.enqueue(owner->queue,held->buffer,0,NULL);
+        if (owner->error != 0) { --owner->pending; held->available = 1; }
+        else at += amount;
+    }
+    if (owner->error == 0 && fk_audio_ms() >= until) owner->error = ETIMEDOUT;
+    int start = !owner->started && owner->error == 0;
+    if (start) { owner->started = 1; owner->running = 1; }
+    pthread_mutex_unlock(&owner->mutex);
+    OSStatus status = start ? fk_audio.start(owner->queue,NULL) : 0;
+    pthread_mutex_lock(&owner->mutex);
+    if (status != 0 && owner->error == 0) owner->error = status;
+    int failed = owner->error != 0; pthread_mutex_unlock(&owner->mutex);
+    if (start && status == 0) fk_audio_output_changed(owner,owner->queue,kAudioQueueProperty_IsRunning);
+    return at > 0 ? (long long)(at/2) : failed ? -1 : 0;
+}
+long long fk_audio_output_start_external(long long rate, long long wait_ms) {
+    if (rate < 4000 || rate > 192000) return -3;
+    if (fk_audio_output != NULL) {
+        pthread_mutex_lock(&fk_audio_output->mutex);
+        int ready = fk_audio_output->accepting && fk_audio_output->error == 0 && fk_audio_output->rate == rate;
+        pthread_mutex_unlock(&fk_audio_output->mutex); return ready ? 0 : -1;
+    }
+    uint64_t until = wait_ms < 0 ? UINT64_MAX : fk_audio_ms()+(uint64_t)wait_ms;
+    fk_audio_output = fk_audio_output_open(rate,until); return fk_audio_output == NULL ? -1 : 0;
+}
+long long fk_audio_output_held_external(void) { return fk_audio_output != NULL; }
+long long fk_audio_output_write_external(const char *bytes, long long length, long long wait_ms) {
+    uint64_t until = wait_ms < 0 ? UINT64_MAX : fk_audio_ms()+(uint64_t)wait_ms;
+    return fk_audio_output_append(fk_audio_output,bytes,length,until);
+}
+long long fk_audio_output_stop_external(long long wait_ms) {
+    int status = fk_audio_output_close(&fk_audio_output,wait_ms), retired = fk_audio_output_retry();
+    return status == 0 && retired == 0 ? 0 : -1;
+}
+long long fk_audio_play_external(const char *bytes, long long length, long long rate, long long wait_ms) {
+    if (rate < 4000 || rate > 192000) return -3;
+    if (length < 0 || length % 2 != 0 || (bytes == NULL && length != 0)) return -2;
+    if (length == 0) return 0;
+    uint64_t until = wait_ms < 0 ? UINT64_MAX : fk_audio_ms() + (uint64_t)wait_ms;
+    FKAudioOutput *owner = fk_audio_output_open(rate,until); if (owner == NULL) return -1;
+    long long accepted = fk_audio_output_append(owner,bytes,length,until);
+    uint64_t now = fk_audio_ms();
+    long long left = until == UINT64_MAX ? -1 : now >= until ? 0 : (long long)(until-now);
+    int completed = fk_audio_output_close(&owner,accepted < 0 ? 0 : left);
+    fk_audio_output_retain(owner);
+    return accepted == length/2 && completed == 0 ? accepted : -1;
+}
+const char *fk_audio_loopback_external(const char *bytes, long long length, long long rate, long long tail_ms, long long wait_ms, long long *played, long long *captured, long long *released) {
+    *played = -1; *captured = -1; *released = 1;
+    if (rate < 4000 || rate > 192000 || length < 0 || length%2 != 0 || tail_ms < 0) return NULL;
+    uint64_t until = wait_ms < 0 ? UINT64_MAX : fk_audio_ms()+(uint64_t)wait_ms;
+    FKAudioInput *input = fk_audio_input_open(until);
+    uint64_t now = fk_audio_ms();
+    long long left = until == UINT64_MAX ? -1 : now>=until ? 0 : (long long)(until-now);
+    if (left != 0) *played = fk_audio_play_external(bytes,length,rate,left);
+    if (input != NULL) {
+        now = fk_audio_ms(); uint64_t cutoff = *played < 0 ? now : now+(uint64_t)tail_ms;
+        if (until < cutoff) cutoff = until;
+        fk_audio_reading = fk_audio_input_take(input,SIZE_MAX & ~(size_t)1,cutoff,1,1);
+        fk_audio_input_close(&input);
+        if (input != NULL) { input->retired_next=fk_audio_retired; fk_audio_retired=input; }
+        if (input != NULL) *released=0;
+        if (fk_audio_reading != nil) { *captured=(long long)fk_audio_reading.length; return *captured==0 ? "" : fk_audio_reading.bytes; }
+    }
+    return NULL;
+}
 
 // A submitted unit carries the exact resources encoded into it. The command
 // buffer owns device execution; these explicit leases keep host lifetime legible
@@ -194,12 +584,30 @@ static long long fk_emit(char *out, long long cap, NSString *s) {
     return n;
 }
 
+// Compatibility matvec calls retain their completed report. Reading a larger
+// report never repeats compilation, dispatch or any completed GPU work.
+static NSData *fk_matvec_report = nil;
+static long long fk_matvec_emit(char *out, long long cap, NSString *s) {
+    fk_matvec_report = [s dataUsingEncoding:NSUTF8StringEncoding];
+    return fk_emit(out, cap, s);
+}
+long long fk_metal_matvec_report_external(char *out, long long cap) {
+    @autoreleasepool {
+        if (fk_matvec_report == nil || [fk_matvec_report length] > LLONG_MAX) { return -1; }
+        long long length = (long long)[fk_matvec_report length];
+        if (out != NULL && cap > 0 && length > 0) {
+            memcpy(out, [fk_matvec_report bytes], (size_t)(cap < length ? cap : length));
+        }
+        return length;
+    }
+}
+
 static int fk_metal_up(NSString **err) {
-    if (fk_dev != nil) { return 1; }
+    if (fk_dev != nil && fk_q != nil && fk_pipes != nil) { return 1; }
     fk_dev = MTLCreateSystemDefaultDevice();
     if (fk_dev == nil) { *err = @"no Metal device"; return 0; }
     fk_q = [fk_dev newCommandQueue];
-    if (fk_q == nil) { *err = @"no command queue"; return 0; }
+    if (fk_q == nil) { fk_dev = nil; *err = @"no command queue"; return 0; }
     fk_pipes = [NSMutableDictionary dictionary];
     return 1;
 }
@@ -208,11 +616,11 @@ long long fk_metal_matvec_fixture_external(char *out, long long cap) {
     @autoreleasepool {
         NSString *err = nil;
         if (!fk_metal_up(&err)) {
-            return fk_emit(out, cap,
+            return fk_matvec_emit(out, cap,
                 [NSString stringWithFormat:
                     @"SKIP fkwu-form-cli-metal-direct: %@\nmetal_owner=fkwu-form-cli\nmetal_carrier=dynamic\nmetal_loaded=true\nmetal_device=false\n", err]);
         }
-        return fk_emit(out, cap,
+        return fk_matvec_emit(out, cap,
             [NSString stringWithFormat:
                 @"PASS fkwu-form-cli-metal-direct\nmetal_owner=fkwu-form-cli\nmetal_carrier=dynamic\nmetal_loaded=true\nmetal_device=true\n"
                  "device=%@\nunified_memory=%d\nmax_threadgroup=%lu\n",
@@ -228,7 +636,7 @@ long long fk_metal_matvec_f32_external(const char *msl, long long msl_len,
     @autoreleasepool {
         NSString *err = nil;
         if (!fk_metal_up(&err)) {
-            return fk_emit(out, cap,
+            return fk_matvec_emit(out, cap,
                 [NSString stringWithFormat:
                     @"SKIP fkwu-form-cli-metal-matvec-f32: %@\nmetal_owner=fkwu-form-cli\nmetal_carrier=dynamic\nmetal_loaded=true\nmetal_device=false\n", err]);
         }
@@ -237,17 +645,22 @@ long long fk_metal_matvec_f32_external(const char *msl, long long msl_len,
         // anyway would produce a plausible number from garbage, which is the failure this body calls
         // a numb green: right-shaped, wrong-meaning, and silent.
         if (model_len < 8) {
-            return fk_emit(out, cap, @"FAIL fkwu-form-cli-metal-matvec-f32 model shorter than its 8-byte header\n");
+            return fk_matvec_emit(out, cap, @"FAIL fkwu-form-cli-metal-matvec-f32 model shorter than its 8-byte header\n");
         }
         uint32_t rows = 0, cols = 0;
         memcpy(&rows, model, 4);
         memcpy(&cols, model + 4, 4);
         if (rows == 0 || cols == 0) {
-            return fk_emit(out, cap, @"FAIL fkwu-form-cli-metal-matvec-f32 rows or cols is zero\n");
+            return fk_matvec_emit(out, cap, @"FAIL fkwu-form-cli-metal-matvec-f32 rows or cols is zero\n");
         }
-        long long need = 8 + (long long)rows * (long long)cols * 4 + (long long)cols * 4;
+        uint64_t vector_bytes = (uint64_t)cols * 4;
+        if ((uint64_t)rows > ((uint64_t)LLONG_MAX - 8 - vector_bytes) / vector_bytes) {
+            return fk_matvec_emit(out, cap, @"FAIL fkwu-form-cli-metal-matvec-f32 model dimensions overflow its byte span\n");
+        }
+        uint64_t matrix_bytes = (uint64_t)rows * vector_bytes;
+        long long need = (long long)(8 + matrix_bytes + vector_bytes);
         if (model_len < need) {
-            return fk_emit(out, cap,
+            return fk_matvec_emit(out, cap,
                 [NSString stringWithFormat:
                     @"FAIL fkwu-form-cli-metal-matvec-f32 model is %lld bytes, rows=%u cols=%u needs %lld\n",
                     model_len, rows, cols, need]);
@@ -258,7 +671,7 @@ long long fk_metal_matvec_f32_external(const char *msl, long long msl_len,
         NSString *fn = [[NSString alloc] initWithBytes:kernel length:(NSUInteger)kernel_len
                                               encoding:NSUTF8StringEncoding];
         if (src == nil || fn == nil) {
-            return fk_emit(out, cap, @"FAIL fkwu-form-cli-metal-matvec-f32 msl or kernel name is not UTF-8\n");
+            return fk_matvec_emit(out, cap, @"FAIL fkwu-form-cli-metal-matvec-f32 msl or kernel name is not UTF-8\n");
         }
 
         NSString *key = [NSString stringWithFormat:@"%@\n%@", fn, src];
@@ -269,19 +682,19 @@ long long fk_metal_matvec_f32_external(const char *msl, long long msl_len,
             if (lib == nil) {
                 // The compiler's own words, not a summary of them. A swallowed MSL diagnostic is how
                 // a kernel that silently value-initialises an operand to zero gets shipped.
-                return fk_emit(out, cap,
+                return fk_matvec_emit(out, cap,
                     [NSString stringWithFormat:@"FAIL fkwu-form-cli-metal-matvec-f32 msl compile\n%@\n",
                         [e localizedDescription]]);
             }
             id<MTLFunction> f = [lib newFunctionWithName:fn];
             if (f == nil) {
-                return fk_emit(out, cap,
+                return fk_matvec_emit(out, cap,
                     [NSString stringWithFormat:
                         @"FAIL fkwu-form-cli-metal-matvec-f32 msl has no kernel named %@\n", fn]);
             }
             pipe = [fk_dev newComputePipelineStateWithFunction:f error:&e];
             if (pipe == nil) {
-                return fk_emit(out, cap,
+                return fk_matvec_emit(out, cap,
                     [NSString stringWithFormat:@"FAIL fkwu-form-cli-metal-matvec-f32 pipeline\n%@\n",
                         [e localizedDescription]]);
             }
@@ -289,9 +702,9 @@ long long fk_metal_matvec_f32_external(const char *msl, long long msl_len,
         }
 
         const char *wp = model + 8;
-        const char *xp = model + 8 + (long long)rows * (long long)cols * 4;
+        const char *xp = model + 8 + matrix_bytes;
         id<MTLBuffer> wb = [fk_dev newBufferWithBytes:wp
-                                               length:(NSUInteger)rows * cols * 4
+                                               length:(NSUInteger)matrix_bytes
                                               options:MTLResourceStorageModeShared];
         id<MTLBuffer> xb = [fk_dev newBufferWithBytes:xp
                                                length:(NSUInteger)cols * 4
@@ -299,7 +712,7 @@ long long fk_metal_matvec_f32_external(const char *msl, long long msl_len,
         id<MTLBuffer> yb = [fk_dev newBufferWithLength:(NSUInteger)rows * 4
                                                options:MTLResourceStorageModeShared];
         if (wb == nil || xb == nil || yb == nil) {
-            return fk_emit(out, cap, @"FAIL fkwu-form-cli-metal-matvec-f32 buffer allocation\n");
+            return fk_matvec_emit(out, cap, @"FAIL fkwu-form-cli-metal-matvec-f32 buffer allocation\n");
         }
 
         id<MTLCommandBuffer> cb = [fk_q commandBuffer];
@@ -319,13 +732,12 @@ long long fk_metal_matvec_f32_external(const char *msl, long long msl_len,
         [cb waitUntilCompleted];
 
         if ([cb error] != nil) {
-            return fk_emit(out, cap,
+            return fk_matvec_emit(out, cap,
                 [NSString stringWithFormat:@"FAIL fkwu-form-cli-metal-matvec-f32 dispatch\n%@\n",
                     [[cb error] localizedDescription]]);
         }
 
-        // The sum travels alongside the elements so a caller who cannot fit rows into the 8192-byte
-        // cap still holds one number that changes when any element changes.
+        // The sum and all elements share the retained completed report.
         const float *y = (const float *)[yb contents];
         double sum = 0.0;
         for (uint32_t i = 0; i < rows; i++) { sum += (double)y[i]; }
@@ -338,11 +750,10 @@ long long fk_metal_matvec_f32_external(const char *msl, long long msl_len,
         [r appendFormat:@"sum=%.9g\n", sum];
         [r appendString:@"y="];
         for (uint32_t i = 0; i < rows; i++) {
-            if ([r length] > (NSUInteger)(cap - 64)) { [r appendString:@" ..."]; break; }
             [r appendFormat:@"%s%.9g", i ? " " : "", (double)y[i]];
         }
         [r appendString:@"\n"];
-        return fk_emit(out, cap, r);
+        return fk_matvec_emit(out, cap, r);
     }
 }
 

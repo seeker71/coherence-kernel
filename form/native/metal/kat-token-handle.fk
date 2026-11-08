@@ -189,7 +189,8 @@ section [form.bml] {
     def kth-bytes(src, off) = kth-tybytes(egg-ti-type(src, off), kth-nw(src, off));
     // a tensor VIEW from a collected record offset: (handle rows cols type). rows is dim1 —
     // for the 3D expert tensors that is the PER-EXPERT row count, and the expert lives in ebase.
-    def kth-tv-at(src, base, path, off) = [metal_buf_from_file(path, (Number) base + (Number) egg-ti-dataoff(src, off), kth-bytes(src, off)), egg-ti-ndims(src, off) > 1 ? egg-ti-dim(src, off, 1) : 1, egg-ti-dim(src, off, 0), egg-ti-type(src, off)];
+    def kth-tv-at-by(src, base, path, off,from-file) = [from-file(path, (Number) base + (Number) egg-ti-dataoff(src, off), kth-bytes(src, off)), egg-ti-ndims(src, off) > 1 ? egg-ti-dim(src, off, 1) : 1, egg-ti-dim(src, off, 0), egg-ti-type(src, off)];
+    def kth-tv-at(src,base,path,off) = kth-tv-at-by(src,base,path,off,metal_buf_from_file);
     def kth-tv-h(t) = t[0];
     def kth-tv-r(t) = t[1];
     def kth-tv-c(t) = t[2];
@@ -232,20 +233,23 @@ section [form.bml] {
     // at one position only, so a span of logits would be allocated and unread.
     //
     // span 1 allocates exactly what kth-bufs always allocated.
-    def kth-bufs-span(d, convdim, dinner, nv, ff, nExp, nqhd, kvd, maxpos, nq, vocabN, span) = [metal_buf_alloc(d * span * 4), metal_buf_alloc(d * span * 4), metal_buf_alloc(convdim * span * 4), metal_buf_alloc(nv * span * 4), metal_buf_alloc(nv * span * 4), metal_buf_alloc(nv * span * 4), metal_buf_alloc(nv * span * 4), metal_buf_alloc(dinner * span * 4), metal_buf_alloc(dinner * span * 4), metal_buf_alloc(dinner * span * 4), metal_buf_alloc(d * span * 4), metal_buf_alloc(nExp * span * 4), metal_buf_alloc(32), metal_buf_alloc(32), metal_buf_alloc(ff * span * 4), metal_buf_alloc(ff * span * 4), metal_buf_alloc(ff * span * 4), metal_buf_alloc(d * span * 4), metal_buf_alloc(d * span * 4), metal_buf_alloc(ff * span * 4), metal_buf_alloc(d * span * 4), metal_buf_alloc(16), metal_buf_alloc(nqhd * span * 4), metal_buf_alloc(nqhd * span * 4), metal_buf_alloc(kvd * span * 4), metal_buf_alloc(kvd * span * 4), metal_buf_alloc(nqhd * span * 4),     // 27 — attention score scratch. Span-wide too: the span attention
+    def kth-bufs-span(d,convdim,dinner,nv,ff,nExp,nqhd,kvd,maxpos,nq,vocabN,span) = kth-bufs-span-by(d,convdim,dinner,nv,ff,nExp,nqhd,kvd,maxpos,nq,vocabN,span,metal_buf_alloc);
+    def kth-bufs-span-by(d, convdim, dinner, nv, ff, nExp, nqhd, kvd, maxpos, nq, vocabN, span, allocate) = [allocate(d * span * 4), allocate(d * span * 4), allocate(convdim * span * 4), allocate(nv * span * 4), allocate(nv * span * 4), allocate(nv * span * 4), allocate(nv * span * 4), allocate(dinner * span * 4), allocate(dinner * span * 4), allocate(dinner * span * 4), allocate(d * span * 4), allocate(nExp * span * 4), allocate(32), allocate(32), allocate(ff * span * 4), allocate(ff * span * 4), allocate(ff * span * 4), allocate(d * span * 4), allocate(d * span * 4), allocate(ff * span * 4), allocate(d * span * 4), allocate(16), allocate(nqhd * span * 4), allocate(nqhd * span * 4), allocate(kvd * span * 4), allocate(kvd * span * 4), allocate(nqhd * span * 4),     // 27 — attention score scratch. Span-wide too: the span attention
     // kernel gives every (token, head) its own row, so this is
     // 2 * ntok * nq * maxpos rather than 2 * nq * maxpos.
-metal_buf_alloc(2 * nq * maxpos * span * 4), metal_buf_alloc(vocabN * 4), metal_buf_alloc(4096), metal_buf_alloc(4096), metal_buf_alloc(16), metal_buf_alloc(16),     // 33 — the token-major residual stream for a layer-major walk.
+allocate(2 * nq * maxpos * span * 4), allocate(vocabN * 4), allocate(4096), allocate(4096), allocate(16), allocate(16),     // 33 — the token-major residual stream for a layer-major walk.
     // Attention runs one position at a time into slot 0's single-token
     // working set; this is where each position's residual lives between
     // layers, so a batched FFN can read the whole span at once.
-metal_buf_alloc(d * span * 4)];
+allocate(d * span * 4)];
     def kth-bufs(d, convdim, dinner, nv, ff, nExp, nqhd, kvd, maxpos, nq, vocabN) = kth-bufs-span(d, convdim, dinner, nv, ff, nExp, nqhd, kvd, maxpos, nq, vocabN, 1);
     // per-STREAM state: one conv window + one delta state per linear block, one K + one V cache
     // per full block; indexed BY LAYER (non-owners carry 0, never dispatched). Zero-filled by
     // the allocator, so a new stream needs no zeroing pass.
-    def kth-state-go(l, n, interval, convdim, taps, nv, dv, dk, kvd, maxpos, acc) = l >= n ? acc : kth-state-go((Number) l + (Number) 1, n, interval, convdim, taps, nv, dv, dk, kvd, maxpos, append(acc, kth-full?(l, interval) ? [[0, 0, metal_buf_alloc(kvd * maxpos * 4), metal_buf_alloc(kvd * maxpos * 4)]] : [[metal_buf_alloc(convdim * taps * 4), metal_buf_alloc(nv * dv * dk * 4), 0, 0]]));
-    def kth-stream-state(n, interval, convdim, taps, nv, dv, dk, kvd, maxpos) = kth-state-go(0, n, interval, convdim, taps, nv, dv, dk, kvd, maxpos, []);
+    def kth-state-go-by(l, n, interval, convdim, taps, nv, dv, dk, kvd, maxpos, acc,allocate) = l >= n ? acc : kth-state-go-by((Number) l + (Number) 1, n, interval, convdim, taps, nv, dv, dk, kvd, maxpos, append(acc, kth-full?(l, interval) ? [[0, 0, allocate(kvd * maxpos * 4), allocate(kvd * maxpos * 4)]] : [[allocate(convdim * taps * 4), allocate(nv * dv * dk * 4), 0, 0]]),allocate);
+    def kth-state-go(l,n,interval,convdim,taps,nv,dv,dk,kvd,maxpos,acc) = kth-state-go-by(l,n,interval,convdim,taps,nv,dv,dk,kvd,maxpos,acc,metal_buf_alloc);
+    def kth-stream-state-by(n,interval,convdim,taps,nv,dv,dk,kvd,maxpos,allocate) = kth-state-go-by(0,n,interval,convdim,taps,nv,dv,dk,kvd,maxpos,[],allocate);
+    def kth-stream-state(n,interval,convdim,taps,nv,dv,dk,kvd,maxpos) = kth-stream-state-by(n,interval,convdim,taps,nv,dv,dk,kvd,maxpos,metal_buf_alloc);
     // ================= dispatch helpers =================
     // SERIAL encoder, tpg 256 everywhere mode 0 runs (the proven 2.9x), barrier 0 (a serial
     // batch refuses barriers, correctly — order is already total).

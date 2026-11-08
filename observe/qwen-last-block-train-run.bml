@@ -19,6 +19,7 @@
 // preflight-exec: forbidden
 // preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml form-stdlib/form-cli-model-session.fk form-stdlib/bml/qwen-last-block-capture.bml form-stdlib/bml/qwen-last-block-forward.bml form-stdlib/bml/qwen-last-block-backward.bml form-stdlib/bml/qwen-last-block-train.bml form-stdlib/bml/qwen-last-block-judge.bml
 section [form.bml] {
+ let QLWT-OWNED=record_new(0);
  class QwenLastBlockTrainRun {
   def qlwt-door() = "qwen-last-block-train";
   def qlwt-spec() = [["out", "str"], ["rows", "str"], ["valid", "str"], ["valid_rows", "int"], ["negatives", "str"], ["heldout_every", "int"], ["steps", "int"], ["lr_micro", "int"], ["margin_milli", "int"], ["neg_every", "int"], ["val_every", "int"], ["captures", "str"], ["valid_captures", "str"], ["neg_captures", "str"], ["wall_s", "int"], ["seed_micro", "int"], ["dev_every", "int"], ["dev_upto", "int"]];
@@ -45,8 +46,8 @@ section [form.bml] {
     let row = qlbj-row-of(src, x, p, cap);
     qlbt-row-count(row) > 0 ? append(acc, [row]) : { qlwt-say(side ++ " line " ++ p[1].str() ++ " set aside: its prompt is " ++ row[5].str() ++ " ids; under the cap no assistant token is a supervised target"); acc; };
    }, [], lines);
-  def qlwt-captured(ctx, L, dir, side, rows, cap) = foldl((acc, row) => {
-    let c = qlbt-capture(ctx, L, dir, row, cap);
+  def qlwt-captured(session,ctx, L, dir, side, rows, cap) = foldl((acc, row) => {
+    let c = qlbt-capture-owned(session,ctx, L, dir, row, cap);
     let said = c[2] == 1 ? 0 : qlwt-say(side ++ " line " ++ row[0].str() ++ ": prefill " ++ c[1].str() ++ " ms, " ++ len(c[0]).str() ++ " bytes");
     len(c[0]) > 0 ? append(acc, [[row, c[0]]]) : { qlwt-say(side ++ " line " ++ row[0].str() ++ " set aside: its capture did not land"); acc; };
    }, [], rows);
@@ -123,6 +124,7 @@ section [form.bml] {
    [trainRows, validRows, negRows];
   }
   def qlwt-open(ctx, prepared, c) {
+   record_set(c,"stage","capture");
    let geo = ctx[2];
    let L = qlbj-last-block(geo);
    let cap = qlwt-cap();
@@ -132,9 +134,9 @@ section [form.bml] {
    qlwt-say("block L = " ++ L.str() ++ ", rank " ++ qlwt-rank().str() ++ ", scale " ++ qlwt-scale().str() ++ ", lr " ++ record_get(c, "lr").str() ++ ", steps " ++ record_get(c, "steps").str() ++ ", margin " ++ record_get(c, "margin").str() ++ ", rejected every " ++ record_get(c, "neg_every").str() ++ "; gpu utilization " ++ host_gpu_utilization().str() ++ "; " ++ mg-status-line(mg-sense()));
    let t1 = host_monotonic_ms();
    let dirs = qlbt-dir-ready(record_get(c, "captures")) + qlbt-dir-ready(record_get(c, "valid_captures")) + qlbt-dir-ready(record_get(c, "neg_captures"));
-   let train = qlwt-captured(ctx, L, record_get(c, "captures"), "accepted", trainRows, cap);
-   let valid = qlwt-captured(ctx, L, record_get(c, "valid_captures"), "held-out", validRows, cap);
-   let negs = qlwt-captured(ctx, L, record_get(c, "neg_captures"), "rejected", negRows, cap);
+   let train = qlwt-captured(record_get(c,"session"),ctx, L, record_get(c, "captures"), "accepted", trainRows, cap);
+   let valid = qlwt-captured(record_get(c,"session"),ctx, L, record_get(c, "valid_captures"), "held-out", validRows, cap);
+   let negs = qlwt-captured(record_get(c,"session"),ctx, L, record_get(c, "neg_captures"), "rejected", negRows, cap);
    let t2 = host_monotonic_ms();
    let every = record_get(c, "heldout_every");
    let negGrad = filter(p => p[0][0] % every != 0, negs);
@@ -152,14 +154,18 @@ section [form.bml] {
    };
   }
   def qlwt-train(ctx, L, c, train, valid, negGrad, negHeld) {
+   record_set(c,"stage","training");
    let geo = ctx[2];
    let cap = qlwt-cap();
    let lay = nth(ctx[3], L);
-   let o = qlbt-open(geo, lay, ctx[5], cap, qlwt-rank(), qlwt-scale());
-   let sx = qlbf-scratch(geo, 0, cap);
+   let owner=fcms-phase-open(record_get(c,"session"),"qwen training step",[["forward",qlbf-scratch-bytes(geo,0,cap)],["training",qlbt-own-bytes(geo,cap,qlwt-rank())]]);
+   record_set(c,"training-owner",owner);
+   let allocate=bytes=>q38x-alloc(owner,bytes);
+   let o = qlbt-open-by(geo, lay, ctx[5], cap, qlwt-rank(), qlwt-scale(),allocate);
+   let sx = qlbf-scratch-by(geo, 0, cap,allocate);
    let counted = qlbf-scratch-bytes(geo, 0, cap) + qlbt-own-bytes(geo, cap, qlwt-rank());
-   !qlbt-ok?(o) || !qlbf-ok?(sx) ? {
-    qlwt-say("refused: the step's device state did not open (freed " ++ (qlbf-free(sx) + qlbt-free(o)).str() ++ ")");
+   !qlbt-ok?(o) || !qlbf-ok?(sx) || !fcms-phase-ready(owner) ? {
+    qlwt-say("refused: the step's device state did not open; release_ok " ++ fcms-phase-close(owner).str());
     0;
    } : {
     let seeded = qlbt-seed(o, record_get(c, "seed"));
@@ -183,16 +189,52 @@ section [form.bml] {
     let rejFall = nothing?(v0[1]) || nothing?(vEnd[1]) ? nothing() : v0[1] - vEnd[1];
     qlwt-say("after step " ++ done.str() ++ " of " ++ record_get(c, "steps").str() ++ " in " ++ (t2 - t1).str() ++ " ms: train mean " ++ qlwt-num(mean0) ++ " -> " ++ qlwt-num(mean1) ++ "; accepted held-out fall " ++ qlwt-num(accFall) ++ ", rejected never seen fall " ++ qlwt-num(rejFall));
     let out = record_get(c, "out");
+    record_set(c,"stage","export");
     let ex = qlbt-export(o, L, out, qlwt-config(L, c, record_get(c, "rows"), map(p => p[0][0], train), map(p => p[0][0], negGrad), record_get(c, "negatives"), done, mean0, mean1));
     let events = write_file_text(out ++ "/training-events.jsonl", str-join-with(map(e => qlwt-step-json(e), walked[1]), "\n") ++ "\n");
     let back = qlbt-export-read(out, ex[3], ex[4], geo[10] * qlwt-rank() * 4);
     qlwt-say("export: " ++ out ++ "/adapters.safetensors " ++ ex[0].str() ++ " of " ++ ex[1].str() ++ " bytes; read back: whole " ++ back[0].str() ++ ", pairs " ++ back[1].str() ++ ", rank " ++ back[2].str() ++ ", dtype " ++ back[3] ++ "; " ++ mg-status-line(mg-sense()));
-    let freed = qlbf-free(sx) + qlbt-free(o);
-    qlwt-say("freed " ++ freed.str() ++ " of " ++ (17 + qlbt-handle-count()).str() ++ " handles");
-    ex[0] == ex[1] && back[0] == 1 ? done : 0;
+    let completed=ex[0] == ex[1] && back[0] == 1 ? done : 0;
+    record_set(c,"completed-steps",completed);
+    record_set(c,"execution-complete",ex[0] == ex[1] && back[0] == 1);
+    let released=fcms-phase-close(owner);
+    qlwt-say("export retained; step release_ok " ++ released.str());
+    released ? completed : form_error("qwen-training-release-incomplete; completed export retained at "+out);
    };
   }
   def qlwt-run() {
+   let prior=record_get(QLWT-OWNED,"current");
+   record?(prior) && record_get(prior,"release-ok") != 1 ? qlwt-finish(prior) : qlwt-start();
+  }
+  def qlwt-finish(c) {
+   let released=fcms-release-ok?(record_get(c,"session"));
+   record_set(c,"release-ok",released);
+   let completed=record_get(c,"completed-steps") ?? 0;
+   qlwt-say("completed_steps "+completed.str()+"; release_ok "+released.str()+"; export "+record_get(c,"out"));
+   !released ? form_error("qwen-training-release-incomplete; retained original run and completed export") : record_get(c,"execution-complete")==1 ? completed : {
+    print(["qwen-training-unfinished",record_get(c,"stage"),record_get(c,"admission"),record_get(fcms-release-ledger(record_get(c,"session")),"phase-admission")]);
+    form_error("qwen training unfinished at "+record_get(c,"stage")+"; completed effects and admission retained");
+   };
+  }
+  def qlwt-context(c,model,src,geo,prepared) {
+   let session=fcms-session("nothing","training-context",model,src,[],[],qlwt-maxpos(),0,-1,0,0,0,0,0);
+   record_set(c,"session",session);record_set(c,"completed-steps",0);record_set(c,"execution-complete",0);record_set(c,"stage","context-admission");record_set(c,"release-ok",0);record_set(QLWT-OWNED,"current",c);
+   let attempted=try {
+    let parts=take(2,q38-session-parts(geo,qlwt-span(),0));let own=sum(map(part=>part[1],parts));
+     let grant=mg-lease-retaining("qwen last-block train",model,fcms-weights-bytes(model),own,token=>fcms-retain-reservation(fcms-release-ledger(session),token));
+    record_set(c,"admission",grant);
+    let reservation=fcms-reservation(fcms-release-ledger(session),grant,parts);
+    !record_get(reservation,"ready") ? form_error(mg-held-reason()+mg-line("qwen last-block train",own+fcms-weights-bytes(model),grant)) : 0;
+    let constructing=fcms-retain-owned-release(session,[],record_get(reservation,"parts"));
+    record_set(fcms-release-ledger(session),"context",constructing);
+    record_set(c,"stage","context-open");
+    let ctx=q38-open-span-by(model,qlwt-maxpos(),qlwt-span(),bytes=>q38x-alloc(constructing,bytes),(path,offset,bytes)=>q38x-map(constructing,path,offset,bytes));
+    record_set(c,"session",fcms-capacity-owner(session,ctx,[],qlwt-maxpos()));
+    q38-context-ok?(ctx)==1 && fcms-reservation-ack(reservation,["scratch","position-scratch"]) ? qlwt-open(ctx,prepared,c) : 0;
+   } catch {record_set(c,"interrupted",1);0;};
+   qlwt-finish(c);
+  }
+  def qlwt-start() {
    let opts = dop-doc(qlwt-door(), stdin-text(), qlwt-spec());
    let out = qlwt-text(opts, "out", "form/form-stdlib/adapters/qwen38-last-block-next-2");
    let rowsPath = qlwt-text(opts, "rows", "learn/last-block-train-rows.jsonl");
@@ -211,15 +253,7 @@ section [form.bml] {
    let cap = qlwt-cap();
    let x = qtf2-load(qtf2-root-for(model), qsx-seal-line(model));
    let prepared = qlwt-rows(src, x, c);
-   let own = fcms-qwen-own(src, qlwt-maxpos()) + qlbf-scratch-bytes(geo, 0, cap) + qlbt-own-bytes(geo, cap, qlwt-rank()) + qlbc-own-bytes(geo[0], cap);
-   let granted = mg-lease("qwen last-block train", model, fcms-weights-bytes(model), own);
-   !mg-granted?(granted) ? dop-refuse(qlwt-door(), "held by the memory governor: " ++ mg-line("qwen last-block train", own + fcms-weights-bytes(model), granted)) : {
-    let ctx = q38-open-span(model, qlwt-maxpos(), qlwt-span());
-    let done = (Comparable) q38-context-ok?(ctx) == 1 ? qlwt-open(ctx, prepared, c) : 0;
-    let closed = len(ctx) > 10 ? q38-close(ctx, []) : 0;
-    let unleased = mg-release();
-    done;
-   };
+   qlwt-context(c,model,src,geo,prepared);
   }
  }
  qlwt-run();
