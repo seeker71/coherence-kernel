@@ -417,6 +417,7 @@ static long long fk_gpu_busy_total_us; /* host GPU busy microseconds integrated 
 static long long fk_gpu_busy_last_us;  /* monotonic clock at the last fresh level read (the integration step) */
 static long long fk_gpu_level_cache = -1; /* the last level read; the utilization the accelerator answers is the mean since the previous query by ANY process, so a second read within the window would read 0 */
 static const char *fk_self_path = "./fkwu";
+static int fk_seed_state = 2;   /* kernel_stat 90: does this process run the version its checkout's seed names (fk_seed_alias) */
 static long long fk_host_gpu_utilization(void); /* the optional Metal carrier answers after dynamic admission; absent answers -1 */
 /* the host's own statistics and processes, no shell between: Mach VM/CPU/load, libproc, IOKit (carrier), fork+execvp on an argv */
 static long long fk_host_disk_stat(long long *out);
@@ -22061,6 +22062,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (ks_k == 67) { return fk_clo_reclaimed << 1; }
         if (ks_k == 68) { return fk_clo_capvals_top << 1; }
         if (ks_k == 69) { return fk_melt_gen << 1; }   /* the melts this kernel has run */
+        if (ks_k == 90) { return fk_seed_state << 1; } /* 1 the version the checkout's seed names, 0 another, 2 no checkout */
         if (ks_k == 74) { return fk_f64_emit_refused << 1; }   /* node levels past 4096 the loop lane's emitter refused instead of running the stack out */
         if (ks_k >= 100 && ks_k < 100 + ks_n) {
             return fk_arms[ks_k - 100] << 1;
@@ -32237,6 +32239,115 @@ static int fk_run_closure(const char *path, const char *out) {
     fk_closure_put(1, line, n);
     return 0;
 }
+/* ── The seed's version and the shared binaries ──
+ * A binary's version is the digest of the seed it was built from: the bytes of runtime/fkwu-uni.c and the headers it
+ * includes, and the flags it was built with (FK_SEED_KEY, given by the build). Every version built on this host is kept
+ * at $HOME/.cache/fkwu/bin/<version>/fkwu, and a checkout's ./fkwu is an alias of the version its own seed names. When
+ * the checkout's ./fkwu starts and its seed names another version (the kernel was edited, a branch switched, a plain
+ * `cc` built it), that version is taken from the store, built there once under a lock when absent, the alias is pointed
+ * at it, and the same command begins again on it. A seed edited back finds its version still built: working on the
+ * kernel moves between versions at the cost of one digest. kernel_stat 90 reads whether this process runs the version
+ * its checkout's seed names (1), another one (0), or stands outside a checkout (2). */
+#ifndef FK_SEED_KEY
+#define FK_SEED_KEY 0ULL
+#endif
+#define FK_SEED_FLAGS "-O2"
+#define FK_SEED_KEEP 16
+static void fk_seed_say(unsigned long long key, const char *tail) {
+    char line[256];
+    int n = sprintf(line, "fkwu: seed version %016llx %s\n", key, tail);
+    write(2, line, (unsigned long)n);
+}
+static unsigned long long fk_seed_digest(void) {
+    static const char *files[] = {"runtime/fkwu-uni.c", "runtime/fkwu-node-word.h", "runtime/fkwu-optable.h", 0};
+    unsigned long long key = fk_bytes_fnv1a(FK_SEED_FLAGS, fk_cstrlen(FK_SEED_FLAGS));
+    for (int k = 0; files[k]; k++) {
+        long long n = 0;
+        char *bytes = fk_read_whole_file(files[k], &n);
+        if (!bytes) return 0;
+        key = (key ^ fk_bytes_fnv1a(files[k], fk_cstrlen(files[k]))) * 1099511628211ULL;
+        key = (key ^ fk_bytes_fnv1a(bytes, n)) * 1099511628211ULL;
+        free(bytes);
+    }
+    return key ? key : 1;
+}
+#if !defined(_WIN32)
+extern int flock(int, int);
+static int fk_seed_build(const char *dir, const char *binary, unsigned long long key) {
+    char temporary[FK_PATH_CAP + 64], define[64];
+    sprintf(temporary, "%s/.build.%d", dir, (int)getpid());
+    sprintf(define, "-DFK_SEED_KEY=0x%016llxULL", key);
+    pid_t pid = fork();
+    if (pid < 0) return 0;
+    if (pid == 0) {
+        dup2(2, 1);   /* the compiler speaks on stderr: stdout belongs to the command that begins again */
+        char *cc_argv[] = {"cc", FK_SEED_FLAGS, define, "-o", temporary, "runtime/fkwu-uni.c", 0};
+        execvp("cc", cc_argv);
+        _exit(127);
+    }
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    /* exited by itself (no signal in the low seven bits) with status 0 */
+    if ((status & 0x7f) != 0 || ((status >> 8) & 0xff) != 0 || rename(temporary, binary) != 0) { unlink(temporary); return 0; }
+    return 1;
+}
+/* the store keeps its FK_SEED_KEEP newest versions; a pruned version a checkout still names is built again on demand */
+static void fk_seed_prune(const char *root) {
+    for (;;) {
+        DIR *d = opendir(root);
+        if (!d) return;
+        struct dirent *e;
+        struct stat st;
+        char path[FK_PATH_CAP + 64], oldest[FK_PATH_CAP + 64];
+        long long count = 0, old = 0;
+        while ((e = readdir(d)) != 0) {
+            if (fk_cstrlen(e->d_name) != 16) continue;
+            sprintf(path, "%s/%s/fkwu", root, e->d_name);
+            if (stat(path, &st) != 0) continue;
+            count++;
+            if (old == 0 || (long long)st.st_mtime < old) { old = (long long)st.st_mtime; sprintf(oldest, "%s", path); }
+        }
+        closedir(d);
+        if (count <= FK_SEED_KEEP || unlink(oldest) != 0) return;
+    }
+}
+static void fk_seed_alias(char **argv) {
+    char self[FK_PATH_CAP], alias[FK_PATH_CAP];
+    if (!argv[0] || fk_path_size_raw("runtime/fkwu-uni.c") < 0 || !realpath(argv[0], self) || !realpath("fkwu", alias) ||
+        !fk_cstr_eq(self, alias)) return;   /* only the checkout's own ./fkwu answers to the checkout's seed */
+    unsigned long long key = fk_seed_digest();
+    if (key == 0) return;
+    if (key == (unsigned long long)FK_SEED_KEY) { fk_seed_state = 1; return; }
+    fk_seed_state = 0;
+    const char *hop = getenv("FK_SEED_HOP"), *home = getenv("HOME");
+    if ((hop && hop[0]) || !home || !home[0] || fk_path_len(home) + 64 >= FK_PATH_CAP) return;
+    char root[FK_PATH_CAP], dir[FK_PATH_CAP], binary[FK_PATH_CAP + 16], lock[FK_PATH_CAP + 16], link_tmp[64];
+    sprintf(root, "%s/.cache", home); mkdir(root, 0755);
+    sprintf(root, "%s/.cache/fkwu", home); mkdir(root, 0755);
+    sprintf(root, "%s/.cache/fkwu/bin", home); mkdir(root, 0755);
+    sprintf(dir, "%s/%016llx", root, key); mkdir(dir, 0755);
+    sprintf(binary, "%s/fkwu", dir);
+    if (fk_path_size_raw(binary) < 0) {
+        sprintf(lock, "%s/.lock", dir);
+        int fd = open(lock, O_RDWR | O_CREAT, 0644);
+        if (fd >= 0) flock(fd, 2 /* LOCK_EX */);
+        int built = fk_path_size_raw(binary) >= 0;
+        if (!built) {
+            fk_seed_say(key, "is built once for this host");
+            built = fk_seed_build(dir, binary, key);
+            if (built) fk_seed_prune(root);
+        }
+        if (fd >= 0) close(fd);
+        if (!built) { fk_seed_say(key, "could not be built; the binary at hand runs"); return; }
+    }
+    sprintf(link_tmp, "fkwu.alias.%d", (int)getpid());
+    unlink(link_tmp);
+    if (symlink(binary, link_tmp) != 0 || rename(link_tmp, "fkwu") != 0) { unlink(link_tmp); return; }
+    setenv("FK_SEED_HOP", "1", 1);
+    execv(binary, argv);
+    unsetenv("FK_SEED_HOP");   /* the store's binary would not begin: this one carries on */
+}
+#endif
 static int fk_run(int argc, char **argv) {
     char fk_stack_here;
     fk_stack_base = &fk_stack_here;
@@ -32246,6 +32357,10 @@ static int fk_run(int argc, char **argv) {
     if (argv[0] && argv[0][0]) {
         fk_self_path = argv[0];
     }
+#if !defined(_WIN32)
+    fk_seed_alias(argv);
+    unsetenv("FK_SEED_HOP");   /* a child this run begins is its own run: it asks its own seed */
+#endif
     fk_fkb_builder_admit();
     fk_nodes_init();
 #if !defined(_WIN32)
