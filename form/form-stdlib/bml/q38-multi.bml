@@ -100,6 +100,22 @@ section [form.bml] {
    q38m-read-ids(raw, 0, ntok);
   });
   def q38m-read-ids(raw, i, n) = i >= n ? [] : cons(kth-u32at(raw, i), q38m-read-ids(raw, i + 1, n));
+  // Parallel reasoning over real prompts. Stream s feeds prompts[s] one token a step (teacher forced, position = step), then its own
+  // greedy id; every step is one pass over the weights for all streams. A stream's continuation is the ids it predicts from the step
+  // that fed its last prompt token on, `gen` of them. Streams of different prompt lengths share the pass: a short prompt starts
+  // generating while a long one is still being read, so nothing waits for the longest prompt to be prefilled first.
+  // Returns one list of gen ids per stream. The arena must be fresh (position 0 empty).
+  def q38m-feed-ids(prompts, last, i) = map(s => i < len(prompts[s]) ? prompts[s][i] : last[s], range(0, len(prompts)));
+  def q38m-fill(x, n) = n <= 0 ? [] : cons(x, q38m-fill(x, n - 1));
+  def q38m-keep(prompts, outs, nxt, i, gen) = map(s => (i >= len(prompts[s]) - 1 && len(outs[s]) < gen) ? append(outs[s], [nxt[s]]) : outs[s], range(0, len(prompts)));
+  def q38m-generate-go(ctx, qs, mp, arena, sx, posb, prompts, i, total, last, outs, gen) {
+   if (i >= total) then outs else {
+    let nxt = q38m-step(ctx, qs, mp, arena, sx, posb, q38m-feed-ids(prompts, last, i), q38m-fill(i, len(prompts)));
+    q38m-generate-go(ctx, qs, mp, arena, sx, posb, prompts, i + 1, total, nxt, q38m-keep(prompts, outs, nxt, i, gen), gen);
+   };
+  }
+  def q38m-longest(prompts) = foldl((a, p) => len(p) > a ? len(p) : a, 0, prompts);
+  def q38m-generate(ctx, qs, mp, arena, sx, posb, prompts, gen) = q38m-generate-go(ctx, qs, mp, arena, sx, posb, prompts, 0, q38m-longest(prompts) + gen - 1, q38m-fill(0, len(prompts)), map(p => [], prompts), gen);
  }
  0;
 }

@@ -60,7 +60,42 @@ section [form.bml] {
    let o = qmr-opts();
    let n = qmr-int(o, "n", 2);
    let steps = qmr-int(o, "steps", 6);
-   qmr-int(o, "go", 0) != 1 ? qmr-say("plan: go=1 opens " ++ qmr-file() ++ " and runs n streams for steps tokens, single-stream against one pass per step; fast 2 or 3 puts the 2..8 row projections on the matrix unit") : qmr-go(n, steps, qmr-int(o, "fast", 0));
+   json-object-has?(o, "prompts") && qmr-int(o, "go", 0) == 1 ? qmr-prompts-go(map(p => map(t => json-int-value(t), json-array-elements(p)), json-array-elements(json-object-get(o, "prompts"))), qmr-int(o, "gen", 8), qmr-int(o, "fast", 0)) : qmr-int(o, "go", 0) != 1 ? qmr-say("plan: go=1 opens " ++ qmr-file() ++ " and runs n streams for steps tokens, single-stream against one pass per step; fast 2 or 3 puts the 2..8 row projections on the matrix unit") : qmr-go(n, steps, qmr-int(o, "fast", 0));
+  }
+  // one stream alone with a teacher-forced prompt: feed prompt tokens, then its own ids; the gen ids from the last prompt token on
+  def qmr-forced-go(ctx, sts, p, id, i, total, gen, out) {
+   if (i >= total) then out else {
+    let feed = i < len(p) ? p[i] : id;
+    let nxt = q38-forward(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], feed, i);
+    qmr-forced-go(ctx, sts, p, nxt, i + 1, total, gen, (i >= len(p) - 1 && len(out) < gen) ? append(out, [nxt]) : out);
+   };
+  }
+  def qmr-forced(ctx, p, gen) {
+   let sts = q38-new-state(ctx[2]);
+   let ids = qmr-forced-go(ctx, sts, p, 0, 0, len(p) + gen - 1, gen, []);
+   let freed = q38-free-state(sts);
+   ids;
+  }
+  // real prompts, N streams, one pass over the weights per step; each stream must equal its own single-stream decode of the same prompt
+  def qmr-prompts-go(prompts, gen, fast) {
+   let n = len(prompts);
+   let ctx = q38-open-span(qmr-file(), 64, 8);
+   let qs0 = q38s-pipes(q38s-msl());
+   let qs = fast == 3 ? q38s-fast1(qs0) : (fast == 2 ? q38s-fast(qs0) : qs0);
+   let sx = q38s-open(ctx, 8, 8);
+   let mp = q38m-pipes(q38m-msl());
+   let posb = metal_buf_alloc(64);
+   let t1 = host_monotonic_ms();
+   let singles = map(p => qmr-forced(ctx, p, gen), prompts);
+   let t2 = host_monotonic_ms();
+   let arena = q38m-new-arena(ctx[2], n, bytes => metal_buf_alloc(bytes));
+   let multis = q38m-generate(ctx, qs, mp, arena, sx, posb, prompts, gen);
+   let t3 = host_monotonic_ms();
+   let a = qmr-say("prompts " ++ map(p => len(p), prompts).str() ++ " tokens, gen " ++ gen.str());
+   let b = qmr-say("single: " ++ singles.str() ++ " in " ++ (t2 - t1).str() ++ " ms");
+   let c = qmr-say("one pass: " ++ multis.str() ++ " in " ++ (t3 - t2).str() ++ " ms");
+   let g = qmr-say(singles == multis ? "EQUAL: every stream continues its own prompt exactly as it would alone" : "DIFFER");
+   0;
   }
   def qmr-go(n, steps, fast) {
    let t0 = host_monotonic_ms();
