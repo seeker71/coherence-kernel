@@ -25,6 +25,7 @@
 // a design budget and never justify a static route table.
 //
 import form-stdlib/form-cli-model-session.fk;
+import form-stdlib/form-recipe-exec-token-live.fk;
 import form-stdlib/peer-epoch-lease.fk;
 import form-stdlib/jit-once-born.fk;
 import form-stdlib/form-cli-resident-turnwheel-native-bml.fk;
@@ -158,19 +159,46 @@ section [form.bml] {
         }, id, "row-pinned-at-enqueue");
     };
     def fcrt-accept-program(host, id, arg, budget, releaser) = fcrt-enqueue-flow(host, id, fcrt-program-flow(arg), budget, releaser);
+    // A cursor that already yields one token gets its own KV through `allocate`.
+    // The token is read first, so a cursor that ends or refuses never allocates.
+    def fcrt-accept-cursor(host, id, cursor, budget, releaser, allocate) = budget <= 0 ? fcrt-act("nothing", host, nothing(), "nonpositive-gas-refused") : {
+        let one = qtlc-next(cursor);
+        !((Comparable) qtlc-next-present?(one) == 1) ? fcrt-act("nothing", host, nothing(), qtlc-reason(qtlc-next-cursor(one))) : {
+            let shared = wt-sctx(le-w(fcrt-lw(host)));
+            let sts = q38-new-state-by(fcrt-shared-ctx(shared)[2], allocate);
+            !((Comparable) q38-state-ok?(sts) == 1) ? fcrt-act("failure", host, nothing(), "isolated-kv-state-allocation-refused") : fcrt-enqueue-flow(host, id, fcrt-flow(fcrtn-phase-prefill(), fcrt-prefill-payload(sts, qtlc-next-cursor(one), qtlc-next-value(one), 0, 1, "open"), nothing()), budget, releaser);
+        };
+    };
     // Open a scannerless prompt cursor and allocate only this branch's KV.
     // The actual prefill happens later in bounded wheel turns.
+    // The on-demand affine kernel's own value, composed as MSL and not dispatched.
+    // A resident that holds the Metal lease can run that source later; this choice
+    // is the integer the kernel would write, and it commits with no buffer.
+    def fcrt-kernel-choice(recipe, input) = {
+        let code = frexl-code-node(recipe);
+        (Comparable) frexl-code-valid?(code, recipe) == 1 ? frexl-recipe-expected(recipe, input) : nothing();
+    };
+    def fcrt-kernel-step(sctx, flow) = {
+        let payload = fcrt-flow-payload(flow);
+        let tok = fcrt-kernel-choice(frex-recipe(), fcrt-pf-held(payload));
+        let next = fcrt-prefill-payload(fcrt-pf-sts(payload), fcrt-pf-cursor(payload), tok, fcrt-pf-pos(payload) + 1, fcrt-pf-count(payload) + 1, "kernel-choice");
+        [tok, fcrt-flow(fcrt-flow-phase(flow), next, fcrt-flow-receipt(flow)), sctx];
+    };
+    def fcrt-lw-with-wheel(lw, wheel) = [wheel, lw[1], lw[2], lw[3]];
+    def fcrt-kernel-stage(rows) = (Comparable) len(rows) == 0 ? 0 : {
+        let wrote = fcrt-stage-write(rows[0]);
+        (Number) wrote == 0 ? fcrt-kernel-stage(rows[1:]) : fcrt-kernel-stage(rows[1:]);
+    };
+    def fcrt-kernel-turn(host) = {
+        let lw = fcrt-lw(host);
+        let turned = wt-turn(le-w(lw), (sctx, flow) => fcrt-kernel-step(sctx, flow));
+        let staged = fcrt-kernel-stage(wt-rows(turned));
+        fcrt-with(host, fcrt-lw-with-wheel(lw, turned), fcrt-event("kernel-choice", staged, len(wt-rows(turned))));
+    };
     def fcrt-accept-prompt(host, id, prompt, budget, releaser) = budget <= 0 ? fcrt-act("nothing", host, nothing(), "nonpositive-gas-refused") : {
         let shared = wt-sctx(le-w(fcrt-lw(host)));
-        let sts = q38-new-state(fcrt-shared-ctx(shared)[2]);
-        !((Comparable) q38-state-ok?(sts) == 1) ? fcrt-act("failure", host, nothing(), "isolated-kv-state-allocation-refused") : {
-            let cursor = fcmg-chat-cursor-profile(fcrt-shared-path(shared), prompt, "full", fcrt-shared-x(shared));
-            let one = qtlc-next(cursor);
-            !((Comparable) qtlc-next-present?(one) == 1) ? {
-                let released = q38-free-state(sts);
-                fcrt-act("nothing", host, released, qtlc-reason(qtlc-next-cursor(one)));
-            } : fcrt-enqueue-flow(host, id, fcrt-flow(fcrtn-phase-prefill(), fcrt-prefill-payload(sts, qtlc-next-cursor(one), qtlc-next-value(one), 0, 1, "open"), nothing()), budget, releaser);
-        };
+        let cursor = fcmg-chat-cursor-profile(fcrt-shared-path(shared), prompt, "full", fcrt-shared-x(shared));
+        fcrt-accept-cursor(host, id, cursor, budget, releaser, bytes => metal_buf_alloc(bytes));
     };
     // step outcome: signal/presence/value/flow/shared/receipt/reason.
     def fcrt-step-out(signal, present, value, flow, shared, receipt, reason) = ["form-cli-resident-step-v1", signal, present, value, flow, shared, receipt, reason];

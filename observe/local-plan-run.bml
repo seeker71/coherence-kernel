@@ -37,8 +37,8 @@
 // The voice speaks in this process (form-stdlib/bml/form-cli-native-voice.bml: registry weights on this Mac), one
 // reply at a time, each ask naming its enquiry as a plan whose coverage row waits for the verdict (receipts/query-coverage-ledger.jsonl
 // holds one kind "plan" row per option, source local-plan, answered only when verified), and the band runs begin only after its session is released. No prompt leaves the machine by
-// construction: the voice is in-process, and a declined walk's guide packet (fcgp-packet-at) is a file no door here
-// sends. Each packet and reply is kept under .hearth/local-plans, each option whose voice opened is marked in
+// construction: the voice is in-process. A declined walk that earned a guide asks that same local voice
+// one question through admission, sharing a resident session's mapped weights; the packet stays a file, and no door here sends it. Each packet and reply is kept under .hearth/local-plans, each option whose voice opened is marked in
 // .hearth/local-plans/began.jsonl, each reply is owned the moment it is heard by a mark in .hearth/local-plans/heard.jsonl,
 // each option's row lands in .hearth/local-plans/ledger.jsonl, and a verified plan lands its band at its path and one row at the end of the
 // queue, where the night's walk takes it. A physical run: it needs the local GPU and a quiet machine.
@@ -46,6 +46,7 @@
 import form-stdlib/bml/form-cli-local-plan.bml;
 import form-stdlib/bml/form-cli-native-voice.bml;
 import form-stdlib/model-registry.bml;
+import form-stdlib/gpu-lease.bml;
 import form-stdlib/bml/stdin-source.bml;
 import form-stdlib/bml/host-walk.bml;
 import form-stdlib/bml/formbin-codec.bml;
@@ -180,9 +181,158 @@ section [form.bml] {
   // an earlier walk of this request left its refused options in the ledger; the walk resumes from them unless
   // {"fresh":1} asks for a clean start
   def lpr-memory(req, opts) = if ((Comparable) lpr-int(opts, "fresh", 0) == 1) then [] else flp-memory-of(flp-queue-rows(flp-dir() ++ "/ledger.jsonl"), flp-req-id(req), p => lpr-read(p));
+  // A voice already mapped by a live process is warm and is chosen first. A cold voice
+  // is chosen only when its file plus an 8 GiB reserve fits the memory still free.
+  def lpr-steer-bytes(name) {
+   let n = file_size(mr-path(mr-find(name)));
+   n < 1 ? -1 : n;
+  }
+  def lpr-steer-model(voices) {
+   let rows = map(name => [name, lpr-steer-bytes(name)], voices);
+   let warm = filter(name => adm-held-already?(mr-path(mr-find(name))), voices);
+   flp-steer-model(rows, warm, lpr-free-bytes(lpr-sense()), 8 * flp-disk-gib());
+  }
+  def lpr-steer-lease() = flp-steer-lease(gpl-judge(gpu-lease-path()), host_pid());
+  def lpr-peer-rows() {
+   let rows = host_processes("fkwu*");
+   (String) value_kind(rows) == "list" ? rows : [];
+  }
+  def lpr-named-held?(rows) {
+   if nil?(rows) then 0 else if ((Comparable) rows[0][0] == host_pid()) then lpr-named-held?(rows[1:]) else {
+    let row = host_process(rows[0][0]);
+    let text = (String) value_kind(row) == "list" && len(row) >= 5 && (String) value_kind(row[4]) == "list" ? flp-join(row[4], " ") : "";
+    (Comparable) flp-named-peer?(text) == 1 ? 1 : lpr-named-held?(rows[1:]);
+   }
+  }
+  def lpr-peer-held?() = (Comparable) flp-rss-held?(lpr-peer-rows(), host_pid(), flp-kernel-need()) == 1 ? 1 : lpr-named-held?(lpr-peer-rows());
+  def lpr-model-path(model) = mr-path(mr-find(model));
+  def lpr-model-shared?(model) {
+   let path = lpr-model-path(model);
+   (String) path != "" && adm-held-already?(path) ? "shared" : "cold";
+  }
+  def lpr-cold-need(model) = flp-cold-need(lpr-steer-bytes(model), 8 * flp-disk-gib());
+  def lpr-ask-memory(model) = (String) lpr-model-shared?(model) == "shared" ? "room" : lpr-steer-memory(lpr-cold-need(model));
+  def lpr-ask-open?(model) = flp-ask-open?((String) lpr-steer-lease() == "held-elsewhere" ? "held" : "free", lpr-steer-disk(), lpr-ask-memory(model), model, lpr-model-shared?(model));
+  def lpr-ask-line(opts) {
+   let model = lpr-steer-model(lpr-voices(opts));
+   print_str(mc-cat(["[local-plan:ask] open=", lpr-ask-open?(model).str(), " model=", model, " share=", lpr-model-shared?(model), " device=", (String) lpr-steer-lease() == "held-elsewhere" ? "held" : "free", " disk=", lpr-steer-disk(), " memory=", lpr-ask-memory(model), " cold=", lpr-cold-need(model).str()]));
+   lpr-ask-open?(model);
+  }
+  // The header names one extra stream's KV. A held lease stays closed. No weights are mapped here.
+  def lpr-stream-line(opts) {
+   let model = lpr-steer-model(lpr-voices(opts));
+   let path = lpr-model-path(model);
+   let shared = (String) lpr-model-shared?(model) == "shared" ? 1 : 0;
+   let weight = lpr-steer-bytes(model);
+   let geo = (String) path == "" ? [] : q38-geo(eqr-of-file(path, 0, 40000000), 2048);
+   let state = len(geo) < 24 ? -1 : q38-state-bytes(geo);
+   let scratch = len(geo) < 24 ? -1 : q38-scratch-bytes(geo, 1);
+   let need = flp-residence-need(weight < 1 ? 0 : weight, scratch < 1 ? 0 : scratch, state < 1 ? 0 : state, 8 * flp-disk-gib(), shared);
+   let free = lpr-free-bytes(lpr-sense());
+   let device = lpr-device-held?() ? "held" : "free";
+   print_str(mc-cat(["[local-plan:streams] open=", flp-stream-open?(device, free, need).str(), " model=", model, " share=", shared.str(), " device=", device, " free=", free.str(), " scratch=", scratch.str(), " state=", state.str(), " need=", need.str()]));
+   flp-stream-open?(device, free, need);
+  }
+  def lpr-state-handle(row) {
+   if (row[0] > 0) then row[0] else if (row[1] > 0) then row[1] else if (row[2] > 0) then row[2] else row[3];
+  }
+  // One token on a stream this process already opened. The position is that stream's own cache slot. No second lease take.
+  def lpr-one-token(ctx, sts, id, pos) {
+   let moved = q38-forward-state(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], id, pos);
+   let head = q38-head(ctx[0], ctx[1], ctx[2], ctx[5], ctx[6]);
+   kth-u32at(metal_buf_read(ctx[1][31], 0, 4), 0);
+  }
+  // One weight open and two KV streams. Both read token 1 at position 0, then each reads a different token at position 1.
+  // When those answers differ, both read token 4 at position 2. A different answer there is the cache, not the input.
+  // After the weights close, the same lease runs the affine kernel on those two answers. Every buffer is freed before the lease returns.
+  def lpr-two-open(path) {
+   let ctx = q38-open-span-owned(path, 2048, 1);
+   if (len(ctx) < 10) then ["", "", "0", "", "", "0", "0", "", "", "0", "", "", "0", "", ""] else {
+    let a = q38-new-state(ctx[2]);
+    let b = q38-new-state(ctx[2]);
+    let ha = lpr-state-handle(a[0]);
+    let hb = lpr-state-handle(b[0]);
+    let distinct = ((Comparable) q38-state-ok?(a) == 1) && ((Comparable) q38-state-ok?(b) == 1) && (ha > 0) && ((Comparable) ha != hb) ? "1" : "0";
+    let fa = (String) distinct == "1" ? (try [1, lpr-one-token(ctx, a, 1, 0)] catch [0, -1]) : [0, -1];
+    let fb = (String) distinct == "1" && ((Comparable) fa[0] == 1) ? (try [1, lpr-one-token(ctx, b, 1, 0)] catch [0, -1]) : [0, -1];
+    let agree = ((Comparable) fa[0] == 1) && ((Comparable) fb[0] == 1) && ((Comparable) fa[1] == fb[1]) ? "1" : "0";
+    let sa = (String) agree == "1" ? (try [1, lpr-one-token(ctx, a, 2, 1)] catch [0, -1]) : [0, -1];
+    let sb = (String) agree == "1" && ((Comparable) sa[0] == 1) ? (try [1, lpr-one-token(ctx, b, 3, 1)] catch [0, -1]) : [0, -1];
+    let diverge = ((Comparable) sa[0] == 1) && ((Comparable) sb[0] == 1) && ((Comparable) sa[1] != sb[1]) ? "1" : "0";
+    let ta = (String) diverge == "1" ? (try [1, lpr-one-token(ctx, a, 4, 2)] catch [0, -1]) : [0, -1];
+    let tb = (String) diverge == "1" && ((Comparable) ta[0] == 1) ? (try [1, lpr-one-token(ctx, b, 4, 2)] catch [0, -1]) : [0, -1];
+    let isolate = ((Comparable) ta[0] == 1) && ((Comparable) tb[0] == 1) && ((Comparable) ta[1] != tb[1]) ? "1" : "0";
+    let tokensA = ((Comparable) fa[0] == 1 ? 1 : 0) + ((Comparable) sa[0] == 1 ? 1 : 0) + ((Comparable) ta[0] == 1 ? 1 : 0);
+    let tokensB = ((Comparable) fb[0] == 1 ? 1 : 0) + ((Comparable) sb[0] == 1 ? 1 : 0) + ((Comparable) tb[0] == 1 ? 1 : 0);
+    let framed = print_str(mc-cat(["<|form:resident-stage|>\nid=1\nphase=prefill\nstatus=live\ngas=0\ntokens=", tokensA.str(), "\n<|/form:resident-stage|>\n<|form:resident-stage|>\nid=2\nphase=prefill\nstatus=live\ngas=0\ntokens=", tokensB.str(), "\n<|/form:resident-stage|>\n"]));
+    let freed = q38-free-state(a) + q38-free-state(b);
+    let closed = q38-close(ctx, []);
+    let kernel = ((Comparable) ta[0] == 1) && ((Comparable) tb[0] == 1) ? flp-metal-two(ta[1], tb[1]) : ["", ""];
+    [ha.str(), hb.str(), distinct, fa[1].str(), fb[1].str(), agree, closed.str(), sa[1].str(), sb[1].str(), diverge, ta[1].str(), tb[1].str(), isolate, kernel[0], kernel[1]];
+   }
+  }
+  def lpr-two-streams(opts) {
+   let model = lpr-steer-model(lpr-voices(opts));
+   let path = lpr-model-path(model);
+   let shared = (String) lpr-model-shared?(model) == "shared" ? 1 : 0;
+   let weight = lpr-steer-bytes(model);
+   let geo = (String) path == "" ? [] : q38-geo(eqr-of-file(path, 0, 40000000), 2048);
+   let state = len(geo) < 24 ? -1 : q38-state-bytes(geo);
+   let scratch = len(geo) < 24 ? -1 : q38-scratch-bytes(geo, 1);
+   let need = flp-residence-need(weight < 1 ? 0 : weight, scratch < 1 ? 0 : scratch, state < 1 ? 0 : state, 8 * flp-disk-gib(), shared);
+   let free = lpr-free-bytes(lpr-sense());
+   let device = lpr-device-held?() ? "held" : "free";
+   if ((Comparable) flp-stream-open?(device, free, need) != 1) then { print_str(mc-cat(["[local-plan:streams] live not-run model=", model, " device=", device, " free=", free.str(), " need=", need.str()])); nothing(); } else {
+    let opened = gpu-lease-turn("two streams", () => lpr-two-open(path));
+    print_str(mc-cat(["[local-plan:streams] live model=", model, " handles=", opened[0], ",", opened[1], " distinct=", opened[2], " tokens=", opened[3], ",", opened[4], " agree=", opened[5], " second=", opened[7], ",", opened[8], " diverge=", opened[9], " third=", opened[10], ",", opened[11], " isolate=", opened[12], " kernel=", opened[13], ",", opened[14], " closed=", opened[6]]));
+    opened;
+   }
+  }
+  def lpr-device-held?() = (String) lpr-steer-lease() == "held-elsewhere";
+  def lpr-peer-line() {
+   let rows = lpr-peer-rows();
+   print_str(mc-cat(["[local-plan:peers] rss-held=", flp-rss-held?(rows, host_pid(), flp-kernel-need()).str(), " named-or-heavy=", lpr-peer-held?().str(), " device=", lpr-device-held?() ? "held" : "free"]));
+   rows;
+  }
+  def lpr-steer-disk() {
+   let v = host_volume(".");
+   nothing?(v) || len(v) < 3 ? flp-steer-disk(0, 0) : flp-steer-disk(v[0], v[2]);
+  }
+  def lpr-sense() = mg-sense();
+  def lpr-available(room) = mg-vm-ok?(room) ? mg-available(room) : 0;
+  // Free pages, not file-backed external pages. A mapped model inflates the governor's available while those pages are in use.
+  def lpr-free-bytes(room) = mg-vm-ok?(room) ? room[2] * room[0] : 0;
+  def lpr-steer-memory(need) = flp-steer-memory(lpr-free-bytes(lpr-sense()), need);
+  def lpr-memory-line() {
+   let room = lpr-sense();
+   let available = lpr-available(room);
+   let free = lpr-free-bytes(room);
+   print_str(mc-cat(["[local-plan:memory] available=", available.str(), " free=", free.str(), " kernel=", flp-steer-memory(free, flp-kernel-need()), " model=", flp-steer-memory(free, flp-model-need())]));
+   free;
+  }
+  def lpr-steer-worn(model) {
+   let wear = fcnv-wear-registered(fcnv-wear-registry(), model);
+   nothing?(wear) ? ["bare", nothing()] : len(fcnv-wear-why(wear)) > 0 ? ["mismatch", nothing()] : ["wear", wear];
+  }
+  def lpr-steer-request(model, id, worn) {
+   let base = [fhn-s("model", model), fhn-n("max_reply_tokens", flp-steer-budget()), fhn-n("reply_budget", flp-steer-budget()), fhn-s("enquiry", id), fhn-s("enquiry_kind", "plan"), fhn-s("coverage", "after-verdict")];
+   json-node-object((String) worn[0] == "wear" ? append(base, [fhn-s("adapter", worn[1][0])]) : base);
+  }
+  // The earned question joins the resident admission on the chosen voice. A matching
+  // adapter is worn. A mismatched one is not opened. No provider call is made.
+  def lpr-local-steer(voices, question, id) {
+   let model = lpr-steer-model(voices);
+   if (((String) flp-steer-route(voices, flp-gpu-holders()) == "none") || ((Comparable) lpr-ask-open?(model) != 1)) then nothing() else {
+    let worn = lpr-steer-worn(model);
+    if ((String) worn[0] == "mismatch") then nothing() else {
+     let answer = fcnv-ask(question, lpr-steer-request(model, id, worn));
+     (String) answer[0] == "answered" && len(trim(answer[1])) > 0 ? [answer[1], answer[3], answer[2]] : nothing();
+    }
+   }
+  }
   def lpr-focus-guide(req,opts) {
    let named=any?(name=>flp-mentioned?(flp-text(req,"needs"),name,0),flp-source-names(flp-req-files(req)));
-   named || !nil?(flp-guided-focus(req)) || lpr-closed?(fcgp-num(opts,"until_ms"),lpr-floor-of(mr-chain-names("triage")[0])) ? 0 : {
+   named || !nil?(flp-guided-focus(req)) || lpr-closed?(fcgp-num(opts,"until_ms"),lpr-floor-of(mr-chain-names("triage")[0])) || ((Comparable) lpr-ask-open?(mr-chain-names("triage")[0]) != 1) ? 0 : {
     let model=mr-chain-names("triage")[0];
     let prompt=flp-focus-prompt(req);
     let answer=fcnv-ask(prompt,json-node-object([fhn-s("model",model),fhn-n("max_reply_tokens",1024),fhn-s("enquiry",lpr-enquiry(flp-req-id(req),-1)),fhn-s("enquiry_kind","prose")]));
@@ -192,6 +342,7 @@ section [form.bml] {
    };
   }
   def lpr-walk(req, opts, voices, queue) {
+   if ((Comparable) lpr-ask-open?(lpr-steer-model(voices)) != 1) then { print_str(mc-cat(["[local-plan] not-opened device=", lpr-device-held?() ? "held" : "free", " disk=", lpr-steer-disk(), " memory=", lpr-steer-memory(flp-model-need()), " model=", lpr-steer-model(voices)])); nothing(); } else {
    let walked = now_unix_ms();
    let made = flp-mkdirs(flp-dir());
    let attempts = lpr-int(opts, "attempts", flp-attempts());
@@ -201,7 +352,9 @@ section [form.bml] {
    let spent = if ((Comparable) lpr-int(opts, "fresh", 0) == 1) then 0 else lpr-spent(lpr-tried(attempts), flp-req-id(req));
    let left = json-object-has?(opts,"attempts") ? lpr-left(attempts, spent) : nothing();
     let base = flp-ctx(lpr-voice(flp-dir(), flp-safe-id(req), flp-req-id(req), lpr-int(opts, "context", nothing()), lpr-int(opts, "max_reply_tokens", 3072), lpr-int(opts, "reply_budget", flp-reply-budget()), fcgp-num(opts, "until_ms")), voices, left, queue, "", flp-dir() ++ "/scratch", flp-dir() ++ "/ledger.jsonl", lpr-int(opts, "deadline_ms", flp-deadline-ms()));
-     let ctx=flp-with-admission-care(flp-with-reference-care(base,(request,context,said,refusal)=>lpr-closed?(fcgp-num(opts,"until_ms"),lpr-floor(opts)) ? nothing() : lrpr-repair(request,context,said,refusal,opts)),lpr-release-said);
+     let cared=flp-with-admission-care(flp-with-reference-care(base,(request,context,said,refusal)=>lpr-closed?(fcgp-num(opts,"until_ms"),lpr-floor(opts)) ? nothing() : lrpr-repair(request,context,said,refusal,opts)),lpr-release-said);
+     let steered=flp-with-steer(cared,(question,id)=>lpr-local-steer(voices,question,id));
+     let ctx=(String) lpr-steer-lease() == "held-elsewhere" ? flp-with-lease(steered, "held-elsewhere") : steered;
    let resumed = if ((spent == 0) && nil?(memory)) then 0 else print_str(mc-cat(["[local-plan] resuming ", flp-req-id(req), ": ", spent.str(), " option(s) spent, ", len(memory).str(), " refused row(s) retained; ", nothing?(left) ? "native choices continue" : left.str()+" caller option(s) left"]));
    let care=parked ? nothing() : lrpr-resume(req,ctx,memory);
    let r=nothing?(care) ? flp-walk-from(req,ctx,memory) : care[0]==1 ? flp-ended(["queued",care[1]],memory) : care[0]==3 ? flp-ended(["moot",care[1]],memory) : flp-walk-from(req,ctx,append(memory,[care[1]]));
@@ -210,6 +363,7 @@ section [form.bml] {
    let result=flp-result(req,r);
    let said=print_str("[local-plan:result] " + json-emit(result));
    r[0]=="queued" ? r[1][1] : result;
+   }
   }
   // A walk of {"next":1} that declined parked its request, so the window goes on to the next open one. A request asked
   // for by id answers for itself, and one that did not park ends the door with its own word.
@@ -218,6 +372,133 @@ section [form.bml] {
    let answer = lpr-walk(req, opts, voices, queue);
    let more = (lpr-declined?(answer) && ((Comparable) lpr-int(opts, "next", 0) == 1) && (!lpr-closed?(fcgp-num(opts, "until_ms"), lpr-floor(opts)))) ? lpr-pick(opts, queue) : nothing();
    (nothing?(more) || ((String) flp-req-id(more) == flp-req-id(req))) ? answer : lpr-walks(more, opts, voices, queue);
+  }
+  def lpr-steer-req() = parse-json("live-steer", "{\"id\":\"live-steer\",\"title\":\"three copies\",\"needs\":\"lpdf-rows answers three copies\",\"files\":[\"form/form-stdlib/tests/fixtures/local-plan-door-flow.bml\"],\"evidence\":\"the fixture returns two copies\"}");
+  def lpr-steer-earned() = map(r => ["", "", "", "", "", r, 0, 0], [lpr-steer-row("attempt", "a1", "o1"), lpr-steer-row("lens", "a2", "o2"), lpr-steer-row("lens", "a3", "o3"), lpr-steer-row("voice", "a4", "o4"), lpr-steer-row("decode", "a5", "o5"), lpr-steer-row("context", "a6", "o6"), lpr-steer-row("local-guide", "a7", "o7"), lpr-steer-row("lens", "a8", "o2"), lpr-steer-row("lens", "a9", "o3"), lpr-steer-row("local-guide", "a10", "o4"), lpr-steer-row("lens", "a11", "o5")]);
+  def lpr-steer-row(rung, a, o) = json-node-object([fhn-s("gap", "g"), fhn-s("rung", rung), fhn-s("approach_digest", a), fhn-s("outcome_digest", o), fhn-n("local_generated_ids", 1), fhn-n("local_injected_ids", 0), fhn-n("band_green", 0)]);
+  def lpr-steer-question(req) = mc-cat([flp-guide-question(), "\n\nThe request:\n", flp-request-text(req), "\n", flp-files-block(req), "The writable path is form/form-stdlib/tests/fixtures/local-plan-door-flow.bml. Today's fixture still returns two copies and stays there. A verified scratch candidate already returns three copies. It holds lpdf-rows(1) = [1, 1, 1], lpdf-rows(\"a\") = [\"a\", \"a\", \"a\"], and lpdf-rows(0) = [0, 0, 0]. Two streams on one residence then answered 2 and 5, and the affine kernel committed 13 and 22. Keep the three-copy reference and those three cases, and add one case whose argument is neither 1 nor \"a\" nor 0.\n"]);
+  def lpr-steer-safe?(text) {
+   let parsed = flp-parse(text);
+   (String) parsed[0] == "" && all?(w => ((String) w == "form/form-stdlib/tests/fixtures/local-plan-door-flow.bml"), flp-p-writable(parsed[2]));
+  }
+  def lpr-steer-req-id(id) = parse-json(id, mc-cat(["{\"id\":\"", id, "\",\"title\":\"three copies\",\"needs\":\"lpdf-rows answers three copies\",\"files\":[\"form/form-stdlib/tests/fixtures/local-plan-door-flow.bml\"],\"evidence\":\"the fixture returns two copies\"}"]));
+  def lpr-steer-verify(voices, text, generated, prompt, metal, id) {
+   let root = flp-dir() ++ "/" ++ id;
+   let steered = flp-with-steer(flp-ctx((packet, name, n, lens) => ["answered", "not a plan", 0, 0], voices, 1, root ++ "/queue.jsonl", "", root ++ "/scratch", root ++ "/ledger.jsonl", 120000), (question, gap) => [text, generated, prompt]);
+   let ctx = (String) metal == "" ? steered : flp-with-metal(steered, metal);
+   let walked = flp-after-decline(lpr-steer-req-id(id), ctx, lpr-steer-earned());
+   print_str(mc-cat(["[local-plan:steer] verify ", walked[0], " id=", id]));
+   walked;
+  }
+  // One local steer, asked only when this process may open the model. The reply stays a file.
+  // A plan is verified only when every writable path is the door fixture, so no other source is queued.
+  def lpr-steer-live(opts) {
+   let voices = lpr-voices(opts);
+   let lease = lpr-steer-lease();
+   let disk = lpr-steer-disk();
+   let model = lpr-steer-model(voices);
+   if ((Comparable) lpr-ask-open?(model) != 1) then print_str(mc-cat(["[local-plan:steer] not-asked lease=", lease, " disk=", disk, " model=", model, " memory=", lpr-ask-memory(model), " cold=", lpr-cold-need(model).str(), " device=", lpr-device-held?() ? "held" : "free"])) else {
+    let worn = lpr-steer-worn(model);
+    if ((String) worn[0] == "mismatch") then print_str("[local-plan:steer] mismatch") else {
+     let answer = fcnv-ask(lpr-steer-question(lpr-steer-req()), lpr-steer-request(model, "live-steer", worn));
+     let text = (String) answer[0] == "answered" ? answer[1] : "";
+     let id = mc-cat(["live-steer-", now_unix_ms().str()]);
+     let stem = mc-cat([flp-dir(), "/", id]);
+     let kept = write_file_text(stem ++ ".reply.txt", text);
+     let channel = flp-plan-channel(lpr-rename-plan(text, id));
+     let admitted = (String) channel == "" ? nothing() : fcgp-admit(channel, id);
+     let proposal = flp-proposal?(channel) ? "1" : "0";
+     let status = nothing?(admitted) ? "" : fcgp-str(admitted, "status");
+     print_str(mc-cat(["[local-plan:steer] ", answer[0], " model=", model, " wear=", worn[0], " prompt_ids=", answer[2].str(), " generated_ids=", answer[3].str(), " proposal=", proposal, " admit=", status, " reply=", stem, ".reply.txt"]));
+     let metal = lpr-steer-metal(channel);
+     (String) proposal == "1" && lpr-steer-safe?(channel) ? lpr-steer-verify([model], channel, answer[3], answer[2], metal, id) : admitted;
+    }
+   }
+  }
+  def lpr-seat-line() {
+   let many = flp-seat-many([4, 19, 1, 8]);
+   print_str(mc-cat(["[local-plan:seat] tokens=", flp-join(many[0], ","), " alloc=", many[1], " handles=", flp-join(many[2], ","), " distinct=", flp-handles-distinct?(many[2]).str()]));
+   many;
+  }
+  def lpr-kernel-once(n) {
+   if (lpr-device-held?() || (((String) lpr-steer-disk() == "tight") || ((String) lpr-steer-memory(flp-kernel-need()) == "tight"))) then { print_str(mc-cat(["[local-plan:kernel] not-run lease=", lpr-steer-lease(), " disk=", lpr-steer-disk(), " memory=", lpr-steer-memory(flp-kernel-need()), " device=", lpr-device-held?() ? "held" : "free"])); ""; } else {
+    let pair = gpu-lease-turn("affine kernel", () => flp-metal-token(n));
+    print_str(mc-cat(["[local-plan:kernel] input=", n.str(), " value=", pair[0], " expected=", (n * 3 + 7).str(), " model-executed=", pair[1]]));
+    pair[0];
+   }
+  }
+  def lpr-kernel-two() {
+   if (lpr-device-held?() || (((String) lpr-steer-disk() == "tight") || ((String) lpr-steer-memory(flp-kernel-need()) == "tight"))) then { print_str(mc-cat(["[local-plan:kernel] not-run lease=", lpr-steer-lease(), " disk=", lpr-steer-disk(), " memory=", lpr-steer-memory(flp-kernel-need()), " device=", lpr-device-held?() ? "held" : "free"])); ["", ""]; } else {
+    let pair = gpu-lease-turn("affine pair", () => flp-metal-two(4, 19));
+    let seated = flp-seat-two(4, 19);
+    let agree = ((String) pair[0] == seated[0]) && ((String) pair[1] == seated[1]) ? "1" : "0";
+    print_str(mc-cat(["[local-plan:kernel] pair input=4,19 value=", pair[0], ",", pair[1], " seated=", seated[0], ",", seated[1], " agree=", agree, " handles=", seated[2], " model-executed=0"]));
+    pair;
+   }
+  }
+  def lpr-kernel-text(text) {
+   let n = flp-first-int(text);
+   if (n < 0) then { print_str("[local-plan:kernel] not-run no-integer"); ""; } else lpr-kernel-once(n);
+  }
+  // One integer is dispatched as the kernel token, and kept when the GPU writes the committed value.
+  // Two integers are one launch, kept when both threads match the pair.
+  def lpr-kernel-committed(text) {
+   let n = flp-first-int(text);
+   if (n < 0) then "" else {
+    let kernel = n * 3 + 7;
+    flp-keep-metal(lpr-kernel-once(kernel), (kernel * 3 + 7).str());
+   }
+  }
+  def lpr-kernel-pair-of(text) {
+   let a = flp-first-int(text);
+   let b = flp-second-int(text);
+   if ((a < 0) || (b < 0)) then "" else if (lpr-device-held?() || (((String) lpr-steer-disk() == "tight") || ((String) lpr-steer-memory(flp-kernel-need()) == "tight"))) then "" else {
+    let pair = gpu-lease-turn("affine pair", () => flp-metal-two(a, b));
+    flp-keep-metal(mc-cat([pair[0], ",", pair[1]]), flp-pair-token(text));
+   }
+  }
+  def lpr-steer-metal(text) {
+   if ((String) text == "") then "" else if (flp-second-int(text) >= 0) then lpr-kernel-pair-of(text) else lpr-kernel-committed(text);
+  }
+  // The standing witness keeps its name. A later landing of the same local plan takes a new band and does not rewrite it.
+  def lpr-rename-plan(text, id) {
+   let from = "\"id\": \"live-steer\"";
+   let at = str_find(text, from, 0);
+   at < 0 ? text : mc-cat([substring(text, 0, at), "\"id\": \"", id, "\"", substring(text, at + len(from), len(text))]);
+  }
+  def lpr-fresh-plan(text) = lpr-rename-plan(text, "live-steer-metal");
+  // The local plan already on disk is steered again with the GPU pair of its first two integers. No model is opened.
+  def lpr-metal-steer() {
+   let text = fhn-read(flp-dir() ++ "/live-steer-1794221128012.reply.txt");
+   if nothing?(text) || ((String) trim(text) == "") then { print_str("[local-plan:steer] metal not-run no-reply"); nothing(); } else {
+    let channel = flp-plan-channel(lpr-fresh-plan(text));
+    let metal = lpr-steer-metal(channel);
+    print_str(mc-cat(["[local-plan:steer] metal=", metal, " expected=", flp-pair-token(channel)]));
+    if ((String) metal == "") then nothing() else {
+     let root = flp-dir() ++ "/live-steer-metal";
+     let steered = flp-with-steer(flp-ctx((packet, name, n, lens) => ["answered", "not a plan", 0, 0], ["qwen38-q8"], 1, root ++ "/queue.jsonl", "", root ++ "/scratch", root ++ "/ledger.jsonl", 120000), (question, id) => [channel, 2, 0]);
+     let ctx = flp-with-metal(steered, metal);
+     let walked = flp-after-decline(lpr-steer-req-id("live-steer-metal"), ctx, lpr-steer-earned());
+     print_str(mc-cat(["[local-plan:steer] verify ", walked[0]]));
+     walked;
+    }
+    }
+  }
+  // The reply is already on disk. A new band name lands it. The model stays closed.
+  def lpr-land-reply(id) {
+   let text = fhn-read(mc-cat([flp-dir(), "/", id, ".reply.txt"]));
+   if (nothing?(text) || ((String) trim(text) == "")) then { print_str(mc-cat(["[local-plan:steer] land not-run no-reply id=", id])); nothing(); } else {
+    let channel = flp-plan-channel(lpr-rename-plan(text, id));
+    if (!lpr-steer-safe?(channel)) then { print_str(mc-cat(["[local-plan:steer] land not-run unsafe id=", id])); nothing(); } else {
+     let metal = lpr-steer-metal(channel);
+     print_str(mc-cat(["[local-plan:steer] land metal=", metal, " expected=", flp-kept-token(channel), " device=", lpr-device-held?() ? "held" : "free", " id=", id]));
+     let walked = lpr-steer-verify(["reply-on-disk"], channel, 0, 0, metal, id);
+     let formed = mc-cat([flp-dir(), "/", id, "/scratch/form/form-stdlib/tests/fixtures/local-plan-door-flow.bml"]);
+     let ran = flp-exists?(formed) ? flp-band-run(formed, 120000) : [nothing(), 0, ""];
+     print_str(mc-cat(["[local-plan:formed] reading=", flp-show(ran[0]), " path=", formed]));
+     walked;
+    }
+   }
   }
   def lpr-run() {
    let input = cell_input();
@@ -230,7 +511,7 @@ section [form.bml] {
    let req = lpr-pick(opts, queue);
    let queued = if nothing?(req) then nothing() else flp-request-row(queue, flp-req-id(req));
    let voices = lpr-voices(opts);
-   if nothing?(req) then { print_str(mc-cat(["[local-plan] no request to plan in ", lpr-source(opts), ": none stands open, or each reads parked until what it stands on moves"])); nothing(); } else if fcgp-present?(opts,"reply") then lpr-recheck(req,opts,queue) else if (!nothing?(queued)) then { print_str(mc-cat(["[local-plan] request ", flp-req-id(req), " is already queued as ", flp-text(queued, "id"), " in ", queue, "; a request is planned once, and no model opens"])); queued; } else if nil?(voices) then { print_str("[local-plan] no plan voice has its weights on disk"); nothing(); } else if ((Comparable) lpr-int(opts, "dry", 0) == 1) then { lpr-dry(req, voices, queue); nothing(); } else lpr-walks(req, opts, voices, queue);
+   if fcgp-present?(opts, "ask-gate") then lpr-ask-line(opts) else if fcgp-present?(opts, "two-streams") then lpr-two-streams(opts) else if fcgp-present?(opts, "streams") then lpr-stream-line(opts) else if fcgp-present?(opts, "peers") then lpr-peer-line() else if fcgp-present?(opts, "memory") then lpr-memory-line() else if fcgp-present?(opts, "seat") then lpr-seat-line() else if fcgp-present?(opts, "land") then lpr-land-reply(fcgp-str(opts, "land")) else if fcgp-present?(opts, "metal-steer") then lpr-metal-steer() else if fcgp-present?(opts, "kernel-two") then lpr-kernel-two() else if fcgp-present?(opts, "kernel-text") then lpr-kernel-text(fcgp-str(opts, "kernel-text")) else if fcgp-present?(opts, "kernel") then lpr-kernel-once(lpr-int(opts, "kernel", 19)) else if ((Comparable) lpr-int(opts, "steer", 0) == 1) then lpr-steer-live(opts) else if nothing?(req) then { print_str(mc-cat(["[local-plan] no request to plan in ", lpr-source(opts), ": none stands open, or each reads parked until what it stands on moves"])); nothing(); } else if fcgp-present?(opts,"reply") then lpr-recheck(req,opts,queue) else if (!nothing?(queued)) then { print_str(mc-cat(["[local-plan] request ", flp-req-id(req), " is already queued as ", flp-text(queued, "id"), " in ", queue, "; a request is planned once, and no model opens"])); queued; } else if nil?(voices) then { print_str("[local-plan] no plan voice has its weights on disk"); nothing(); } else if ((Comparable) lpr-int(opts, "dry", 0) == 1) then { lpr-dry(req, voices, queue); nothing(); } else lpr-walks(req, opts, voices, queue);
   }
   def lpr-recheck(req,opts,queue) {
    let ctx=flp-ctx(nothing(),[],0,queue,"",flp-dir() + "/scratch",flp-dir() + "/ledger.jsonl",lpr-int(opts,"deadline_ms",flp-deadline-ms()));
