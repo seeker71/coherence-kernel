@@ -18161,6 +18161,21 @@ static long long fk_rename_exclusive(long long x) {
     return (long long)(-38) * 2;
 #endif
 }
+/* float_leaf 68: (68 [fd op]) -> 0 when flock(fd, op) took what it asked, else the negative errno (a lock another holder keeps,
+ * with LOCK_NB, answers -11 on both hosts: Darwin's EWOULDBLOCK 35 and Linux's EAGAIN 11 are one answer). op is LOCK_SH 1,
+ * LOCK_EX 2, LOCK_NB 4, LOCK_UN 8 and their sums. The directory lock under the memory governor's reservations and the model
+ * admission take their exclusion with this; the hand-assembled syscall image they once called is not admitted on this seed. */
+static long long fk_file_flock(long long x) {
+    long long fd, rest, op, tail;
+    if (!fk_door_pair(x, &fd, &rest) || !fk_door_pair(rest, &op, &tail) || tail != 1) { return fk_nothing; }
+    if ((fd & 1) != 0 || fk_is_str(fd) || (op & 1) != 0 || fk_is_str(op)) { return fk_nothing; }
+    long long d = fd >> 1, o = op >> 1;
+    if (d < 0 || d > 1048576 || o < 1 || o > 15) { return fk_nothing; }
+    if (flock((int)d, (int)o) == 0) { return 0; }
+    int e = errno;
+    if (e == EWOULDBLOCK || e == EAGAIN) { e = 11; }
+    return (long long)(-e) * 2;
+}
 /* float_leaf 60: scoped file leases -- the descriptor owner under the Form storage recipes (native-posix.bml), which
  * do every read, write, frame and publication on the returned descriptor.
  *   ("open" path writing)         a private journal lease: the caller's own 0600 regular file, held under a
@@ -20405,6 +20420,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
          * built (which names the objects of its warm packs), else its executable's identity */
         if ((fm201 >> 1) == 66) { return fk_sbuf(fk_fkb_builder_id, fk_cstrlen(fk_fkb_builder_id)); }
         if ((fm201 >> 1) == 67) { return fk_rename_exclusive(fx201); }
+        if ((fm201 >> 1) == 68) { return fk_file_flock(fx201); }
         /* The Form cell frame takes root identity with its argument when residency leaves the seed. */
         if ((fm201 >> 1) == 55) {
             const char *root55 = fk_cell_root_path != 0 ? fk_cell_root_path : fk_src_root_path;
