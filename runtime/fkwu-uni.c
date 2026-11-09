@@ -31519,7 +31519,8 @@ static int fk_store_path(char *out, const char *a, const char *b, int make) {
     long long n;
     if (fk_store_mode() == 0) return 0;   /* FKWU_CACHE=off: no host store is read or written */
     if (fk_store_mode() < 2) make = 0;    /* =ro: the stores are read, never made */
-    if (!home || home[0] != '/' || (n = fk_path_len(home)) + 128 >= FK_PATH_CAP) return 0;
+    /* room left for the longest name a store directory holds (255 bytes) and a temporary's suffix, under every buffer built from this root */
+    if (!home || home[0] != '/' || (n = fk_path_len(home)) + 600 >= FK_PATH_CAP) return 0;
     memcpy(out, home, (unsigned long)n); out[n] = 0;
     for (int k = 0; k < 4; k++) {
         if (!parts[k]) continue;
