@@ -776,6 +776,17 @@ plainly once, and give the conversation your attention.
    own checks is removed and rebuilt. Bytes that cross from another host answer
    to a SHA-256 first.
 
+   The caches are measured and bounded. Every run that touches them appends one
+   line to `$HOME/.cache/fkwu/ledger` (served from beside the unit, from the
+   store, or built; bytes read and built), a run that built something sweeps the
+   stores to 85 percent of their budget least recently used first (a twentieth of
+   the free space plus what they hold, within 256 MiB and 16 GiB; or
+   `FKWU_CACHE_BUDGET_MB`), and `./fkwu observe/cache-run.bml` reads it all:
+   entries and bytes per layer against the budget, the hit rate, what was swept.
+   `FKWU_CACHE=off` reads and writes no host store (the cold baseline a
+   verification compares against), `=ro` reads without writing, and
+   `FKWU_CACHE_REPORT=1` makes a run say what it served and built.
+
    Preflight distinguishes an undefined name, a missing prelude and a kernel
    lane seam. Repair the named cause in the same context, then re-observe.
    `; preflight-exec: forbidden` (or `//` in BML) preserves effectful cells for

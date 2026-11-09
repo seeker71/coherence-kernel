@@ -1,0 +1,129 @@
+// cache-run.bml — what the host-wide caches hold, how they have been used and whether they stand within their budget.
+//
+//   ./fkwu observe/cache-run.bml </dev/null
+//
+// Reads, never writes. The stores live under $HOME/.cache/fkwu (FKWU_CACHE_ROOT names another root to read):
+//   bin/<seed version>/fkwu      kernel versions (a checkout's ./fkwu is a clone of one)
+//   fkb/<identity>.fkb|.sym|.cell.fkb   compiled images
+//   lowfk/<unit key>/<seal>      lowering packets
+//   ledger                       one line per run that touched a cache: R <t> <pid> <kernel> then lowerings, images and cells
+//                                as local/store/built, then bytes read and bytes built; E <t> <pid> <entries> <bytes> a sweep
+// The budget is FKWU_CACHE_BUDGET_MB, else the MiB in <root>/budget, else a twentieth of the volume's free space plus what the
+// stores hold, kept within 256 MiB and 16 GiB. A run that built something sweeps the stores down to 85 percent of it, least
+// recently used first (fkwu-uni.c fk_cache_sweep). FKWU_CACHE=off|ro|rw picks whether a run uses the stores at all, and
+// FKWU_CACHE_REPORT=1 makes a run say what it served and built. FKWU_CACHE_LEGACY=<checkout> also weighs the per-checkout
+// .fkb .sym .lowfk files that the stores make redundant. A cold run costs its bytes divided by the disk's bandwidth and nothing
+// more: the ledger's "built" column is what was compiled instead of read, and a healthy host shows it near zero after the first run.
+// stdout: lines headed `[cache]`; the last says `within` or `OVER`.
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/bml/host-fs.bml form-stdlib/bml/string-join.bml
+import form-stdlib/core.fk;
+import form-stdlib/line-grammar.fk;
+import form-stdlib/bml/host-fs.bml;
+import form-stdlib/bml/string-join.bml;
+section [form.bml] {
+ class CacheRun {
+  def cr-mib() = 1048576;
+  def cr-say(t) = print_str("[cache] " ++ t);
+  def cr-pad(s, n) = len(s) >= n ? s : cr-pad(s ++ " ", n);
+  def cr-mib-text(b) = (b * 10 / cr-mib() / 10).str() ++ "." ++ (b * 10 / cr-mib() % 10).str() ++ " MiB";
+  def cr-int(s) = cr-int-go(s, 0, 0);
+  def cr-int-go(s, i, acc) = i >= len(s) ? acc : (str_byte_at(s, i) >= 48 && str_byte_at(s, i) <= 57) ? cr-int-go(s, i + 1, acc * 10 + (str_byte_at(s, i) - 48)) : acc;
+  def cr-ends?(s, suf) = len(s) >= len(suf) && (String) substring(s, len(s) - len(suf), len(s)) == suf;
+  def cr-sum(xs) = foldl((a, x) => a + x, 0, xs);
+  def cr-names(dir) = fs_list(dir) ?? [];
+  def cr-root() = (String) (host_getenv("FKWU_CACHE_ROOT") ?? ((host_getenv("HOME") ?? "") ++ "/.cache/fkwu"));
+  def cr-size(path) {
+   let id = hfs-identity(path);
+   (String) value_kind(id) == "list" ? id[0] : 0;
+  }
+  // ── the three layers ────────────────────────────────────────────────────────────────────────────────────────────
+  def cr-bin(root) {
+   let d = root ++ "/bin";
+   let vs = filter(n => len(n) == 16, cr-names(d));
+   let bytes = cr-sum(map(n => cr-size(d ++ "/" ++ n ++ "/fkwu"), vs));
+   let said = cr-say(cr-pad("layer bin", 12) ++ "versions " ++ len(vs).str() ++ "  bytes " ++ cr-mib-text(bytes) ++ "  keeps the 16 most recently used");
+   0;
+  }
+  // [bytes] of the image store
+  def cr-fkb(root) {
+   let d = root ++ "/fkb";
+   let names = cr-names(d);
+   let cells = filter(n => cr-ends?(n, ".cell.fkb"), names);
+   let images = filter(n => cr-ends?(n, ".fkb") && !cr-ends?(n, ".cell.fkb"), names);
+   let syms = filter(n => cr-ends?(n, ".sym"), names);
+   let bytes = cr-sum(map(n => cr-size(d ++ "/" ++ n), names));
+   let said = cr-say(cr-pad("layer fkb", 12) ++ "entries " ++ len(images).str() ++ " images, " ++ len(syms).str() ++ " symbol lenses, " ++ len(cells).str() ++ " cell images  bytes " ++ cr-mib-text(bytes));
+   bytes;
+  }
+  def cr-low-unit(d, u) = cr-sum(map(n => cr-size(d ++ "/" ++ u ++ "/" ++ n), filter(n => len(n) == 16, cr-names(d ++ "/" ++ u))));
+  def cr-low-count(d, u) = len(filter(n => len(n) == 16, cr-names(d ++ "/" ++ u)));
+  def cr-lowfk(root) {
+   let d = root ++ "/lowfk";
+   let units = filter(n => len(n) == 16, cr-names(d));
+   let packets = cr-sum(map(u => cr-low-count(d, u), units));
+   let bytes = cr-sum(map(u => cr-low-unit(d, u), units));
+   let said = cr-say(cr-pad("layer lowfk", 12) ++ "units " ++ len(units).str() ++ ", packets " ++ packets.str() ++ "  bytes " ++ cr-mib-text(bytes));
+   bytes;
+  }
+  // ── the budget ──────────────────────────────────────────────────────────────────────────────────────────────────
+  def cr-clamp(b) = b < 256 * cr-mib() ? 256 * cr-mib() : b > 16384 * cr-mib() ? 16384 * cr-mib() : b;
+  def cr-budget(root, used) {
+   let env = cr-int(host_getenv("FKWU_CACHE_BUDGET_MB") ?? "");
+   let file = cr-int(read_file(root ++ "/budget") ?? "");
+   let v = host_volume(root);
+   let derived = (String) value_kind(v) == "list" ? (v[2] + used) / 20 : 8192 * cr-mib();
+   env > 0 ? env * cr-mib() : file > 0 ? file * cr-mib() : cr-clamp(derived);
+  }
+  // ── the ledger ──────────────────────────────────────────────────────────────────────────────────────────────────
+  def cr-fields(line) = filter(f => len(f) > 0, split-on(line, " "));
+  def cr-rows(root, kind) = map(l => cr-fields(l), filter(l => len(l) > 0 && str_byte_at(l, 0) == kind, split-on(read_file(root ++ "/ledger") ?? "", "\n")));
+  def cr-col(rows, i) = cr-sum(map(r => len(r) > i ? cr-int(r[i]) : 0, rows));
+  def cr-pct(served, built) = served + built == 0 ? "n/a" : (served * 100 / (served + built)).str() ++ "%";
+  def cr-ledger(root) {
+   let runs = cr-rows(root, 82);
+   let sweeps = cr-rows(root, 69);
+   let said = len(runs) == 0 ? cr-say("ledger      no run has been recorded yet (it fills as runs touch the caches)") : {
+    let low = [cr-col(runs, 4), cr-col(runs, 5), cr-col(runs, 6)];
+    let img = [cr-col(runs, 7), cr-col(runs, 8), cr-col(runs, 9)];
+    let cell = [cr-col(runs, 10), cr-col(runs, 11), cr-col(runs, 12)];
+    let read = cr-col(runs, 13);
+    let built = cr-col(runs, 14);
+    let first = cr-int(runs[0][1]);
+    let last = cr-int(runs[len(runs) - 1][1]);
+    let s1 = cr-say(cr-pad("ledger", 12) ++ "runs " ++ len(runs).str() ++ " over " ++ ((last - first) / 3600).str() ++ " h  read " ++ cr-mib-text(read) ++ "  built " ++ cr-mib-text(built));
+    let s2 = cr-say(cr-pad("  lowerings", 12) ++ "local " ++ low[0].str() ++ "  store " ++ low[1].str() ++ "  built " ++ low[2].str() ++ "  served " ++ cr-pct(low[0] + low[1], low[2]));
+    let s3 = cr-say(cr-pad("  images", 12) ++ "local " ++ img[0].str() ++ "  store " ++ img[1].str() ++ "  built " ++ img[2].str() ++ "  served " ++ cr-pct(img[0] + img[1], img[2]));
+    let s4 = cr-say(cr-pad("  cells", 12) ++ "local " ++ cell[0].str() ++ "  store " ++ cell[1].str() ++ "  built " ++ cell[2].str() ++ "  served " ++ cr-pct(cell[0] + cell[1], cell[2]));
+    0;
+   };
+   let swept = len(sweeps) == 0 ? 0 : cr-say(cr-pad("  sweeps", 12) ++ len(sweeps).str() ++ ", evicting " ++ cr-col(sweeps, 3).str() ++ " entries, " ++ cr-mib-text(cr-col(sweeps, 4)));
+   0;
+  }
+  // ── the per-checkout caches the stores make redundant ───────────────────────────────────────────────────────────
+  def cr-cache-name?(n) = cr-ends?(n, ".fkb") || cr-ends?(n, ".sym") || cr-ends?(n, ".lowfk") || str_find(n, ".lowfk.s", 0) >= 0;
+  def cr-skip?(n) = (String) n == ".git" || (String) n == "node_modules";
+  def cr-legacy-go(dir, depth) {
+   let names = filter(n => !cr-skip?(n), cr-names(dir));
+   let here = cr-sum(map(n => cr-cache-name?(n) ? cr-size(dir ++ "/" ++ n) : 0, names));
+   let below = depth >= 6 ? 0 : cr-sum(map(n => (Comparable) host_path_is_dir(dir ++ "/" ++ n) == 1 ? cr-legacy-go(dir ++ "/" ++ n, depth + 1) : 0, names));
+   here + below;
+  }
+  def cr-legacy() {
+   let dir = host_getenv("FKWU_CACHE_LEGACY") ?? "";
+   len(dir) == 0 ? 0 : cr-say(cr-pad("legacy", 12) ++ dir ++ ": " ++ cr-mib-text(cr-legacy-go(dir, 0)) ++ " of per-checkout .fkb/.sym/.lowfk (a store entry makes its copy redundant)");
+  }
+  def cr-main() {
+   let root = cr-root();
+   let a = cr-bin(root);
+   let fkb = cr-fkb(root);
+   let low = cr-lowfk(root);
+   let ledger = cr-ledger(root);
+   let legacy = cr-legacy();
+   let used = fkb + low;
+   let budget = cr-budget(root, used);
+   cr-say(cr-pad("budget", 12) ++ "images and lowerings " ++ cr-mib-text(used) ++ " of " ++ cr-mib-text(budget) ++ (used <= budget ? "  within" : "  OVER"));
+  }
+ }
+ cr-main();
+}

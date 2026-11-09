@@ -417,6 +417,13 @@ static long long fk_gpu_busy_total_us; /* host GPU busy microseconds integrated 
 static long long fk_gpu_busy_last_us;  /* monotonic clock at the last fresh level read (the integration step) */
 static long long fk_gpu_level_cache = -1; /* the last level read; the utilization the accelerator answers is the mean since the previous query by ANY process, so a second read within the window would read 0 */
 static const char *fk_self_path = "./fkwu";
+/* The cache's account of this run: what was served from beside the unit (local), from the host store (store) and what
+ * had to be built, per layer, and the bytes read and built. One line of it is appended to the host ledger at exit, and
+ * spoken on stderr when FKWU_CACHE_REPORT is set (fk_cache_flush). Counting is an integer increment; nothing here costs
+ * a syscall on the read path. */
+enum { FK_CS_LOW_LOCAL, FK_CS_LOW_STORE, FK_CS_LOW_BUILT, FK_CS_IMG_LOCAL, FK_CS_IMG_STORE, FK_CS_IMG_BUILT,
+       FK_CS_CELL_LOCAL, FK_CS_CELL_STORE, FK_CS_CELL_BUILT, FK_CS_READ_BYTES, FK_CS_BUILT_BYTES, FK_CS_N };
+static long long fk_cs[FK_CS_N];
 static int fk_seed_state = 2;   /* kernel_stat 90: does this process run the version its checkout's seed names (fk_seed_alias) */
 static long long fk_host_gpu_utilization(void); /* the optional Metal carrier answers after dynamic admission; absent answers -1 */
 /* the host's own statistics and processes, no shell between: Mach VM/CPU/load, libproc, IOKit (carrier), fork+execvp on an argv */
@@ -27252,6 +27259,8 @@ static void fk_fkb_builder_admit(void) {
 static const char *fk_src_path_id(const char *path, char *out);
 static int fk_store_path(char *out, const char *a, const char *b, int make);
 static char *fk_store_read(const char *path, long long *out_len);
+static void fk_store_touch(const char *path);
+static int fk_store_mode(void);
 static unsigned long long fk_store_seq;
 static int fk_fkb_store_name(const char *src_path, const char *source_hash, const char *ext, char *out, int make) {
     char canon[FK_PATH_CAP], dir[FK_PATH_CAP];
@@ -27293,7 +27302,7 @@ static void fk_fkb_store_put(const char *src_path, const char *source_hash, cons
     char stored[FK_PATH_CAP + 64];
     /* an image that carries compile errors or is unrunnable is a local diagnostic, never a store entry: another checkout
      * would be served the refusal instead of finding the real one */
-    if (fk_nerr > 0 || fk_nerr_seen > 0 || fk_src_truncated || fk_src_unrunnable) return;
+    if (fk_nerr > 0 || fk_nerr_seen > 0 || fk_src_truncated || fk_src_unrunnable || fk_store_mode() < 2) return;
     if (!fk_fkb_store_name(src_path, source_hash, ".fkb", stored, 1) || fk_path_size_raw(stored) >= 0) return;
     if (fk_path_size_raw(sym_path) >= 0 && fk_fkb_store_name(src_path, source_hash, ".sym", stored, 0))
         fk_fkb_store_clone(sym_path, stored);
@@ -27447,6 +27456,7 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
     }
     if (!publication.released) fk_diag_path("cache-failure", fkb_path, publication.reason);
     if (src_path && source_hash && source_hash[0]) fk_fkb_store_put(src_path, source_hash, fkb_path, sym_path);
+    fk_cs[FK_CS_IMG_BUILT]++; fk_cs[FK_CS_BUILT_BYTES] += image_bytes;
     *written_bytes = image_bytes;
     *written_checksum = checksum;
     return 1;
@@ -27543,6 +27553,8 @@ static int fk_fkb_open_checked(const char *path, const char *source, const char 
     int fd = open(path, O_RDONLY
 #if defined(_WIN32)
         | 0x8000
+#else
+        | O_NONBLOCK   /* a FIFO named like an image answers at once (and is refused below) instead of waiting for a writer */
 #endif
     );
     if (fd < 0) {
@@ -27551,7 +27563,7 @@ static int fk_fkb_open_checked(const char *path, const char *source, const char 
     }
 #ifdef FK_HAVE_STAT_HEADER
     struct stat state;
-    if (fstat(fd, &state) != 0 || state.st_size < 0) {
+    if (fstat(fd, &state) != 0 || state.st_size < 0 || !S_ISREG(state.st_mode) || state.st_size > (1LL << 31)) {
         int closed = close(fd);
         fk_fkb_mark_bad(closed == 0 ? "opened image metadata could not be read" :
             "image metadata and descriptor release failed"); return 0;
@@ -28612,7 +28624,10 @@ static int fk_src_load_fkb_checked_here(const char *fkb_path, const char *expect
  * would be. When the store holds none either, the first refusal stands as the answer. */
 static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_src_path,
                                    const char *expected_source_hash) {
-    if (fk_src_load_fkb_checked_here(fkb_path, expected_src_path, expected_source_hash)) return 1;
+    if (fk_src_load_fkb_checked_here(fkb_path, expected_src_path, expected_source_hash)) {
+        fk_cs[FK_CS_IMG_LOCAL]++; fk_cs[FK_CS_READ_BYTES] += fk_fkb_len;
+        return 1;
+    }
     char stored[FK_PATH_CAP + 64];
     if (!expected_src_path || !expected_source_hash ||
         !fk_fkb_store_name(expected_src_path, expected_source_hash, ".fkb", stored, 0) ||
@@ -28626,6 +28641,8 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
         unlink(stored);
         unlink(fkb_path);
     } else if (cloned) {
+        fk_cs[FK_CS_IMG_STORE]++; fk_cs[FK_CS_READ_BYTES] += fk_fkb_len;
+        fk_store_touch(stored);   /* retention follows use */
         /* the symbol lens beside it, when the store holds one: <image without .fkb>.sym, as the writer names it */
         char sym[FK_PATH_CAP + 64], sym_path[FK_PATH_CAP + 8];
         long long fn = fk_path_len(fkb_path);
@@ -30252,13 +30269,15 @@ FK_PHASED(FK_PHASE_LOAD, int, fk_cell_load, (const char *path, long long *root_o
     int image_loaded = 0;
     if (!fk_cell_image_busy && identified && fk_cell_image_path(path, image_path)) {
         char stored[FK_PATH_CAP + 64];
-        int here = fk_fkb_open_checked(image_path, path, identity);
+        int here = fk_fkb_open_checked(image_path, path, identity), from_store = 0;
         if (!here && fk_fkb_store_name(path, identity, ".cell.fkb", stored, 0) && fk_path_size_raw(stored) >= 0 &&
             fk_fkb_store_clone(stored, image_path)) {
             here = fk_fkb_open_checked(image_path, path, identity);
             if (!here) { unlink(stored); unlink(image_path); }   /* damaged: it leaves the store, the rebuild replaces it */
+            else { from_store = 1; fk_store_touch(stored); }
         }
         if (here) {
+            fk_cs[from_store ? FK_CS_CELL_STORE : FK_CS_CELL_LOCAL]++; fk_cs[FK_CS_READ_BYTES] += fk_fkb_len;
             fk_fkb_snapshot snapshot = {0}; fk_fkb_snapshot_take(&snapshot);
             fk_cell_import_root = *root_out; fk_cell_import_fresh = d0;
             image_loaded = fk_src_import_fkb_image(image_path, &snapshot);
@@ -30363,9 +30382,10 @@ static int fk_cell_image_prepare(const char *path, long long root, long long *pu
     fk_admission_image_note(a, image, 0, 0, 0);
     a->publication = 1;
     fk_sig_heal_settle(image);
+    fk_cs[FK_CS_CELL_BUILT]++;
     {
         char stored[FK_PATH_CAP + 64];
-        if (fk_fkb_store_name(path, a->hash, ".cell.fkb", stored, 1) && fk_path_size_raw(stored) < 0)
+        if (fk_store_mode() == 2 && fk_fkb_store_name(path, a->hash, ".cell.fkb", stored, 1) && fk_path_size_raw(stored) < 0)
             fk_fkb_store_clone(image, stored);
     }
     return 1;
@@ -31422,6 +31442,8 @@ static int fk_store_path(char *out, const char *a, const char *b, int make) {
     const char *home = getenv("HOME");
     const char *parts[4] = {".cache", "fkwu", a, b};
     long long n;
+    if (fk_store_mode() == 0) return 0;   /* FKWU_CACHE=off: no host store is read or written */
+    if (fk_store_mode() < 2) make = 0;    /* =ro: the stores are read, never made */
     if (!home || home[0] != '/' || (n = fk_path_len(home)) + 128 >= FK_PATH_CAP) return 0;
     memcpy(out, home, (unsigned long)n); out[n] = 0;
     for (int k = 0; k < 4; k++) {
@@ -31630,6 +31652,7 @@ static char *fk_bml_packet_port(const char *packet, long long n, int dir, const 
  * FK_BML_STORE_KEEP most recently used lowerings (checkouts at different points of the tree, and kernels of different
  * builds, each find theirs); a lowering already held is not written twice. */
 static void fk_bml_store_put(const char *path, const char *packet, long long n) {
+    if (fk_store_mode() < 2) return;
     char dir[FK_PATH_CAP], file[FK_PATH_CAP + 64], temporary[FK_PATH_CAP + 96], footer[32], oldest[FK_PATH_CAP + 64], base[FK_PATH_CAP + 4];
     long long pn = 0;
     char *port = fk_bml_packet_port(packet, n, 0, path, &pn);
@@ -31717,6 +31740,235 @@ static char *fk_bml_store_get(const char *path, long long *out_len) {
     }
     closedir(d);
     return body;
+}
+extern int flock(int, int);
+/* ── The cache's mode, its account and its budget ──
+ * FKWU_CACHE=off reads and writes no host store (everything is local and cold: the baseline a verification compares
+ * against); =ro reads the stores and writes none; anything else, or nothing, is rw. The account of a run (fk_cs, above)
+ * is appended at exit as ONE line to $HOME/.cache/fkwu/ledger (an O_APPEND write of under 512 bytes: whole under
+ * concurrency, 480,000 lines from 8 processes measured intact), and spoken on stderr when FKWU_CACHE_REPORT is set. The
+ * ledger is metadata only: lose it and nothing the stores serve changes. A run that built something may then sweep the
+ * stores: at most once in ten minutes, under a lock nobody waits for, the least recently used entries leave until the
+ * stores stand at 85 percent of their budget. The budget is a twentieth of the free space plus what the stores hold,
+ * kept within 256 MiB and 16 GiB, or FKWU_CACHE_BUDGET_MB, or the MiB in $HOME/.cache/fkwu/budget. Retention follows
+ * use: a store hit touches its entry (fk_store_touch). Reads never wait on any of this. */
+static int fk_store_mode_v = -1;
+static int fk_store_mode(void) {
+    if (fk_store_mode_v < 0) {
+        const char *e = getenv("FKWU_CACHE");
+        fk_store_mode_v = e && e[0] == 'o' && e[1] == 'f' && e[2] == 'f' && e[3] == 0 ? 0 : e && e[0] == 'r' && e[1] == 'o' && e[2] == 0 ? 1 : 2;
+    }
+    return fk_store_mode_v;
+}
+static void fk_store_touch(const char *path) {
+    struct timespec now[2];
+    if (clock_gettime(CLOCK_REALTIME, &now[0]) == 0) { now[1] = now[0]; utimensat(FK_AT_FDCWD, path, now, 0); }
+}
+static long long fk_cache_parse_uint(const char *s) {
+    long long v = 0;
+    if (!s || s[0] < '0' || s[0] > '9') return 0;
+    for (long long i = 0; s[i] >= '0' && s[i] <= '9' && i < 15; i++) v = v * 10 + (s[i] - '0');
+    return v;
+}
+/* the bytes available to this user on the volume holding dir (the Darwin statfs prefix / the LP64 statvfs prefix, as host_volume reads them) */
+static long long fk_cache_free_bytes(const char *dir) {
+#if defined(_WIN32)
+    (void)dir; return 0;
+#else
+    unsigned char raw[2168];
+    unsigned long long scale, avail;
+    memset(raw, 0, sizeof(raw));
+#if defined(__APPLE__)
+    extern int statfs(const char *, void *);
+    if (statfs(dir, raw) != 0) return 0;
+    scale = (unsigned long long)raw[0] | ((unsigned long long)raw[1] << 8) | ((unsigned long long)raw[2] << 16) | ((unsigned long long)raw[3] << 24);
+    memcpy(&avail, raw + 24, 8);
+#else
+    extern int statvfs(const char *, void *);
+    if (statvfs(dir, raw) != 0) return 0;
+    memcpy(&scale, raw + 8, 8);
+    memcpy(&avail, raw + 32, 8);
+#endif
+    if (scale == 0 || avail > 0x7fffffffffffffffULL / scale) return 0;
+    return (long long)(avail * scale);
+#endif
+}
+static long long fk_cache_budget(const char *root, long long used) {
+    const char *e = getenv("FKWU_CACHE_BUDGET_MB");
+    long long mb = e ? fk_cache_parse_uint(e) : 0;
+    if (mb > 0) return mb << 20;
+    char file[FK_PATH_CAP + 16];
+    sprintf(file, "%s/budget", root);
+    long long n = 0;
+    char *text = fk_store_read(file, &n);
+    if (text) { mb = fk_cache_parse_uint(text); free(text); if (mb > 0) return mb << 20; }
+    long long free_bytes = fk_cache_free_bytes(root);
+    long long b = free_bytes > 0 ? (free_bytes + used) / 20 : (8LL << 30);
+    if (b < (256LL << 20)) b = 256LL << 20;
+    if (b > (16LL << 30)) b = 16LL << 30;
+    return b;
+}
+typedef struct { long long mtime, bytes; char path[3][FK_PATH_CAP + 64]; int files, low; } fk_gc_entry;
+static fk_gc_entry *fk_gc_list;
+static long long fk_gc_n, fk_gc_cap;
+static fk_gc_entry *fk_gc_add(long long mtime) {
+    if (fk_gc_n == fk_gc_cap) {
+        long long nc = fk_gc_cap ? fk_gc_cap * 2 : 1024;
+        fk_gc_entry *grown = realloc(fk_gc_list, (unsigned long)nc * sizeof(fk_gc_entry));
+        if (!grown) return 0;
+        fk_gc_list = grown; fk_gc_cap = nc;
+    }
+    fk_gc_entry *e = &fk_gc_list[fk_gc_n++];
+    e->mtime = mtime; e->bytes = 0; e->files = 0; e->low = 0;
+    return e;
+}
+static void fk_gc_file(fk_gc_entry *e, const char *path) {
+    struct stat st;
+    if (e->files < 3 && lstat(path, &st) == 0 && S_ISREG(st.st_mode)) {
+        sprintf(e->path[e->files++], "%s", path);
+        e->bytes += (long long)st.st_size;
+    }
+}
+extern void qsort(void *, unsigned long, unsigned long, int (*)(const void *, const void *));
+static int fk_gc_older(const void *a, const void *b) {
+    long long x = ((const fk_gc_entry *)a)->mtime, y = ((const fk_gc_entry *)b)->mtime;
+    return x < y ? -1 : x > y;
+}
+/* the stores' entries: an image entry is <key>.fkb with its <key>.sym (a cell image is <key>.cell.fkb alone); a lowering entry is one packet */
+static long long fk_gc_collect(const char *root) {
+    char dir[FK_PATH_CAP + 16], sub[FK_PATH_CAP + 64], path[FK_PATH_CAP + 96];
+    long long total = 0;
+    struct dirent *e;
+    struct stat st;
+    fk_gc_n = 0;
+    sprintf(dir, "%s/fkb", root);
+    DIR *d = opendir(dir);
+    if (d) {
+        while ((e = readdir(d)) != 0) {
+            long long n = fk_cstrlen(e->d_name);
+            if (n < 20 || e->d_name[0] == '.' || memcmp(e->d_name + n - 4, ".fkb", 4) != 0) continue;
+            sprintf(path, "%s/%s", dir, e->d_name);
+            if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+            fk_gc_entry *g = fk_gc_add((long long)st.st_mtime);
+            if (!g) break;
+            fk_gc_file(g, path);
+            sprintf(path, "%s/%.*s.sym", dir, (int)(n - 4), e->d_name);
+            fk_gc_file(g, path);
+            total += g->bytes;
+        }
+        closedir(d);
+    }
+    sprintf(dir, "%s/lowfk", root);
+    d = opendir(dir);
+    if (d) {
+        struct dirent *u;
+        while ((u = readdir(d)) != 0) {
+            if (u->d_name[0] == '.' || fk_cstrlen(u->d_name) != 16) continue;
+            sprintf(sub, "%s/%s", dir, u->d_name);
+            DIR *ud = opendir(sub);
+            if (!ud) continue;
+            while ((e = readdir(ud)) != 0) {
+                if (e->d_name[0] == '.' || fk_cstrlen(e->d_name) != 16) continue;
+                sprintf(path, "%s/%s", sub, e->d_name);
+                if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+                fk_gc_entry *g = fk_gc_add((long long)st.st_mtime);
+                if (!g) break;
+                g->low = 1;
+                fk_gc_file(g, path);
+                total += g->bytes;
+            }
+            closedir(ud);
+        }
+        closedir(d);
+    }
+    return total;
+}
+/* sweep the stores down to 85 percent of the budget, oldest use first; answers the bytes freed */
+static long long fk_cache_sweep(const char *root, long long *evicted) {
+    long long used = fk_gc_collect(root), freed = 0, now = 0;
+    struct timespec clock;
+    *evicted = 0;
+    long long budget = fk_cache_budget(root, used);
+    if (used <= budget) { free(fk_gc_list); fk_gc_list = 0; fk_gc_n = fk_gc_cap = 0; return 0; }
+    if (clock_gettime(CLOCK_REALTIME, &clock) == 0) now = (long long)clock.tv_sec;
+    qsort(fk_gc_list, (unsigned long)fk_gc_n, sizeof(fk_gc_entry), fk_gc_older);
+    long long target = budget / 100 * 85;
+    for (long long i = 0; i < fk_gc_n && used - freed > target; i++) {
+        fk_gc_entry *g = &fk_gc_list[i];
+        if (now - g->mtime < 60) continue;   /* what this very minute wrote or used is not a candidate */
+        for (int k = 0; k < g->files; k++) unlink(g->path[k]);
+        if (g->low && g->files > 0) {   /* a lowering unit left empty leaves too (rmdir answers no on a directory that still holds packets) */
+            char parent[FK_PATH_CAP + 64];
+            sprintf(parent, "%s", g->path[0]);
+            long long p = fk_path_len(parent) - 1;
+            while (p > 0 && parent[p] != '/') p--;
+            if (p > 0) { parent[p] = 0; rmdir(parent); }
+        }
+        freed += g->bytes;
+        (*evicted)++;
+    }
+    free(fk_gc_list); fk_gc_list = 0; fk_gc_n = fk_gc_cap = 0;
+    return freed;
+}
+static void fk_cache_ledger(const char *root, const char *line, int n) {
+    char file[FK_PATH_CAP + 16];
+    struct stat st;
+    sprintf(file, "%s/ledger", root);
+    if (lstat(file, &st) == 0 && st.st_size > (4LL << 20)) {   /* one generation kept */
+        char old[FK_PATH_CAP + 24];
+        sprintf(old, "%s/ledger.1", root);
+        rename(file, old);
+    }
+    int fd = open(file, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW, 0600);
+    if (fd < 0) return;
+    write(fd, line, (unsigned long)n);   /* one write: whole under concurrency */
+    close(fd);
+}
+static void fk_cache_flush(void) {
+    long long any = 0;
+    for (int i = 0; i < FK_CS_N; i++) any |= fk_cs[i];
+    if (!any) return;
+    char line[640], root[FK_PATH_CAP], stamp[FK_PATH_CAP + 24];
+    struct timespec clock;
+    long long t = clock_gettime(CLOCK_REALTIME, &clock) == 0 ? (long long)clock.tv_sec : 0;
+    const char *rep = getenv("FKWU_CACHE_REPORT");
+    if (rep && rep[0]) {
+        int n = sprintf(line, "fkwu cache: lowerings local %lld store %lld built %lld | images local %lld store %lld built %lld | cells local %lld store %lld built %lld | read %lld KiB, built %lld KiB\n",
+            fk_cs[FK_CS_LOW_LOCAL], fk_cs[FK_CS_LOW_STORE], fk_cs[FK_CS_LOW_BUILT], fk_cs[FK_CS_IMG_LOCAL], fk_cs[FK_CS_IMG_STORE], fk_cs[FK_CS_IMG_BUILT],
+            fk_cs[FK_CS_CELL_LOCAL], fk_cs[FK_CS_CELL_STORE], fk_cs[FK_CS_CELL_BUILT], fk_cs[FK_CS_READ_BYTES] >> 10, fk_cs[FK_CS_BUILT_BYTES] >> 10);
+        write(2, line, (unsigned long)n);
+    }
+    if (fk_store_mode() == 0 || !fk_store_path(root, 0, 0, 0)) return;
+    /* R <t> <pid> <builder> <low l s b> <img l s b> <cell l s b> <read bytes> <built bytes> *<check> */
+    int n = sprintf(line, "R %lld %d %016llx %lld %lld %lld %lld %lld %lld %lld %lld %lld %lld %lld", t, (int)getpid(), fk_builder_key(),
+        fk_cs[FK_CS_LOW_LOCAL], fk_cs[FK_CS_LOW_STORE], fk_cs[FK_CS_LOW_BUILT], fk_cs[FK_CS_IMG_LOCAL], fk_cs[FK_CS_IMG_STORE], fk_cs[FK_CS_IMG_BUILT],
+        fk_cs[FK_CS_CELL_LOCAL], fk_cs[FK_CS_CELL_STORE], fk_cs[FK_CS_CELL_BUILT], fk_cs[FK_CS_READ_BYTES], fk_cs[FK_CS_BUILT_BYTES]);
+    n += sprintf(line + n, " *%08x\n", (unsigned int)(fk_bytes_fnv1a(line, n) & 0xffffffffULL));
+    fk_cache_ledger(root, line, n);
+    if (fk_store_mode() < 2 || fk_cs[FK_CS_LOW_BUILT] + fk_cs[FK_CS_IMG_BUILT] + fk_cs[FK_CS_CELL_BUILT] == 0) return;
+    /* a run that built something may sweep: once in ten minutes, under a lock nobody waits for */
+    struct stat st;
+    sprintf(stamp, "%s/gc.stamp", root);
+    if (lstat(stamp, &st) == 0 && t - (long long)st.st_mtime < 600) return;
+    char lock[FK_PATH_CAP + 24];
+    sprintf(lock, "%s/gc.lock", root);
+    int fd = open(lock, O_RDWR | O_CREAT | O_NOFOLLOW, 0600);
+    if (fd < 0) return;
+    if (flock(fd, 2 | 4 /* LOCK_EX | LOCK_NB */) == 0) {
+        long long evicted = 0, freed = fk_cache_sweep(root, &evicted);
+        int sfd = open(stamp, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
+        if (sfd >= 0) close(sfd);
+        if (evicted > 0) {
+            int en = sprintf(line, "E %lld %d %lld %lld\n", t, (int)getpid(), evicted, freed);
+            fk_cache_ledger(root, line, en);
+        }
+    }
+    close(fd);
+}
+static void fk_cache_arm(void) {
+#if !defined(_WIN32)
+    atexit(fk_cache_flush);
+#endif
 }
 static void fk_bml_bootstrap(const char *first);
 static void fk_bml_need_add(const char *path) {
@@ -31863,6 +32115,7 @@ static char *fk_bml_memo_read(const char *bml_path, long long *out_len, char *wh
                 body = fk_bml_packet_body(bml_path, packet, n - 25, out_len, moved, !fk_bml_trusts(memo, seal));
                 if (!body && why) sprintf(why, "%s", moved[0] ? moved : "it names another unit, working directory or home");
                 if (body && fk_bml_scanning) fk_bml_seen_add(memo, seal);
+                if (body) fk_cs[FK_CS_LOW_LOCAL]++;
                 /* a lowering this checkout holds that the store has never seen for this unit is offered to it (one
                  * stat of the unit's store directory per read) */
                 if (body) {
@@ -31874,7 +32127,9 @@ static char *fk_bml_memo_read(const char *bml_path, long long *out_len, char *wh
             if (body) return body;
         }
     }
-    return fk_bml_store_get(bml_path, out_len);
+    char *from_store = fk_bml_store_get(bml_path, out_len);
+    if (from_store) fk_cs[FK_CS_LOW_STORE]++;
+    return from_store;
 }
 /* A lowering is a memo read. The memo is valid when its seal holds and every file it observed still has the bytes it
  * saw; any other state is a miss, and a miss is answered by the floor compiler in THIS process:
@@ -32072,6 +32327,7 @@ static long long fk_bml_floor_lower_needs(void) {
                     fk_bml_low_moved[slot] = 0;
                     if (wrote) {
                         fk_bml_low_held[slot] = fk_bml_low_held[slot] + 1;
+                        fk_cs[FK_CS_LOW_BUILT]++;
                         done = done + 1;
                     } else {
                         /* a lowering that held but cannot stand as a memo would be asked again round after round */
@@ -32652,7 +32908,7 @@ static void fk_seed_alias(char **argv) {
         fk_seed_snapshot_free(&snap); return;
     }
     const char *hop = getenv("FK_SEED_HOP"), *home = getenv("HOME");
-    if (hop && hop[0]) { fk_seed_snapshot_free(&snap); return; }
+    if ((hop && hop[0]) || fk_store_mode() == 0) { fk_seed_snapshot_free(&snap); return; }
     char root[FK_PATH_CAP], dir[FK_PATH_CAP], binary[FK_PATH_CAP + 16], seal[FK_PATH_CAP + 16], lock[FK_PATH_CAP + 16], name[24];
     sprintf(name, "%016llx", key);
     (void)home;
@@ -32704,6 +32960,7 @@ static int fk_run(int argc, char **argv) {
 #if !defined(_WIN32)
     fk_seed_alias(argv);
     unsetenv("FK_SEED_HOP");   /* a child this run begins is its own run: it asks its own seed */
+    fk_cache_arm();            /* the run's account is appended to the host ledger at exit */
 #endif
     fk_fkb_builder_admit();
     fk_nodes_init();
