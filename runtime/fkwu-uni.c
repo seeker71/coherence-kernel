@@ -27417,21 +27417,10 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
              fk_fkb_write_srctext_slice(fd, fk_fnsym_s[i], fk_fnsym_n[i]);
         i = i + 1;
     }
-    ok = ok && fk_fkb_write_signed(fd, fk_node_count);
-    i = 0;
-    while (ok && i < fk_node_count) {
-        long long defined = fk_src_symbol_id_for_node(i);
-        long long dep_fn = fk_src_direct_call_fn(i);
-        long long dep_sym = fk_src_symbol_id_for_fn(dep_fn);
-        long long dep_count = dep_sym >= 0 ? 1 : 0;
-        ok = fk_fkb_write_signed(fd, i) && fk_fkb_write_signed(fd, defined) &&
-             fk_fkb_write_signed(fd, dep_count);
-        if (ok && dep_count == 1) {
-            long long target = (dep_fn >= 0 && dep_fn < fk_fn_count) ? fk_fn[dep_fn] : -1;
-            ok = fk_fkb_write_signed(fd, dep_sym) && fk_fkb_write_signed(fd, target);
-        }
-        i = i + 1;
-    }
+    /* the optional node-symbol inspection section, empty: its rows were 42 percent of every image (22.9 of 54 MB measured)
+     * and both native loaders read them only to discard them (fk_fkb_read_node_symbols accepts a count of 0, and the Form
+     * image producer already writes none). The symbol relationships live in the .sym lens, which still carries them. */
+    ok = ok && fk_fkb_write_signed(fd, 0);
     /* v6: the top-level constant table. A unit's column-0 lets are const rows
      * (name -> initializer node); the importer binds them from this table, so a
      * band that imports the unit's image sees them as it would reading its text. */
