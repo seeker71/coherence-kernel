@@ -8,7 +8,7 @@
 // gated-delta recurrence of the linear layers. Each kernel here is the single-stream kernel's arithmetic in its order, with a row
 // offset (a stream's state at row * stride) in front, so a stream's result equals its own one-token step's bit for bit.
 // The bands witness each kernel against the single-stream kernel on small synthetic data, with no model (q38-multi-band.bml).
-// preludes: form-stdlib/core.fk
+// preludes: form-stdlib/core.fk form-stdlib/gpu-lease.bml native/metal/qwen35-dense-spec.fk
 section [form.bml] {
  class Q38Multi {
   def q38m-header() = "#include <metal_stdlib>\n#pragma clang fp contract(off)\n";
@@ -30,6 +30,76 @@ section [form.bml] {
   // The key (or value) store into each stream's own cache: stream row's cache is the arena slice at row * maxpos * kvd, and its
   // position is posb[row]. kth-copyoff-msl's store with the row and position folded into the destination.
   def q38m-kvwrite-msl(fname) = "kernel void " ++ fname ++ " (device const float* s [[buffer(0)]], device float* d [[buffer(1)]], device const uint* posb [[buffer(2)]], constant uint& kvd [[buffer(3)]], constant uint& maxpos [[buffer(4)]], constant uint& nrows [[buffer(5)]], uint gid [[thread_position_in_grid]]) { if (gid >= nrows * kvd) return; uint row = gid / kvd; uint i = gid - row * kvd; d[row * maxpos * kvd + posb[row] * kvd + i] = s[row * kvd + i]; }";
+  // ── the driver: one step of N streams, one pass over the weights ──
+  // The pipelines of the five kernels, [delta, conv, rope, kv write, attention], compiled from kth-msl's helpers plus the kernels.
+  def q38m-msl() = kth-msl() ++ q38m-delta-msl("form_q38m_delta_rows") ++ q38m-conv-msl("form_q38m_conv_rows") ++ q38m-rope-msl("form_q38m_rope_rows") ++ q38m-kvwrite-msl("form_q38m_kvw_rows") ++ q38m-gqa-msl("form_q38m_gqa_rows");
+  def q38m-pipes(msl) = [metal_pipeline(msl, "form_q38m_delta_rows"), metal_pipeline(msl, "form_q38m_conv_rows"), metal_pipeline(msl, "form_q38m_rope_rows"), metal_pipeline(msl, "form_q38m_kvw_rows"), metal_pipeline(msl, "form_q38m_gqa_rows")];
+  // N streams' state side by side: per layer [conv, delta, K, V], stream s at s * its own stride (a single stream's allocation scaled by N).
+  def q38m-new-arena(geo, n, allocate) = kth-stream-state-by(geo[21], geo[22], geo[1] * n, geo[23], geo[3] * n, geo[5], geo[4], geo[20], geo[18] * n, allocate);
+  def q38m-uints(xs) = foldl((a, x) => a ++ md-le32(x), "", xs);
+  // a linear-attention layer for ntok streams: q38s-linear-attn-span-s with the snapshot-free recurrence replaced by the row kernels
+  def q38m-linear(ps, qs, mp, bs, geo, lay, st, ntok) {
+   let pitch = qlslc-bs2-output-pitch(geo);
+   q38-rms-span(ps, bs[33], lay[0], bs[1], geo[0], geo[6], ntok, 1);
+   q38s-mv(ps, qs, lay[5], bs[1], bs[2], ntok, pitch, 1);
+   q38s-mv(ps, qs, lay[7], bs[1], bs[3], ntok, kth-tv-r(lay[7]), 0);
+   q38s-mv(ps, qs, lay[8], bs[1], bs[4], ntok, kth-tv-r(lay[8]), 0);
+   q38s-mv(ps, qs, lay[12], bs[1], bs[7], ntok, kth-tv-r(lay[12]), 0);
+   metal_enqueue(mp[1], md-bind16([st[0], bs[2], kth-tv-h(lay[6]), bs[2]], [geo[1], geo[23], geo[1] * geo[23], pitch, ntok], 256, 0, 0, 1), geo[1] * ntok);
+   metal_enqueue(ps[8], q38-b16([bs[2]], [qlslc-bs2-allocation-elements(geo, ntok)], 0, 1), qlslc-bs2-allocation-elements(geo, ntok));
+   metal_enqueue(nth(ps, qlslc-l2norm-span-pipeline()), q38-b16([bs[2]], [2 * geo[2], geo[4], geo[6], pitch, ntok], 0, 1), 2 * geo[2] * ntok);
+   metal_enqueue(nth(ps, qlslc-gates-span-pipeline()), q38-b16([bs[3], bs[4], kth-tv-h(lay[9]), kth-tv-h(lay[10]), bs[5], bs[6]], [geo[3], ntok], 0, 1), geo[3] * ntok);
+   metal_enqueue(mp[0], md-bind16([st[1], bs[2], bs[5], bs[6], bs[8]], [geo[3], geo[5], geo[4], geo[2], geo[7], geo[3] * geo[5] * geo[4], pitch, ntok], 256, 0, 0, 1), ntok * geo[3] * geo[5]);
+   metal_enqueue(nth(ps, qlslc-norm-gate-span-pipeline()), q38-b16([bs[8], kth-tv-h(lay[11]), bs[7], bs[9]], [geo[3], geo[5], geo[6], ntok], 0, 1), geo[3] * ntok);
+   q38s-mv-res(ps, qs, lay[13], bs[9], bs[10], bs[33], ntok, kth-tv-r(lay[13]), 1);
+   1;
+  }
+  // a full-attention layer for ntok streams, each at its own position (posb): q38s-full-attn-span with rope, the cache store and the
+  // attention replaced by the row kernels
+  def q38m-full(ps, qs, mp, bs, geo, lay, st, posb, ntok) {
+   let nqhd = geo[12] * geo[14];
+   let kvd = geo[20];
+   q38-rms-span(ps, bs[33], lay[0], bs[1], geo[0], geo[6], ntok, 1);
+   q38s-mv(ps, qs, lay[5], bs[1], bs[2], ntok, q38-bs2-stride(geo), 1);
+   q38s-mv(ps, qs, lay[6], bs[1], bs[24], ntok, kth-tv-r(lay[6]), 0);
+   q38s-mv(ps, qs, lay[7], bs[1], bs[25], ntok, kth-tv-r(lay[7]), 0);
+   metal_enqueue(ps[34], q38-b16([bs[2], bs[22]], [nqhd, geo[14], 0, ntok, q38-bs2-stride(geo)], 0, 1), nqhd * ntok);
+   metal_enqueue(ps[34], q38-b16([bs[2], bs[23]], [nqhd, geo[14], geo[14], ntok, q38-bs2-stride(geo)], 0, 0), nqhd * ntok);
+   metal_enqueue(ps[35], q38-b16([bs[22], kth-tv-h(lay[8]), bs[22]], [geo[12], geo[14], geo[6], ntok], 0, 1), geo[12] * ntok);
+   metal_enqueue(ps[35], q38-b16([bs[24], kth-tv-h(lay[9]), bs[24]], [geo[13], geo[14], geo[6], ntok], 0, 0), geo[13] * ntok);
+   metal_enqueue(mp[2], md-bind16([bs[22], posb], [geo[12], geo[14], geo[15], geo[16], nqhd, ntok], 256, 0, 0, 1), geo[12] * (geo[15] / 2) * ntok);
+   metal_enqueue(mp[2], md-bind16([bs[24], posb], [geo[13], geo[14], geo[15], geo[16], kvd, ntok], 256, 0, 0, 0), geo[13] * (geo[15] / 2) * ntok);
+   metal_enqueue(mp[3], md-bind16([bs[24], st[2], posb], [kvd, geo[18], ntok], 256, 0, 0, 1), kvd * ntok);
+   metal_enqueue(mp[3], md-bind16([bs[25], st[3], posb], [kvd, geo[18], ntok], 256, 0, 0, 0), kvd * ntok);
+   metal_enqueue(mp[4], md-bind16([bs[22], st[2], st[3], bs[26], bs[27], posb], [geo[12], geo[13], geo[14], geo[17], geo[18], nqhd, geo[18] * kvd, 2 * geo[12] * geo[18], ntok], 256, 0, 1, 1), geo[12] * ntok);
+   metal_enqueue(ps[17], q38-b16([bs[26], bs[23]], [nqhd * ntok], 0, 1), nqhd * ntok);
+   q38s-mv-res(ps, qs, lay[10], bs[26], bs[10], bs[33], ntok, kth-tv-r(lay[10]), 1);
+   1;
+  }
+  def q38m-layers(ps, qs, mp, bs, geo, lays, arena, posb, l, nL, ntok) {
+   if (l >= nL) then 1 else {
+    let done = kth-full?(l, geo[22]) ? q38m-full(ps, qs, mp, bs, geo, nth(lays, l), nth(arena, l), posb, ntok) : q38m-linear(ps, qs, mp, bs, geo, nth(lays, l), nth(arena, l), ntok);
+    q38s-ffn-span(ps, qs, bs, geo, nth(lays, l), ntok);
+    let handed = q38-handover-after(l + 1, nL);
+    q38m-layers(ps, qs, mp, bs, geo, lays, arena, posb, l + 1, nL, ntok);
+   };
+  }
+  // The next greedy id of each of the ids' streams, stream i feeding ids[i] at poss[i]: one pass over the weights for all of them.
+  // sx is the span scratch (q38s-open), arena the streams' state (q38m-new-arena), posb a uint buffer of at least ntok words.
+  def q38m-step(ctx, qs, mp, arena, sx, posb, ids, poss) = gpu-lease-turn("qwen multi decode", () => {
+   let ntok = len(ids);
+   let bs = ctx[1];
+   let geo = ctx[2];
+   let w1 = metal_buf_write(sx[0], 0, q38m-uints(ids));
+   let w2 = metal_buf_write(posb, 0, q38m-uints(poss));
+   let batch = metal_batch_concurrent();
+   metal_enqueue(qs[q38s-pipe-embed()], md-bind16([kth-tv-h(ctx[4]), sx[0], bs[33]], [geo[0], ntok, 0], 256, 0, 0, 1), geo[0] * ntok);
+   let layers = q38m-layers(ctx[0], qs, mp, bs, geo, ctx[3], arena, posb, 0, geo[21], ntok);
+   let head = q38s-head-check(ctx, qs, sx, ntok);
+   let raw = metal_buf_read(sx[4], 0, ntok * 4);
+   q38m-read-ids(raw, 0, ntok);
+  });
+  def q38m-read-ids(raw, i, n) = i >= n ? [] : cons(kth-u32at(raw, i), q38m-read-ids(raw, i + 1, n));
  }
  0;
 }

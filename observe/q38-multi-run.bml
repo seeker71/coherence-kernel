@@ -1,0 +1,97 @@
+// q38-multi-run.bml — N Qwen token streams in one weight pass against N single-stream decodes, and what the pass costs against the floor.
+//
+//   echo '{"go":1,"n":2,"steps":6}' | ./fkwu observe/q38-multi-run.bml
+//
+// Opens the 27B (Q8_0) once, runs n streams (stream s feeds the start token 1000 * (s + 1)) for `steps` tokens each the ordinary way, one
+// q38-forward at a time on its own state, then the same n streams through q38m-step: one pass over the weights per step for all of them,
+// each stream's state in the arena (form-stdlib/bml/q38-multi.bml). Every greedy id of every stream must equal its single-stream id.
+// Prints the ids, the milliseconds a token single and the milliseconds a step of n streams, the aggregate tokens a second, and the memory
+// bandwidth each implies from the bytes of weights one pass reads (q38-forward-weight-bytes); the floor of this machine is about 546 GB/s.
+// stdin, one JSON line, all optional: go (without it only the plan is said), n (2, at most 8), steps (6).
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/q38-multi.bml native/metal/qwen35-dense-token-handle.fk native/metal/qwen35-dense-spec.fk
+section [form.bml] {
+ class Q38MultiRun {
+  def qmr-file() = "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf";
+  def qmr-say(t) = print_str("[q38-multi] " ++ t ++ "\n");
+  def qmr-opts() {
+   let line = trim(stdin-text());
+   (len(line) > 0) && (str_byte_at(line, 0) == 123) ? parse-json("q38-multi-run", line) : json-node-object([]);
+  }
+  def qmr-int(doc, key, d) = json-object-has?(doc, key) ? json-int-value(json-object-get(doc, key)) : d;
+  // one stream alone, the ordinary way: the ids it decodes over `steps` tokens from its start token, on its own state
+  def qmr-single-go(ctx, sts, id, i, steps) {
+   if (i >= steps) then [] else {
+    let nxt = q38-forward(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], id, i);
+    cons(nxt, qmr-single-go(ctx, sts, nxt, i + 1, steps));
+   };
+  }
+  def qmr-single(ctx, s, steps) {
+   let sts = q38-new-state(ctx[2]);
+   let ids = qmr-single-go(ctx, sts, 1000 * (s + 1), 0, steps);
+   let freed = q38-free-state(sts);
+   ids;
+  }
+  // the control: the lane's own one-row verify on token 1000 at position 0 of a fresh state, read the way the lane reads it
+  def qmr-control(ctx, qs, sx) {
+   let sts = q38-new-state(ctx[2]);
+   let w = metal_buf_write(sx[0], 0, md-le32(1000));
+   let batch = metal_batch_concurrent();
+   let v = q38s-verify(ctx, qs, sts, sx, 1, 0);
+   let id = kth-u32at(metal_buf_read(sx[4], 0, 4), 0);
+   let f = q38-free-state(sts);
+   id;
+  }
+  def qmr-singles(ctx, s, n, steps) = s >= n ? [] : cons(qmr-single(ctx, s, steps), qmr-singles(ctx, s + 1, n, steps));
+  def qmr-start(s, n) = s >= n ? [] : cons(1000 * (s + 1), qmr-start(s + 1, n));
+  def qmr-fill(x, n) = n <= 0 ? [] : cons(x, qmr-fill(x, n - 1));
+  // the same streams through the arena: the list of each step's n ids
+  def qmr-multi-go(ctx, qs, mp, arena, sx, posb, ids, i, steps, n) {
+   if (i >= steps) then [] else {
+    let nxt = q38m-step(ctx, qs, mp, arena, sx, posb, ids, qmr-fill(i, n));
+    cons(nxt, qmr-multi-go(ctx, qs, mp, arena, sx, posb, nxt, i + 1, steps, n));
+   };
+  }
+  // stream s's ids from the per-step rows
+  def qmr-col(rows, s) = map(r => r[s], rows);
+  def qmr-cols(rows, s, n) = s >= n ? [] : cons(qmr-col(rows, s), qmr-cols(rows, s + 1, n));
+  def qmr-tenths(a, b) = b <= 0 ? "0.0" : (a * 10 / b / 10).str() ++ "." ++ (a * 10 / b % 10).str();
+  def qmr-run() {
+   let o = qmr-opts();
+   let n = qmr-int(o, "n", 2);
+   let steps = qmr-int(o, "steps", 6);
+   qmr-int(o, "go", 0) != 1 ? qmr-say("plan: go=1 opens " ++ qmr-file() ++ " and runs n streams for steps tokens, single-stream against one pass per step") : qmr-go(n, steps);
+  }
+  def qmr-go(n, steps) {
+   let t0 = host_monotonic_ms();
+   let ctx = q38-open-span(qmr-file(), 64, 8);
+   let a = qmr-say("open " ++ (host_monotonic_ms() - t0).str() ++ " ms; context ok " ++ q38-context-ok?(ctx).str());
+   let qs = q38s-pipes(q38s-msl());
+   let sx = q38s-open(ctx, 8, 8);
+   let mp = q38m-pipes(q38m-msl());
+   let arena = q38m-new-arena(ctx[2], n, bytes => metal_buf_alloc(bytes));
+   let posb = metal_buf_alloc(64);
+   let warm = qmr-singles(ctx, 0, n, steps);
+   let warm2 = qmr-multi-go(ctx, qs, mp, arena, sx, posb, qmr-start(0, n), 0, steps, n);
+   let t1 = host_monotonic_ms();
+   let singles = qmr-singles(ctx, 0, n, steps);
+   let t2 = host_monotonic_ms();
+   let rows = qmr-multi-go(ctx, qs, mp, arena, sx, posb, qmr-start(0, n), 0, steps, n);
+   let t3 = host_monotonic_ms();
+   // equality is judged on the first run, from a fresh arena; the second run (state advanced past it) is only timed
+   let multis = qmr-cols(warm2, 0, n);
+   let ctl = qmr-control(ctx, qs, sx);
+   let b = qmr-say("single-stream ids: " ++ singles.str() ++ "; the existing verify path on token 1000 gives " ++ ctl.str());
+   let c = qmr-say("one-pass ids:      " ++ multis.str());
+   let bytes = q38-forward-weight-bytes(ctx);
+   let sms = t2 - t1;
+   let mms = t3 - t2;
+   let d = qmr-say("single: " ++ (sms / (n * steps)).str() ++ " ms a token = " ++ qmr-tenths(n * steps * 1000, sms) ++ " tok/s; " ++ qmr-tenths(bytes / 1000000 * n * steps, sms) ++ " MB/ms of weights");
+   let e = qmr-say("one pass x " ++ n.str() ++ " streams: " ++ (mms / steps).str() ++ " ms a step = " ++ qmr-tenths(n * steps * 1000, mms) ++ " aggregate tok/s");
+   let f = qmr-say("weights per pass " ++ (bytes / 1000000).str() ++ " MB; one-pass bandwidth " ++ qmr-tenths(bytes / 1000000 * steps, mms) ++ " GB/s of 546");
+   let g = qmr-say(singles == multis ? "EQUAL: every stream's ids match its single-stream decode" : "DIFFER");
+   0;
+  }
+ }
+ qmr-run();
+}
