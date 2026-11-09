@@ -9,7 +9,7 @@
 // bandwidth each implies from the bytes of weights one pass reads (q38-forward-weight-bytes); the floor of this machine is about 546 GB/s.
 // stdin, one JSON line, all optional: go (without it only the plan is said), n (2, at most 8), steps (6).
 // preflight-exec: forbidden
-// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/q38-multi.bml native/metal/qwen35-dense-token-handle.fk native/metal/qwen35-dense-spec.fk
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/q38-multi.bml form-stdlib/bml/form-cli-code-live.bml native/metal/qwen35-dense-token-handle.fk native/metal/qwen35-dense-spec.fk
 section [form.bml] {
  class Q38MultiRun {
   def qmr-file() = "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf";
@@ -60,7 +60,7 @@ section [form.bml] {
    let o = qmr-opts();
    let n = qmr-int(o, "n", 2);
    let steps = qmr-int(o, "steps", 6);
-   json-object-has?(o, "prompts") && qmr-int(o, "go", 0) == 1 ? qmr-prompts-go(map(p => map(t => json-int-value(t), json-array-elements(p)), json-array-elements(json-object-get(o, "prompts"))), qmr-int(o, "gen", 8), qmr-int(o, "fast", 0)) : qmr-int(o, "go", 0) != 1 ? qmr-say("plan: go=1 opens " ++ qmr-file() ++ " and runs n streams for steps tokens, single-stream against one pass per step; fast 2 or 3 puts the 2..8 row projections on the matrix unit") : qmr-go(n, steps, qmr-int(o, "fast", 0));
+   json-object-has?(o, "texts") && qmr-int(o, "go", 0) == 1 ? qmr-texts-go(map(t => json-string-value(t), json-array-elements(json-object-get(o, "texts"))), qmr-int(o, "gen", 8), qmr-int(o, "fast", 0)) : json-object-has?(o, "prompts") &&qmr-int(o, "go", 0) == 1 ? qmr-prompts-go(map(p => map(t => json-int-value(t), json-array-elements(p)), json-array-elements(json-object-get(o, "prompts"))), qmr-int(o, "gen", 8), qmr-int(o, "fast", 0)) : qmr-int(o, "go", 0) != 1 ? qmr-say("plan: go=1 opens " ++ qmr-file() ++ " and runs n streams for steps tokens, single-stream against one pass per step; fast 2 or 3 puts the 2..8 row projections on the matrix unit") : qmr-go(n, steps, qmr-int(o, "fast", 0));
   }
   // one stream alone with a teacher-forced prompt: feed prompt tokens, then its own ids; the gen ids from the last prompt token on
   def qmr-forced-go(ctx, sts, p, id, i, total, gen, out) {
@@ -77,6 +77,30 @@ section [form.bml] {
    ids;
   }
   // real prompts, N streams, one pass over the weights per step; each stream must equal its own single-stream decode of the same prompt
+  // text in, text out: the body's own tokenizer reads each text, N streams continue them in one pass per step, the body's decoder
+  // writes them back. This is the local model's parallel reasoning: N lines of thought for the price of one pass over the weights.
+  def qmr-tok-go(cur, left, acc) {
+   let one = qtlc-next(cur);
+   if (qtlc-next-present?(one) && left > 0) then qmr-tok-go(qtlc-next-cursor(one), left - 1, cons(qtlc-next-value(one), acc)) else reverse(acc);
+  }
+  def qmr-tokenize(ctx, text) = qmr-tok-go(qtlc-open(ctx[9], qsx-seal-line(ctx[9]), [qtlc-text-segment(text)]), 4000, []);
+  def qmr-detok(ctx, ids) = foldl((a, id) => a ++ fcmo-decode-id(ctx[7], id), "", ids);
+  def qmr-texts-go(texts, gen, fast) {
+   let ctx = q38-open-span(qmr-file(), 64, 8);
+   let prompts = map(t => qmr-tokenize(ctx, t), texts);
+   let qs0 = q38s-pipes(q38s-msl());
+   let qs = fast == 3 ? q38s-fast1(qs0) : (fast == 2 ? q38s-fast(qs0) : qs0);
+   let sx = q38s-open(ctx, 8, 8);
+   let mp = q38m-pipes(q38m-msl());
+   let posb = metal_buf_alloc(64);
+   let arena = q38m-new-arena(ctx[2], len(prompts), bytes => metal_buf_alloc(bytes));
+   let t0 = host_monotonic_ms();
+   let outs = q38m-generate(ctx, qs, mp, arena, sx, posb, prompts, gen);
+   let t1 = host_monotonic_ms();
+   let a = qmr-say("texts " ++ map(p => len(p), prompts).str() ++ " tokens in, " ++ gen.str() ++ " out each, " ++ (t1 - t0).str() ++ " ms");
+   map(o => qmr-say("continues: " ++ qmr-detok(ctx, o)), outs);
+   0;
+  }
   def qmr-prompts-go(prompts, gen, fast) {
    let n = len(prompts);
    let ctx = q38-open-span(qmr-file(), 64, 8);
