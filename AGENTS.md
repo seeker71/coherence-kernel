@@ -536,7 +536,19 @@ reads what the night's turns achieved (who ran them, the rented share, the lande
 share, how they ended) and, for the latest turn left short of full, names the red
 claims of its band: a reading is the sum of the bits whose claims landed, and
 `form-stdlib/bml/band-claims.bml` decodes the missing bits from the band's own
-head. Unknown usage stays unknown;
+head.
+
+   A physical turn is read through the glass and the stage lines, never by waiting: run it from a short-path
+   checkout (a name built from the checkout root goes into a 128-byte buffer: a path near 165 bytes died in
+   `gift_roster_register`), read the lane's own counters with `printf 'qwen.coding' | ./fkwu observe/glass-read-run.bml`
+   (rows `id=code.<pid>.generated-ids|tools|repairs|checks`) and its `form-peer stage ... phase=model-prefill-positions-N`
+   lines, and give it its own `deadline_ms` (an absolute epoch ms) so it ends itself: a turn killed mid-GPU-work leaves the
+   device reading 100 percent busy for tens of minutes and every number after it is wrong. Read the bench's fp32 gauge line
+   (`observe/q38-prefill-bench.bml`: clean is 13000+ GFLOP/s) before believing any throughput. A quiet M4 Max, Q8_0 27B:
+   one stream decodes 14.8 tokens a second (404 of 546 GB/s); `observe/q38-multi-run.bml` runs n streams in one pass over
+   the weights, each equal to its own decode (n=2 29.3 tok/s, n=4 48.5, n=8 on the matrix unit 90.6); batched prefill is 190
+   positions a second. The framebuffer holds nodes: `jv-frame-word` builds one, so a cell's stop and an organ's health reach
+   the observer. Unknown usage stays unknown;
 unused allowance is not consumption. An unknown or unavailable reading invites
 repair of its evidence path: bind the actual owner, recover retained observations
 and re-observe. Preserve uncertainty until that evidence arrives. The loop and each meter's job are in the
