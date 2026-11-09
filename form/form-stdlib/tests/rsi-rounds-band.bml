@@ -1,0 +1,113 @@
+; rsi-rounds-band.bml — Terminal-RSI's rounds (form-stdlib/bml/rsi-rounds.bml, observe/rsi-round-run.bml, observe/rsi-report-run.bml).
+; No model and no gap's band runs: the stand-in turn door form-stdlib/tests/rsi-turn-fixture.bml lands scripted option rows.
+; Expected: 255
+;   1   split: the same ids split the same way, held-out and trained share no gap and cover every gap, and two or more gaps hold one out
+;   2   tb-gae: the reward stands at a walk's last turn and discount and trace decay act across turns: with V 0 every turn's advantage is
+;       the reward; with V(0) 0.5 and V(1) 0.25 under reward 1.5 the advantages read 1.0 and 1.25 and the returns 1.5 and 1.5
+;   4   critic: four critic-only steps at rate 0.5 leave a sixteenth of the gap, so the loss falls by 256; the critic file reads back, a
+;       negative value included
+;   8   rounds: two rounds land three eval rows and two train rows under one run id; the second round's critic loss before is the first
+;       round's after (the inherited critic), and each eval reads only the held-out gaps
+;   16  lessons: with no home every chosen lesson is held as home-unnamed; under retain 1 train 0 each lands as one experience, the
+;       learner reads -3 (no training granted), and no held-out gap is ever offered
+;   32  exit: a turn whose door exits nonzero is counted in turn_exit_nonzero once per turn, and its rows still read
+;   64  report: the report door prints the run's head and one line per row, each eval beside round 0
+;   128 pool: a band's number is its last integer line (a signed one too, a line with words is none), a reset row names its commit and
+;       reading, a gap left out names why, and only reset rows are pooled
+// preludes: form-stdlib/core.fk form-stdlib/bml/live.bml form-stdlib/bml/rsi-rounds.bml
+section [form.bml] {
+ class RsiRoundsBand {
+  def rrb-root() = temp_dir() ++ "/rsi-rounds-band-" ++ host_pid().str();
+  def rrb-has?(s, p) = str_find(s, p, 0) >= 0;
+  def rrb-near?(a, b) = (a - b) < 0.000001 && (b - a) < 0.000001;
+  def rrb-q(root, id, full, script, extra) = "{\"id\":\"" ++ id ++ "\",\"band\":\"b.fk\",\"goal\":\"goal " ++ id ++ "\",\"full\":" ++ full.str() ++ ",\"standin\":" ++ script ++ ",\"candidate\":\"def x() = 1;\",\"turns_dir\":\"" ++ root ++ "/turns\"" ++ extra ++ "}\n";
+  def rrb-world(root, name, exitGap) {
+   let d = root ++ "/" ++ name;
+   let a = host_dir_mkdir(d);
+   let b = host_dir_mkdir(d ++ "/turns");
+   let q = write_file_text(d ++ "/queue.jsonl", str-join([rrb-q(d, "g-a", 7, "[[1,7,1]]", ""), rrb-q(d, "g-b", 3, "[[0,1,0],[1,3,1]]", ""), rrb-q(d, "g-c", 15, "[[0,3,0]]", (String) exitGap == "g-c" ? ",\"exit\":1" : ""), rrb-q(d, "g-d", 1, "[[0,0,0],[0,0,0]]", ""), rrb-q(d, "g-e", 7, "[[3,7,1]]", ""), rrb-q(d, "g-f", 3, "[[0,3,0]]", "")]));
+   d;
+  }
+  def rrb-req(d, run, rounds, home) = "{\"run\":\"" ++ run ++ "\",\"rounds\":" ++ rounds.str() ++ ",\"queue\":\"" ++ d ++ "/queue.jsonl\",\"receipts\":\"" ++ d ++ "/r.jsonl\",\"work\":\"" ++ d ++ "/work\",\"turn_door\":\"form/form-stdlib/tests/rsi-turn-fixture.bml\",\"held_out_every\":3,\"turns_dir\":\"" ++ d ++ "/turns\"" ++ ((String) home == "" ? "" : ",\"home\":\"" ++ home ++ "\",\"learn\":1") ++ "}";
+  def rrb-door(d, door, text) {
+   let i = write_file_text(d ++ "/in", text ++ "\n");
+   let pid = host_spawn_at(["./fkwu", door], [d ++ "/in", d ++ "/out", d ++ "/err"]);
+   let status = pid <= 0 ? -1 : host_wait(pid);
+   [status, read_file(d ++ "/out") ?? "", read_file(d ++ "/err") ?? ""];
+  }
+  def rrb-rows(d, phase) = filter(r => (String) fcgp-str(r, "phase") == phase, fcgp-rows(d ++ "/r.jsonl"));
+  def rrb-ids() = ["g-a", "g-b", "g-c", "g-d", "g-e", "g-f"];
+  def rrb-in?(x, xs) = any?(y => (String) y == x, xs);
+  def rrb-c-split(root) {
+   let s = rsi-split(rrb-ids(), 3);
+   let t = rsi-split(rrb-ids(), 3);
+   !nil?(s[0]) && (Comparable) len(s[0]) + len(s[1]) == 6 && all?(h => !rrb-in?(h, s[1]), s[0]) && all?(i => rrb-in?(i, s[0]) || rrb-in?(i, s[1]), rrb-ids()) && (String) str-join(s[0]) == str-join(t[0]) && (Comparable) len(rsi-split(["x", "y"], 1000003)[0]) == 1;
+  }
+  def rrb-walk(n, green) = ["w", map(i => fcgp-rows-of("{\"gap\":\"w\",\"band_before\":0,\"band_after\":" ++ (i == n - 1 && green ? 3 : 1).str() ++ ",\"full\":3,\"band_green\":" ++ (i == n - 1 && green ? 1 : 0).str() ++ ",\"dry\":0,\"test\":0}")[0], rsi-range(0, n))];
+  def rrb-c-gae(root) {
+   let w = rrb-walk(2, true);
+   let r = rsi-spr-of(w);
+   let zero = rsi-gae([], w, 1.0, 1.0);
+   let warm = rsi-gae([["w#0", 0.5], ["w#1", 0.25]], w, 1.0, 1.0);
+   rrb-near?(r, 1.5) && rrb-near?(zero[0][2], r) && rrb-near?(zero[1][2], r) && rrb-near?(warm[0][2], 1.0) && rrb-near?(warm[1][2], 1.25) && rrb-near?(warm[0][3], 1.5) && rrb-near?(warm[1][3], 1.5) && (String) warm[0][0] == "w#0";
+  }
+  def rrb-c-critic(root) {
+   let targets = [["k#0", 0.0, 0.0, 2.0]];
+   let before = rsi-loss([], targets);
+   let after = rsi-loss(rsi-calibrate([], targets, 4, 0.5), targets);
+   let p = write_file_text(root ++ "/critic.txt", rsi-critic-text([["k#0", 1.875], ["k#1", 0.0 - 0.25]]));
+   let back = rsi-critic-read(root ++ "/critic.txt");
+   rrb-near?(before, 4.0) && rrb-near?(after * 256.0, before) && (Comparable) len(back) == 2 && rrb-near?(rsi-v(back, "k#0"), 1.875) && rrb-near?(rsi-v(back, "k#1"), 0.0 - 0.25);
+  }
+  def rrb-c-rounds(root) {
+   let d = rrb-world(root, "rounds", "");
+   let r = rrb-door(d, "observe/rsi-round-run.bml", rrb-req(d, "band-r", 2, ""));
+   let evals = rrb-rows(d, "eval");
+   let trains = rrb-rows(d, "train");
+   let held = len(rsi-split(rrb-ids(), 3)[0]);
+   let ok = (Comparable) r[0] == 0 && (Comparable) len(evals) == 3 && (Comparable) len(trains) == 2 && all?(x => (String) fcgp-str(x, "run") == "band-r", fcgp-rows(d ++ "/r.jsonl")) && all?(e => (Comparable) rsi-num(e, "gaps") == held, evals) && (Comparable) rsi-num(trains[1], "critic_loss_before_micro") == rsi-num(trains[0], "critic_loss_after_micro") && rsi-num(trains[0], "critic_loss_after_micro") < rsi-num(trains[0], "critic_loss_before_micro") && (String) fcgp-str(trains[0], "rpr_actor") == rsi-actor-note();
+   let p = ok ? 0 : print_str("[rsi-rounds-band] rounds: " ++ r[0].str() ++ " " ++ r[1] ++ r[2]);
+   ok;
+  }
+  def rrb-c-lessons(root) {
+   let d = rrb-world(root, "lessons", "");
+   let none = rrb-door(d, "observe/rsi-round-run.bml", rrb-req(d, "band-none", 1, ""));
+   let home = d ++ "/home";
+   let h = host_dir_mkdir(home);
+   let c = write_file_text(home ++ "/config.json", "{\"scope\":{\"owner\":\"band\",\"purpose\":\"rsi rounds band\",\"retain\":1,\"train\":0}}\n");
+   let kept = rrb-door(d, "observe/rsi-round-run.bml", rrb-req(d, "band-home", 1, home));
+   let trains = rrb-rows(d, "train");
+   let held = rsi-split(rrb-ids(), 3)[0];
+   let records = map(n => fcgp-rows-of(read_file(home ++ "/experiences/" ++ n ++ "/record.json") ?? "")[0], fs-list(home ++ "/experiences"));
+   let ok = (Comparable) len(trains) == 2 && (String) fcgp-str(trains[0], "rsr_held") == "home-unnamed" && (Comparable) rsi-num(trains[0], "rsr_retained") == 0 && rsi-num(trains[1], "rsr_chosen") > 0 && (Comparable) rsi-num(trains[1], "rsr_retained") == rsi-num(trains[1], "rsr_chosen") && (Comparable) rsi-num(trains[1], "learner_exit") == -3 && (Comparable) len(records) == rsi-num(trains[1], "rsr_retained") && all?(x => !any?(g => str_find(fcgp-str(x, "event"), g ++ "-r", 0) == 0, held) && (Comparable) (fcgp-num(x, "evaluation") ?? 1) == 0 && rrb-has?(fcgp-str(x, "attempt"), "def x() = 1;"), records);
+   let p = ok ? 0 : print_str("[rsi-rounds-band] lessons: " ++ none[1] ++ kept[1] ++ kept[2]);
+   ok;
+  }
+  def rrb-c-exit(root) {
+   let d = rrb-world(root, "exit", "g-c");
+   let r = rrb-door(d, "observe/rsi-round-run.bml", rrb-req(d, "band-exit", 1, ""));
+   let rows = fcgp-rows(d ++ "/r.jsonl");
+   let bad = foldl((n, x) => n + rsi-num(x, "turn_exit_nonzero"), 0, rows);
+   let walks = foldl((n, x) => n + rsi-num(x, "walks"), 0, rows);
+   // one round: eval, train, eval; g-c turns twice when held out (both evals), once when trained
+   let runs = rrb-in?("g-c", rsi-split(rrb-ids(), 3)[0]) ? 2 : 1;
+   (Comparable) r[0] == 0 && (Comparable) bad == runs && (Comparable) walks == 8;
+  }
+  def rrb-c-pool(root) {
+   let rows = [["g-a", "abc", 3], ["g-b", "", "no-earlier-text-opens-band"]];
+   (Comparable) rsi-last-int("compiled\n7\nok 3 bands\n") == 7 && (Comparable) rsi-last-int("-2\n") == -2 && nothing?(rsi-last-int("no number here\n")) && (String) rsi-pool-line(rows[0]) == "{\"id\":\"g-a\",\"reset_commit\":\"abc\",\"band_before\":3}" && (String) rsi-pool-line(rows[1]) == "{\"id\":\"g-b\",\"reset_commit\":\"\",\"left_out\":\"no-earlier-text-opens-band\"}" && (String) str-join(rsi-pooled(rows)) == "g-a" && (String) rsi-left(rows) == "g-b:no-earlier-text-opens-band";
+  }
+  def rrb-c-report(root) {
+   let d = rrb-world(root, "report", "");
+   let r = rrb-door(d, "observe/rsi-round-run.bml", rrb-req(d, "band-rep", 1, ""));
+   let rep = rrb-door(d, "observe/rsi-report-run.bml", "{\"run\":\"band-rep\",\"receipts\":\"" ++ d ++ "/r.jsonl\"}");
+   let lines = filter(l => str_find(l, "round ", 0) == 0, split-on(rep[1], "\n"));
+   (Comparable) rep[0] == 0 && rrb-has?(rep[1], "[rsi-report] run=band-rep rows=3") && (Comparable) len(lines) == 3 && rrb-has?(lines[0], "round  0 eval") && rrb-has?(lines[1], "round  0 train") && rrb-has?(lines[2], "round  1 eval") && rrb-has?(lines[2], "(0)");
+  }
+ }
+ let root = rrb-root();
+ let m = host_dir_mkdir(root);
+ let v = live-claims("rsi-rounds-band", root, [["split", 1, 1, rrb-c-split], ["tb-gae", 2, 1, rrb-c-gae], ["critic", 4, 1, rrb-c-critic], ["rounds", 8, 1, rrb-c-rounds], ["lessons", 16, 1, rrb-c-lessons], ["exit", 32, 1, rrb-c-exit], ["report", 64, 1, rrb-c-report], ["pool", 128, 1, rrb-c-pool]]);
+ let g = fs-remove-tree(root);
+ v;
+}

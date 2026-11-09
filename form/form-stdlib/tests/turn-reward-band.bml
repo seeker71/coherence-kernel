@@ -1,0 +1,60 @@
+; turn-reward-band.bml — Terminal-RSI's FDR and SPR over native-turn ledger rows (form-stdlib/bml/turn-reward.bml, observe/turn-reward-run.bml). A fixture ledger, no model.
+; Expected: 127
+;   1   attempts: dry, test, already-full, window-closed and query rows are no trajectory; the five rows with work to do are, in three families
+;   2   bits: passed counts the checks band_after holds of full, and a bit above full counts for nothing
+;   4   gate: success is band_green with every check passed; every check passed under a gate that did not go green is a failure
+;   8   frozen: a family's divisor is the check count of its first attempt, and a later row with a wider full does not move it
+;   16  prioritized: under SPR every failure scores below 1 and every success at least 1, so every success outranks every failure; FDR lets a failure tie a success
+;   32  shares: the failed reward share reads binary 0.0%, FDR 50.0%, SPR 25.0% over the fixture, to the thousandth
+;   64  door: the run door reads the fixture by path, prints the one line and one JSON row per attempt, exits 0 and writes nothing beside it
+// preludes: form-stdlib/core.fk form-stdlib/bml/live.bml form-stdlib/bml/turn-reward.bml
+section [form.bml] {
+ class TurnRewardBand {
+  def trb-root() = temp_dir() ++ "/turn-reward-band-" ++ host_pid().str();
+  def trb-has?(s, p) = str_find(s, p, 0) >= 0;
+  def trb-row(gap, full, before, after, green, dry, test) = "{\"at_unix_ms\":1,\"gap\":\"" ++ gap ++ "\",\"band_before\":" ++ before.str() ++ ",\"band_after\":" ++ after.str() ++ ",\"full\":" ++ full.str() ++ ",\"band_green\":" ++ green.str() ++ ",\"dry\":" ++ dry.str() ++ ",\"test\":" ++ test.str() ++ "}";
+  def trb-text() = str-join([
+   trb-row("a", 7, 1, 7, 1, 0, 0), "\n",
+   trb-row("a", 15, 0, 7, 0, 0, 0), "\n",
+   trb-row("b", 3, 0, 3, 0, 0, 0), "\n",
+   trb-row("b", 3, 1, 11, 1, 0, 0), "\n",
+   trb-row("c", 1, 0, 0, 0, 0, 0), "\n",
+   trb-row("d", 7, 0, 7, 1, 1, 0), "\n",
+   trb-row("d", 7, 0, 7, 1, 0, 1), "\n",
+   trb-row("d", 7, 7, 7, 1, 0, 0), "\n",
+   "{\"at_unix_ms\":1,\"gap\":\"e\",\"band_before\":0,\"band_after\":1,\"full\":3,\"band_green\":0,\"dry\":0,\"test\":0,\"lane\":\"native\",\"lane_reason\":\"window-closed\"}\n",
+   "{\"at_unix_ms\":1,\"gap\":\"q\",\"full\":0,\"band_green\":1,\"dry\":0,\"test\":0}\n"]);
+  def trb-rows() = fcgp-rows-of(trb-text());
+  def trb-attempts() = trw-attempts(trb-rows());
+  def trb-divisors() = trw-divisors(trb-attempts());
+  def trb-c-attempts(root) { let r = trw-read(trb-rows()); (Comparable) r[0] == 5 && (Comparable) r[1] == 3 && (Comparable) r[2] == 2; }
+  def trb-c-bits(root) {
+   let a = trb-attempts();
+   (Comparable) trw-bits(0) == 0 && (Comparable) trw-bits(3405951) == 16 && (Comparable) trw-and(11, 3) == 3 && (Comparable) a[3][1] == 2 && (Comparable) a[3][2] == 2 && (Comparable) a[1][1] == 3 && (Comparable) a[1][2] == 4;
+  }
+  def trb-c-gate(root) { let a = trb-attempts(); (Comparable) a[2][1] == a[2][2] && (Comparable) a[2][3] == 0 && (Comparable) a[3][3] == 1 && (Comparable) a[0][3] == 1; }
+  def trb-c-frozen(root) { let d = trb-divisors(); (Comparable) trw-divisor(d, "a") == 3 && (Comparable) trw-divisor(d, "b") == 2 && (Comparable) trw-divisor(d, "c") == 1; }
+  def trb-c-prioritized(root) {
+   let a = trb-attempts();
+   let d = trb-divisors();
+   all?(x => (Comparable) x[3] == 1 ? trw-spr(x, trw-divisor(d, x[0])) >= 1.0 : trw-spr(x, trw-divisor(d, x[0])) < 1.0, a) && (Comparable) trw-ordered?(a, d, trw-spr) == 1 && (Comparable) trw-ordered?(a, d, trw-fdr) == 0;
+  }
+  def trb-c-shares(root) { let r = trw-read(trb-rows()); (Comparable) r[3] == 0 && (Comparable) r[4] == 500 && (Comparable) r[5] == 250; }
+  def trb-c-door(root) {
+   let led = root ++ "/ledger.jsonl";
+   let w = write_file_text(led, trb-text());
+   let i = write_file_text(root ++ "/in", "{\"ledger\":\"" ++ led ++ "\",\"rows\":1}\n");
+   let pid = host_spawn_at(["./fkwu", "observe/turn-reward-run.bml"], [root ++ "/in", root ++ "/out", root ++ "/err"]);
+   let status = pid <= 0 ? -1 : host_wait(pid);
+   let out = read_file(root ++ "/out") ?? "";
+   let ok = (Comparable) status == 0 && trb-has?(out, "[turn-reward] attempts=5 families=3 success=2 failed_reward_share binary=0.0% fdr=50.0% spr=25.0% success_outranks_failure fdr=0 spr=1") && (Comparable) len(filter(l => trb-has?(l, "\"spr_milli\":"), split-on(out, "\n"))) == 5 && trb-has?(out, "\"gap\":\"b\",\"at_unix_ms\":1,\"passed\":2,\"total\":2,\"divisor\":2,\"success\":0,\"spr_milli\":500") && (Comparable) len(fs-list(root)) == 4;
+   let p = ok ? 0 : print_str("[turn-reward-band] door: " ++ status.str() ++ " " ++ out ++ (read_file(root ++ "/err") ?? ""));
+   ok;
+  }
+ }
+ let root = trb-root();
+ let m = host_dir_mkdir(root);
+ let v = live-claims("turn-reward-band", root, [["attempts", 1, 1, trb-c-attempts], ["bits", 2, 1, trb-c-bits], ["gate", 4, 1, trb-c-gate], ["frozen", 8, 1, trb-c-frozen], ["prioritized", 16, 1, trb-c-prioritized], ["shares", 32, 1, trb-c-shares], ["door", 64, 1, trb-c-door]]);
+ let g = fs-remove-tree(root);
+ v;
+}

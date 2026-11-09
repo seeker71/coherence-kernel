@@ -394,3 +394,73 @@ The native session cells live in `form/form-stdlib/native-session-learning.bml`
 `native-session-experience.bml`, with `bml/native-session-code.bml` for the
 coding continuation. The worker door is `observe/native-session-learning-run.fk`,
 which the form-cli `session` verb drives.
+
+## Reward over native turns
+
+`form/form-stdlib/bml/turn-reward.bml` reads `receipts/native-turn-ledger.jsonl`
+through two rewards from Terminal-RSI (arXiv:2610.22192, Apache-2.0), which
+trains this voice's own base, Qwen3.8-27B, as a terminal agent judged by a
+protected verifier. A turn's band is that verifier: the checks passed are the
+bits `band_after` holds of `full`, and success is `band_green` with every
+check passed. Family Dense Reward is `passed / D` and Success-Prioritized
+Reward is `success + passed / (passed + D)`, with `D` the check count of the
+family's first attempt, frozen from history. Under SPR every success outranks
+every failure while partial progress stays visible. The door
+`observe/turn-reward-run.bml` prints the failed reward share each scheme gives
+(`{"rows":1}` adds one row per attempt). It reads allocation over turns that
+already ran; it opens no model and moves no gradient. Band:
+`form-stdlib/tests/turn-reward-band` → 127.
+
+## Recursive rounds
+
+`form/form-stdlib/bml/rsi-rounds.bml` runs Terminal-RSI's alternation of
+Recursive Self-Rewrite and Recursive Policy-Refine over the native-turn queue,
+one measured round at a time (door `observe/rsi-round-run.bml`). A hash of
+each gap's id holds it out or trains on it, and a held-out gap is never
+offered as a lesson.
+
+With `reset:1` the rounds run on a pool the body reopens, as Terminal-RSI
+resets a task's environment before each trial. Most queued gaps were closed
+long ago, so their bands read full before any option opens and no trajectory
+forms. A detached worktree of HEAD under the run's work directory is set up.
+For each gap, the commits that touched its writable files are walked newest
+first (`reset_depth`), with the writables set to the text each commit's parent
+held. A gap whose writables include the harness (the turn door, its ladder,
+these rounds, the reward) is left out, since rewinding it would measure
+another harness. The first text under which the gap's own band reads a number short of
+full is the gap's reset. The band says the gap is open again; no timestamp is
+guessed. Gaps no text reopens, and gaps another gap's reset moved, are left
+out by name in `pool.jsonl`. Every turn then runs inside that tree, and the
+turn door restores the tree after each option, so each round meets the same
+reopened gaps.
+
+A round is:
+
+1. **eval**: every held-out gap takes one turn through
+   `observe/native-turn-run.bml` into the round's own ledger under
+   `.hearth/rsi/<run>/`, so the main ledger does not move.
+2. **collect**: every trained gap takes one turn the same way.
+3. **TB-GAE**: a walk's options are its interaction turns, and SPR on the
+   last option is the reward. Discount and trace decay act across turns
+   only (γ = λ = 1, as the paper's RPR-1 config sets them).
+4. **critic**: a value table keyed by gap and turn index is inherited from
+   the round before. `calib_steps` critic-only updates (four by default) fit
+   it to the round's returns before any advantage is read.
+5. **RSR**: each trained walk that went green with a positive advantage under
+   the calibrated critic becomes one lesson. The goal is the prompt, and the
+   candidate kept under `.hearth/native-turns` is the completion. It is
+   offered through `nsm-offer`, so the home's scope decides retention and
+   training as above.
+6. **learn**: with `learn:1` the round waits for the learner the offer
+   launched, so the next eval reads the new adapter.
+
+Every phase lands one row in the run's receipt (`rsi-rounds.jsonl` under `receipts/`). It holds success,
+mean SPR, mean process (passed/total), the failed reward shares, critic loss
+before and after calibration, explained variance, lessons chosen, offered
+and retained, and the learner's exit. `observe/rsi-report-run.bml` prints a
+run as a table, each eval beside round 0. The paper's token-level PPO actor
+update is not carried: the actor moves only through RSR's lessons, and every
+train row says so (`rpr_actor`). Real rounds need the voice's Metal lane;
+on a host without it the model ways of each turn name their failure, and only
+the native rung moves. Band: `form-stdlib/tests/rsi-rounds-band` → 127,
+through the stand-in turn door `form-stdlib/tests/rsi-turn-fixture.bml`.
