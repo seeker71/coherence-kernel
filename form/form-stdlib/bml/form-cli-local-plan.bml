@@ -84,6 +84,9 @@ import control/choice-lane-core.fk;
 import form-stdlib/sha256.fk;
 import form-stdlib/hex.fk;
 import form-stdlib/bml/native-events-darwin.bml;
+import form-stdlib/peer-task-frame.fk;
+import form-stdlib/form-recipe-exec-token-live.fk;
+import form-stdlib/form-cli-resident-turnwheel.fk;
 section [form.bml] {
  class FormCliLocalPlan {
   // ── instruments ──
@@ -115,6 +118,84 @@ section [form.bml] {
    def flp-admission-start(ctx) = len(ctx)>9 ? ctx[9] : 0;
    def flp-with-admission-care(ctx,care) = append(take(10,flp-with-admission-start(ctx,flp-admission-start(ctx))),[care]);
    def flp-admission-care(req,ctx,row,n) = len(ctx)>10 ? ctx[10](req,row,n) : nothing();
+   // steer sits after admission care. Older contexts leave it empty, so a decline
+   // writes the packet and asks no voice. steer(question, gapId) answers text or nothing.
+   def flp-with-steer(ctx, steer) {
+    let cared = flp-with-admission-care(ctx, len(ctx) > 10 ? ctx[10] : nothing());
+    append(take(11, cared), [steer]);
+   }
+   def flp-steer(ctx) = len(ctx) > 11 ? ctx[11] : nothing();
+   // A lease note sits after the steer. Another process holding the GPU lease is not
+   // this process's client: the ask waits, and a remote guide is not required.
+   def flp-with-lease(ctx, lease) {
+    let steered = len(ctx) > 11 ? ctx : flp-with-steer(ctx, nothing());
+    append(take(12, steered), [lease]);
+   }
+   def flp-lease(ctx) = len(ctx) > 12 ? ctx[12] : "";
+   // A metal value sits after the lease. It is the micro-kernel's token, kept only when it
+   // equals the committed affine value. A mismatch stays off the reading.
+   def flp-with-metal(ctx, metal) {
+    let leased = len(ctx) > 12 ? ctx : flp-with-lease(ctx, "");
+    append(take(13, leased), [metal]);
+   }
+   def flp-metal(ctx) = len(ctx) > 13 ? ctx[13] : "";
+   def flp-steer-route(voices, holders) = nil?(voices) ? "none" : "admit";
+   // A mapped voice is warm: its weights are already shared pages, so the choice does not add them again.
+   // A cold voice is taken only when its bytes plus the reserve fit in the memory the host still has.
+   def flp-steer-warm(rows, warm) = nil?(rows) ? "" : any?(n => (String) n == rows[0][0], warm) ? rows[0][0] : flp-steer-warm(rows[1:], warm);
+   def flp-steer-fit(rows, available, reserve) = nil?(rows) ? "" : rows[0][1] < 0 ? flp-steer-fit(rows[1:], available, reserve) : ((rows[0][1] + reserve) <= available) ? rows[0][0] : flp-steer-fit(rows[1:], available, reserve);
+   def flp-steer-model(rows, warm, available, reserve) {
+    let held = flp-steer-warm(rows, warm);
+    (String) held != "" ? held : flp-steer-fit(rows, available, reserve);
+   }
+   // wear 1 is worn only when the witnessed digest is the bytes just read. Anything else stays off the model.
+   def flp-steer-wear(wear, want, read) {
+    if (wear != 1) then "bare" else if (((String) want == read) && (len(want) > 0)) then "wear" else "mismatch";
+   }
+   // The same reserve the disk steward keeps: a tenth of the volume, and at most 100 GiB.
+   def flp-disk-gib() = 1073741824;
+   def flp-disk-reserve(total) = total / 10 < 100 * flp-disk-gib() ? total / 10 : 100 * flp-disk-gib();
+  def flp-steer-disk(total, free) {
+   if (total < 1 || free < 1) then "tight" else if (free < flp-disk-reserve(total)) then "tight" else "room";
+  }
+  // The micro kernel needs a gib of headroom. The resident model needs 24. Below that, no open.
+  def flp-kernel-need() = flp-disk-gib();
+  def flp-model-need() = 24 * flp-disk-gib();
+  // A cold open asks for the weight file plus the same 8 GiB reserve the choice already keeps. A missing file asks for nothing.
+  def flp-cold-need(bytes, reserve) = bytes < 1 ? 0 : bytes + reserve;
+  def flp-steer-memory(available, need) {
+   if (available < 1 || need < 1) then "tight" else if (available < need) then "tight" else "room";
+  }
+  // A GPU token is kept only when it is the value the recipe committed. Anything else stays off the reading.
+  def flp-keep-metal(got, expected) = ((String) got != "") && ((String) got == expected) ? got : "";
+  // A live lease owned by another pid stays held-elsewhere. Absent, dead, and unowned are free.
+  // Unknown stays held-elsewhere, so a missing observation does not open a second Metal client.
+  // Another fkwu above 1 GiB of resident memory is a peer on this machine. A command that names a model session is a peer even while it is still small.
+  def flp-rss-held?(rows, me, floor) {
+   if nil?(rows) then 0 else if (!((String) value_kind(rows[0]) == "list") || (len(rows[0]) < 2)) then flp-rss-held?(rows[1:], me, floor) else if (((Comparable) rows[0][0] != me) && (rows[0][1] >= floor)) then 1 else flp-rss-held?(rows[1:], me, floor);
+  }
+  def flp-named-peer?(text) {
+   if (str_find(text, "q38", 0) >= 0) then 1 else if (str_find(text, "native-turn", 0) >= 0) then 1 else if (str_find(text, "form-glass-live", 0) >= 0) then 1 else 0;
+  }
+  // A shared model is pages another process already maps. Its weight bytes are not asked again.
+  // The GPU lease is the one Metal client: held-elsewhere stays closed, a shared file does not.
+  def flp-ask-open?(device, disk, memory, model, shared) {
+   if ((String) device == "held") then 0 else if ((String) disk == "tight") then 0 else if ((String) model == "") then 0 else if ((String) shared == "shared") then 1 else if ((String) memory == "tight") then 0 else 1;
+  }
+  // A second stream on a residence this process already holds asks for its own KV.
+  // A new open still asks for its scratch and both streams. A shared file does not ask for the weight bytes again.
+  def flp-stream-need(weight, state, reserve, shared) {
+   if (state < 1) then 0 else if ((Comparable) shared == 1) then state else if (weight < 1) then 0 else weight + reserve + state;
+  }
+  def flp-residence-need(weight, scratch, state, reserve, shared) {
+   if (scratch < 1 || state < 1) then 0 else if ((Comparable) shared == 1) then scratch + state + state else if (weight < 1) then 0 else weight + reserve + scratch + state + state;
+  }
+  def flp-stream-open?(device, free, need) {
+   if ((String) device == "held") then 0 else if (free < 1 || need < 1) then 0 else if (free < need) then 0 else 1;
+  }
+  def flp-steer-lease(judged, me) {
+   if ((String) judged[0] == "absent" || ((String) judged[0] == "dead" || (String) judged[0] == "unowned")) then "free" else if ((String) judged[0] == "live" && ((Comparable) judged[1][2] == me)) then "mine" else "held-elsewhere";
+  }
   // ── text ──
   def flp-starts?(s, p) = (len(s) >= len(p)) && ((String) substring(s, 0, len(p)) == p);
   def flp-ends?(s, p) = (len(s) >= len(p)) && ((String) substring(s, (len(s) - len(p)), len(s)) == p);
@@ -564,6 +645,13 @@ section [form.bml] {
   def flp-band-bytes(p) = if flp-exists?(p) then file_size(p) else 0;
   def flp-band-tail(p, n) = if (flp-band-bytes(p) < 1) then "" else (read_file_slice(p, (flp-band-bytes(p) > n ? (flp-band-bytes(p) - n) : 0), (flp-band-bytes(p) > n ? n : flp-band-bytes(p))) ?? "");
   def flp-band-head(p, n) = if (flp-band-bytes(p) < 1) then "" else (read_file_slice(p, 0, (flp-band-bytes(p) > n ? n : flp-band-bytes(p))) ?? "");
+  // The child is this same kernel. A worktree with no ./fkwu still verifies: the path is the one this process was born as.
+  def flp-kernel() {
+   let row = host_process(host_pid());
+   let named = (String) value_kind(row) == "list" && len(row) > 2 ? row[2] : "";
+   let resolved = (String) named == "" ? nothing() : host_realpath(named);
+   nothing?(resolved) || ((String) resolved == "") ? "./fkwu" : resolved;
+  }
   def flp-band-run(path, deadline) {
    let io = flp-parent(path);
    let step = flp-file-name(path);
@@ -572,7 +660,7 @@ section [form.bml] {
    let err = path ++ ".err";
    let cleared = host_path_remove(out);
    let gone = host_path_remove(err);
-   let pid = host_spawn_at(["./fkwu", path], ["/dev/null", out, err, ""]);
+   let pid = host_spawn_at([flp-kernel(), path], ["/dev/null", out, err, ""]);
    let waited = if (nothing?(pid) || (pid <= 0)) then [nothing(), hch-birth-why(pid)] else hch-wait(pid, (host_monotonic_ms() + deadline));
    let status = waited[0];
    let why = waited[1];
@@ -1157,7 +1245,25 @@ section [form.bml] {
   }
   // the voice's reply, verified: [1, landing] when it lands, [3, witness] when the request is moot, [0, finding] when
   // refused; a refused option's scratch tree leaves once its row lands, and a verified or moot option's stays
-   def flp-planner(memory, n, way, said) = [fhn-s("plan_voice", way[0]), fhn-s("plan_lens", way[1]), fhn-n("plan_options", n), fhn-n("plan_local_generated_ids", (flp-spent(memory, 7) + said[3])), fhn-n("plan_local_injected_ids", (flp-spent(memory, 6) + said[2])), fhn-n("plan_cases_copied", flp-copies-kept(map(m=>m[5],memory)) + flp-said-copied(said))];
+   def flp-steer-prompt(memory) = foldl((n, m) => (String) flp-text(m[5], "rung") == "local-steer" ? (fcgp-num(m[5], "local_prompt_ids") ?? n) : n, 0, memory);
+   def flp-metal-line(text) {
+    let at = str_find(text, "\nmetal ", 0);
+    if (at < 0) then "" else {
+     let rest = substring(text, at + 7, len(text));
+     let nl = str_find(rest, "\n", 0);
+     nl < 0 ? trim(rest) : trim(substring(rest, 0, nl));
+    }
+   }
+   def flp-metal-keep(kept, m) {
+    let line = flp-metal-line((String) m[0]);
+    (String) line == "" ? kept : line;
+   }
+   def flp-metal-of(memory) = foldl(flp-metal-keep, "", memory);
+   def flp-planner(memory, n, way, said) {
+    let base = [fhn-s("plan_voice", way[0]), fhn-s("plan_lens", way[1]), fhn-n("plan_options", n), fhn-n("plan_local_generated_ids", (flp-spent(memory, 7) + said[3])), fhn-n("plan_local_prompt_ids", flp-steer-prompt(memory)), fhn-n("plan_local_injected_ids", (flp-spent(memory, 6) + said[2])), fhn-n("plan_cases_copied", flp-copies-kept(map(m=>m[5],memory)) + flp-said-copied(said))];
+    let metal = flp-metal-of(memory);
+    (String) metal == "" ? base : append(base, [fhn-s("plan_metal", metal)]);
+   }
    // A copy stands once its proposal read cases; a reply refused before that left the base as it was.
    def flp-copies-kept(rows) = foldl((t,r)=>t + (nothing?(fcgp-num(r,"cases_held")) ? 0 : (fcgp-num(r,"cases_copied") ?? 0)),0,rows);
    def flp-observed(req, ctx, n, way, said, started, planner) {
@@ -1209,10 +1315,29 @@ section [form.bml] {
   }
   def flp-record-moot(req, r, requests) = if (!((String) r[0] == "moot")) then "" else mc-cat(["[local-plan:moot] ", flp-req-id(req), " in ", requests, ": ", flp-moot-written(req, r, requests)]);
   // ── the landing: the band at its path, the row at the queue's end ──
+  def flp-candidate(plan, w) = flp-standing(plan, w, (t, d, bml) => flp-ref-def(t, d, bml, flp-p-reference(plan)));
+  def flp-keep-candidate(plan, ctx, w) {
+   let text = flp-candidate(plan, w);
+   if nothing?(text) then "" else {
+    let path = flp-at(flp-ctx-scratch(ctx), w);
+    let put = flp-put(path, text);
+    path;
+   }
+  }
+  def flp-kept-paths(plan, ctx) = filter(p => (String) p != "", map(w => flp-keep-candidate(plan, ctx, w), flp-p-writable(plan)));
+  def flp-formed-row(row, paths) = json-node-object(append(filter(p => (String) json-pair-key(p) != "formed", json-object-pairs(row)), [json-node-pair("formed", flp-json-strings(paths))]));
+  def flp-refresh-formed(plan, ctx, queued) {
+   let paths = flp-kept-paths(plan, ctx);
+   let shown = flp-formed-row(queued, paths);
+   let lines = map(r => ((String) flp-text(r, "request") == flp-text(queued, "request")) && ((String) flp-text(r, "id") == flp-text(queued, "id")) ? lrun-row-line(shown) : lrun-row-line(r), flp-queue-rows(flp-ctx-queue(ctx)));
+   let wrote = write_file_text(flp-ctx-queue(ctx), foldl((a, l) => mc-cat([a, l, "\n"]), "", lines));
+   shown;
+  }
   def flp-land(plan, req, ctx, planner, optionRow) {
    let path = flp-at(flp-ctx-land(ctx), flp-p-band(plan));
    let put = flp-put(path, flp-p-text(plan));
-   let row = flp-row(plan, req, planner);
+   let formed = flp-kept-paths(plan, ctx);
+   let row = json-node-object(append(json-object-pairs(flp-row(plan, req, planner)), [json-node-pair("formed", flp-json-strings(formed))]));
    let appended = fhn-append(flp-ctx-queue(ctx), lrun-row-line(row) ++ "\n");
    appended=="appended" ? [path, row, appended, optionRow] : form_error("local-plan queue retention failed: " + appended);
   }
@@ -1278,7 +1403,7 @@ section [form.bml] {
      let generated=foldl((n,r)=>n + (fcgp-num(r,"local_generated_ids") ?? 0),0,taskRows);
      let injected=foldl((n,r)=>n + (fcgp-num(r,"local_injected_ids") ?? 0),0,taskRows);
      let planner=[fhn-s("plan_voice",way[0]),fhn-s("plan_lens",way[1]),fhn-n("plan_options",len(taskRows)),fhn-n("plan_local_generated_ids",generated),fhn-n("plan_local_injected_ids",injected),fhn-n("plan_cases_copied",flp-copies-kept(rows |> filter(r=>flp-text(r,"request")==flp-req-id(req) && flp-text(r,"rung")!="recheck"))),fhn-s("plan_reference_reply",referenceReply),fhn-s("plan_reference_voice",flp-text(referenceOwner,"voice")),fhn-n("reachable",1),json-node-pair("plan_solofall",flp-falls-node(v[6])),json-node-pair("plan_checkfall",flp-checkfall-node(v[6]))];
-     ["queued",nothing?(queued) ? flp-land(parsed[2],req,ctx,planner,row) : [flp-p-band(parsed[2]),queued,0,row],""];
+     ["queued",nothing?(queued) ? flp-land(parsed[2],req,ctx,planner,row) : [flp-p-band(parsed[2]),flp-refresh-formed(parsed[2],ctx,queued),0,row],""];
     };
    };
   }
@@ -1357,8 +1482,8 @@ section [form.bml] {
    let memory=record_get(record_get(nve-event-watch(event),"repeat"),"cursor");
    let ack=oac-offer(flp-option,[[context[0],context[1]],memory]);
    let next=oac-node?(ack) ? append(memory,[oac-payload(ack)]) : memory;
-   oac-node?(ack) ? (flp-outcome-still?(next) ? { print_str(flp-still-line(context[0], next)); flp-park-mark(context[0],context[1],"still"); flp-declined(context[0],context[1],next); } : flp-ways-spent?(next, flp-ctx-voices(context[1])) ? { print_str(flp-spent-line(context[0], next)); flp-park-mark(context[0],context[1],"spent"); flp-declined(context[0],context[1],next); } : again(next)) :
-    oac-one?(ack) ? flp-ended(oac-payload(ack),memory) : flp-declined(context[0],context[1],memory);
+   oac-node?(ack) ? (flp-outcome-still?(next) ? { print_str(flp-still-line(context[0], next)); flp-park-mark(context[0],context[1],"still"); flp-after-decline(context[0],context[1],next); } : flp-ways-spent?(next, flp-ctx-voices(context[1])) ? { print_str(flp-spent-line(context[0], next)); flp-park-mark(context[0],context[1],"spent"); flp-after-decline(context[0],context[1],next); } : again(next)) :
+    oac-one?(ack) ? flp-ended(oac-payload(ack),memory) : flp-after-decline(context[0],context[1],memory);
   }
   def flp-walk-from(req,ctx,memory) = flp-walk-owned(req,flp-with-admission-start(ctx,len(memory)),memory);
   def flp-release-pending?(memory) = !nil?(memory) && flp-release-held?(flp-row-admission(memory[-1][5]));
@@ -1371,7 +1496,7 @@ section [form.bml] {
    } else flp-walk-options(req,ctx,memory);
   }
   def flp-walk-options(req, ctx, memory) {
-   if flp-parked?(req, memory, flp-ctx-voices(ctx)) || ((!nil?(memory)) && flp-park-marked?(req, flp-ctx-ledger(ctx))) then { print_str(flp-parked-line(req, memory)); flp-declined(req, ctx, memory); } else if nothing?(flp-ctx-attempts(ctx)) then {
+   if flp-parked?(req, memory, flp-ctx-voices(ctx)) || ((!nil?(memory)) && flp-park-marked?(req, flp-ctx-ledger(ctx))) then { print_str(flp-parked-line(req, memory)); flp-after-decline(req, ctx, memory); } else if nothing?(flp-ctx-attempts(ctx)) then {
     let owner=nve-open();
     let watch=repeat(owner,flp-repeat,[req,ctx],memory,[]);
     nve-run(owner,nothing());
@@ -1381,7 +1506,7 @@ section [form.bml] {
    } else {
    let w = oac-backtrack-walk(flp-options(flp-ctx-attempts(ctx)), [req, ctx], memory);
    let memory = oac-backtrack-memory(w);
-    if ((Comparable) oac-one?(oac-backtrack-ack(w)) == 1) then flp-ended(oac-payload(oac-backtrack-ack(w)), memory) else if flp-release-pending?(memory) then flp-walk-owned(req,ctx,memory) else flp-declined(req, ctx, memory);
+    if ((Comparable) oac-one?(oac-backtrack-ack(w)) == 1) then flp-ended(oac-payload(oac-backtrack-ack(w)), memory) else if flp-release-pending?(memory) then flp-walk-owned(req,ctx,memory) else flp-after-decline(req, ctx, memory);
    };
   }
   // an option that ends the walk: its plan landed, its band showed the request moot, or the voice could not open (the
@@ -1391,12 +1516,315 @@ section [form.bml] {
   def flp-row-finding(r) = mc-cat(["Verification (", flp-show(fcgp-num(r, "verify_rung")), ") refused option ", flp-show(fcgp-num(r, "option")), " (", fcgp-str(r, "kind"), "): ", fcgp-str(r, "failure")]);
   // a recheck reads a retained reply again: no voice spoke, so it is no option of the walk
   def flp-memory-of(rows, id, read) = map(r => [flp-row-finding(r), fcgp-str(r, "kind"), fcgp-str(r, "lens"), fcgp-str(r, "voice"), read(fcgp-str(r, "reply")), r, (fcgp-num(r, "local_injected_ids") ?? 0), (fcgp-num(r, "local_generated_ids") ?? 0)], filter(r => (((String) fcgp-str(r, "request") == id) && ((String) fcgp-str(r, "verdict") == "refused") && ((String) fcgp-str(r, "rung") != "recheck")), rows));
-  def flp-guide-question() = "Which change of approach would let the local planner write a band-first gap for this request that Form verifies?";
+  def flp-guide-question() = "Write the band-first gap for this request as one reply Form can verify: a <plan> JSON object with id, writable, and definitions; a <goal> that names each definition; a <cases> JSON array of function, arguments, and equals; and a <reference> holding the definition text. After any reasoning, those blocks are the final reply.";
+  def flp-steer-budget() = 1536;
+  // Reasoning stays before the closing mark. The next local rung hears only the final channel.
+  def flp-final-channel(text) {
+   let mark = "</think>";
+   let at = str_find(text, mark, 0);
+   at < 0 ? trim(text) : trim(substring(text, at + len(mark), len(text)));
+  }
+  def flp-reason-channel(text) {
+   let mark = "</think>";
+   let at = str_find(text, mark, 0);
+   at < 0 ? "" : trim(substring(text, 0, at));
+  }
+  // The final reply is the plan when it parses as one. A plan left in the reasoning
+  // is still that plan. Reasoning with no plan leaves the final reply as it stands.
+  def flp-plan-channel(text) {
+   let final = flp-final-channel(text);
+   if flp-proposal?(final) then final else if flp-proposal?(flp-reason-channel(text)) then flp-reason-channel(text) else final;
+  }
+  // Two direct-answer frames share one offer. A resident reader can take them as two streams; this write opens no model.
+  def flp-steer-frames(question) = [fcpa-task-frame(1, "direct-answer", question), fcpa-task-frame(2, "direct-answer", "Name the one Form check that would verify that change.")];
+  def flp-steer-offer(question) = mc-cat([flp-steer-frames(question)[0], "\n", flp-steer-frames(question)[1], "\n"]);
+  def flp-digit?(b) = b >= 48 && b <= 57;
+  def flp-scan-int(text, i, acc, on) {
+   if (i >= len(text)) then (on ? acc : -1) else {
+    let b = str_byte_at(text, i);
+    let digit = flp-digit?(b);
+    let continued = flp-scan-int(text, i + 1, acc * 10 + (b - 48), 1);
+    let stopped = on ? acc : flp-scan-int(text, i + 1, 0, 0);
+    digit ? continued : stopped;
+   }
+  }
+  // Digits inside the plan id name the landing. The kernel reads the body after that block.
+  def flp-kernel-from(text) {
+   let mark = "</plan>";
+   let at = str_find(text, mark, 0);
+   at < 0 ? 0 : at + len(mark);
+  }
+  def flp-last-at(text, mark, i, found) {
+   if (i >= len(text)) then found else {
+    let at = str_find(text, mark, i);
+    at < 0 ? found : flp-last-at(text, mark, at + len(mark), at);
+   }
+  }
+  // The kernel reads the last case's arguments. A reply with no arguments is read from after the plan.
+  def flp-kernel-span(text) {
+   let from = flp-kernel-from(text);
+   let at = flp-last-at(text, "\"arguments\"", from, -1);
+   if (at < 0) then [from, len(text)] else {
+    let close = str_find(text, "]", at);
+    [at + len("\"arguments\""), close < 0 ? len(text) : close];
+   }
+  }
+  def flp-scan-end(text, i, end, acc, on) {
+   if (i >= end || i >= len(text)) then (on ? acc : -1) else {
+    let b = str_byte_at(text, i);
+    let digit = flp-digit?(b);
+    let continued = flp-scan-end(text, i + 1, end, acc * 10 + (b - 48), 1);
+    let stopped = on ? acc : flp-scan-end(text, i + 1, end, 0, 0);
+    digit ? continued : stopped;
+   }
+  }
+  def flp-first-int(text) {
+   let span = flp-kernel-span(text);
+   flp-scan-end(text, span[0], span[1], 0, 0);
+  }
+  def flp-past-end(text, i, end, on) {
+   if (i >= end || i >= len(text)) then i else {
+    let digit = flp-digit?(str_byte_at(text, i));
+    digit ? flp-past-end(text, i + 1, end, 1) : on ? i : flp-past-end(text, i + 1, end, 0);
+   }
+  }
+  def flp-second-int(text) {
+   let span = flp-kernel-span(text);
+   flp-scan-end(text, flp-past-end(text, span[0], span[1], 0), span[1], 0, 0);
+  }
+  // Two integers name two kernel inputs. The pair is the two values one launch would write.
+  def flp-pair-token(text) {
+   let a = flp-first-int(text);
+   let b = flp-second-int(text);
+   a < 0 || b < 0 ? "" : mc-cat([(a * 3 + 7).str(), ",", (b * 3 + 7).str()]);
+  }
+  // One integer is kept after the kernel runs on its own affine value. Two integers are the pair one launch writes.
+  def flp-kept-token(text) {
+   let pair = flp-pair-token(text);
+   if ((String) pair != "") then pair else {
+    let n = flp-first-int(text);
+    n < 0 ? "" : ((n * 3 + 7) * 3 + 7).str();
+   }
+  }
+  // The first integer in an admitted answer is the affine kernel's input.
+  // The recorded token is the value that kernel would write. Nothing here dispatches it.
+  def flp-steer-kernel(text) {
+   let n = flp-first-int(text);
+   let recipe = frex-recipe();
+   let valid = frexl-code-valid?(frexl-code-node(recipe), recipe);
+   n < 0 || ((Comparable) valid != 1) ? "" : frexl-recipe-expected(recipe, n).str();
+  }
+  // One affine token on the micro kernel: a four-byte buffer, one thread, no model.
+  // The value is returned only when the dispatch executed and matches the recipe. Otherwise "".
+  def flp-metal-token(n) {
+   let request = frex-parse(frex-surface(frex-recipe(), n, "metal"));
+   if (String) frex-request-state(request) != "ready" then ["", ""] else {
+    let live = frexl-execute-request(request, 0);
+    let expected = frexl-recipe-expected(frex-recipe(), n);
+    let model = len(live) > 14 ? frexl-result-model-executed?(live).str() : "";
+    (len(live) > 13) && ((Comparable) frexl-result-executed?(live) == 1) && ((Comparable) frexl-result-value(live) == expected) ? [expected.str(), model] : ["", model];
+   }
+  }
+  // Two affine tokens in one launch: one eight-byte buffer, two threads, no model.
+  // Both values are returned only when each thread wrote the recipe. Otherwise ["", ""].
+  def flp-metal-two(a, b) {
+   let source = "#include <metal_stdlib>\nusing namespace metal;\nkernel void form_recipe_exec_affine_pair(device int *v [[buffer(0)]], uint gid [[thread_position_in_grid]]) { if (gid < 2) v[gid] = v[gid] * 3 + 7; }";
+   let buffer = metal_buf_alloc(8);
+   if (buffer <= 0) then ["", ""] else {
+    let wrote = metal_buf_write(buffer, 0, mc-cat([frexl-i32-bytes(a), frexl-i32-bytes(b)]));
+    if ((Comparable) wrote != 8) then { let released = metal_buf_free(buffer); ["", ""]; } else {
+     let pipeline = metal_pipeline(source, "form_recipe_exec_affine_pair");
+     if (pipeline <= 0) then { let released = metal_buf_free(buffer); ["", ""]; } else {
+      let enqueued = metal_enqueue(pipeline, md-bind([buffer], empty()), 2);
+      if ((Comparable) enqueued != 1) then { let released = metal_buf_free(buffer); ["", ""]; } else {
+       let synced = metal_sync();
+       if (synced <= 0) then { let released = metal_buf_free(buffer); ["", ""]; } else {
+        let bytes = metal_buf_read(buffer, 0, 8);
+        let released = metal_buf_free(buffer);
+        let ea = a * 3 + 7;
+        let eb = b * 3 + 7;
+        ((Comparable) released == 1) && ((Comparable) len(bytes) == 8) && ((Comparable) frexl-i32-at(bytes, 0) == ea) && ((Comparable) frexl-i32-at(bytes, 4) == eb) ? [ea.str(), eb.str()] : ["", ""];
+       }
+      }
+     }
+    }
+   }
+  }
+  def flp-steer-geo() = [0, 1, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 1, 2, 1, 1];
+  def flp-count-alloc(box) = bytes => { let n = record_get(box, "n") + 1; record_set(box, "n", n); n; };
+  def flp-steer-host() {
+   let eid = [0, 1];
+   let shared = fcrt-shared("steer-residence", "", [0, 0, flp-steer-geo()], [], 2, 8, []);
+   fcrt-host([wt-wheel([], shared), [[eid, fcrt-unbound-route(), 0]], eid, []], []);
+  }
+  // Two prompt cursors on one residence. Each keeps its own KV handles from the counting allocator, then one kernel turn commits both. No Metal buffer.
+  def flp-seat-two(a, b) {
+   let box = record_new(0, "n", 0);
+   let alloc = flp-count-alloc(box);
+   let first = fcrt-accept-cursor(flp-steer-host(), 3, flp-kernel-cursor(a.str()), 4, () => 0, alloc);
+   let second = fcrt-accept-cursor(fcrt-act-host(first), 4, flp-kernel-cursor(b.str()), 4, () => 0, alloc);
+   let turned = fcrt-kernel-turn(fcrt-act-host(second));
+   let rows = wt-rows(le-w(fcrt-lw(turned)));
+   let rowA = wt-find(rows, 3);
+   let rowB = wt-find(rows, 4);
+   let stsA = fcrt-pf-sts(fcrt-flow-payload(wt-rstate(rowA)));
+   let stsB = fcrt-pf-sts(fcrt-flow-payload(wt-rstate(rowB)));
+   [wt-toks(rowA)[0].str(), wt-toks(rowB)[0].str(), record_get(box, "n").str(), stsA[0][2].str(), stsB[0][2].str()];
+  }
+  def flp-seat-next(host, inputs, id, alloc) {
+   if nil?(inputs) then host else {
+    let seated = fcrt-accept-cursor(host, id, flp-kernel-cursor(inputs[0].str()), 4, () => 0, alloc);
+    (String) fcrt-act-signal(seated) == "value" ? flp-seat-next(fcrt-act-host(seated), inputs[1:], id + 1, alloc) : host;
+   }
+  }
+  def flp-seat-tokens(rows, id, n) {
+   if (n <= 0) then [] else append([wt-toks(wt-find(rows, id))[0].str()], flp-seat-tokens(rows, id + 1, n - 1));
+  }
+  def flp-seat-handles(rows, id, n) {
+   if (n <= 0) then [] else {
+    let sts = fcrt-pf-sts(fcrt-flow-payload(wt-rstate(wt-find(rows, id))));
+    append([sts[0][2].str()], flp-seat-handles(rows, id + 1, n - 1));
+   }
+  }
+  def flp-handles-distinct?(xs) {
+   if nil?(xs) then 1 else if any?(x => (String) x == xs[0], xs[1:]) then 0 else flp-handles-distinct?(xs[1:]);
+  }
+  // Several prompt cursors, one residence, one kernel turn. Each cursor keeps its own KV from the counting allocator. No Metal buffer.
+  def flp-seat-many(inputs) {
+   let box = record_new(0, "n", 0);
+   let alloc = flp-count-alloc(box);
+   let seated = flp-seat-next(flp-steer-host(), inputs, 3, alloc);
+   let turned = fcrt-kernel-turn(seated);
+   let rows = wt-rows(le-w(fcrt-lw(turned)));
+   [flp-seat-tokens(rows, 3, len(inputs)), record_get(box, "n").str(), flp-seat-handles(rows, 3, len(inputs))];
+  }
+  def flp-kernel-cursor(kernel) {
+   let n = flp-first-int(kernel);
+   n < 0 ? nothing() : qtlc-open-owned-index(["current"], [qtlc-id-segment([n])]);
+  }
+  // Two direct-answer frames, and when the answer named a kernel token, one prefill
+  // row that holds it. The allocator is a counter, so this seats no Metal buffer.
+  def flp-commit-row(row) {
+   let flow = wt-rstate(row);
+   if ((String) fcrt-flow-phase(flow) != "prefill") then row else {
+    let stepped = fcrt-kernel-step(0, flow);
+    let tok = stepped[0];
+    nothing?(tok) ? row : wt-with(row, stepped[1], wt-budget(row) - 1, append(wt-toks(row), [tok]), "live");
+   }
+  }
+  def flp-kernel-commit(host) {
+   let lw = fcrt-lw(host);
+   let wheel = le-w(lw);
+   let rows = map(flp-commit-row, wt-rows(wheel));
+   let staged = fcrt-kernel-stage(rows);
+   fcrt-with(host, fcrt-lw-with-wheel(lw, wt-wheel(rows, wt-sctx(wheel))), fcrt-event("kernel-choice", staged, len(rows)));
+  }
+  def flp-seat-offer(question, kernel) {
+   let frames = flp-steer-frames(question);
+   let first = fcrt-accept-program(flp-steer-host(), 1, frames[0], 4, () => 0);
+   let second = fcrt-accept-program(fcrt-act-host(first), 2, frames[1], 4, () => 0);
+   let cursor = flp-kernel-cursor(kernel);
+   if nothing?(cursor) then fcrt-act-host(second) else {
+    let box = record_new(0, "n", 0);
+    let seated = fcrt-accept-cursor(fcrt-act-host(second), 3, cursor, 4, () => 0, flp-count-alloc(box));
+    (String) fcrt-act-signal(seated) == "value" ? flp-kernel-commit(fcrt-act-host(seated)) : fcrt-act-host(seated);
+   }
+  }
+  def flp-seat-count(host) = wt-live-count(wt-rows(le-w(fcrt-lw(host))), 0);
+  def flp-seat-held(host) = fcrt-pf-held(fcrt-flow-payload(wt-rstate(wt-find(wt-rows(le-w(fcrt-lw(host))), 3)))).str();
+  def flp-steer-reading(reading, status, kind, dependence, text, kernel, rows, committed) = json-node-object(append(json-object-pairs(reading), [fhn-s("local_steer", status), fhn-s("local_steer_kind", kind), fhn-s("remote_dependence", dependence), fhn-s("local_steer_text", text), fhn-s("local_steer_kernel", kernel), fhn-s("local_steer_rows", rows), fhn-s("local_steer_committed", committed)]));
+  // An earned decline asks the local steer when the context carries one. The packet
+  // still lands. An admitted answer is feedback, remote_dependence none. A steer that
+  // answers nothing leaves the reading as the gate wrote it.
   def flp-declined(req, ctx, memory) {
    let rows = map(m => m[5], memory);
-   let gap = json-node-object([fhn-s("id", mc-cat(["plan-", flp-safe-id(req)])), fhn-s("goal", flp-request-text(req)), json-node-pair("checks", json-node-array([]))]);
-   let guide = if fcgp-earned?(rows) then fcgp-packet-at(mc-cat([flp-ctx-scratch(ctx), "/guide"]), gap, rows, flp-guide-question(), now_unix_ms()) else ["", fcgp-reading(rows)];
-   ["declined", [], memory, guide[1], guide[0]];
+   let gapId = mc-cat(["plan-", flp-safe-id(req)]);
+   let gap = json-node-object([fhn-s("id", gapId), fhn-s("goal", flp-request-text(req)), json-node-pair("checks", json-node-array([]))]);
+   let earned = fcgp-earned?(rows);
+   let guideDir = mc-cat([flp-ctx-scratch(ctx), "/guide"]);
+   let made = earned ? flp-mkdirs(guideDir) : 0;
+   let guide = if earned then fcgp-packet-at(guideDir, gap, rows, flp-guide-question(), now_unix_ms()) else ["", fcgp-reading(rows)];
+   let raw = earned && !nothing?(flp-steer(ctx)) ? flp-steer(ctx)(flp-guide-question(), gapId) : nothing();
+   let parts = flp-steer-parts(raw);
+   let spoken = parts[0];
+   let generated = parts[1];
+   let prompt = parts[2];
+   let waiting = earned && !nothing?(flp-steer(ctx)) && nothing?(spoken) && ((String) flp-lease(ctx) == "held-elsewhere");
+   let channel = nothing?(spoken) ? "" : flp-plan-channel(spoken);
+   let admitted = nothing?(spoken) ? nothing() : fcgp-admit(channel, gapId);
+   let admittedOk = !nothing?(admitted) && ((String) fcgp-str(admitted, "status") == "admitted");
+   let steerText = admittedOk ? fcgp-str(json-object-get(admitted, "feedback"), "text") : "";
+   let kernel = admittedOk ? flp-steer-kernel(steerText) : "";
+   let seated = admittedOk ? flp-seat-offer(flp-guide-question(), kernel) : nothing();
+   let rowCount = nothing?(seated) ? "0" : flp-seat-count(seated).str();
+   let committed = (String) kernel == "" || nothing?(seated) ? "" : flp-seat-held(seated);
+   let metal = flp-metal(ctx);
+   let pair = flp-pair-token(steerText);
+   let metalOk = (String) metal != "" && (((String) metal == committed) || (((String) pair != "") && ((String) metal == pair)));
+   let waitedReading = flp-steer-reading(guide[1], "waiting", "lease", "none", "", "", "0", "");
+   let admittedReading = flp-steer-reading(guide[1], fcgp-str(admitted, "status"), fcgp-str(admitted, "kind"), admittedOk ? "none" : "required-guide", steerText, kernel, rowCount, committed);
+   let baseReading = if waiting then waitedReading else if nothing?(admitted) then guide[1] else admittedReading;
+   let counted = json-node-object(append(json-object-pairs(baseReading), [fhn-n("local_steer_generated", generated), fhn-n("local_steer_prompt", prompt)]));
+   let reading = metalOk ? json-node-object(append(json-object-pairs(counted), [fhn-s("local_steer_metal", metal)])) : counted;
+   let recorded = nothing?(admitted) ? 0 : fcgp-record(mc-cat([flp-ctx-scratch(ctx), "/guide/local-steer.jsonl"]), fcgp-local-steer-row(gapId, admitted));
+   let offered = admittedOk ? write_file_text(mc-cat([flp-ctx-scratch(ctx), "/guide/local-steer-offer.txt"]), flp-steer-offer(flp-guide-question())) : 0;
+   ["declined", [], memory, reading, guide[0]];
+  }
+  def flp-steered?(memory) = any?(m => (String) flp-text(m[5], "rung") == "local-steer", memory);
+  // A steer may answer a string, or [text, generated, prompt]. A string counts as one generated id, the old reading.
+  def flp-steer-parts(spoken) {
+   if ((String) value_kind(spoken) == "list") && (len(spoken) >= 1) then {
+    let generated = len(spoken) > 1 ? spoken[1] : 1;
+    let prompt = len(spoken) > 2 ? spoken[2] : 0;
+    [spoken[0], generated, prompt];
+   } else [spoken, (nothing?(spoken) ? 0 : 1), 0];
+  }
+  def flp-steer-entry(req, ctx, memory, text, generated, prompt) {
+   let named = nil?(memory) ? "" : memory[-1][3];
+   let voice = flp-has?(flp-ctx-voices(ctx), named) ? named : (nil?(flp-ctx-voices(ctx)) ? "" : flp-ctx-voices(ctx)[0]);
+   let lens = nil?(memory) || ((String) memory[-1][2] == "") ? flp-lenses()[0] : memory[-1][2];
+   let row = json-node-object([fhn-s("rung", "local-steer"), fhn-s("request", flp-req-id(req)), fhn-s("verdict", "refused"), fhn-s("kind", "local-steer"), fhn-s("failure", text), fhn-s("voice", voice), fhn-s("lens", lens), fhn-n("local_generated_ids", generated), fhn-n("local_prompt_ids", prompt), fhn-n("local_injected_ids", 0), fhn-s("approach_digest", flp-sha(mc-cat([voice, "|", lens, "|local-steer"]))), fhn-s("outcome_digest", flp-sha(text))]);
+   [text, "local-steer", lens, voice, "", row, 0, generated];
+  }
+  def flp-steer-landed(attempt, memory) = (Comparable) attempt[0] == 1 ? flp-ended(["queued", attempt[1]], memory) : (Comparable) attempt[0] == 2 ? flp-ended(["held", attempt[1]], memory) : (Comparable) attempt[0] == 3 ? flp-ended(["moot", attempt[1]], memory) : nothing();
+  // An admitted answer that already parses as a plan is that plan. Form verifies it.
+  // The voice is not asked to write the same plan again. A plan that does not hold is heard once, and that reply is verified.
+  def flp-proposal?(text) = (String) flp-parse(text)[0] == "";
+  def flp-steer-held(req, ctx, memory, text, feedback, declined) {
+   let next = append(memory, [flp-steer-entry(req, ctx, memory, feedback, fcgp-num(declined[3], "local_steer_generated") ?? 1, fcgp-num(declined[3], "local_steer_prompt") ?? 0)]);
+   let way = flp-choice(next, ctx);
+   let heard = flp-heard(req, ctx, next, len(next) + 1, way, ["answered", text, 0, 0], now_unix_ms());
+   let landed = flp-steer-landed(heard, next);
+   if !nothing?(landed) then landed else {
+    let failed = append(next, [heard[1]]);
+    let repair = flp-attempt(req, ctx, failed);
+    let repaired = flp-steer-landed(repair, failed);
+    !nothing?(repaired) ? repaired : ["declined", [], append(failed, [repair[1]]), declined[3], declined[4]];
+   }
+  }
+  // One admitted answer becomes the next local option's feedback. A plan already in that answer is verified with no second generation. Other prose is heard once more by that same local voice. A second steer is not asked.
+  def flp-after-decline(req, ctx, memory) {
+   let declined = flp-declined(req, ctx, memory);
+   if (((String) declined[0] != "declined") || flp-steered?(memory) || ((String) fcgp-str(declined[3], "local_steer") != "admitted")) then declined else {
+    let text = fcgp-str(declined[3], "local_steer_text");
+    let kernel = fcgp-str(declined[3], "local_steer_kernel");
+    let committed = fcgp-str(declined[3], "local_steer_committed");
+    let withKernel = (String) kernel == "" ? text : mc-cat([text, "\nkernel ", kernel]);
+    let withCommit = (String) committed == "" ? withKernel : mc-cat([withKernel, "\ncommitted ", committed]);
+    let metal = fcgp-str(declined[3], "local_steer_metal");
+    let feedback = (String) metal == "" ? withCommit : mc-cat([withCommit, "\nmetal ", metal]);
+    if ((Comparable) len(trim(text)) == 0) then declined else if flp-proposal?(text) then flp-steer-held(req, ctx, memory, text, feedback, declined) else {
+     let next = append(memory, [flp-steer-entry(req, ctx, memory, feedback, fcgp-num(declined[3], "local_steer_generated") ?? 1, fcgp-num(declined[3], "local_steer_prompt") ?? 0)]);
+     let attempt = flp-attempt(req, ctx, next);
+     let landed = flp-steer-landed(attempt, next);
+     if !nothing?(landed) then landed else {
+      let heard = append(next, [attempt[1]]);
+      let again = flp-attempt(req, ctx, heard);
+      let landed2 = flp-steer-landed(again, heard);
+      !nothing?(landed2) ? landed2 : ["declined", [], append(heard, [again[1]]), declined[3], declined[4]];
+     }
+    }
+   }
   }
   def flp-result(req, r) = json-node-object([fhn-s("request", flp-req-id(req)), fhn-s("status", r[0]), fhn-n("options", if (((String) r[0] == "queued") || ((String) r[0] == "moot")) then (len(r[2]) + 1) else len(r[2])), fhn-s("band", if nil?(r[1]) then "" else r[1][0]), json-node-pair("queued", if nil?(r[1]) then json-node-null() else r[1][1]), json-node-pair("guide", r[3]), fhn-s("guide_packet", r[4]), json-node-pair("finding", nil?(r[2]) ? json-node-null() : r[2][-1][5])]);
  }
