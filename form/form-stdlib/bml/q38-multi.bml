@@ -32,8 +32,8 @@ section [form.bml] {
   def q38m-kvwrite-msl(fname) = "kernel void " ++ fname ++ " (device const float* s [[buffer(0)]], device float* d [[buffer(1)]], device const uint* posb [[buffer(2)]], constant uint& kvd [[buffer(3)]], constant uint& maxpos [[buffer(4)]], constant uint& nrows [[buffer(5)]], uint gid [[thread_position_in_grid]]) { if (gid >= nrows * kvd) return; uint row = gid / kvd; uint i = gid - row * kvd; d[row * maxpos * kvd + posb[row] * kvd + i] = s[row * kvd + i]; }";
   // ── the driver: one step of N streams, one pass over the weights ──
   // The pipelines of the five kernels, [delta, conv, rope, kv write, attention], compiled from kth-msl's helpers plus the kernels.
-  def q38m-msl() = kth-msl() ++ q38m-delta-msl("form_q38m_delta_rows") ++ q38m-conv-msl("form_q38m_conv_rows") ++ q38m-rope-msl("form_q38m_rope_rows") ++ q38m-kvwrite-msl("form_q38m_kvw_rows") ++ q38m-gqa-msl("form_q38m_gqa_rows");
-  def q38m-pipes(msl) = [metal_pipeline(msl, "form_q38m_delta_rows"), metal_pipeline(msl, "form_q38m_conv_rows"), metal_pipeline(msl, "form_q38m_rope_rows"), metal_pipeline(msl, "form_q38m_kvw_rows"), metal_pipeline(msl, "form_q38m_gqa_rows")];
+  def q38m-msl() = kth-msl() ++ q38m-delta-msl("form_q38m_delta_rows") ++ q38m-conv-msl("form_q38m_conv_rows") ++ q38m-rope-msl("form_q38m_rope_rows") ++ q38m-kvwrite-msl("form_q38m_kvw_rows") ++ q38m-gqa-msl("form_q38m_gqa_rows") ++ q38m-fork-msl("form_q38m_fork");
+  def q38m-pipes(msl) = [metal_pipeline(msl, "form_q38m_delta_rows"), metal_pipeline(msl, "form_q38m_conv_rows"), metal_pipeline(msl, "form_q38m_rope_rows"), metal_pipeline(msl, "form_q38m_kvw_rows"), metal_pipeline(msl, "form_q38m_gqa_rows"), metal_pipeline(msl, "form_q38m_fork")];
   // N streams' state side by side: per layer [conv, delta, K, V], stream s at s * its own stride (a single stream's allocation scaled by N).
   def q38m-new-arena(geo, n, allocate) = kth-stream-state-by(geo[21], geo[22], geo[1] * n, geo[23], geo[3] * n, geo[5], geo[4], geo[20], geo[18] * n, allocate);
   def q38m-uints(xs) = foldl((a, x) => a ++ md-le32(x), "", xs);
@@ -108,14 +108,45 @@ section [form.bml] {
   def q38m-feed-ids(prompts, last, i) = map(s => i < len(prompts[s]) ? prompts[s][i] : last[s], range(0, len(prompts)));
   def q38m-fill(x, n) = n <= 0 ? [] : cons(x, q38m-fill(x, n - 1));
   def q38m-keep(prompts, outs, nxt, i, gen) = map(s => (i >= len(prompts[s]) - 1 && len(outs[s]) < gen) ? append(outs[s], [nxt[s]]) : outs[s], range(0, len(prompts)));
-  def q38m-generate-go(ctx, qs, mp, arena, sx, posb, prompts, i, total, last, outs, gen) {
+  def q38m-generate-go(ctx, qs, mp, arena, sx, posb, prompts, i, total, last, outs, gen, p0) {
    if (i >= total) then outs else {
-    let nxt = q38m-step(ctx, qs, mp, arena, sx, posb, q38m-feed-ids(prompts, last, i), q38m-fill(i, len(prompts)));
-    q38m-generate-go(ctx, qs, mp, arena, sx, posb, prompts, i + 1, total, nxt, q38m-keep(prompts, outs, nxt, i, gen), gen);
+    let nxt = q38m-step(ctx, qs, mp, arena, sx, posb, q38m-feed-ids(prompts, last, i), q38m-fill(p0 + i, len(prompts)));
+    q38m-generate-go(ctx, qs, mp, arena, sx, posb, prompts, i + 1, total, nxt, q38m-keep(prompts, outs, nxt, i, gen), gen, p0);
    };
   }
   def q38m-longest(prompts) = foldl((a, p) => len(p) > a ? len(p) : a, 0, prompts);
-  def q38m-generate(ctx, qs, mp, arena, sx, posb, prompts, gen) = q38m-generate-go(ctx, qs, mp, arena, sx, posb, prompts, 0, q38m-longest(prompts) + gen - 1, q38m-fill(0, len(prompts)), map(p => [], prompts), gen);
+  // p0 is the position the first fed token lands at: 0 for a fresh arena, the shared prefix length after q38m-fork-all.
+  def q38m-generate-from(ctx, qs, mp, arena, sx, posb, prompts, gen, p0) = q38m-generate-go(ctx, qs, mp, arena, sx, posb, prompts, 0, q38m-longest(prompts) + gen - 1, q38m-fill(0, len(prompts)), map(p => [], prompts), gen, p0);
+  def q38m-generate(ctx, qs, mp, arena, sx, posb, prompts, gen) = q38m-generate-from(ctx, qs, mp, arena, sx, posb, prompts, gen, 0);
+  // ── fork: one prefilled stream becomes N ──
+  // A prompt is read once, at the batched prefill's rate, and its state (the linear layers' window and delta, the full layers' K and V
+  // up to pos) is copied into slot s of the arena by one micro-kernel, a plain device-to-device copy at the memory bandwidth, so N
+  // lines of thought that share a prefix pay for the prefix once. The arena slot strides are those of q38m-new-arena.
+  def q38m-fork-msl(fname) = "kernel void " ++ fname ++ " (device const float* s [[buffer(0)]], device float* d [[buffer(1)]], constant uint& doff [[buffer(2)]], constant uint& n [[buffer(3)]], uint gid [[thread_position_in_grid]]) { if (gid >= n) return; d[doff + gid] = s[gid]; }";
+  def q38m-fork-copy(pipe, src, dst, doff, count) = count <= 0 ? 0 : metal_enqueue(pipe, md-bind16([src, dst], [doff, count], 256, 0, 0, 1), count);
+  def q38m-fork-layer(pipe, geo, l, st, ast, s, pos) {
+   if (kth-full?(l, geo[22])) then {
+    let kv = geo[20];
+    let a = q38m-fork-copy(pipe, st[2], ast[2], s * geo[18] * kv, pos * kv);
+    q38m-fork-copy(pipe, st[3], ast[3], s * geo[18] * kv, pos * kv);
+   } else {
+    let conv = geo[1] * geo[23];
+    let delta = geo[3] * geo[5] * geo[4];
+    let a = q38m-fork-copy(pipe, st[0], ast[0], s * conv, conv);
+    q38m-fork-copy(pipe, st[1], ast[1], s * delta, delta);
+   };
+  }
+  def q38m-fork-layers(pipe, geo, sts, arena, s, pos, l) {
+   if (l >= geo[21]) then 0 else {
+    let a = q38m-fork-layer(pipe, geo, l, sts[l], arena[l], s, pos);
+    q38m-fork-layers(pipe, geo, sts, arena, s, pos, l + 1);
+   };
+  }
+  def q38m-fork-all(ctx, pipe, sts, arena, n, pos) = gpu-lease-turn("qwen fork", () => {
+   let batch = metal_batch_concurrent();
+   let a = foldl((acc, s) => q38m-fork-layers(pipe, ctx[2], sts, arena, s, pos, 0), 0, range(0, n));
+   metal_sync();
+  });
  }
  0;
 }

@@ -60,7 +60,7 @@ section [form.bml] {
    let o = qmr-opts();
    let n = qmr-int(o, "n", 2);
    let steps = qmr-int(o, "steps", 6);
-   json-object-has?(o, "texts") && qmr-int(o, "go", 0) == 1 ? qmr-texts-go(map(t => json-string-value(t), json-array-elements(json-object-get(o, "texts"))), qmr-int(o, "gen", 8), qmr-int(o, "fast", 0)) : json-object-has?(o, "prompts") &&qmr-int(o, "go", 0) == 1 ? qmr-prompts-go(map(p => map(t => json-int-value(t), json-array-elements(p)), json-array-elements(json-object-get(o, "prompts"))), qmr-int(o, "gen", 8), qmr-int(o, "fast", 0)) : qmr-int(o, "go", 0) != 1 ? qmr-say("plan: go=1 opens " ++ qmr-file() ++ " and runs n streams for steps tokens, single-stream against one pass per step; fast 2 or 3 puts the 2..8 row projections on the matrix unit") : qmr-go(n, steps, qmr-int(o, "fast", 0));
+   json-object-has?(o, "prefix") && qmr-int(o, "go", 0) == 1 ? qmr-shared-go(json-string-value(json-object-get(o, "prefix")), map(t => json-string-value(t), json-array-elements(json-object-get(o, "lenses"))), qmr-int(o, "gen", 8), qmr-int(o, "fast", 0), qmr-int(o, "check", 0)) : json-object-has?(o, "texts") &&qmr-int(o, "go", 0) == 1 ? qmr-texts-go(map(t => json-string-value(t), json-array-elements(json-object-get(o, "texts"))), qmr-int(o, "gen", 8), qmr-int(o, "fast", 0)) : json-object-has?(o, "prompts") &&qmr-int(o, "go", 0) == 1 ? qmr-prompts-go(map(p => map(t => json-int-value(t), json-array-elements(p)), json-array-elements(json-object-get(o, "prompts"))), qmr-int(o, "gen", 8), qmr-int(o, "fast", 0)) : qmr-int(o, "go", 0) != 1 ? qmr-say("plan: go=1 opens " ++ qmr-file() ++ " and runs n streams for steps tokens, single-stream against one pass per step; fast 2 or 3 puts the 2..8 row projections on the matrix unit") : qmr-go(n, steps, qmr-int(o, "fast", 0));
   }
   // one stream alone with a teacher-forced prompt: feed prompt tokens, then its own ids; the gen ids from the last prompt token on
   def qmr-forced-go(ctx, sts, p, id, i, total, gen, out) {
@@ -99,6 +99,50 @@ section [form.bml] {
    let t1 = host_monotonic_ms();
    let a = qmr-say("texts " ++ map(p => len(p), prompts).str() ++ " tokens in, " ++ gen.str() ++ " out each, " ++ (t1 - t0).str() ++ " ms");
    map(o => qmr-say("continues: " ++ qmr-detok(ctx, o)), outs);
+   0;
+  }
+  // shared prefix: the prefix is prefilled once (the batched path), forked by the micro-kernel into one arena slot per lens, and the
+  // lenses continue in parallel from the prefix length. check=1 also runs each lens alone (own prefill of the prefix, forced suffix)
+  // and says whether the shared run matches it.
+  def qmr-alone-go(ctx, sts, p, id, i, total, gen, out, p0) {
+   if (i >= total) then out else {
+    let feed = i < len(p) ? p[i] : id;
+    let nxt = q38-forward(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], feed, p0 + i);
+    qmr-alone-go(ctx, sts, p, nxt, i + 1, total, gen, (i >= len(p) - 1 && len(out) < gen) ? append(out, [nxt]) : out, p0);
+   };
+  }
+  def qmr-prefill-one(ctx, sts, ids) = len(ids) <= 64 ? q38-prefill-span-batched(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0) : q38-prefill-span-sliced(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0, 64);
+  def qmr-alone(ctx, prefix, lens, gen) {
+   let sts = q38-new-state(ctx[2]);
+   let pre = qmr-prefill-one(ctx, sts, prefix);
+   let ids = qmr-alone-go(ctx, sts, lens, 0, 0, len(lens) + gen - 1, gen, [], len(prefix));
+   let freed = q38-free-state(sts);
+   ids;
+  }
+  def qmr-shared-go(prefixText, lensTexts, gen, fast, check) {
+   // maxpos 512 holds prefix + lens + gen; span 64 is the scratch rows of the batched prefill (a prefix past 8 rows overran span 8)
+   let ctx = q38-open-span(qmr-file(), 512, 64);
+   let prefix =qmr-tokenize(ctx, prefixText);
+   let lenses = map(t => qmr-tokenize(ctx, t), lensTexts);
+   let n = len(lenses);
+   let qs0 = q38s-pipes(q38s-msl());
+   let qs = fast == 3 ? q38s-fast1(qs0) : (fast == 2 ? q38s-fast(qs0) : qs0);
+   let sx = q38s-open(ctx, 8, 8);
+   let mp = q38m-pipes(q38m-msl());
+   let posb = metal_buf_alloc(64);
+   let arena = q38m-new-arena(ctx[2], n, bytes => metal_buf_alloc(bytes));
+   let sts = q38-new-state(ctx[2]);
+   let t0 = host_monotonic_ms();
+   let pre = qmr-prefill-one(ctx, sts, prefix);
+   let t1 = host_monotonic_ms();
+   let forked = q38m-fork-all(ctx, mp[5], sts, arena, n, len(prefix));
+   let t2 = host_monotonic_ms();
+   let outs = q38m-generate-from(ctx, qs, mp, arena, sx, posb, lenses, gen, len(prefix));
+   let t3 = host_monotonic_ms();
+   let a = qmr-say("prefill reading " ++ pre.str() ++ " of ids " ++ prefix.str() ++ "; prefix " ++ len(prefix).str() ++ " tokens prefilled once in " ++ (t1 - t0).str() ++ " ms, forked x" ++ n.str() ++ " in " ++ (t2 - t1).str() ++ " ms, " ++ gen.str() ++ " tokens each in " ++ (t3 - t2).str() ++ " ms");
+   let b = map(o => qmr-say("lens continues " ++ o.str() ++ ": " ++ qmr-detok(ctx, o)), outs);
+   let alone = check == 1 ? map(l => qmr-alone(ctx, prefix, l, gen), lenses) : [];
+   let c = check == 1 ? qmr-say(alone == outs ? "EQUAL: every forked lens continues as it would alone" : ("DIFFER: alone " ++ alone.str() ++ " shared " ++ outs.str())) : 0;
    0;
   }
   def qmr-prompts-go(prompts, gen, fast) {
