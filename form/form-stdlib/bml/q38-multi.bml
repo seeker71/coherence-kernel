@@ -32,8 +32,8 @@ section [form.bml] {
   def q38m-kvwrite-msl(fname) = "kernel void " ++ fname ++ " (device const float* s [[buffer(0)]], device float* d [[buffer(1)]], device const uint* posb [[buffer(2)]], constant uint& kvd [[buffer(3)]], constant uint& maxpos [[buffer(4)]], constant uint& nrows [[buffer(5)]], uint gid [[thread_position_in_grid]]) { if (gid >= nrows * kvd) return; uint row = gid / kvd; uint i = gid - row * kvd; d[row * maxpos * kvd + posb[row] * kvd + i] = s[row * kvd + i]; }";
   // ── the driver: one step of N streams, one pass over the weights ──
   // The pipelines of the five kernels, [delta, conv, rope, kv write, attention], compiled from kth-msl's helpers plus the kernels.
-  def q38m-msl() = kth-msl() ++ q38m-delta-msl("form_q38m_delta_rows") ++ q38m-conv-msl("form_q38m_conv_rows") ++ q38m-rope-msl("form_q38m_rope_rows") ++ q38m-kvwrite-msl("form_q38m_kvw_rows") ++ q38m-gqa-msl("form_q38m_gqa_rows") ++ q38m-fork-msl("form_q38m_fork");
-  def q38m-pipes(msl) = [metal_pipeline(msl, "form_q38m_delta_rows"), metal_pipeline(msl, "form_q38m_conv_rows"), metal_pipeline(msl, "form_q38m_rope_rows"), metal_pipeline(msl, "form_q38m_kvw_rows"), metal_pipeline(msl, "form_q38m_gqa_rows"), metal_pipeline(msl, "form_q38m_fork")];
+  def q38m-msl() = kth-msl() ++ q38m-delta-msl("form_q38m_delta_rows") ++ q38m-conv-msl("form_q38m_conv_rows") ++ q38m-rope-msl("form_q38m_rope_rows") ++ q38m-kvwrite-msl("form_q38m_kvw_rows") ++ q38m-gqa-msl("form_q38m_gqa_rows") ++ q38m-fork-msl("form_q38m_fork") ++ q38m-lp-msl("form_q38m_lp");
+  def q38m-pipes(msl) = [metal_pipeline(msl, "form_q38m_delta_rows"), metal_pipeline(msl, "form_q38m_conv_rows"), metal_pipeline(msl, "form_q38m_rope_rows"), metal_pipeline(msl, "form_q38m_kvw_rows"), metal_pipeline(msl, "form_q38m_gqa_rows"), metal_pipeline(msl, "form_q38m_fork"), metal_pipeline(msl, "form_q38m_lp")];
   // N streams' state side by side: per layer [conv, delta, K, V], stream s at s * its own stride (a single stream's allocation scaled by N).
   def q38m-new-arena(geo, n, allocate) = kth-stream-state-by(geo[21], geo[22], geo[1] * n, geo[23], geo[3] * n, geo[5], geo[4], geo[20], geo[18] * n, allocate);
   def q38m-uints(xs) = foldl((a, x) => a ++ md-le32(x), "", xs);
@@ -86,7 +86,12 @@ section [form.bml] {
   }
   // The next greedy id of each of the ids' streams, stream i feeding ids[i] at poss[i]: one pass over the weights for all of them.
   // sx is the span scratch (q38s-open), arena the streams' state (q38m-new-arena), posb a uint buffer of at least ntok words.
-  def q38m-step(ctx, qs, mp, arena, sx, posb, ids, poss) = gpu-lease-turn("qwen multi decode", () => {
+  // The surprise of the greedy token, in micro-nats, one threadgroup of 256 a stream: -log p(argmax) = log(sum exp(logit - max)). A
+  // stream that is sure of its line reads near 0; one that is guessing reads high. This is the local model's own judgement of its lens.
+  def q38m-lp-msl(fname) = "kernel void " ++ fname ++ " (device const float* lg [[buffer(0)]], device uint* out [[buffer(1)]], constant uint& vocab [[buffer(2)]], uint row [[threadgroup_position_in_grid]], uint lid [[thread_position_in_threadgroup]]) { threadgroup float sh[256]; device const float* r = lg + row * vocab; float m = -INFINITY; for (uint i = lid; i < vocab; i += 256u) { m = metal::max(m, r[i]); } sh[lid] = m; threadgroup_barrier(metal::mem_flags::mem_threadgroup); for (uint s = 128u; s > 0u; s >>= 1u) { if (lid < s) { sh[lid] = metal::max(sh[lid], sh[lid + s]); } threadgroup_barrier(metal::mem_flags::mem_threadgroup); } float mx = sh[0]; threadgroup_barrier(metal::mem_flags::mem_threadgroup); float acc = 0.0f; for (uint i = lid; i < vocab; i += 256u) { acc += metal::exp(r[i] - mx); } sh[lid] = acc; threadgroup_barrier(metal::mem_flags::mem_threadgroup); for (uint s = 128u; s > 0u; s >>= 1u) { if (lid < s) { sh[lid] = sh[lid] + sh[lid + s]; } threadgroup_barrier(metal::mem_flags::mem_threadgroup); } if (lid == 0u) { float nats = metal::log(sh[0]); out[row] = uint(metal::clamp(nats * 1000000.0f, 0.0f, 4000000000.0f)); } }";
+  def q38m-step(ctx, qs, mp, arena, sx, posb, ids, poss) = q38m-step-core(ctx, qs, mp, arena, sx, posb, ids, poss, 0)[0];
+  // lpb is a uint buffer of at least ntok words, or 0 for no scoring; answers [ids, micro-nats of each greedy id]
+  def q38m-step-core(ctx, qs, mp, arena, sx, posb, ids, poss, lpb) = gpu-lease-turn("qwen multi decode", () => {
    let ntok = len(ids);
    let bs = ctx[1];
    let geo = ctx[2];
@@ -96,8 +101,10 @@ section [form.bml] {
    metal_enqueue(qs[q38s-pipe-embed()], md-bind16([kth-tv-h(ctx[4]), sx[0], bs[33]], [geo[0], ntok, 0], 256, 0, 0, 1), geo[0] * ntok);
    let layers = q38m-layers(ctx[0], qs, mp, bs, geo, ctx[3], arena, posb, 0, geo[21], ntok);
    let head = q38s-head-check(ctx, qs, sx, ntok);
+   let scored = lpb == 0 ? 0 : metal_enqueue(mp[6], md-bind16([sx[1], lpb], [geo[19]], 256, 0, 1, 1), ntok);
    let raw = metal_buf_read(sx[4], 0, ntok * 4);
-   q38m-read-ids(raw, 0, ntok);
+   let lps = lpb == 0 ? q38m-fill(0, ntok) : q38m-read-ids(metal_buf_read(lpb, 0, ntok * 4), 0, ntok);
+   [q38m-read-ids(raw, 0, ntok), lps];
   });
   def q38m-read-ids(raw, i, n) = i >= n ? [] : cons(kth-u32at(raw, i), q38m-read-ids(raw, i + 1, n));
   // Parallel reasoning over real prompts. Stream s feeds prompts[s] one token a step (teacher forced, position = step), then its own
@@ -108,15 +115,18 @@ section [form.bml] {
   def q38m-feed-ids(prompts, last, i) = map(s => i < len(prompts[s]) ? prompts[s][i] : last[s], range(0, len(prompts)));
   def q38m-fill(x, n) = n <= 0 ? [] : cons(x, q38m-fill(x, n - 1));
   def q38m-keep(prompts, outs, nxt, i, gen) = map(s => (i >= len(prompts[s]) - 1 && len(outs[s]) < gen) ? append(outs[s], [nxt[s]]) : outs[s], range(0, len(prompts)));
-  def q38m-generate-go(ctx, qs, mp, arena, sx, posb, prompts, i, total, last, outs, gen, p0) {
-   if (i >= total) then outs else {
-    let nxt = q38m-step(ctx, qs, mp, arena, sx, posb, q38m-feed-ids(prompts, last, i), q38m-fill(p0 + i, len(prompts)));
-    q38m-generate-go(ctx, qs, mp, arena, sx, posb, prompts, i + 1, total, nxt, q38m-keep(prompts, outs, nxt, i, gen), gen, p0);
+  def q38m-keep-sums(prompts, sums, lps, outs, i, gen) = map(s => (i >= len(prompts[s]) - 1 && len(outs[s]) < gen) ? sums[s] + lps[s] : sums[s], range(0, len(prompts)));
+  // answers [ids per stream, summed micro-nats of each stream's generated tokens]; lpb 0 leaves the sums at zero
+  def q38m-generate-go(ctx, qs, mp, arena, sx, posb, prompts, i, total, last, outs, gen, p0, lpb, sums) {
+   if (i >= total) then [outs, sums] else {
+    let r = q38m-step-core(ctx, qs, mp, arena, sx, posb, q38m-feed-ids(prompts, last, i), q38m-fill(p0 + i, len(prompts)), lpb);
+    q38m-generate-go(ctx, qs, mp, arena, sx, posb, prompts, i + 1, total, r[0], q38m-keep(prompts, outs, r[0], i, gen), gen, p0, lpb, q38m-keep-sums(prompts, sums, r[1], outs, i, gen));
    };
   }
   def q38m-longest(prompts) = foldl((a, p) => len(p) > a ? len(p) : a, 0, prompts);
   // p0 is the position the first fed token lands at: 0 for a fresh arena, the shared prefix length after q38m-fork-all.
-  def q38m-generate-from(ctx, qs, mp, arena, sx, posb, prompts, gen, p0) = q38m-generate-go(ctx, qs, mp, arena, sx, posb, prompts, 0, q38m-longest(prompts) + gen - 1, q38m-fill(0, len(prompts)), map(p => [], prompts), gen, p0);
+  def q38m-generate-scored(ctx, qs, mp, arena, sx, posb, prompts, gen, p0, lpb) = q38m-generate-go(ctx, qs, mp, arena, sx, posb, prompts, 0, q38m-longest(prompts) + gen - 1, q38m-fill(0, len(prompts)), map(p => [], prompts), gen, p0, lpb, q38m-fill(0, len(prompts)));
+  def q38m-generate-from(ctx, qs, mp, arena, sx, posb, prompts, gen, p0) = q38m-generate-scored(ctx, qs, mp, arena, sx, posb, prompts, gen, p0, 0)[0];
   def q38m-generate(ctx, qs, mp, arena, sx, posb, prompts, gen) = q38m-generate-from(ctx, qs, mp, arena, sx, posb, prompts, gen, 0);
   // ── fork: one prefilled stream becomes N ──
   // A prompt is read once, at the batched prefill's rate, and its state (the linear layers' window and delta, the full layers' K and V
