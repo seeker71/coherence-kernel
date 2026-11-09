@@ -1,0 +1,175 @@
+; q38-multi-band.bml — the stream-indexed kernels of form-stdlib/bml/q38-multi.bml against the single-stream kernels, on synthetic data.
+;
+; N streams in one dispatch must leave each stream's state and output byte-identical to that stream run alone through the
+; single-stream kernel. No model opens: small tensors, a live Metal device, a few seconds.
+;
+; Expected: 31
+; Verdict 31 when every claim lands:
+;   1   delta rows: 3 streams of the gated delta rule (nv 4, dv 8, dk 16, nk 2) in one dispatch leave all three recurrent states and
+;       all three outputs equal, byte for byte, to three runs of kth-delta-msl's single-stream kernel
+;   2   conv rows: 3 streams' convolution windows (96 channels, 4 taps) and outputs in one dispatch equal three runs of gdm-conv-msl
+;   4   rope rows: 3 streams at positions 5, 17 and 2 in one dispatch equal three runs of kth-prope-msl at those constants
+;   8   kv write rows: 3 streams' keys written to positions 1, 4 and 0 of their own caches in one dispatch equal three runs of
+;       kth-copyoff-msl, every untouched cache cell still holding what it held
+;   16  attention rows: 3 streams at positions 5, 2 and 7 over their own caches (4 query heads, 2 kv heads, hd 16) in one dispatch equal
+;       three runs of q38-gqa-tg-msl at those lengths
+; REQUIRES: a live Metal device (metal_pipeline and the other metal_* doors)
+// preludes: form-stdlib/core.fk form-stdlib/bml/live.bml form-stdlib/metal-door.fk native/metal/qwen35-dense-token-handle.fk form-stdlib/bml/q38-multi.bml
+section [form.bml] {
+ class Q38MultiBand {
+  def qmb-n() = 3;
+  def qmb-nv() = 4;
+  def qmb-dv() = 8;
+  def qmb-dk() = 16;
+  def qmb-nk() = 2;
+  def qmb-convdim() = 2 * qmb-nk() * qmb-dk() + qmb-nv() * qmb-dv();
+  def qmb-sf() = qmb-nv() * qmb-dv() * qmb-dk();
+  def qmb-val(i, salt) = (((i * 37 + salt * 101) % 211) * 1.0) * 0.0047 - 0.45;
+  def qmb-f32(i, salt) = md-le32(md-f32-bits(qmb-val(i, salt)));
+  def qmb-floats(n, salt, i) = i >= n ? "" : qmb-f32(i, salt) ++ qmb-floats(n, salt, i + 1);
+  def qmb-buf(bytes) {
+   let h = metal_buf_alloc(len(bytes));
+   let w = metal_buf_write(h, 0, bytes);
+   h;
+  }
+  def qmb-zero(n) = metal_buf_alloc(n);
+  def qmb-msl() = kth-msl() ++ kth-delta-msl("ref_delta") ++ gdm-conv-msl("ref_conv") ++ kth-prope-msl("ref_rope") ++ kth-copyoff-msl("ref_copyoff") ++ q38m-delta-msl("rows_delta") ++ q38m-conv-msl("rows_conv") ++ q38m-rope-msl("rows_rope") ++ q38m-kvwrite-msl("rows_kvw") ++ q38-gqa-tg-msl("ref_gqa") ++ q38m-gqa-msl("rows_gqa");
+  def qmb-uints(xs) = foldl((a, x) => a ++ md-le32(x), "", xs);
+  def qmb-cat(xs) = foldl((a, x) => a ++ x, "", xs);
+  def qmb-consts-ref() = [qmb-nv(), qmb-dv(), qmb-dk(), qmb-nk(), md-f32-bits(0.125)];
+  // one stream alone through the single-stream kernel: [state bytes, output bytes]
+  def qmb-ref-one(pipe, s) {
+   let hS = qmb-buf(qmb-floats(qmb-sf(), s + 1, 0));
+   let hc = qmb-buf(qmb-floats(qmb-convdim(), s + 11, 0));
+   let ha = qmb-buf(qmb-floats(qmb-nv(), s + 21, 0));
+   let hb = qmb-buf(qmb-floats(qmb-nv(), s + 31, 0));
+   let ho = qmb-zero(qmb-nv() * qmb-dv() * 4);
+   let e = metal_enqueue(pipe, md-bind16([hS, hc, ha, hb, ho], qmb-consts-ref(), 256, 0, 0, 0), qmb-nv() * qmb-dv());
+   let y = metal_sync();
+   [metal_buf_read(hS, 0, qmb-sf() * 4), metal_buf_read(ho, 0, qmb-nv() * qmb-dv() * 4)];
+  }
+  def qmb-cat-states(pipe, s, n) {
+   if (s >= n) then ["", ""] else {
+    let one = qmb-ref-one(pipe, s);
+    let rest = qmb-cat-states(pipe, s + 1, n);
+    [one[0] ++ rest[0], one[1] ++ rest[1]];
+   };
+  }
+  def qmb-gather(n, count, salt0, s) = s >= n ? "" : qmb-floats(count, s + salt0, 0) ++ qmb-gather(n, count, salt0, s + 1);
+  def qmb-c-delta(ctx) {
+   let msl = qmb-msl();
+   let refpipe = metal_pipeline(msl, "ref_delta");
+   let mypipe = metal_pipeline(msl, "rows_delta");
+   let want = qmb-cat-states(refpipe, 0, qmb-n());
+   let hS = qmb-buf(qmb-gather(qmb-n(), qmb-sf(), 1, 0));
+   let hc = qmb-buf(qmb-gather(qmb-n(), qmb-convdim(), 11, 0));
+   let ha = qmb-buf(qmb-gather(qmb-n(), qmb-nv(), 21, 0));
+   let hb = qmb-buf(qmb-gather(qmb-n(), qmb-nv(), 31, 0));
+   let ho = qmb-zero(qmb-n() * qmb-nv() * qmb-dv() * 4);
+   let consts = [qmb-nv(), qmb-dv(), qmb-dk(), qmb-nk(), md-f32-bits(0.125), qmb-sf(), qmb-convdim(), qmb-n()];
+   let e = metal_enqueue(mypipe, md-bind16([hS, hc, ha, hb, ho], consts, 256, 0, 0, 0), qmb-n() * qmb-nv() * qmb-dv());
+   let y = metal_sync();
+   let gotS = metal_buf_read(hS, 0, qmb-n() * qmb-sf() * 4);
+   let gotO = metal_buf_read(ho, 0, qmb-n() * qmb-nv() * qmb-dv() * 4);
+   len(want[0]) == qmb-n() * qmb-sf() * 4 && gotS == want[0] && gotO == want[1];
+  }
+  // ── conv rows: nch 96 channels, kw 4 taps, the filter shared ──
+  def qmb-nch() = 96;
+  def qmb-kw() = 4;
+  def qmb-conv-ref(pipe, hw, s) {
+   let hwin = qmb-buf(qmb-floats(qmb-nch() * qmb-kw(), s + 41, 0));
+   let hx = qmb-buf(qmb-floats(qmb-nch(), s + 51, 0));
+   let hy = qmb-zero(qmb-nch() * 4);
+   let e = metal_enqueue(pipe, md-bind16([hwin, hx, hw, hy], [qmb-nch(), qmb-kw()], 256, 0, 0, 0), qmb-nch());
+   let y = metal_sync();
+   [metal_buf_read(hwin, 0, qmb-nch() * qmb-kw() * 4), metal_buf_read(hy, 0, qmb-nch() * 4)];
+  }
+  def qmb-conv-refs(pipe, hw, s, n) {
+   if (s >= n) then ["", ""] else {
+    let one = qmb-conv-ref(pipe, hw, s);
+    let rest = qmb-conv-refs(pipe, hw, s + 1, n);
+    [one[0] ++ rest[0], one[1] ++ rest[1]];
+   };
+  }
+  def qmb-c-conv(ctx) {
+   let msl = qmb-msl();
+   let hw = qmb-buf(qmb-floats(qmb-nch() * qmb-kw(), 61, 0));
+   let want = qmb-conv-refs(metal_pipeline(msl, "ref_conv"), hw, 0, qmb-n());
+   let hwin = qmb-buf(qmb-gather(qmb-n(), qmb-nch() * qmb-kw(), 41, 0));
+   let hx = qmb-buf(qmb-gather(qmb-n(), qmb-nch(), 51, 0));
+   let hy = qmb-zero(qmb-n() * qmb-nch() * 4);
+   let consts = [qmb-nch(), qmb-kw(), qmb-nch() * qmb-kw(), qmb-nch(), qmb-n()];
+   let e = metal_enqueue(metal_pipeline(msl, "rows_conv"), md-bind16([hwin, hx, hw, hy], consts, 256, 0, 0, 0), qmb-n() * qmb-nch());
+   let y = metal_sync();
+   metal_buf_read(hwin, 0, qmb-n() * qmb-nch() * qmb-kw() * 4) == want[0] && metal_buf_read(hy, 0, qmb-n() * qmb-nch() * 4) == want[1];
+  }
+  // ── rope rows: nh 4 heads of hd 16, nrot 8, each stream at its own position ──
+  def qmb-poss() = [5, 17, 2];
+  def qmb-rope-ref(pipe, s) {
+   let hv = qmb-buf(qmb-floats(64, s + 71, 0));
+   let e = metal_enqueue(pipe, md-bind16([hv], [4, 16, 8, qmb-poss()[s], md-f32-bits(10000.0)], 256, 0, 0, 0), 16);
+   let y = metal_sync();
+   metal_buf_read(hv, 0, 256);
+  }
+  def qmb-rope-refs(pipe, s, n) = s >= n ? "" : qmb-rope-ref(pipe, s) ++ qmb-rope-refs(pipe, s + 1, n);
+  def qmb-c-rope(ctx) {
+   let msl = qmb-msl();
+   let want = qmb-rope-refs(metal_pipeline(msl, "ref_rope"), 0, qmb-n());
+   let hv = qmb-buf(qmb-gather(qmb-n(), 64, 71, 0));
+   let hp = qmb-buf(qmb-uints(qmb-poss()));
+   let consts = [4, 16, 8, md-f32-bits(10000.0), 64, qmb-n()];
+   let e = metal_enqueue(metal_pipeline(msl, "rows_rope"), md-bind16([hv, hp], consts, 256, 0, 0, 0), qmb-n() * 16);
+   let y = metal_sync();
+   metal_buf_read(hv, 0, qmb-n() * 256) == want;
+  }
+  // ── kv write rows: kvd 8, caches of maxpos 6, positions 1, 4, 0 ──
+  def qmb-wpos() = [1, 4, 0];
+  def qmb-kvw-ref(pipe, s) {
+   let hs = qmb-buf(qmb-floats(8, s + 81, 0));
+   let hd = qmb-buf(qmb-floats(48, s + 91, 0));
+   let e = metal_enqueue(pipe, md-bind16([hs, hd], [8, qmb-wpos()[s] * 8], 256, 0, 0, 0), 8);
+   let y = metal_sync();
+   metal_buf_read(hd, 0, 192);
+  }
+  def qmb-kvw-refs(pipe, s, n) = s >= n ? "" : qmb-kvw-ref(pipe, s) ++ qmb-kvw-refs(pipe, s + 1, n);
+  def qmb-c-kvw(ctx) {
+   let msl = qmb-msl();
+   let want = qmb-kvw-refs(metal_pipeline(msl, "ref_copyoff"), 0, qmb-n());
+   let hs = qmb-buf(qmb-gather(qmb-n(), 8, 81, 0));
+   let hd = qmb-buf(qmb-gather(qmb-n(), 48, 91, 0));
+   let hp = qmb-buf(qmb-uints(qmb-wpos()));
+   let e = metal_enqueue(metal_pipeline(msl, "rows_kvw"), md-bind16([hs, hd, hp], [8, 6, qmb-n()], 256, 0, 0, 0), qmb-n() * 8);
+   let y = metal_sync();
+   metal_buf_read(hd, 0, qmb-n() * 192) == want;
+  }
+  // ── attention rows: 4 query heads over 2 kv heads of hd 16, caches of maxpos 8, streams at positions 5, 2 and 7 ──
+  def qmb-apos() = [5, 2, 7];
+  def qmb-gqa-ref(pipe, s) {
+   let hq = qmb-buf(qmb-floats(64, s + 101, 0));
+   let hk = qmb-buf(qmb-floats(256, s + 111, 0));
+   let hv = qmb-buf(qmb-floats(256, s + 121, 0));
+   let hy = qmb-zero(256);
+   let hs = qmb-zero(256);
+   let e = metal_enqueue(pipe, md-bind16([hq, hk, hv, hy, hs], [qmb-apos()[s] + 1, 4, 2, 16, md-f32-bits(0.25), 8], 256, 0, 1, 0), 4);
+   let y = metal_sync();
+   metal_buf_read(hy, 0, 256);
+  }
+  def qmb-gqa-refs(pipe, s, n) = s >= n ? "" : qmb-gqa-ref(pipe, s) ++ qmb-gqa-refs(pipe, s + 1, n);
+  def qmb-c-gqa(ctx) {
+   let msl = qmb-msl();
+   let want = qmb-gqa-refs(metal_pipeline(msl, "ref_gqa"), 0, qmb-n());
+   let hq = qmb-buf(qmb-gather(qmb-n(), 64, 101, 0));
+   let hk = qmb-buf(qmb-gather(qmb-n(), 256, 111, 0));
+   let hv = qmb-buf(qmb-gather(qmb-n(), 256, 121, 0));
+   let hy = qmb-zero(qmb-n() * 256);
+   let hs = qmb-zero(qmb-n() * 256);
+   let hp = qmb-buf(qmb-uints(qmb-apos()));
+   let consts = [4, 2, 16, md-f32-bits(0.25), 8, 64, 256, 64, qmb-n()];
+   let e = metal_enqueue(metal_pipeline(msl, "rows_gqa"), md-bind16([hq, hk, hv, hy, hs, hp], consts, 256, 0, 1, 0), qmb-n() * 4);
+   let y = metal_sync();
+   metal_buf_read(hy, 0, qmb-n() * 256) == want;
+  }
+  def qmb-run() = live-claims("q38-multi-band", 0, [["delta", 1, 1, qmb-c-delta], ["conv", 2, 1, qmb-c-conv], ["rope", 4, 1, qmb-c-rope], ["kvwrite", 8, 1, qmb-c-kvw], ["gqa", 16, 1, qmb-c-gqa]]);
+ }
+ qmb-run();
+}
