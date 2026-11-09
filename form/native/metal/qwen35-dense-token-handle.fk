@@ -823,11 +823,13 @@ section [form.bml] {
             q38-prefill-sliced-go-t(ps, bs, geo, lays, sts, embTv, drop(n, ids), (Number) pos + (Number) n, span, tap);
         };
     };
-    // Wide token slices keep their matmuls. Background turns hold eight layers;
-    // an interactive encounter uses up to 32 to reduce repeated drain cost.
-    // Both return to the aging queue between groups. Model/KV/scratch stay
-    // owned; these bounds name work, not wall time.
-    def q38-prefill-turn-layers() = gpu-lease-interactive?() ? 32 : 8;
+    // Wide token slices keep their matmuls. A group returns to the aging queue between groups so another process that waits for
+    // the GPU gets its turn: a background turn holds eight layers, an interactive encounter up to 32. When NO other process waits
+    // there is no one to yield to, and each return is a release, a full pipeline drain and a re-acquire for nothing: the whole stack
+    // is one turn (the batched bench does 190 positions a second; the same 64 positions through eight-layer groups took 3 s).
+    // Model/KV/scratch stay owned; these bounds name work, not wall time.
+    def q38-prefill-turn-layers-for(waiting) = gpu-lease-interactive?() ? 32 : (waiting ? 8 : 4096);
+    def q38-prefill-turn-layers() = q38-prefill-turn-layers-for(gpl-others-wait?(gpu-lease-path()));
     def q38-prefill-turns(l,nL,width,run) = l >= nL ? 1 : width <= 0 ? 0 : {
         let end = min2(nL,l + width);
         run(l,end) ? q38-prefill-turns(end,nL,width,run) : 0;
