@@ -18129,6 +18129,38 @@ static long long fk_file_sha256(long long x) {
     free(bytes);
     return fk_sbuf(hex, 64);
 }
+/* float_leaf 67: (67 [from to]) -> 0 when from was renamed to to and nothing stood at to (a staged directory is published whole or
+ * not at all, never over an existing one, not even an empty one), else the negative errno. The GPU lease takes its lock with this:
+ * the one holder is whoever's rename lands. macOS renamex_np(RENAME_EXCL), Linux renameat2(RENAME_NOREPLACE); a host with neither
+ * answers -ENOSYS, and the caller reads that as a lease it cannot take. */
+#if defined(__linux__)
+extern long syscall(long number, ...);
+#endif
+static long long fk_rename_exclusive(long long x) {
+    long long from, rest, to, tail;
+    char a[FK_PATH_CAP], b[FK_PATH_CAP];
+    if (!fk_door_pair(x, &from, &rest) || !fk_door_pair(rest, &to, &tail) || tail != 1) { return fk_nothing; }
+    if (!fk_is_str(from) || !fk_is_str(to)) { return fk_nothing; }
+    fk_cstr(from, a, FK_PATH_CAP);
+    fk_cstr(to, b, FK_PATH_CAP);
+#if defined(__APPLE__)
+    extern int renamex_np(const char *from_path, const char *to_path, unsigned int flags);
+    if (renamex_np(a, b, 4u) == 0) { return 0; }
+    return (long long)(-errno) * 2;
+#elif defined(__linux__) && (defined(__x86_64__) || defined(__aarch64__))
+    long number =
+#if defined(__x86_64__)
+        316;
+#else
+        276;
+#endif
+    if (syscall(number, -100L, a, -100L, b, 1L) == 0) { return 0; }
+    return (long long)(-errno) * 2;
+#else
+    (void)a; (void)b;
+    return (long long)(-38) * 2;
+#endif
+}
 /* float_leaf 60: scoped file leases -- the descriptor owner under the Form storage recipes (native-posix.bml), which
  * do every read, write, frame and publication on the returned descriptor.
  *   ("open" path writing)         a private journal lease: the caller's own 0600 regular file, held under a
@@ -20372,6 +20404,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         /* float_leaf 66: (66 0) -> this kernel's identity string, "fkwu-image-v1 seed <key> <os>-<arch>" for a kernel the seed
          * built (which names the objects of its warm packs), else its executable's identity */
         if ((fm201 >> 1) == 66) { return fk_sbuf(fk_fkb_builder_id, fk_cstrlen(fk_fkb_builder_id)); }
+        if ((fm201 >> 1) == 67) { return fk_rename_exclusive(fx201); }
         /* The Form cell frame takes root identity with its argument when residency leaves the seed. */
         if ((fm201 >> 1) == 55) {
             const char *root55 = fk_cell_root_path != 0 ? fk_cell_root_path : fk_src_root_path;
