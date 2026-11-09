@@ -79,16 +79,46 @@ section [form.bml] {
   def ds-has?(s, part) = str_find(s, part, 0) >= 0;
   def ds-image?(p) = ds-ends?(p, ".fkb") || ds-ends?(p, ".sym") || ds-ends?(p, ".lowfk");
   // the source an image was compiled from: a.bml.fkb -> a.bml, a.fk.discovery.fkb -> a.fk, a.bml.sym -> a.bml
-  def ds-image-source(p) = ds-ends?(p, ".discovery.fkb") ? substring(p, 0, len(p) - 14) : ds-ends?(p, ".pin.fkb") ? substring(p, 0, len(p) - 8) : ds-ends?(p, ".fkb") ? substring(p, 0, len(p) - 4) : ds-ends?(p, ".sym") ? substring(p, 0, len(p) - 4) : ds-ends?(p, ".lowfk") ? substring(p, 0, len(p) - 6) : p;
+  def ds-image-source(p) = ds-ends?(p, ".discovery.fkb") ? substring(p, 0, len(p) - 14) : ds-ends?(p, ".pin.fkb") ? substring(p, 0, len(p) - 8) : ds-ends?(p, ".cell.fkb") ? substring(p, 0, len(p) - 9) : ds-ends?(p, ".fkb") ? substring(p, 0, len(p) - 4) : ds-ends?(p, ".sym") ? substring(p, 0, len(p) - 4) : ds-ends?(p, ".lowfk") ? substring(p, 0, len(p) - 6) : p;
   def ds-log?(p) = ds-ends?(p, ".out") || ds-ends?(p, ".log") || ds-ends?(p, ".err") || ds-ends?(p, ".stream");
   // meaning the steward never lists
   def ds-kept?(p) = ds-has?(p, "/companion") || ds-has?(p, "/drafts") || ds-has?(p, "/walk-aside") || ds-has?(p, "/session-learning") || ds-has?(p, "/response-parity") || ds-has?(p, "/forbidden-breath") || ds-has?(p, "walk.began") || ds-has?(p, "walk-retry.jsonl") || ds-has?(p, "/leases");
   def ds-kind(p) = ds-kept?(p) ? "kept" : ds-image?(p) ? ((Comparable) fs_exists(ds-image-source(p)) == 1 ? "image" : "orphan-image") : ds-has?(p, "/prefix-cache/") ? "prefix-row" : ds-has?(p, "/native-turns/") ? "candidate" : ds-has?(p, ".form-heal/") ? "evidence" : ds-log?(p) ? "log" : "scratch";
+  // ── what an image's own header says (float_leaf 64 reads the first bytes of a file, never the 54 MB behind them) ──────
+  // A compile image opens with the 8 bytes "FKPIFB1\0" and its format version as a big-endian u32; the kernel of the checkout
+  // that holds it reads exactly the version its runtime/fkwu-uni.c names (FK_FKB_VERSION). An image of any other version can
+  // never load there: dead tissue, composted at every tending (on 2026-11-09, 40 of the 44 GB of images across 22 worktrees
+  // were versions 5 to 8 under a version 9 kernel). A file that opens with the magic of the body's own data nodes (FORMBIN)
+  // is meaning, never a cache. Anything else keeps the name-based reading above.
+  def ds-head(p) = float_leaf(64, [p, 12]);
+  def ds-head-text?(h) = (String) value_kind(h) == "string";
+  def ds-image-version(h) = ds-head-text?(h) && len(h) == 12 && (String) substring(h, 0, 7) == "FKPIFB1" ? str_byte_at(h, 8) * 16777216 + str_byte_at(h, 9) * 65536 + str_byte_at(h, 10) * 256 + str_byte_at(h, 11) : -1;
+  def ds-data-node?(h) = ds-head-text?(h) && len(h) >= 7 && (String) substring(h, 0, 7) == "FORMBIN";
+  // the image format version this checkout's own kernel reads; 0 when its source does not say (then nothing is called dead)
+  def ds-kernel-version(root) {
+   let text = read_file(root ++ "/runtime/fkwu-uni.c") ?? "";
+   let i = str_find(text, "#define FK_FKB_VERSION ", 0);
+   i < 0 ? 0 : ds-int(substring(text, i + 23, i + 31));
+  }
+  def ds-explicit?(p) = ds-has?(p, "/bootstrap/");
+  // the kind of an image by what it says it is; ver is its checkout's kernel version (0: unknown)
+  def ds-kind-v(p, ver) {
+   let base = ds-kind(p);
+   let named = ds-ends?(p, ".fkb") && !ds-ends?(p, ".discovery.fkb") && !ds-ends?(p, ".pin.fkb") && ((String) base == "image" || (String) base == "orphan-image");
+   let h = named ? ds-head(p) : "";
+   let v = named ? ds-image-version(h) : -1;
+   let sibling = ds-ends?(p, ".sym") ? substring(p, 0, len(p) - 4) ++ ".fkb" : "";
+   named && ds-data-node?(h) ? "kept" : named && !ds-explicit?(p) && ver > 0 && v >= 0 && v != ver ? "dead-image" : (len(sibling) > 0 && (Comparable) fs_exists(sibling) == 1 && (String) ds-kind-v(sibling, ver) == "dead-image") ? "dead-image" : base;
+  }
   // the cost of remaking a lease, by kind, in milliseconds: a compile image is one compile; a prefix row is one forward
   // pass over a training row (HOMECOMING: a warm four-step run 13.7 s against 25.1 s cold); the rest costs nothing to lose
   def ds-make-ms(kind) = (String) kind == "image" ? 60 : (String) kind == "prefix-row" ? 3000 : (String) kind == "scratch" ? 10 : 0;
   // a lease row: [path, kind, bytes, age_days, make_ms]
   def ds-lease(p, now) = [p, ds-kind(p), file_size(p), (now - file_mtime(p)) / 86400, ds-make-ms(ds-kind(p))];
+  def ds-lease-v(p, now, ver) {
+   let k = ds-kind-v(p, ver);
+   [p, k, file_size(p), (now - file_mtime(p)) / 86400, ds-make-ms(k)];
+  }
   def ds-path(l) = l[0];
   def ds-lkind(l) = l[1];
   def ds-bytes(l) = l[2];
@@ -98,8 +128,9 @@ section [form.bml] {
   def ds-walk(dir, depth, now) = depth <= 0 ? [] : foldl((acc, n) => append(acc, ds-walk-entry(dir ++ "/" ++ n, depth, now)), [], filter(n => (String) n != ".git", fs_list(dir) ?? []));
   def ds-walk-entry(p, depth, now) = (Comparable) fs_is_dir(p) == 1 ? ds-walk(p, depth - 1, now) : [ds-lease(p, now)];
   // compile images anywhere under the root, found by walking the tree for image names only
-  def ds-images(dir, depth, now) = depth <= 0 ? [] : foldl((acc, n) => append(acc, ds-images-entry(dir ++ "/" ++ n, depth, now)), [], filter(n => (String) n != ".git" && (String) n != ".hearth" && (String) n != ".form-heal" && (String) n != "node_modules", fs_list(dir) ?? []));
-  def ds-images-entry(p, depth, now) = (Comparable) fs_is_dir(p) == 1 ? ds-images(p, depth - 1, now) : ds-image?(p) ? [ds-lease(p, now)] : [];
+  def ds-images(dir, depth, now) = ds-images-v(dir, depth, now, 0);
+  def ds-images-v(dir, depth, now, ver) = depth <= 0 ? [] : foldl((acc, n) => append(acc, ds-images-entry(dir ++ "/" ++ n, depth, now, ver)), [], filter(n => (String) n != ".git" && (String) n != ".hearth" && (String) n != ".form-heal" && (String) n != "node_modules", fs_list(dir) ?? []));
+  def ds-images-entry(p, depth, now, ver) = (Comparable) fs_is_dir(p) == 1 ? ds-images-v(p, depth - 1, now, ver) : ds-image?(p) ? [ds-lease-v(p, now, ver)] : [];
   // ── the user temp tree: form-run captures ───────────────────────────────────────────────────────────────────────
   // form-run (the output-compaction carrier) keeps each command's stdout and stderr under $TMPDIR/form-run.XXXXXX until
   // the command ends. A capture whose files moved within the last ten minutes is live: a row of kind "capture-live",
@@ -115,12 +146,12 @@ section [form.bml] {
   }
   def ds-captures-in(tmp, now) = (Comparable) len(tmp) == 0 ? [] : foldl((acc, n) => append(acc, ds-capture-rows(tmp ++ "/" ++ n, now)), [], filter(n => ds-capture-dir?(n), fs_list(tmp) ?? []));
   def ds-captures(now) = ds-captures-in(ds-tmp(), now);
-  def ds-leases(root, now) = append(append(append(ds-walk(root ++ "/.hearth", 6, now), ds-walk(root ++ "/.form-heal", 4, now)), ds-images(root, 8, now)), ds-captures(now));
+  def ds-leases(root, now) = append(append(append(ds-walk(root ++ "/.hearth", 6, now), ds-walk(root ++ "/.form-heal", 4, now)), ds-images-v(root, 8, now, ds-kernel-version(root))), ds-captures(now));
   def ds-lease-bytes(ls) = foldl((a, l) => a + ds-bytes(l), 0, ls);
   def ds-of-kind(ls, k) = filter(l => (String) ds-lkind(l) == k, ls);
   // ── the choice ─────────────────────────────────────────────────────────────────────────────────────────────────
   // waste: composted at every tending, pressure or none
-  def ds-waste?(l) = (String) ds-lkind(l) == "orphan-image" || ((String) ds-lkind(l) == "log" && ds-age(l) >= ds-guide-get("waste_days")) || (((String) ds-lkind(l) == "evidence" || (String) ds-lkind(l) == "candidate") && ds-age(l) >= ds-guide-get("stale_days")) || ((String) ds-lkind(l) == "capture" && ds-age(l) >= ds-guide-get("capture_days"));
+  def ds-waste?(l) = (String) ds-lkind(l) == "orphan-image" || (String) ds-lkind(l) == "dead-image" || ((String) ds-lkind(l) == "log" && ds-age(l) >= ds-guide-get("waste_days")) || (((String) ds-lkind(l) == "evidence" || (String) ds-lkind(l) == "candidate") && ds-age(l) >= ds-guide-get("stale_days")) || ((String) ds-lkind(l) == "capture" && ds-age(l) >= ds-guide-get("capture_days"));
   // the value of releasing a lease under pressure: big, old and cheap to remake scores high; kept and waste are not weighed here
   def ds-weighable?(l) = (String) ds-lkind(l) == "image" || (String) ds-lkind(l) == "prefix-row" || (String) ds-lkind(l) == "scratch" || (String) ds-lkind(l) == "log";
   def ds-score(l) = (ds-bytes(l) / 1024) * (ds-age(l) + 1) / (ds-cost(l) + 1);
@@ -189,6 +220,23 @@ section [form.bml] {
    let row = ledger-append(ds-ledger(), DiskStewardRow{at_unix_ms: now * 1000, root: root, total_bytes: total, free_bytes: free, wanted_bytes: wanted, leases: len(leases), lease_bytes: ds-lease-bytes(leases), released: len(chosen[0]), released_bytes: releasedBytes, branches_released: branchesReleased, mode: act >= 2 ? "act-worktrees" : act == 1 ? "act" : "read"});
    let live = ds-of-kind(leases, "capture-live");
    seen ? "[disk] free " ++ ds-gib-text(free) ++ " of " ++ ds-gib-text(total) ++ ", wanted " ++ ds-gib-text(wanted) ++ "; leases " ++ len(leases).str() ++ " (" ++ ds-gib-text(ds-lease-bytes(leases)) ++ "); " ++ (act >= 1 ? "released " : "would release ") ++ len(chosen[0]).str() ++ " (" ++ ds-gib-text(act >= 1 ? releasedBytes : ds-lease-bytes(chosen[0])) ++ "), branches " ++ (act >= 1 ? branchesReleased.str() : len(branches).str()) ++ ", idle worktrees " ++ (act >= 2 ? removed.str() ++ " removed" : len(idle).str()) ++ "; live captures " ++ len(live).str() ++ " (" ++ ds-gib-text(ds-lease-bytes(live)) ++ "); glass " ++ value_str(published) : "[disk] the volume did not read (df -k " ++ root ++ "); nothing released";
+  }
+  // ── dead images in every worktree ──────────────────────────────────────────────────────────────────────────────────
+  // git worktree list is the authority for which checkouts exist (a registration whose directory is gone is skipped). Each
+  // checkout is read against its OWN kernel's image version, so an old checkout's images stay while its kernel can read them.
+  // [dead images, their bytes, bytes released] of one worktree
+  def ds-reclaim-one(wt, now, act) {
+   let dead = filter(l => (String) ds-lkind(l) == "dead-image", ds-images-v(wt, 8, now, ds-kernel-version(wt)));
+   [len(dead), ds-lease-bytes(dead), ds-release(dead, act)];
+  }
+  def ds-reclaim(repo, act) {
+   let now = now_unix_ms() / 1000;
+   let wts = filter(wt => (Comparable) fs_exists(wt) == 1, ds-worktrees(hch-read(["git", "-C", repo, "worktree", "list", "--porcelain"])));
+   let per = map(wt => ds-reclaim-one(wt, now, act), wts);
+   let n = foldl((a, r) => a + r[0], 0, per);
+   let bytes = foldl((a, r) => a + r[1], 0, per);
+   let released = foldl((a, r) => a + r[2], 0, per);
+   "[disk] dead images in " ++ len(wts).str() ++ " worktrees: " ++ n.str() ++ " (" ++ ds-gib-text(bytes) ++ "); " ++ (act >= 1 ? "released " ++ ds-gib-text(released) : "would release them (act 1)");
   }
   // the largest leases, one line each, for a reader
   def ds-top(ls, n) = ds-top-lines(ds-by-value(ls), n);

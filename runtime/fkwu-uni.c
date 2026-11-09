@@ -18073,6 +18073,32 @@ static long long fk_number_bytes(long long mode, long long x) {
     if (n > 4611686018427387903LL || n < -4611686018427387904LL) { return fk_nothing; }
     return n << 1;
 }
+/* float_leaf 64: (64 [path n]) -> the first n bytes (n at most 4096) of the regular file at path, or nothing. A reader that
+ * wants a file's kind from its header (a compile image's magic and format version, among the 54 MB it would otherwise have
+ * to read whole) asks this; a FIFO, a device or a missing file is nothing, and no waiting happens. */
+static long long fk_file_head(long long x) {
+    long long path, rest, count, tail;
+    char name[FK_PATH_CAP];
+    if (!fk_door_pair(x, &path, &rest) || !fk_door_pair(rest, &count, &tail) || tail != 1) { return fk_nothing; }
+    if (!fk_is_str(path) || (count & 1) != 0 || fk_is_str(count)) { return fk_nothing; }
+    long long want = count >> 1;
+    if (want < 0 || want > 4096) { return fk_nothing; }
+    fk_cstr(path, name, FK_PATH_CAP);
+    int fd = open(name, O_RDONLY | O_NONBLOCK);
+    if (fd < 0) { return fk_nothing; }
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) { close(fd); return fk_nothing; }
+    char bytes[4096];
+    long long got = 0;
+    while (got < want) {
+        long long r = (long long)read(fd, bytes + got, (unsigned long)(want - got));
+        if (r < 0 && errno == EINTR) { continue; }
+        if (r <= 0) { break; }
+        got += r;
+    }
+    close(fd);
+    return fk_sbuf(bytes, got);
+}
 /* float_leaf 60: scoped file leases -- the descriptor owner under the Form storage recipes (native-posix.bml), which
  * do every read, write, frame and publication on the returned descriptor.
  *   ("open" path writing)         a private journal lease: the caller's own 0600 regular file, held under a
@@ -20311,6 +20337,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         /* mode 60: scoped file leases; modes 62-63: a wire number's 8 bytes -- see fk_lease_door, fk_number_bytes */
         if ((fm201 >> 1) == 60) { return fk_lease_door(fx201); }
         if ((fm201 >> 1) == 62 || (fm201 >> 1) == 63) { return fk_number_bytes(fm201 >> 1, fx201); }
+        if ((fm201 >> 1) == 64) { return fk_file_head(fx201); }
         /* The Form cell frame takes root identity with its argument when residency leaves the seed. */
         if ((fm201 >> 1) == 55) {
             const char *root55 = fk_cell_root_path != 0 ? fk_cell_root_path : fk_src_root_path;
