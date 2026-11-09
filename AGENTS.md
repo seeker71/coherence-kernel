@@ -531,7 +531,12 @@ particular task's checks and observed behavior establish its completion.
 Open with `./fkwu observe/local-flow-review.bml` and work
 its `next`; close by measuring the actual transcript, then review again. Work
 the local lane could take goes to `learn/native-turn-queue.jsonl` with its
-original checks, sources and retained effects. Unknown usage stays unknown;
+original checks, sources and retained effects. `./fkwu observe/native-turn-ledger-fold-run.bml`
+reads what the night's turns achieved (who ran them, the rented share, the landed
+share, how they ended) and, for the latest turn left short of full, names the red
+claims of its band: a reading is the sum of the bits whose claims landed, and
+`form-stdlib/bml/band-claims.bml` decodes the missing bits from the band's own
+head. Unknown usage stays unknown;
 unused allowance is not consumption. An unknown or unavailable reading invites
 repair of its evidence path: bind the actual owner, recover retained observations
 and re-observe. Preserve uncertainty until that evidence arrives. The loop and each meter's job are in the

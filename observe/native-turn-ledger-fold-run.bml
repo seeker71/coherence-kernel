@@ -1,0 +1,86 @@
+// native-turn-ledger-fold-run.bml — what the night's turns achieved, read from the ledger they wrote, and which claim the latest short one lacks.
+//
+//   ./fkwu observe/native-turn-ledger-fold-run.bml </dev/null
+//   printf 'ledger /path/to/ledger.jsonl\nqueue /path/to/queue.jsonl\n' | ./fkwu observe/native-turn-ledger-fold-run.bml
+//
+// Reads, never writes. The ledger (receipts/native-turn-ledger.jsonl) holds one row per turn a lane took: who coordinated it,
+// whether a rented mind took part, what the lane and its reason were, whether it published, and the band's reading before and
+// after as a number. A turn is real when it is neither dry nor a test. This folds the rows into the numbers a steering choice
+// needs: how many turns, who ran them, what share used a rented mind, what share landed a change, how they ended, and for the
+// latest turn that left its band short of full, WHICH claims were short: the number is decoded against the band's own head
+// (form-stdlib/bml/band-claims.bml), found through the gap's row in the queue. The decode reads the band as it stands now,
+// which is the band the next turn will meet; a band edited since the row was written says so by naming a different claim.
+// stdout: lines headed `[turns]`; the last says the latest short turn, or that none is short.
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/bml/form-rows.bml form-stdlib/bml/stdin-source.bml form-stdlib/bml/parse.bml form-stdlib/bml/form-cli-heal-native-io.bml form-stdlib/bml/band-claims.bml
+import form-stdlib/core.fk;
+import form-stdlib/bml/form-rows.bml;
+import form-stdlib/bml/stdin-source.bml;
+import form-stdlib/bml/parse.bml;
+import form-stdlib/bml/form-cli-heal-native-io.bml;
+import form-stdlib/bml/band-claims.bml;
+section [form.bml] {
+ class NativeTurnLedgerFold {
+  def fl-say(t) = print_str("[turns] " ++ t ++ "\n");
+  def fl-rows(path) {
+   let text = fhn-read(path);
+   map(l => parse-json("native-turn-row", l), filter(l => len(trim(l)) > 0, split-on(text, "\n")));
+  }
+  def fl-kind(doc, key) = json-object-has?(doc, key) ? (String) value_kind(json-object-get(doc, key)) : "absent";
+  def fl-real?(r) = fhn-count(r, "dry") == 0 && fhn-count(r, "test") == 0;
+  def fl-landed?(r) = fhn-count(r, "published") >= 1;
+  // a turn the band left short: a reading below the full verdict, both numbers present
+  def fl-short?(r) = fhn-count(r, "full") > 0 && fhn-count(r, "band_after") > 0 && fhn-count(r, "band_after") < fhn-count(r, "full");
+  // ── tallies ──────────────────────────────────────────────────────────────────
+  def fl-uniq(xs) = foldl((acc, x) => any?(a => (String) a == (String) x, acc) ? acc : append(acc, [x]), [], xs);
+  def fl-count(xs, k) = len(filter(x => (String) x == (String) k, xs));
+  def fl-pairs(xs) = map(k => [k, fl-count(xs, k)], fl-uniq(xs));
+  def fl-insert(p, sorted) = nil?(sorted) ? [p] : p[1] >= sorted[0][1] ? cons(p, sorted) : cons(sorted[0], fl-insert(p, sorted[1:]));
+  def fl-sort(pairs) = foldl((acc, p) => fl-insert(p, acc), [], pairs);
+  def fl-top(pairs, n) = nil?(pairs) || n < 1 ? [] : cons(pairs[0], fl-top(pairs[1:], n - 1));
+  def fl-tally-text(xs, n) = str-join-with(map(p => (String) p[0] ++ " " ++ p[1].str(), fl-top(fl-sort(fl-pairs(xs)), n)), ", ");
+  def fl-pct(a, b) = b == 0 ? "0.0%" : (a * 1000 / b / 10).str() ++ "." ++ (a * 1000 / b % 10).str() ++ "%";
+  def fl-outcome(r) = fhn-text(r, "lane") ++ "/" ++ fhn-text(r, "lane_status") ++ "/" ++ fhn-text(r, "lane_reason");
+  // ── the latest short turn, and the claims it lacked ─────────────────────────
+  def fl-last-short(rows) = foldl((acc, r) => fl-short?(r) ? [r] : acc, [], rows);
+  def fl-queue-band(queue, gap) {
+   let rows = filter(q => json-object-has?(q, "id") && fhn-text(q, "id") == gap, fl-rows(queue));
+   nil?(rows) ? "" : fhn-text(rows[0], "band");
+  }
+  def fl-claim-line(c) = "[turns]   " ++ c[0].str() ++ "  " ++ (len(c[1]) > 300 ? (String) substring(c[1], 0, 300) ++ " ..." : (String) c[1]) ++ "\n";
+  def fl-report-short(r, queue) {
+   let gap = fhn-text(r, "gap");
+   let band = fl-queue-band(queue, gap);
+   let after = fhn-count(r, "band_after");
+   let said = fl-say("latest short turn: gap " ++ gap ++ ", " ++ fl-outcome(r) ++ ", band " ++ after.str() ++ " of " ++ fhn-count(r, "full").str() ++ ", short by " ++ (fhn-count(r, "full") - after).str() ++ " (at_unix_ms " ++ fhn-count(r, "at_unix_ms").str() ++ ")");
+   len(band) == 0 ? fl-say("its band is not in the queue (" ++ queue ++ "), so its claims are not decoded") : fl-decode(band, after);
+  }
+  def fl-decode(band, after) {
+   let text = (String) (read_file(band) ?? "");
+   let red = len(text) == 0 ? [] : bc-red(text, after);
+   let said = fl-say("red claims of " ++ band ++ " for that reading (the band as it stands now): " ++ len(red).str());
+   foldl((a, c) => print_str(fl-claim-line(c)), 0, red);
+  }
+  // ── the fold ─────────────────────────────────────────────────────────────────
+  def fl-run() = fl-with(frw-options(stdin-text() ?? ""));
+  def fl-with(o) {
+   if (String) o[0] != "ok" then print_str("[turns] the options were refused at line " ++ o[2].str() ++ ": " ++ o[1] ++ "\n")
+   else fl-go(o[1]);
+  }
+  def fl-go(o) {
+   let ledger = frw-str(o, "ledger", "receipts/native-turn-ledger.jsonl");
+   let queue = frw-str(o, "queue", "learn/native-turn-queue.jsonl");
+   let rows = fl-rows(ledger);
+   let real = filter(r => fl-real?(r), rows);
+   let landed = filter(r => fl-landed?(r), real);
+   let a = fl-say(len(rows).str() ++ " rows in " ++ ledger ++ ", " ++ len(real).str() ++ " real (neither dry nor a test)");
+   let b = fl-say("coordinated by: " ++ fl-tally-text(map(r => fhn-text(r, "coordinated_by"), real), 6));
+   let c = fl-say("a rented mind took part in " ++ len(filter(r => fhn-count(r, "rented_mind") == 1, real)).str() ++ " of them (" ++ fl-pct(len(filter(r => fhn-count(r, "rented_mind") == 1, real)), len(real)) ++ "); none in " ++ len(filter(r => fhn-count(r, "rented_mind") == 0, real)).str());
+   let d = fl-say("landed a change (published at least one): " ++ len(landed).str() ++ " (" ++ fl-pct(len(landed), len(real)) ++ "); of those " ++ len(filter(r => fhn-count(r, "rented_mind") == 0, landed)).str() ++ " with no rented mind");
+   let e = fl-say("how turns ended (lane/status/reason): " ++ fl-tally-text(map(r => fl-outcome(r), real), 8));
+   let last = fl-last-short(real);
+   nil?(last) ? fl-say("no real turn left its band short of full") : fl-report-short(last[0], queue);
+  }
+ }
+ fl-run();
+}
