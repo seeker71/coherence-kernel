@@ -1,0 +1,74 @@
+// local-kernel-run.bml — the local model writes a micro GPU kernel; the body compiles it, runs it on real data and keeps it only if it is right.
+//
+//   echo '{"go":1}' | ./fkwu observe/local-kernel-run.bml
+//
+// Three lenses of the one model (q38-lenses.bml: one prefix prefilled once, forked, three continuations in one pass per step) each
+// write the body of a Metal kernel for the task in the prefix. A lens text is cut at its closing fence, compiled with metal_pipeline,
+// dispatched over eight uints on the device under the GPU lease and read back; a kernel is valid only when every output word equals
+// the Form reference. Of the valid kernels the one the model was surest of (least surprise a token) is kept at
+// .hearth/local-kernels/<name>.metal. No kernel is valid means nothing is kept: the model's choice is checked by the machine, never
+// trusted. The task here is a probe (y = 3 x + 7 over uints); the door is the pattern a kernel the lane needs would follow.
+// stdin, one JSON line: go (without it only the plan is said), gen (160 tokens a lens).
+// A physical run: it needs the local GPU.
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/q38-multi.bml form-stdlib/bml/form-cli-code-live.bml form-stdlib/bml/q38-lenses.bml native/metal/qwen35-dense-token-handle.fk native/metal/qwen35-dense-spec.fk
+section [form.bml] {
+ class LocalKernelRun {
+  def lkr-say(t) = print_str("[local-kernel] " ++ t ++ "\n");
+  def lkr-opts() {
+   let line = trim(stdin-text());
+   (len(line) > 0) && (str_byte_at(line, 0) == 123) ? parse-json("local-kernel", line) : json-node-object([]);
+  }
+  def lkr-int(doc, key, d) = json-object-has?(doc, key) ? json-int-value(json-object-get(doc, key)) : d;
+  def lkr-name() = "form_probe";
+  def lkr-task() = "Write one Metal Shading Language compute kernel named form_probe with exactly this signature: kernel void form_probe (device const uint* x [[buffer(0)]], device uint* y [[buffer(1)]], constant uint& n [[buffer(2)]], uint gid [[thread_position_in_grid]]). For gid < n it must set y[gid] = x[gid] * 3u + 7u. Answer with the kernel only, inside a metal code fence.\n";
+  def lkr-header() = "#include <metal_stdlib>\nusing namespace metal;\n";
+  def lkr-lenses() = ["```metal\n" ++ lkr-header(), "```metal\n" ++ lkr-header() ++ "// bounds check first\n", "```metal\n" ++ lkr-header() ++ "// one thread, one word\n"];
+  // the text up to the closing fence
+  def lkr-cut-at(text, i) = i + 2 >= len(text) ? text : (str_byte_at(text, i) == 96 && str_byte_at(text, i + 1) == 96 && str_byte_at(text, i + 2) == 96) ? substring(text, 0, i) : lkr-cut-at(text, i + 1);
+  def lkr-source(lens, text) = lkr-header() ++ (lens == 0 ? "" : "") ++ lkr-cut-at(text, 0);
+  def lkr-input() = [1, 2, 3, 4, 5, 6, 7, 8];
+  def lkr-expect() = map(v => v * 3 + 7, lkr-input());
+  def lkr-words(raw, i, n) = i >= n ? [] : cons(kth-u32at(raw, i), lkr-words(raw, i + 1, n));
+  // compile and run one candidate; [valid, what] — a compile refusal or a wrong word is a reading, not a stop
+  def lkr-try(source) {
+   let pipe = try metal_pipeline(source, lkr-name()) catch 0;
+   !(pipe > 0) ? [0, "did not compile"] : lkr-dispatch(pipe);
+  }
+  def lkr-dispatch(pipe) {
+   let xb = metal_buf_alloc(64);
+   let yb = metal_buf_alloc(64);
+   let w = metal_buf_write(xb, 0, foldl((a, v) => a ++ md-le32(v), "", lkr-input()));
+   let z = metal_buf_write(yb, 0, foldl((a, v) => a ++ md-le32(0), "", lkr-input()));
+   let ran = gpu-lease-turn("local kernel probe", () => {
+    let batch = metal_batch_concurrent();
+    let q = metal_enqueue(pipe, md-bind16([xb, yb], [8], 256, 0, 0, 1), 8);
+    metal_sync();
+   });
+   let got = lkr-words(metal_buf_read(yb, 0, 32), 0, 8);
+   got == lkr-expect() ? [1, "exact"] : [0, "wrong words " ++ got.str()];
+  }
+  def lkr-best(rows, i, best) = i >= len(rows) ? best : lkr-best(rows, i + 1, (rows[i][0] == 1 && (best < 0 || rows[i][1] < rows[best][1])) ? i : best);
+  def lkr-run() {
+   let o = lkr-opts();
+   lkr-int(o, "go", 0) != 1 ? lkr-say("plan: go=1 asks three lenses of the local model for the probe kernel, compiles and checks each on the device, keeps the surest valid one") : lkr-go(lkr-int(o, "gen", 160));
+  }
+  def lkr-go(gen) {
+   let ctx = qlz-open(1024);
+   let r = qlz-run(ctx, lkr-task(), lkr-lenses(), gen);
+   let sources = map(i => lkr-source(i, r[0][i]), range(0, len(r[0])));
+   let tried = map(s => lkr-try(s), sources);
+   let a = lkr-say("prefix " ++ len(r[2]).str() ++ " ids; " ++ gen.str() ++ " tokens x " ++ len(sources).str() ++ " lenses " ++ r[3][2].str() ++ " ms");
+   let b = map(i => lkr-say("lens " ++ i.str() ++ " valid " ++ tried[i][0].str() ++ " (" ++ tried[i][1] ++ ") surprise " ++ r[1][i].str() ++ " micro-nats a token"), range(0, len(sources)));
+   let rows = map(i => [tried[i][0], r[1][i]], range(0, len(sources)));
+   let best = lkr-best(rows, 0, 0 - 1);
+   best < 0 ? lkr-say("no lens wrote a valid kernel: nothing kept") : lkr-keep(sources[best], best);
+  }
+  def lkr-keep(source, lens) {
+   let made = host_mkdir_mode(".hearth/local-kernels", 493);
+   let kept = write_file_text(".hearth/local-kernels/" ++ lkr-name() ++ ".metal", source);
+   lkr-say("kept lens " ++ lens.str() ++ " at .hearth/local-kernels/" ++ lkr-name() ++ ".metal (" ++ len(source).str() ++ " bytes)");
+  }
+ }
+ lkr-run();
+}
