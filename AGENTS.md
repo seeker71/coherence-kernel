@@ -756,6 +756,14 @@ plainly once, and give the conversation your attention.
    process-local diagnostics, reads the actual source lane and refreshes that
    unit's cache. Reuse the result while its source and dependencies stay current.
 
+   A cold run and a warm run differ only by what hardware bandwidth explains:
+   the bytes read from disk instead of the page cache. Any other gap (relowering,
+   rebuilding an image another checkout already built, a cache bound to a path
+   spelling or a working directory) is a defect to heal, never a figure to
+   report. A cold claim is justified by its bytes. Lowerings and images live in
+   the host's shared content-checked store (`$HOME/.cache/fkwu/lowfk`, `/fkb`),
+   so a fresh checkout reads them.
+
    Preflight distinguishes an undefined name, a missing prelude and a kernel
    lane seam. Repair the named cause in the same context, then re-observe.
    `; preflight-exec: forbidden` (or `//` in BML) preserves effectful cells for

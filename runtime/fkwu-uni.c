@@ -25865,7 +25865,15 @@ static const char *fk_path_canon_id(const char *path, char *out) {
     }
 #endif
     long long pre_n = fk_path_repo_prefix_len(out);
-    return pre_n > 0 ? out + pre_n : out;
+    if (pre_n > 0) return out + pre_n;
+    /* a unit beside form/ (observe/, gate/, cognition/ ...) is anchored at the working directory it lies under: the
+     * checkout, so its image keeps one name in every checkout too */
+    char here[FK_PATH_CAP];
+    if (realpath(".", here) != 0) {
+        long long h = fk_path_len(here);
+        if (h > 1 && !memcmp(out, here, (unsigned long)h) && out[h] == FK_CH_SLASH) return out + h + 1;
+    }
+    return out;
 }
 static const char *fk_src_path_id(const char *path, char *out) {
     long long dep = fk_src_dep_index(path);
@@ -27232,6 +27240,62 @@ static void fk_fkb_builder_admit(void) {
     sprintf(fk_fkb_builder_id, "fkwu-image-v1 %016llx/%llu", hash, count);
 }
 
+/* ── The shared image store ──
+ * An image's identity never names its checkout: the builder (this fkwu's own bytes), the unit's repo-anchored path id
+ * and the v4 source identity (repo-anchored paths, sizes and digests of the closure). So one image serves every checkout
+ * on this host: $HOME/.cache/fkwu/fkb/<identity key><.fkb|.sym>. A checkout without an image of its identity clones the
+ * store's into place and loads it through the same checks; a cold checkout then pays the bytes, not the compile. */
+static const char *fk_src_path_id(const char *path, char *out);
+static int fk_fkb_store_name(const char *src_path, const char *source_hash, const char *ext, char *out, int make) {
+    const char *home = getenv("HOME");
+    char canon[FK_PATH_CAP];
+    if (!home || !home[0] || fk_path_len(home) + 80 >= FK_PATH_CAP) return 0;
+    const char *id = fk_src_path_id(src_path, canon);
+    unsigned long long key = fk_bytes_fnv1a(fk_fkb_builder_id, fk_cstrlen(fk_fkb_builder_id));
+    key = (key ^ fk_bytes_fnv1a(id, fk_path_len(id))) * 1099511628211ULL;
+    key = (key ^ fk_bytes_fnv1a(source_hash, fk_cstrlen(source_hash))) * 1099511628211ULL;
+    if (make) {
+        sprintf(out, "%s/.cache", home); mkdir(out, 0755);
+        sprintf(out, "%s/.cache/fkwu", home); mkdir(out, 0755);
+        sprintf(out, "%s/.cache/fkwu/fkb", home); mkdir(out, 0755);
+    }
+    sprintf(out, "%s/.cache/fkwu/fkb/%016llx%s", home, key, ext);
+    return 1;
+}
+/* one file's bytes at a new name, whole or not at all: cloned where the filesystem shares blocks, else copied, through
+ * <to>.c<pid> and one rename */
+#if defined(__APPLE__)
+extern int clonefile(const char *, const char *, unsigned int);
+#endif
+static int fk_fkb_store_clone(const char *from, const char *to) {
+    char temporary[FK_PATH_CAP + 64];
+    if (fk_path_len(to) >= FK_PATH_CAP) return 0;
+    sprintf(temporary, "%s.c%d", to, (int)getpid());
+    unlink(temporary);
+    int done = 0;
+#if defined(__APPLE__)
+    done = clonefile(from, temporary, 0) == 0;
+#endif
+    if (!done) {
+        long long n = 0;
+        char *bytes = fk_read_whole_file(from, &n);
+        if (!bytes) return 0;
+        int fd = open(temporary, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        done = fd >= 0 && fk_write_all_raw(fd, bytes, (unsigned long)n);
+        if (fd >= 0 && close(fd) != 0) done = 0;
+        free(bytes);
+    }
+    if (done && rename(temporary, to) == 0) return 1;
+    unlink(temporary);
+    return 0;
+}
+static void fk_fkb_store_put(const char *src_path, const char *source_hash, const char *fkb_path, const char *sym_path) {
+    char stored[FK_PATH_CAP + 64];
+    if (!fk_fkb_store_name(src_path, source_hash, ".fkb", stored, 1) || fk_path_size_raw(stored) >= 0) return;
+    if (fk_path_size_raw(sym_path) >= 0 && fk_fkb_store_name(src_path, source_hash, ".sym", stored, 0))
+        fk_fkb_store_clone(sym_path, stored);
+    if (fk_fkb_store_name(src_path, source_hash, ".fkb", stored, 0)) fk_fkb_store_clone(fkb_path, stored);
+}
 static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const char *sym_path,
                             long long source_mtime, const char *source_hash,
                             long long *written_bytes, unsigned long long *written_checksum) {
@@ -27379,6 +27443,7 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
         return 0;
     }
     if (!publication.released) fk_diag_path("cache-failure", fkb_path, publication.reason);
+    if (src_path && source_hash && source_hash[0]) fk_fkb_store_put(src_path, source_hash, fkb_path, sym_path);
     *written_bytes = image_bytes;
     *written_checksum = checksum;
     return 1;
@@ -28467,8 +28532,8 @@ static int fk_fkb_restore_symbol_image(long long version) {
     }
     return !fk_fkb_bad;
 }
-static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_src_path,
-                                   const char *expected_source_hash) {
+static int fk_src_load_fkb_checked_here(const char *fkb_path, const char *expected_src_path,
+                                        const char *expected_source_hash) {
     if (!fk_fkb_open_checked(fkb_path, expected_src_path, expected_source_hash)) return 0;
     long long version = FK_FKB_VERSION;
     long long nf = fk_fkb_read_signed();
@@ -28538,6 +28603,33 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
     fk_prog_note_ice(fkb_path, fk_fkb_len, expected_source_hash);
     fk_prog_note_counts();
     return 1;
+}
+/* The checked load, carried by the shared image store when this checkout holds no image of this identity: the store's
+ * image is cloned into place (copy-on-write where the filesystem offers it) and asked every question the local one
+ * would be. When the store holds none either, the first refusal stands as the answer. */
+static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_src_path,
+                                   const char *expected_source_hash) {
+    if (fk_src_load_fkb_checked_here(fkb_path, expected_src_path, expected_source_hash)) return 1;
+    char stored[FK_PATH_CAP + 64];
+    if (!expected_src_path || !expected_source_hash ||
+        !fk_fkb_store_name(expected_src_path, expected_source_hash, ".fkb", stored, 0) ||
+        fk_path_size_raw(stored) < 0) return 0;
+    int bad = fk_fkb_bad;
+    const char *why = fk_fkb_bad_why;
+    if (fk_fkb_store_clone(stored, fkb_path) &&
+        fk_src_load_fkb_checked_here(fkb_path, expected_src_path, expected_source_hash)) {
+        /* the symbol lens beside it, when the store holds one: <image without .fkb>.sym, as the writer names it */
+        char sym[FK_PATH_CAP + 64], sym_path[FK_PATH_CAP + 8];
+        long long fn = fk_path_len(fkb_path);
+        if (fn > 4 && fn < FK_PATH_CAP && fk_path_has_suffix(fkb_path, ".fkb") &&
+            fk_fkb_store_name(expected_src_path, expected_source_hash, ".sym", sym, 0) && fk_path_size_raw(sym) >= 0) {
+            sprintf(sym_path, "%.*s.sym", (int)(fn - 4), fkb_path);
+            fk_fkb_store_clone(sym, sym_path);
+        }
+        return 1;
+    }
+    fk_fkb_bad = bad; fk_fkb_bad_why = why;
+    return 0;
 }
 static int fk_src_load_fkb(const char *fkb_path) {
     return fk_src_load_fkb_checked(fkb_path, 0, 0);
@@ -30151,7 +30243,12 @@ FK_PHASED(FK_PHASE_LOAD, int, fk_cell_load, (const char *path, long long *root_o
     int identified = parsed && fk_cell_closure_identity(*root_out, d0, identity);
     int image_loaded = 0;
     if (!fk_cell_image_busy && identified && fk_cell_image_path(path, image_path)) {
-        if (fk_fkb_open_checked(image_path, path, identity)) {
+        char stored[FK_PATH_CAP + 64];
+        int here = fk_fkb_open_checked(image_path, path, identity);
+        if (!here && fk_fkb_store_name(path, identity, ".cell.fkb", stored, 0) && fk_path_size_raw(stored) >= 0 &&
+            fk_fkb_store_clone(stored, image_path))
+            here = fk_fkb_open_checked(image_path, path, identity);
+        if (here) {
             fk_fkb_snapshot snapshot = {0}; fk_fkb_snapshot_take(&snapshot);
             fk_cell_import_root = *root_out; fk_cell_import_fresh = d0;
             image_loaded = fk_src_import_fkb_image(image_path, &snapshot);
@@ -30256,6 +30353,11 @@ static int fk_cell_image_prepare(const char *path, long long root, long long *pu
     fk_admission_image_note(a, image, 0, 0, 0);
     a->publication = 1;
     fk_sig_heal_settle(image);
+    {
+        char stored[FK_PATH_CAP + 64];
+        if (fk_fkb_store_name(path, a->hash, ".cell.fkb", stored, 1) && fk_path_size_raw(stored) < 0)
+            fk_fkb_store_clone(image, stored);
+    }
     return 1;
 }
 /* the program's answer is its last sequence in text order: the cell's own, or, for a root that only names preludes
@@ -31283,6 +31385,119 @@ static int fk_bml_memo_owner_is(const char *memo, const char *path) {
     return same;
 }
 static int fk_closure_put(int fd, const char *bytes, long long n);
+/* ── The shared lowering store ──
+ * A lowering's body never names its checkout: only its header rows do (P the unit as spelled, C the working directory,
+ * H the home index, F/N the files it observed). So one lowering serves every checkout on this host once those rows are
+ * spoken relative to the checkout: P and H as paths under the working directory, C as "@", F/N as "@/<rest>". The store
+ * ($HOME/.cache/fkwu/lowfk/<unit key>/<seal>) holds a unit's lowerings in that portable spelling, keyed by the unit's
+ * and home's checkout-relative spelling, one file per distinct lowering (its seal names it). A reader carries one back
+ * into its own checkout and asks every observation of its own tree, so a cold checkout pays only the bytes it reads and
+ * digests: the same work a warm run does. */
+#define FK_BML_STORE_KEEP 8
+/* the spelling of a path relative to the working directory when it lies under it, else the path itself */
+static const char *fk_bml_canon(const char *path, const char *cwd) {
+    long long c = fk_path_len(cwd);
+    if (c > 0 && !memcmp(path, cwd, (unsigned long)c) && path[c] == '/') return path + c + 1;
+    return path;
+}
+static int fk_bml_store_dir(const char *path, char *out, int make) {
+    const char *home = getenv("HOME");
+    char cwd[FK_PATH_CAP];
+    if (!home || !home[0] || !getcwd(cwd, sizeof(cwd)) || fk_path_len(home) + 64 >= FK_PATH_CAP) return 0;
+    const char *p = fk_bml_canon(path, cwd), *h = fk_bml_canon(fk_home_path, cwd);
+    unsigned long long key = fk_bytes_fnv1a(p, fk_path_len(p));
+    key = (key ^ fk_bytes_fnv1a(h, fk_path_len(h))) * 1099511628211ULL;
+    if (make) {
+        sprintf(out, "%s/.cache", home); mkdir(out, 0755);
+        sprintf(out, "%s/.cache/fkwu", home); mkdir(out, 0755);
+        sprintf(out, "%s/.cache/fkwu/lowfk", home); mkdir(out, 0755);
+    }
+    sprintf(out, "%s/.cache/fkwu/lowfk/%016llx", home, key);
+    if (make) mkdir(out, 0755);
+    return 1;
+}
+/* A packet's header rows moved between this checkout's spelling (dir 0 -> portable) and back (dir 1 -> this checkout,
+ * answering 0 when the portable rows do not name `owner` and this home). The digests and the body are carried as they
+ * are: they never named a place. */
+static char *fk_bml_packet_port(const char *packet, long long n, int dir, const char *owner, long long *out_n) {
+    char cwd[FK_PATH_CAP], path[FK_PATH_CAP];
+    if (n < 7 || memcmp(packet, "fklow2\n", 7) || !getcwd(cwd, sizeof(cwd))) return 0;
+    long long cn = fk_path_len(cwd), rows = 0, i = 7;
+    while (i < n) { if (packet[i] == '\n') rows++; i++; }
+    long long cap = n + rows * (cn + fk_path_len(owner) + fk_path_len(fk_home_path) + 32) + 64, at = 7, o = 7;
+    char *out = malloc((unsigned long)cap);
+    if (!out) return 0;
+    memcpy(out, packet, 7);
+    while (at < n && packet[at] != '\n') {
+        long long count = 0, digits = 0, start = at;
+        if (at + 20 >= n || packet[at + 1] != ' ' || packet[at + 18] != ' ') { free(out); return 0; }
+        char kind = packet[at];
+        at += 19;
+        while (at < n && packet[at] >= '0' && packet[at] <= '9' && digits < 6) { count = count * 10 + packet[at++] - '0'; digits++; }
+        if (!digits || !count || count >= FK_PATH_CAP || at >= n || packet[at++] != ':' || count >= n - at ||
+            packet[at + count] != '\n') { free(out); return 0; }
+        memcpy(path, packet + at, (unsigned long)count); path[count] = 0; at += count + 1;
+        const char *said = path;
+        char moved[FK_PATH_CAP + 8];
+        if (dir == 0) {
+            if (kind == 'P' || kind == 'H') said = fk_bml_canon(path, cwd);
+            else if (kind == 'C') said = fk_cstr_eq(path, cwd) ? "@" : path;
+            else if (fk_bml_canon(path, cwd) != path) { sprintf(moved, "@/%s", fk_bml_canon(path, cwd)); said = moved; }
+        } else {
+            if (kind == 'P') { if (!fk_cstr_eq(path, fk_bml_canon(owner, cwd))) { free(out); return 0; } said = owner; }
+            else if (kind == 'H') { if (!fk_cstr_eq(path, fk_bml_canon(fk_home_path, cwd))) { free(out); return 0; } said = fk_home_path; }
+            else if (kind == 'C') { if (!fk_cstr_eq(path, "@")) { free(out); return 0; } said = cwd; }
+            else if (path[0] == '@' && path[1] == '/' && cn + count < FK_PATH_CAP) { sprintf(moved, "%s/%s", cwd, path + 2); said = moved; }
+        }
+        long long sn = fk_path_len(said);
+        if (o + 19 + 12 + sn + 2 > cap) { free(out); return 0; }
+        memcpy(out + o, packet + start, 19); o += 19;
+        o += sprintf(out + o, "%lld:", sn);
+        memcpy(out + o, said, (unsigned long)sn); o += sn;
+        out[o++] = '\n';
+    }
+    if (at >= n || o + (n - at) > cap) { free(out); return 0; }
+    memcpy(out + o, packet + at, (unsigned long)(n - at)); o += n - at;
+    *out_n = o;
+    return out;
+}
+/* A lowering this checkout just wrote, offered to the store in its portable spelling. The store keeps a unit's newest
+ * FK_BML_STORE_KEEP lowerings (checkouts at different points of the tree each find theirs); a lowering already held is
+ * not written twice. */
+static int fk_closure_put(int fd, const char *bytes, long long n);
+static void fk_bml_store_put(const char *path, const char *packet, long long n) {
+    char dir[FK_PATH_CAP], file[FK_PATH_CAP + 64], temporary[FK_PATH_CAP + 96], footer[32], oldest[FK_PATH_CAP + 64];
+    long long pn = 0;
+    char *port = fk_bml_packet_port(packet, n, 0, path, &pn);
+    if (!port) return;
+    unsigned long long seal = fk_bytes_fnv1a(port, pn);
+    if (!fk_bml_store_dir(path, dir, 1)) { free(port); return; }
+    sprintf(file, "%s/%016llx", dir, seal);
+    if (fk_path_size_raw(file) >= 0) { free(port); return; }
+    sprintf(temporary, "%s/.tmp.%lld", dir, (long long)getpid());
+    int fd = open(temporary, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) { free(port); return; }
+    int size = sprintf(footer, "\nfkend2 %016llx\n", seal);
+    int complete = fk_closure_put(fd, port, pn) && fk_closure_put(fd, footer, size);
+    free(port);
+    if (close(fd) != 0 || !complete || rename(temporary, file) != 0) { unlink(temporary); return; }
+    for (;;) {
+        DIR *d = opendir(dir);
+        if (!d) return;
+        struct dirent *e;
+        struct stat st;
+        long long count = 0, old = 0;
+        while ((e = readdir(d)) != 0) {
+            if (e->d_name[0] == '.' || fk_cstrlen(e->d_name) != 16) continue;
+            sprintf(file, "%s/%s", dir, e->d_name);
+            if (stat(file, &st) != 0) continue;
+            count++;
+            if (old == 0 || (long long)st.st_mtime < old) { old = (long long)st.st_mtime; sprintf(oldest, "%s", file); }
+        }
+        closedir(d);
+        if (count <= FK_BML_STORE_KEEP || unlink(oldest) != 0) return;
+    }
+}
 /* The memo is written beside itself under this process's name (<memo>.tmp.<pid>) and renamed into place, so a reader
  * meets the whole memo or the one before it; its seal (fkend2) covers every byte above it. Answers 1 when the memo
  * stands whole, 0 when it could not be written (nothing is left behind). */
@@ -31296,9 +31511,40 @@ static int fk_bml_low_memo_write(const char *path, const char *packet, long long
     int size = sprintf(footer, "\nfkend2 %016llx\n", fk_bytes_fnv1a(packet, n));
     int complete = fk_closure_put(fd, packet, n) && fk_closure_put(fd, footer, size);
     if (close(fd) != 0) complete = 0;
-    if (complete && rename(temporary, memo) == 0) return 1;
+    if (complete && rename(temporary, memo) == 0) { fk_bml_store_put(path, packet, n); return 1; }
     unlink(temporary);
     return 0;
+}
+/* A memo the shared store holds for this unit, carried into this checkout: every observation is asked of THIS tree (the
+ * store is read by many checkouts, so nothing it holds is trusted unseen), and a holding one is written down as this
+ * checkout's own memo so the next run reads it beside its source. 0 when none holds. */
+static char *fk_bml_store_get(const char *path, long long *out_len) {
+    char dir[FK_PATH_CAP], file[FK_PATH_CAP + 64];
+    unsigned long long seal;
+    if (!fk_bml_store_dir(path, dir, 0)) return 0;
+    DIR *d = opendir(dir);
+    if (!d) return 0;
+    struct dirent *e;
+    char *body = 0;
+    while (!body && (e = readdir(d)) != 0) {
+        if (e->d_name[0] == '.' || fk_cstrlen(e->d_name) != 16) continue;
+        sprintf(file, "%s/%s", dir, e->d_name);
+        long long n = 0, local_n = 0;
+        char *packet = fk_read_whole_file(file, &n);
+        if (!packet) continue;
+        if (n >= 25 && !memcmp(packet + n - 25, "\nfkend2 ", 8) && packet[n - 1] == '\n' &&
+            fk_hex16_parse(packet + n - 17, &seal) && seal == fk_bytes_fnv1a(packet, n - 25)) {
+            char *local = fk_bml_packet_port(packet, n - 25, 1, path, &local_n);
+            if (local) {
+                body = fk_bml_packet_body(path, local, local_n, out_len, 0, 1);
+                if (body) fk_bml_low_memo_write(path, local, local_n);
+                free(local);
+            }
+        }
+        free(packet);
+    }
+    closedir(d);
+    return body;
 }
 static void fk_bml_bootstrap(const char *first);
 static void fk_bml_need_add(const char *path) {
@@ -31445,12 +31691,18 @@ static char *fk_bml_memo_read(const char *bml_path, long long *out_len, char *wh
                 body = fk_bml_packet_body(bml_path, packet, n - 25, out_len, moved, !fk_bml_trusts(memo, seal));
                 if (!body && why) sprintf(why, "%s", moved[0] ? moved : "it names another unit, working directory or home");
                 if (body && fk_bml_scanning) fk_bml_seen_add(memo, seal);
+                /* a lowering this checkout holds that the store has never seen for this unit is offered to it (one
+                 * stat of the unit's store directory per read) */
+                if (body) {
+                    char dir[FK_PATH_CAP];
+                    if (fk_bml_store_dir(bml_path, dir, 0) && fk_path_size_raw(dir) < 0) fk_bml_store_put(bml_path, packet, n - 25);
+                }
             }
             free(packet);
             if (body) return body;
         }
     }
-    return 0;
+    return fk_bml_store_get(bml_path, out_len);
 }
 /* A lowering is a memo read. The memo is valid when its seal holds and every file it observed still has the bytes it
  * saw; any other state is a miss, and a miss is answered by the floor compiler in THIS process:
