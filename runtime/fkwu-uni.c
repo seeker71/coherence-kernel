@@ -438,9 +438,11 @@ extern int proc_pidinfo(int pid, int flavor, unsigned long long arg, void *buffe
 extern int proc_name(int pid, void *buffer, unsigned int buffersize);
 extern int proc_pidpath(int pid, void *buffer, unsigned int buffersize);
 extern int proc_pidfdinfo(int pid, int fd, int flavor, void *buffer, int buffersize); /* host_file_holders: one open vnode's identity */
-extern unsigned int getuid(void);
 struct fk_mach_timebase { unsigned int numer; unsigned int denom; };
 extern int mach_timebase_info(struct fk_mach_timebase *info);
+#endif
+#if !defined(_WIN32)
+extern unsigned int getuid(void);
 #endif
 extern int setpriority(int which, unsigned int who, int prio);
 extern int kill(int pid, int sig);
@@ -7601,11 +7603,15 @@ static long long fk_cuda_matvec_f32(long long wv, long long xv) {
     return 1;
 }
 #endif
+#if defined(__linux__)
+#include <sys/time.h>   /* glibc and musl own the layout; a second struct timeval is a redefinition */
+#else
 struct timeval {
     long tv_sec;
     int tv_usec;
 };
 extern int gettimeofday(struct timeval *, void *);
+#endif
 static long long fk_now_ms(void) {
     struct timeval tv;
     if (gettimeofday(&tv, 0) != 0) {
@@ -15615,11 +15621,17 @@ static long long fk_field_claim(long long word, long long n) {
     if (locked) { fk_owned_unlock(); }
     return out;
 }
+static long long fk_cache_free_bytes(const char *dir);
 /* opens every column; answers 1 when this kernel's node tables now live in the field */
 static int fk_field_open(void) {
     if (fk_field_on) { return 1; }
     fk_field_tried = 1;
     if (fk_conf("FK_FIELD_OFF") || fk_conf("FK_STORE_PRIVATE")) { return 0; }
+#if defined(__linux__)
+    /* The columns are sparse: ftruncate always succeeds, and a page touched past the shm filesystem's room raises SIGBUS
+     * (a container's /dev/shm is 64 MB by default). A host that cannot hold the field keeps its tables in the process. */
+    { long long room = fk_cache_free_bytes("/dev/shm"); if (room < (2LL << 30)) { return 0; } }
+#endif
     void *hdr = fk_field_take('h', 4096);
     if (fk_conf("FK_FIELD_TRACE")) { dprintf(2, "[field] hdr=%p\n", hdr); }
     if (hdr == 0) { return 0; }
@@ -18099,6 +18111,24 @@ static long long fk_file_head(long long x) {
     close(fd);
     return fk_sbuf(bytes, got);
 }
+static void fk_sha256_hex(const unsigned char *p, long long n, char *out);
+static char *fk_store_read(const char *path, long long *out_len);
+/* float_leaf 65: (65 [path limit]) -> the SHA-256 of the regular file at path (at most limit bytes) as 64 lower-case hex
+ * digits, or nothing. A fetched object is trusted by a hash committed in the repo, never by a seal it carries itself; the
+ * reader asks this before it places the object. A FIFO, a device, a missing or larger file is nothing, and no waiting happens. */
+static long long fk_file_sha256(long long x) {
+    long long path, rest, limit, tail, n = 0;
+    char name[FK_PATH_CAP], hex[72];
+    if (!fk_door_pair(x, &path, &rest) || !fk_door_pair(rest, &limit, &tail) || tail != 1) { return fk_nothing; }
+    if (!fk_is_str(path) || (limit & 1) != 0 || fk_is_str(limit) || (limit >> 1) < 0) { return fk_nothing; }
+    fk_cstr(path, name, FK_PATH_CAP);
+    char *bytes = fk_store_read(name, &n);
+    if (!bytes) { return fk_nothing; }
+    if (n > (limit >> 1)) { free(bytes); return fk_nothing; }
+    fk_sha256_hex((const unsigned char *)bytes, n, hex);
+    free(bytes);
+    return fk_sbuf(hex, 64);
+}
 /* float_leaf 60: scoped file leases -- the descriptor owner under the Form storage recipes (native-posix.bml), which
  * do every read, write, frame and publication on the returned descriptor.
  *   ("open" path writing)         a private journal lease: the caller's own 0600 regular file, held under a
@@ -20338,6 +20368,10 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if ((fm201 >> 1) == 60) { return fk_lease_door(fx201); }
         if ((fm201 >> 1) == 62 || (fm201 >> 1) == 63) { return fk_number_bytes(fm201 >> 1, fx201); }
         if ((fm201 >> 1) == 64) { return fk_file_head(fx201); }
+        if ((fm201 >> 1) == 65) { return fk_file_sha256(fx201); }
+        /* float_leaf 66: (66 0) -> this kernel's identity string, "fkwu-image-v1 seed <key> <os>-<arch>" for a kernel the seed
+         * built (which names the objects of its warm packs), else its executable's identity */
+        if ((fm201 >> 1) == 66) { return fk_sbuf(fk_fkb_builder_id, fk_cstrlen(fk_fkb_builder_id)); }
         /* The Form cell frame takes root identity with its argument when residency leaves the seed. */
         if ((fm201 >> 1) == 55) {
             const char *root55 = fk_cell_root_path != 0 ? fk_cell_root_path : fk_src_root_path;
@@ -27221,12 +27255,37 @@ static void fk_src_sweep_dead_temps(const char *fkb_path) {
     closedir(d);
 }
 #endif
-/* Cache identity follows the executable bytes, captured before the process
- * admits a unit or changes directory. Identical rebuilds reuse images; another
- * executable cannot lend them its meaning. The native artifact layer takes this
- * carrier home when it replaces the seed's image reader and writer. */
+/* Cache identity follows the kernel's meaning. A kernel the seed built names itself by the digest of the seed it was made
+ * from and the target it runs on (FK_SEED_KEY, given by the build): every compiler flag of one source lowers and images
+ * identically (witnessed: O1, O2, O3 and Os left lowering and image bodies byte-identical, only this stamp differing), so
+ * one warm object serves them all and a prebuilt one is as good as a local build. A kernel built without the key
+ * (a plain `cc`) follows its executable bytes, captured before the process admits a unit or changes directory:
+ * another executable cannot lend it its meaning. */
+#ifndef FK_SEED_KEY
+#define FK_SEED_KEY 0ULL
+#endif
+#if defined(__APPLE__)
+#define FK_TARGET_OS "darwin"
+#elif defined(__linux__)
+#define FK_TARGET_OS "linux"
+#elif defined(_WIN32)
+#define FK_TARGET_OS "windows"
+#else
+#define FK_TARGET_OS "other"
+#endif
+#if defined(__aarch64__) || defined(__arm64__)
+#define FK_TARGET_ARCH "arm64"
+#elif defined(__x86_64__) || defined(_M_X64)
+#define FK_TARGET_ARCH "x86_64"
+#else
+#define FK_TARGET_ARCH "other"
+#endif
 #define FK_FKB_BUILDER_ID fk_fkb_builder_id
 static void fk_fkb_builder_admit(void) {
+    if (FK_SEED_KEY) {
+        sprintf(fk_fkb_builder_id, "fkwu-image-v1 seed %016llx %s-%s", (unsigned long long)FK_SEED_KEY, FK_TARGET_OS, FK_TARGET_ARCH);
+        return;
+    }
     const char *path = fk_self_path;
 #if defined(__linux__)
     path = "/proc/self/exe";

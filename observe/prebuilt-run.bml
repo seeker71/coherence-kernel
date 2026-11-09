@@ -1,0 +1,176 @@
+// prebuilt-run.bml — warm packs: what one run touched, made shippable; what a shipped pack holds, verified and placed.
+//
+//   printf 'publish /path/to/out\nsince 1794200000\n' | ./fkwu observe/prebuilt-run.bml     make a pack of this kernel
+//   printf 'fetch /path/to/out\n'                    | ./fkwu observe/prebuilt-run.bml     place a pack's objects in the store
+//   printf 'fetch https://host/base\npin <sha256>\n'  | ./fkwu observe/prebuilt-run.bml     the same from a mirror, manifest pinned
+//
+// A pack is the host store's entries (bin, fkb, lowfk under $HOME/.cache/fkwu, or FKWU_CACHE_ROOT) that one warm run touched:
+// the store marks an entry on every hit and write, so "touched since T" is exactly what that run needed. Its directory is
+// <key>-<target> (the kernel's own identity, float_leaf 66: the seed digest and the OS-arch it runs on, because images and
+// lowerings follow both) holding manifest.txt, one `<relative path> <sha256> <bytes>` line per object, and objects/<relative path>.
+// Nothing here is trusted by a name or a seal it carries: the manifest's hash is pinned in prebuilt/index.txt (one line per
+// published pack: `pack <key> <target> <manifest sha256> <mirror>...`, committed beside the source), and every object's hash is
+// the manifest's. An object that does not match is refused and never placed; a pack never has to exist, because a miss is
+// built, as before. A mirror is a directory or an http(s) base fetched with curl; objects are content-addressed, so any
+// mirror may host them. `compress 1` on a publish stores each object as zstd -19 (7 to 9 percent of its size; the manifest
+// still names the hash of the bytes it decodes to); a fetch asks the mirror for objects/<path>.zst first, then the raw object.
+// stdin options: publish <dir> | since <seconds> | compress <0|1> | fetch <mirror> | pin <sha256>
+// stdout: lines headed `[prebuilt]`; the last says `published`, `placed` or `refused`.
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/bml/form-rows.bml form-stdlib/bml/stdin-source.bml form-stdlib/bml/host-fs.bml form-stdlib/bml/host-child.bml form-stdlib/bml/string-join.bml
+import form-stdlib/core.fk;
+import form-stdlib/bml/form-rows.bml;
+import form-stdlib/bml/stdin-source.bml;
+import form-stdlib/bml/host-fs.bml;
+import form-stdlib/bml/host-child.bml;
+import form-stdlib/bml/string-join.bml;
+section [form.bml] {
+ class PrebuiltRun {
+  def pb-say(t) = print_str("[prebuilt] " ++ t ++ "\n");
+  def pb-root() = (String) (host_getenv("FKWU_CACHE_ROOT") ?? ((host_getenv("HOME") ?? "") ++ "/.cache/fkwu"));
+  def pb-limit() = 2147483648;
+  def pb-id() = (String) float_leaf(66, 0);
+  // "fkwu-image-v1 seed <16 hex> <os>-<arch>": a kernel the seed built; any other kernel has no pack
+  def pb-seed?() = len(pb-id()) > 36 && (String) substring(pb-id(), 0, 19) == "fkwu-image-v1 seed ";
+  def pb-key() = (String) substring(pb-id(), 19, 35);
+  def pb-target() = (String) substring(pb-id(), 36, len(pb-id()));
+  def pb-pack() = pb-key() ++ "-" ++ pb-target();
+  def pb-sha(path) = (String) (float_leaf(65, [path, pb-limit()]) ?? "");
+  def pb-size(path) = host_file_size(path);
+  def pb-ends?(s, suf) = len(s) >= len(suf) && (String) substring(s, len(s) - len(suf), len(s)) == suf;
+  def pb-temp?(n) = str_find(n, ".t", 0) >= 0 || str_find(n, ".hfs-copy-", 0) >= 0 || str_find(n, ".build.", 0) >= 0;
+  def pb-names(dir) = fs_list(dir) ?? [];
+  def pb-mtime(path) {
+   let id = hfs-identity(path);
+   (String) value_kind(id) == "list" ? id[1] : 0;
+  }
+  def pb-dir-of(path) = pb-dir-go(path, len(path) - 1);
+  def pb-dir-go(path, i) = i <= 0 ? "" : str_byte_at(path, i) == 47 ? (String) substring(path, 0, i) : pb-dir-go(path, i - 1);
+  def pb-mk(dir) = hch-mkdirs(dir);
+  // ── publish ──────────────────────────────────────────────────────────────────
+  // relative paths of what this pack holds: the kernel itself and every entry touched since `since` (ms)
+  def pb-kernel-paths() = [];
+  def pb-fkb-paths(root, since) = map(n => "fkb/" ++ n, filter(n => !pb-temp?(n) && pb-mtime(root ++ "/fkb/" ++ n) >= since, pb-names(root ++ "/fkb")));
+  def pb-low-unit(root, since, u) = map(n => "lowfk/" ++ u ++ "/" ++ n, filter(n => len(n) == 16 && pb-mtime(root ++ "/lowfk/" ++ u ++ "/" ++ n) >= since, pb-names(root ++ "/lowfk/" ++ u)));
+  def pb-low-paths(root, since) = foldl((acc, u) => append(acc, pb-low-unit(root, since, u)), [], filter(u => !pb-temp?(u), pb-names(root ++ "/lowfk")));
+  def pb-paths(root, since) = append(pb-kernel-paths(), append(pb-fkb-paths(root, since), pb-low-paths(root, since)));
+  def pb-put(root, out, rel, zip) {
+   let from = root ++ "/" ++ rel;
+   let to = out ++ "/objects/" ++ rel;
+   let made = pb-mk(pb-dir-of(to));
+   let n = hfs-copy(from, to);
+   let line = (Comparable) n < 0 ? "" : rel ++ " " ++ pb-sha(to) ++ " " ++ n.str();
+   let packed = (Comparable) n < 0 || !zip ? 1 : pb-zip(to);
+   packed ? line : "";
+  }
+  // the mirror holds the compressed object; the manifest keeps the hash of the bytes it decodes to, which is what is verified
+  def pb-zip(path) {
+   let run = hch-run-in(".hearth/prebuilt-io", "zstd", ["zstd", "-19", "-q", "-f", "-o", path ++ ".zst", path], "", hch-by(600000));
+   hch-ok?(run) && (Comparable) host_path_remove(path) == 0;
+  }
+  def pb-unzip(from, to) {
+   let run = hch-run-in(".hearth/prebuilt-io", "unzstd", ["zstd", "-d", "-q", "-f", "-o", to, from], "", hch-by(600000));
+   hch-ok?(run) && (Comparable) host_path_exists(to) == 1;
+  }
+  // the kernel is this checkout's ./fkwu (a clone of the store's binary, which a seed-version kernel never places in the
+  // store): the object and the seal the kernel's store writes beside a binary, "<sha256> <bytes>"
+  def pb-kernel(out) {
+   let rel = "bin/" ++ pb-key() ++ "/fkwu";
+   let to = out ++ "/objects/" ++ rel;
+   let made = pb-mk(pb-dir-of(to));
+   let n = hfs-copy(host_realpath(host_cwd() ++ "/fkwu") ?? (host_cwd() ++ "/fkwu"), to);
+   let sha = pb-sha(to);
+   let sealed = write_file_text(to ++ ".seal", sha ++ " " ++ n.str() ++ "\n");
+   (Comparable) n < 0 || len(sha) == 0 ? [] : [rel ++ " " ++ sha ++ " " ++ n.str(), rel ++ ".seal " ++ pb-sha(to ++ ".seal") ++ " " ++ pb-size(to ++ ".seal").str()];
+  }
+  def pb-publish(dir, since, zip) {
+   let root = pb-root();
+   let out = dir ++ "/" ++ pb-pack();
+   let made = pb-mk(out);
+   let kernel = pb-kernel(out);
+   let lines = filter(l => len(l) > 0, append(kernel, map(rel => pb-put(root, out, rel, zip), pb-paths(root, since * 1000))));
+   let wrote = write_file_text(out ++ "/manifest.txt", str-join-with(lines, "\n") ++ "\n");
+   let said = pb-say(pb-pack() ++ ": " ++ len(lines).str() ++ " objects, " ++ pb-mib(foldl((a, l) => a + pb-line-size(l), 0, lines)) ++ " MiB, since " ++ since.str());
+   let said2 = pb-say("index line: pack " ++ pb-key() ++ " " ++ pb-target() ++ " " ++ pb-sha(out ++ "/manifest.txt") ++ " <mirror>");
+   pb-say("published");
+  }
+  def pb-int(s) = pb-int-go(s, 0, 0);
+  def pb-int-go(s, i, acc) = i >= len(s) ? acc : (str_byte_at(s, i) >= 48 && str_byte_at(s, i) <= 57) ? pb-int-go(s, i + 1, acc * 10 + (str_byte_at(s, i) - 48)) : acc;
+  def pb-fields(line) = split-on(line, " ");
+  def pb-line-size(line) = len(pb-fields(line)) == 3 ? pb-int(pb-fields(line)[2]) : 0;
+  def pb-mib(b) = (b * 10 / 1048576 / 10).str() ++ "." ++ (b * 10 / 1048576 % 10).str();
+  // ── fetch ────────────────────────────────────────────────────────────────────
+  def pb-http?(m) = len(m) > 8 && ((String) substring(m, 0, 7) == "http://" || (String) substring(m, 0, 8) == "https://");
+  // 1 when `rel` of the pack at mirror arrived at `to`
+  def pb-get(mirror, rel, to) {
+    let from = mirror ++ "/" ++ pb-pack() ++ "/" ++ rel;
+    pb-http?(mirror) ? pb-curl(from, to) : (Comparable) hfs-copy(from, to) >= 0;
+  }
+  def pb-curl(url, to) {
+   let run = hch-run-in(".hearth/prebuilt-io", "curl", ["curl", "-fsSL", "--retry", "2", "--connect-timeout", "20", "-o", to, url], "", hch-by(1800000));
+   hch-ok?(run) && (Comparable) host_path_exists(to) == 1;
+  }
+  // the pinned manifest hash: the option, else the line of prebuilt/index.txt for this kernel
+  def pb-index-pin() {
+   let text = (String) (read_file("prebuilt/index.txt") ?? "");
+   let rows = filter(r => len(pb-fields(r)) >= 4 && pb-fields(r)[0] == "pack" && pb-fields(r)[1] == pb-key() && pb-fields(r)[2] == pb-target(), split-on(text, "\n"));
+   nil?(rows) ? "" : pb-fields(rows[0])[3];
+  }
+  def pb-want(o) = frw-has?(o, "pin") ? frw-str(o, "pin", "") : pb-index-pin();
+  def pb-place(root, stage, mirror, line) {
+   let f = pb-fields(line);
+   let rel = f[0];
+   let dest = root ++ "/" ++ rel;
+   let got = (Comparable) host_path_exists(dest) == 1 ? "present" : pb-fetch-one(root, stage, mirror, rel, f[1], pb-int(f[2]), dest);
+   got;
+  }
+  def pb-fetch-one(root, stage, mirror, rel, sha, size, dest) {
+   let tmp = stage ++ "/obj";
+   let zipped = pb-get(mirror, "objects/" ++ rel ++ ".zst", tmp ++ ".zst") && pb-unzip(tmp ++ ".zst", tmp);
+   let ok = zipped || pb-get(mirror, "objects/" ++ rel, tmp);
+   !ok ? "missing" : (Comparable) pb-size(tmp) != size || pb-sha(tmp) != sha ? "refused" : pb-land(root, tmp, dest);
+  }
+  def pb-land(root, tmp, dest) {
+   let made = pb-mk(pb-dir-of(dest));
+   let moved = (Comparable) host_path_rename(tmp, dest) == 0;
+   let marked = moved && pb-ends?(dest, "/fkwu") ? hfs-private-chmod(dest) : true;
+   moved && marked ? "placed" : "refused";
+  }
+  def pb-count(rs, w) = len(filter(r => (String) r == w, rs));
+  def pb-fetch(o) {
+   let mirror = frw-str(o, "fetch", "");
+   let root = pb-root();
+   let stage = root ++ "/.fetch." ++ host_pid().str();
+   let made = pb-mk(stage);
+   let pin = pb-want(o);
+   let got = pb-get(mirror, "manifest.txt", stage ++ "/manifest.txt");
+   !got ? pb-say("the pack " ++ pb-pack() ++ " is not at " ++ mirror ++ " (built locally instead)") : pb-fetch-manifest(o, root, stage, mirror, pin);
+  }
+  def pb-fetch-manifest(o, root, stage, mirror, pin) {
+   let mf = stage ++ "/manifest.txt";
+   let sha = pb-sha(mf);
+   len(pin) == 0 ? pb-say("refused: no pinned manifest hash (give `pin <sha256>` or commit a line in prebuilt/index.txt)")
+   : sha != pin ? pb-say("refused: the manifest hashes to " ++ sha ++ ", not the pinned " ++ pin)
+   : pb-fetch-objects(root, stage, mirror, filter(l => len(pb-fields(l)) == 3, split-on((String) (read_file(mf) ?? ""), "\n")));
+  }
+  def pb-fetch-objects(root, stage, mirror, lines) {
+   let rs = map(l => pb-place(root, stage, mirror, l), lines);
+   let said = pb-say(pb-pack() ++ ": " ++ pb-count(rs, "placed").str() ++ " placed, " ++ pb-count(rs, "present").str() ++ " already present, " ++ pb-count(rs, "refused").str() ++ " refused, " ++ pb-count(rs, "missing").str() ++ " missing");
+   let cleaned = host_path_remove(stage ++ "/manifest.txt");
+   pb-count(rs, "refused") > 0 ? pb-say("refused") : pb-say("placed");
+  }
+  // ── the door ─────────────────────────────────────────────────────────────────
+  def pb-run() = pb-with(frw-options(stdin-text() ?? ""));
+  def pb-with(o) {
+   if (String) o[0] != "ok" then print_str("[prebuilt] the options were refused at line " ++ o[2].str() ++ ": " ++ o[1] ++ "\n")
+   else pb-go(o[1]);
+  }
+  def pb-go(o) {
+   if (!pb-seed?()) then pb-say("this kernel was not built by the seed (" ++ pb-id() ++ "); it has no pack")
+   else if (frw-has?(o, "publish")) then pb-publish(frw-str(o, "publish", "."), frw-int(o, "since", 0), frw-int(o, "compress", 0) == 1)
+   else if (frw-has?(o, "fetch")) then pb-fetch(o)
+   else pb-say("give `publish <dir>` (with `since <seconds>`) or `fetch <mirror>` (with `pin <sha256>`)");
+  }
+ }
+ pb-run();
+}

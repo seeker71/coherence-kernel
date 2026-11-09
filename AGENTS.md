@@ -768,8 +768,12 @@ plainly once, and give the conversation your attention.
    of the version its checkout's seed names, built once per host from a private
    snapshot of those bytes, sealed with a SHA-256, and begun again on when the
    seed changes (`fk_seed_alias`; `kernel_stat 90` answers 1 when the running
-   binary is that version). A lowering or image is served only to the kernel
-   build that made it. The stores stand on their owner's permissions: a store
+   binary is that version). A lowering or image is served only to a kernel of
+   the same seed digest and target (OS and architecture; `float_leaf 66` names
+   it): the compiler flags do not enter, because O1, O2, O3 and Os left every
+   lowering and image body byte-identical and only the stamp differing. A kernel
+   built without the seed's key (a plain `cc`) follows its executable's bytes
+   instead. The stores stand on their owner's permissions: a store
    directory that is not a real directory owned by this user and closed to other
    writers is ignored, files are written under names no other process shares, a
    FIFO or device at a cache path is read as a miss, and an entry that fails its
@@ -786,6 +790,17 @@ plainly once, and give the conversation your attention.
    `FKWU_CACHE=off` reads and writes no host store (the cold baseline a
    verification compares against), `=ro` reads without writing, and
    `FKWU_CACHE_REPORT=1` makes a run say what it served and built.
+
+   A new machine need not pay the cold build: a warm pack is the store's entries
+   one warm run touched, shippable. `observe/prebuilt-run.bml` writes one
+   (`publish <dir>`, `since <seconds>`, `compress 1` for zstd -19: 81 MiB becomes
+   11) and places one (`fetch <mirror>`, a directory or an http(s) base fetched
+   with curl). Nothing fetched is trusted by name or by a seal it carries: the
+   manifest's SHA-256 is pinned in `prebuilt/index.txt` (committed; the bytes
+   never are, because the history would carry them) and each object answers to the
+   manifest (`float_leaf 65` hashes a file), so any mirror may host the objects
+   and a miss is built as before. Witnessed: a fresh home and checkout reach the
+   self-review band in 4 s with nothing built, against 54 s cold.
 
    Preflight distinguishes an undefined name, a missing prelude and a kernel
    lane seam. Repair the named cause in the same context, then re-observe.

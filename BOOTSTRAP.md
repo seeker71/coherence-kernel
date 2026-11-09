@@ -34,6 +34,15 @@ gcc -O2 -o fkwu.exe runtime/fkwu-uni.c -lws2_32 -lwinmm -lavicap32 -luser32 -lwl
 aarch64-linux-android34-clang -O2 -pthread runtime/fkwu-uni.c -o fkwu-android
 ```
 
+Linux is witnessed on arm64 and x86_64 (gcc 13, glibc): the build is warning-light, byte-reproducible from any
+directory, and runs the gate bands. A container's default 64 MB `/dev/shm` is too small for the kernel's shared
+node tables, so on Linux the kernel keeps its tables in the process when `/dev/shm` holds under 2 GiB free
+(the same private mode as `FK_FIELD_OFF` in `fkwu.conf`).
+
+A machine can also take the kernel and a warm pack instead of building them: [`AGENTS.md`](AGENTS.md) names
+`observe/prebuilt-run.bml` and `prebuilt/index.txt`. Whatever arrives is checked against a hash committed in the
+repo; with nothing published, the `cc` line above is all there is and all that is needed.
+
 On a Mac with a GPU, build the Metal carrier beside the kernel: a dylib fkwu admits on its first Metal
 call, in the same process. Tensor programs run through `form/form-stdlib/native-tensor.bml`; the build
 lines are in [`AGENTS.md`](AGENTS.md).
