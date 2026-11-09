@@ -762,7 +762,19 @@ plainly once, and give the conversation your attention.
    spelling or a working directory) is a defect to heal, never a figure to
    report. A cold claim is justified by its bytes. Lowerings and images live in
    the host's shared content-checked store (`$HOME/.cache/fkwu/lowfk`, `/fkb`),
-   so a fresh checkout reads them.
+   so a fresh checkout reads them. The kernel binary is one more cached object:
+   its version is the digest of the three seed files (`runtime/fkwu-uni.c` and
+   the two headers it includes) and the flags; `./fkwu` is a copy-on-write clone
+   of the version its checkout's seed names, built once per host from a private
+   snapshot of those bytes, sealed with a SHA-256, and begun again on when the
+   seed changes (`fk_seed_alias`; `kernel_stat 90` answers 1 when the running
+   binary is that version). A lowering or image is served only to the kernel
+   build that made it. The stores stand on their owner's permissions: a store
+   directory that is not a real directory owned by this user and closed to other
+   writers is ignored, files are written under names no other process shares, a
+   FIFO or device at a cache path is read as a miss, and an entry that fails its
+   own checks is removed and rebuilt. Bytes that cross from another host answer
+   to a SHA-256 first.
 
    Preflight distinguishes an undefined name, a missing prelude and a kernel
    lane seam. Repair the named cause in the same context, then re-observe.

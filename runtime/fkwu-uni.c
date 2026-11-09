@@ -25856,6 +25856,7 @@ extern char *_fullpath(char *, const char *, unsigned long long);
  * keeps one name across CWD flips and checkout moves. out must hold FK_PATH_CAP
  * bytes. Verbatim on resolve failure -- degrade to the old spelling (an
  * honest rebuild), never fabricate an identity. */
+static const char *fk_anchor(void);
 static const char *fk_path_canon_id(const char *path, char *out) {
 #if defined(_WIN32)
     if (_fullpath(out, path, FK_PATH_CAP) == 0) {
@@ -25866,16 +25867,17 @@ static const char *fk_path_canon_id(const char *path, char *out) {
         return path;
     }
 #endif
-    long long pre_n = fk_path_repo_prefix_len(out);
-    if (pre_n > 0) return out + pre_n;
-    /* a unit beside form/ (observe/, gate/, cognition/ ...) is anchored at the working directory it lies under: the
-     * checkout, so its image keeps one name in every checkout too */
-    char here[FK_PATH_CAP];
-    if (realpath(".", here) != 0) {
-        long long h = fk_path_len(here);
-        if (h > 1 && !memcmp(out, here, (unsigned long)h) && out[h] == FK_CH_SLASH) return out + h + 1;
+    /* anchored at the checkout this process works in (the nearest directory at or above the working directory that holds
+     * the seed): every unit of a checkout, whether under form/, observe/, gate/ or learn/, keeps one name in every
+     * checkout and from every working directory inside it. Only a unit outside any checkout falls back to the lexical
+     * form/ / learn/ rule. */
+    const char *anchor = fk_anchor();
+    if (anchor) {
+        long long h = fk_path_len(anchor);
+        if (h > 1 && !memcmp(out, anchor, (unsigned long)h) && out[h] == FK_CH_SLASH) return out + h + 1;
     }
-    return out;
+    long long pre_n = fk_path_repo_prefix_len(out);
+    return pre_n > 0 ? out + pre_n : out;
 }
 static const char *fk_src_path_id(const char *path, char *out) {
     long long dep = fk_src_dep_index(path);
@@ -27248,20 +27250,17 @@ static void fk_fkb_builder_admit(void) {
  * on this host: $HOME/.cache/fkwu/fkb/<identity key><.fkb|.sym>. A checkout without an image of its identity clones the
  * store's into place and loads it through the same checks; a cold checkout then pays the bytes, not the compile. */
 static const char *fk_src_path_id(const char *path, char *out);
+static int fk_store_path(char *out, const char *a, const char *b, int make);
+static char *fk_store_read(const char *path, long long *out_len);
+static unsigned long long fk_store_seq;
 static int fk_fkb_store_name(const char *src_path, const char *source_hash, const char *ext, char *out, int make) {
-    const char *home = getenv("HOME");
-    char canon[FK_PATH_CAP];
-    if (!home || !home[0] || fk_path_len(home) + 80 >= FK_PATH_CAP) return 0;
+    char canon[FK_PATH_CAP], dir[FK_PATH_CAP];
+    if (!fk_store_path(dir, "fkb", 0, make)) return 0;   /* the store stands only when it is ours alone */
     const char *id = fk_src_path_id(src_path, canon);
     unsigned long long key = fk_bytes_fnv1a(fk_fkb_builder_id, fk_cstrlen(fk_fkb_builder_id));
     key = (key ^ fk_bytes_fnv1a(id, fk_path_len(id))) * 1099511628211ULL;
     key = (key ^ fk_bytes_fnv1a(source_hash, fk_cstrlen(source_hash))) * 1099511628211ULL;
-    if (make) {
-        sprintf(out, "%s/.cache", home); mkdir(out, 0755);
-        sprintf(out, "%s/.cache/fkwu", home); mkdir(out, 0755);
-        sprintf(out, "%s/.cache/fkwu/fkb", home); mkdir(out, 0755);
-    }
-    sprintf(out, "%s/.cache/fkwu/fkb/%016llx%s", home, key, ext);
+    sprintf(out, "%s/%016llx%s", dir, key, ext);
     return 1;
 }
 /* one file's bytes at a new name, whole or not at all: cloned where the filesystem shares blocks, else copied, through
@@ -27270,19 +27269,18 @@ static int fk_fkb_store_name(const char *src_path, const char *source_hash, cons
 extern int clonefile(const char *, const char *, unsigned int);
 #endif
 static int fk_fkb_store_clone(const char *from, const char *to) {
-    char temporary[FK_PATH_CAP + 64];
-    if (fk_path_len(to) >= FK_PATH_CAP) return 0;
-    sprintf(temporary, "%s.c%d", to, (int)getpid());
-    unlink(temporary);
+    char temporary[FK_PATH_CAP + 96];
+    if (fk_path_len(to) + 64 >= FK_PATH_CAP) return 0;
+    sprintf(temporary, "%s.c%d.%llu", to, (int)getpid(), ++fk_store_seq);   /* named for this process and this call alone */
     int done = 0;
 #if defined(__APPLE__)
-    done = clonefile(from, temporary, 0) == 0;
+    done = clonefile(from, temporary, 0) == 0;   /* never overwrites, never follows a link at the destination */
 #endif
     if (!done) {
         long long n = 0;
-        char *bytes = fk_read_whole_file(from, &n);
+        char *bytes = fk_store_read(from, &n);
         if (!bytes) return 0;
-        int fd = open(temporary, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        int fd = open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
         done = fd >= 0 && fk_write_all_raw(fd, bytes, (unsigned long)n);
         if (fd >= 0 && close(fd) != 0) done = 0;
         free(bytes);
@@ -27293,6 +27291,9 @@ static int fk_fkb_store_clone(const char *from, const char *to) {
 }
 static void fk_fkb_store_put(const char *src_path, const char *source_hash, const char *fkb_path, const char *sym_path) {
     char stored[FK_PATH_CAP + 64];
+    /* an image that carries compile errors or is unrunnable is a local diagnostic, never a store entry: another checkout
+     * would be served the refusal instead of finding the real one */
+    if (fk_nerr > 0 || fk_nerr_seen > 0 || fk_src_truncated || fk_src_unrunnable) return;
     if (!fk_fkb_store_name(src_path, source_hash, ".fkb", stored, 1) || fk_path_size_raw(stored) >= 0) return;
     if (fk_path_size_raw(sym_path) >= 0 && fk_fkb_store_name(src_path, source_hash, ".sym", stored, 0))
         fk_fkb_store_clone(sym_path, stored);
@@ -28618,8 +28619,13 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
         fk_path_size_raw(stored) < 0) return 0;
     int bad = fk_fkb_bad;
     const char *why = fk_fkb_bad_why;
-    if (fk_fkb_store_clone(stored, fkb_path) &&
-        fk_src_load_fkb_checked_here(fkb_path, expected_src_path, expected_source_hash)) {
+    int cloned = fk_fkb_store_clone(stored, fkb_path);
+    if (cloned && !fk_src_load_fkb_checked_here(fkb_path, expected_src_path, expected_source_hash)) {
+        /* an entry that fails the very checks its identity promises is damaged: it leaves the store, and the rebuild
+         * this run is about to do puts a whole one in its place */
+        unlink(stored);
+        unlink(fkb_path);
+    } else if (cloned) {
         /* the symbol lens beside it, when the store holds one: <image without .fkb>.sym, as the writer names it */
         char sym[FK_PATH_CAP + 64], sym_path[FK_PATH_CAP + 8];
         long long fn = fk_path_len(fkb_path);
@@ -30248,8 +30254,10 @@ FK_PHASED(FK_PHASE_LOAD, int, fk_cell_load, (const char *path, long long *root_o
         char stored[FK_PATH_CAP + 64];
         int here = fk_fkb_open_checked(image_path, path, identity);
         if (!here && fk_fkb_store_name(path, identity, ".cell.fkb", stored, 0) && fk_path_size_raw(stored) >= 0 &&
-            fk_fkb_store_clone(stored, image_path))
+            fk_fkb_store_clone(stored, image_path)) {
             here = fk_fkb_open_checked(image_path, path, identity);
+            if (!here) { unlink(stored); unlink(image_path); }   /* damaged: it leaves the store, the rebuild replaces it */
+        }
         if (here) {
             fk_fkb_snapshot snapshot = {0}; fk_fkb_snapshot_take(&snapshot);
             fk_cell_import_root = *root_out; fk_cell_import_fresh = d0;
@@ -31305,6 +31313,11 @@ static const char *fk_native_unit_path(const char *unit, const char *tail) {
  * packet that does not read is the floor's own wound. With `observe` 0 the observations are read as rows but not asked
  * of the tree: a memo the image before this one verified at its last scan (fk_bml_trust). */
 #define FK_BML_MOVED_CAP (FK_PATH_CAP + 32)
+/* the P row's digest names the kernel build that lowered the unit: a packet of another build is not this kernel's
+ * (fk_bml_ignore_builder asks only whose unit, directory and home it is, to decide where a new memo goes) */
+static unsigned long long fk_builder_key(void);
+static char *fk_store_read(const char *path, long long *out_len);
+static int fk_bml_ignore_builder;
 static char *fk_bml_packet_body(const char *owner, const char *packet, long long n,
                                 long long *out_len, char *moved, int observe) {
     long long at = 7, context = 0, files = 0;
@@ -31327,7 +31340,7 @@ static char *fk_bml_packet_body(const char *owner, const char *packet, long long
             packet[at + count] != '\n') return 0;
         memcpy(path, packet + at, (unsigned long)count); path[count] = 0; at += count + 1;
         if (fk_path_len(path) != count) return 0;
-        if (kind == 'P' && context == 0 && fk_cstr_eq(path, owner)) context = 1;
+        if (kind == 'P' && context == 0 && fk_cstr_eq(path, owner) && (fk_bml_ignore_builder || expected == fk_builder_key())) context = 1;
         else if (kind == 'C' && context == 1 && fk_cstr_eq(path, cwd)) context = 2;
         else if (kind == 'H' && context == 2 && fk_cstr_eq(path, fk_home_path)) context = 3;
         else if (context == 3 && kind == 'N') {
@@ -31379,54 +31392,203 @@ static int fk_bml_memo_name(const char *path, int sidecar, char *out) {
 /* Reuse the packet reader's context authority without re-observing its sources. */
 static int fk_bml_memo_owner_is(const char *memo, const char *path) {
     long long n = 0, length = 0;
-    char *packet = fk_read_whole_file(memo, &n);
+    char *packet = fk_store_read(memo, &n);
     if (!packet) return -1;
+    fk_bml_ignore_builder = 1;
     char *body = fk_bml_packet_body(path, packet, n, &length, 0, 0);
+    fk_bml_ignore_builder = 0;
     int same = body != 0;
     free(body); free(packet);
     return same;
 }
 static int fk_closure_put(int fd, const char *bytes, long long n);
-/* ── The shared lowering store ──
- * A lowering's body never names its checkout: only its header rows do (P the unit as spelled, C the working directory,
- * H the home index, F/N the files it observed). So one lowering serves every checkout on this host once those rows are
- * spoken relative to the checkout: P and H as paths under the working directory, C as "@", F/N as "@/<rest>". The store
- * ($HOME/.cache/fkwu/lowfk/<unit key>/<seal>) holds a unit's lowerings in that portable spelling, keyed by the unit's
- * and home's checkout-relative spelling, one file per distinct lowering (its seal names it). A reader carries one back
- * into its own checkout and asks every observation of its own tree, so a cold checkout pays only the bytes it reads and
- * digests: the same work a warm run does. */
-#define FK_BML_STORE_KEEP 8
-/* the spelling of a path relative to the working directory when it lies under it, else the path itself */
-static const char *fk_bml_canon(const char *path, const char *cwd) {
-    long long c = fk_path_len(cwd);
-    if (c > 0 && !memcmp(path, cwd, (unsigned long)c) && path[c] == '/') return path + c + 1;
-    return path;
+/* ── Store hygiene: what every host-wide store stands on ──
+ * The stores live under $HOME/.cache/fkwu and are read by every checkout of this user, so nothing in them is trusted
+ * by being found. A store directory stands only when it is ours alone (a real directory, never a link, owned by this
+ * user, writable by no one else); every file the stores write is made by this process alone (O_EXCL, never through a
+ * link, 0600) under a name no other process shares; every read is of a regular file of sane size (a FIFO or a device
+ * placed at a cache path neither hangs nor floods a run); a dead writer's leftovers are swept. The integrity of an
+ * entry is the user's own permissions plus a checksum (accident-proof); bytes that cross from another host answer to
+ * a SHA-256 first (the kernel binary's seal today). */
+extern unsigned int geteuid(void);
+static unsigned long long fk_store_seq;
+static int fk_store_dir_ok(const char *dir) {
+    struct stat st;
+    if (lstat(dir, &st) != 0 || !S_ISDIR(st.st_mode)) return 0;
+    return st.st_uid == geteuid() && (st.st_mode & 022) == 0;
 }
-static int fk_bml_store_dir(const char *path, char *out, int make) {
+/* $HOME/.cache/fkwu[/a[/b]]: each level is made 0700 when absent (make) and stands only when it is ours */
+static int fk_store_path(char *out, const char *a, const char *b, int make) {
     const char *home = getenv("HOME");
-    char cwd[FK_PATH_CAP];
-    if (!home || !home[0] || !getcwd(cwd, sizeof(cwd)) || fk_path_len(home) + 64 >= FK_PATH_CAP) return 0;
-    const char *p = fk_bml_canon(path, cwd), *h = fk_bml_canon(fk_home_path, cwd);
-    unsigned long long key = fk_bytes_fnv1a(p, fk_path_len(p));
-    key = (key ^ fk_bytes_fnv1a(h, fk_path_len(h))) * 1099511628211ULL;
-    if (make) {
-        sprintf(out, "%s/.cache", home); mkdir(out, 0755);
-        sprintf(out, "%s/.cache/fkwu", home); mkdir(out, 0755);
-        sprintf(out, "%s/.cache/fkwu/lowfk", home); mkdir(out, 0755);
+    const char *parts[4] = {".cache", "fkwu", a, b};
+    long long n;
+    if (!home || home[0] != '/' || (n = fk_path_len(home)) + 128 >= FK_PATH_CAP) return 0;
+    memcpy(out, home, (unsigned long)n); out[n] = 0;
+    for (int k = 0; k < 4; k++) {
+        if (!parts[k]) continue;
+        sprintf(out + n, "/%s", parts[k]);
+        n = fk_path_len(out);
+        if (make) mkdir(out, 0700);
+        if (k >= 1 && !fk_store_dir_ok(out)) return 0;
     }
-    sprintf(out, "%s/.cache/fkwu/lowfk/%016llx", home, key);
-    if (make) mkdir(out, 0755);
     return 1;
 }
+/* a new file named <base>.<tag><pid>.<seq>, made here and nowhere else: -1 when none could be made */
+static int fk_store_new(const char *base, const char *tag, int mode, char *tmp) {
+    if (fk_path_len(base) + 64 >= FK_PATH_CAP) return -1;
+    for (int k = 0; k < 16; k++) {
+        sprintf(tmp, "%s.%s%d.%llu", base, tag, (int)getpid(), ++fk_store_seq);
+        int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, mode);
+        if (fd >= 0) return fd;
+        if (errno != EEXIST) return -1;
+    }
+    return -1;
+}
+/* a cache file's bytes: a regular file of at most 2 GiB (opened without waiting, so a FIFO answers at once) */
+static char *fk_store_read(const char *path, long long *out_len) {
+    struct stat st;
+    int fd = open(path, O_RDONLY | O_NONBLOCK);
+    if (fd < 0) return 0;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0 || st.st_size > (1LL << 31)) { close(fd); return 0; }
+    long long size = st.st_size, at = 0;
+    char *buf = malloc((unsigned long)size + 1);
+    if (!buf) { close(fd); return 0; }
+    while (at < size) {
+        long long got = (long long)read(fd, buf + at, (unsigned long)(size - at));
+        if (got < 0 && errno == EINTR) continue;
+        if (got <= 0) break;
+        at += got;
+    }
+    close(fd);
+    if (at != size) { free(buf); return 0; }
+    buf[size] = 0;
+    *out_len = size;
+    return buf;
+}
+/* a directory's leftovers: ".t<pid>.<seq>" files whose writer is gone (or that a day has passed over) */
+static void fk_store_sweep(const char *dir) {
+    DIR *d = opendir(dir);
+    if (!d) return;
+    struct dirent *e;
+    struct stat st;
+    char path[FK_PATH_CAP + 64];
+    struct timespec clock;
+    long long now = clock_gettime(CLOCK_REALTIME, &clock) == 0 ? (long long)clock.tv_sec : 0;
+    while ((e = readdir(d)) != 0) {
+        const char *nm = e->d_name;
+        if (nm[0] != '.' || nm[1] != 't' || nm[2] < '0' || nm[2] > '9') continue;
+        long long pid = 0, i = 2;
+        while (nm[i] >= '0' && nm[i] <= '9' && i < 14) pid = pid * 10 + (nm[i++] - '0');
+        sprintf(path, "%s/%s", dir, nm);
+        if (lstat(path, &st) != 0) continue;
+        if ((pid > 0 && kill((int)pid, 0) != 0 && errno == ESRCH) || now - (long long)st.st_mtime > 86400) unlink(path);
+    }
+    closedir(d);
+}
+/* ── The place a store speaks from ──
+ * The checkout this process works in: the nearest directory at or above the working directory that holds the seed
+ * (runtime/fkwu-uni.c), else the working directory itself. Everything a store says about a place is spoken from here
+ * ("@" the checkout, "@/<rest>" under it), so a door run from a subdirectory shares with one run from the root. */
+static char fk_anchor_text[FK_PATH_CAP];
+static int fk_anchor_known;
+static const char *fk_anchor(void) {
+    char dir[FK_PATH_CAP], probe[FK_PATH_CAP + 32];
+    if (fk_anchor_known) return fk_anchor_text;
+    if (!getcwd(dir, sizeof(dir))) return 0;
+    fk_cstr_copy(fk_anchor_text, dir, FK_PATH_CAP);
+    for (;;) {
+        sprintf(probe, "%s/runtime/fkwu-uni.c", dir);
+        if (fk_path_size_raw(probe) >= 0) { fk_cstr_copy(fk_anchor_text, dir, FK_PATH_CAP); break; }
+        long long p = fk_path_len(dir) - 1;
+        while (p > 0 && dir[p] != '/') p--;
+        if (p <= 0) break;
+        dir[p] = 0;
+    }
+    fk_anchor_known = 1;
+    return fk_anchor_text;
+}
+/* path as an absolute spelling with "." and ".." collapsed (no filesystem asked) */
+static int fk_lexical_abs(const char *path, const char *cwd, char *out) {
+    char joined[2 * FK_PATH_CAP];
+    long long on = 0, i = 0;
+    if (path[0] == '/') { if (fk_path_len(path) >= 2 * FK_PATH_CAP) return 0; sprintf(joined, "%s", path); }
+    else { if (fk_path_len(cwd) + fk_path_len(path) + 2 >= 2 * FK_PATH_CAP) return 0; sprintf(joined, "%s/%s", cwd, path); }
+    out[0] = 0;
+    while (joined[i]) {
+        while (joined[i] == '/') i++;
+        long long s = i;
+        while (joined[i] && joined[i] != '/') i++;
+        long long len = i - s;
+        if (len == 0) break;
+        if (len == 1 && joined[s] == '.') continue;
+        if (len == 2 && joined[s] == '.' && joined[s + 1] == '.') { while (on > 0 && out[on - 1] != '/') on--; if (on > 0) on--; out[on] = 0; continue; }
+        if (on + 1 + len >= FK_PATH_CAP) return 0;
+        out[on++] = '/';
+        memcpy(out + on, joined + s, (unsigned long)len);
+        on += len; out[on] = 0;
+    }
+    if (on == 0) { out[0] = '/'; out[1] = 0; }
+    return 1;
+}
+static int fk_portable(const char *path, char *out) {
+    char cwd[FK_PATH_CAP], abs[FK_PATH_CAP];
+    const char *anchor = fk_anchor();
+    if (!anchor || !getcwd(cwd, sizeof(cwd)) || !fk_lexical_abs(path, cwd, abs)) return 0;
+    long long a = fk_path_len(anchor);
+    if (a > 0 && !memcmp(abs, anchor, (unsigned long)a) && abs[a] == 0) sprintf(out, "@");
+    else if (a > 0 && !memcmp(abs, anchor, (unsigned long)a) && abs[a] == '/') sprintf(out, "@/%s", abs + a + 1);
+    else sprintf(out, "%s", abs);
+    return 1;
+}
+static int fk_unportable(const char *said, char *out) {
+    const char *anchor = fk_anchor();
+    if (!anchor) return 0;
+    if (said[0] == '@' && said[1] == 0) { sprintf(out, "%s", anchor); return 1; }
+    if (said[0] == '@' && said[1] == '/') {
+        if (fk_path_len(anchor) + fk_path_len(said) >= FK_PATH_CAP) return 0;
+        sprintf(out, "%s/%s", anchor, said + 2);
+        return 1;
+    }
+    sprintf(out, "%s", said);
+    return 1;
+}
+/* ── The shared lowering store ──
+ * A lowering's body never names its checkout: only its header rows do (P the unit as spelled and the kernel that made
+ * it, C the working directory, H the home index, F/N the files it observed). So one lowering serves every checkout on
+ * this host once those rows are spoken from the checkout (fk_portable). The store ($HOME/.cache/fkwu/lowfk/<unit key>/
+ * <seal>) holds a unit's lowerings in that spelling, keyed by the unit's and home's portable spelling, one file per
+ * distinct lowering (its seal names it). A reader carries one back into its own checkout and asks every observation of
+ * its own tree and the kernel that made it (the P row's digest is the builder: a lowering of one kernel build is never
+ * served to another), so a cold checkout pays only the bytes it reads and digests: what a warm run does. */
+#define FK_BML_STORE_KEEP 8
+static unsigned long long fk_builder_key(void) {
+    return fk_bytes_fnv1a(fk_fkb_builder_id, fk_cstrlen(fk_fkb_builder_id));
+}
+/* the packet with this kernel's build in the P row's digest (rows' own digests are the Form lowerer's, the P row's is free) */
+static char *fk_bml_stamp(const char *packet, long long n) {
+    char *out = malloc((unsigned long)n + 1);
+    if (!out) return 0;
+    memcpy(out, packet, (unsigned long)n); out[n] = 0;
+    if (n > 30 && out[7] == 'P' && out[8] == ' ') { char hex[24]; sprintf(hex, "%016llx", fk_builder_key()); memcpy(out + 9, hex, 16); }
+    return out;
+}
+static int fk_bml_store_dir(const char *path, char *out, int make) {
+    char p[FK_PATH_CAP], h[FK_PATH_CAP], key16[24];
+    if (!fk_portable(path, p) || !fk_portable(fk_home_path, h)) return 0;
+    unsigned long long key = fk_bytes_fnv1a(p, fk_path_len(p));
+    key = (key ^ fk_bytes_fnv1a(h, fk_path_len(h))) * 1099511628211ULL;
+    sprintf(key16, "%016llx", key);
+    return fk_store_path(out, "lowfk", key16, make);
+}
 /* A packet's header rows moved between this checkout's spelling (dir 0 -> portable) and back (dir 1 -> this checkout,
- * answering 0 when the portable rows do not name `owner` and this home). The digests and the body are carried as they
- * are: they never named a place. */
+ * answering 0 when the portable rows do not name `owner`, this working directory and this home). The digests and the
+ * body are carried as they are: they never named a place. */
 static char *fk_bml_packet_port(const char *packet, long long n, int dir, const char *owner, long long *out_n) {
-    char cwd[FK_PATH_CAP], path[FK_PATH_CAP];
+    char cwd[FK_PATH_CAP], path[FK_PATH_CAP], mine[FK_PATH_CAP];
     if (n < 7 || memcmp(packet, "fklow2\n", 7) || !getcwd(cwd, sizeof(cwd))) return 0;
     long long cn = fk_path_len(cwd), rows = 0, i = 7;
     while (i < n) { if (packet[i] == '\n') rows++; i++; }
-    long long cap = n + rows * (cn + fk_path_len(owner) + fk_path_len(fk_home_path) + 32) + 64, at = 7, o = 7;
+    long long cap = n + rows * (cn + fk_path_len(owner) + fk_path_len(fk_home_path) + fk_path_len(fk_anchor()) + 32) + 64, at = 7, o = 7;
     char *out = malloc((unsigned long)cap);
     if (!out) return 0;
     memcpy(out, packet, 7);
@@ -31442,14 +31604,15 @@ static char *fk_bml_packet_port(const char *packet, long long n, int dir, const 
         const char *said = path;
         char moved[FK_PATH_CAP + 8];
         if (dir == 0) {
-            if (kind == 'P' || kind == 'H') said = fk_bml_canon(path, cwd);
-            else if (kind == 'C') said = fk_cstr_eq(path, cwd) ? "@" : path;
-            else if (fk_bml_canon(path, cwd) != path) { sprintf(moved, "@/%s", fk_bml_canon(path, cwd)); said = moved; }
+            if (!fk_portable(path, moved)) { free(out); return 0; }
+            said = moved;
+        } else if (kind == 'P' || kind == 'H' || kind == 'C') {
+            const char *mine_is = kind == 'P' ? owner : kind == 'H' ? fk_home_path : cwd;
+            if (!fk_portable(mine_is, mine) || !fk_cstr_eq(path, mine)) { free(out); return 0; }
+            said = mine_is;
         } else {
-            if (kind == 'P') { if (!fk_cstr_eq(path, fk_bml_canon(owner, cwd))) { free(out); return 0; } said = owner; }
-            else if (kind == 'H') { if (!fk_cstr_eq(path, fk_bml_canon(fk_home_path, cwd))) { free(out); return 0; } said = fk_home_path; }
-            else if (kind == 'C') { if (!fk_cstr_eq(path, "@")) { free(out); return 0; } said = cwd; }
-            else if (path[0] == '@' && path[1] == '/' && cn + count < FK_PATH_CAP) { sprintf(moved, "%s/%s", cwd, path + 2); said = moved; }
+            if (!fk_unportable(path, moved)) { free(out); return 0; }
+            said = moved;
         }
         long long sn = fk_path_len(said);
         if (o + 19 + 12 + sn + 2 > cap) { free(out); return 0; }
@@ -31463,12 +31626,11 @@ static char *fk_bml_packet_port(const char *packet, long long n, int dir, const 
     *out_n = o;
     return out;
 }
-/* A lowering this checkout just wrote, offered to the store in its portable spelling. The store keeps a unit's newest
- * FK_BML_STORE_KEEP lowerings (checkouts at different points of the tree each find theirs); a lowering already held is
- * not written twice. */
-static int fk_closure_put(int fd, const char *bytes, long long n);
+/* A lowering this checkout just wrote, offered to the store in its portable spelling. The store keeps a unit's
+ * FK_BML_STORE_KEEP most recently used lowerings (checkouts at different points of the tree, and kernels of different
+ * builds, each find theirs); a lowering already held is not written twice. */
 static void fk_bml_store_put(const char *path, const char *packet, long long n) {
-    char dir[FK_PATH_CAP], file[FK_PATH_CAP + 64], temporary[FK_PATH_CAP + 96], footer[32], oldest[FK_PATH_CAP + 64];
+    char dir[FK_PATH_CAP], file[FK_PATH_CAP + 64], temporary[FK_PATH_CAP + 96], footer[32], oldest[FK_PATH_CAP + 64], base[FK_PATH_CAP + 4];
     long long pn = 0;
     char *port = fk_bml_packet_port(packet, n, 0, path, &pn);
     if (!port) return;
@@ -31476,13 +31638,14 @@ static void fk_bml_store_put(const char *path, const char *packet, long long n) 
     if (!fk_bml_store_dir(path, dir, 1)) { free(port); return; }
     sprintf(file, "%s/%016llx", dir, seal);
     if (fk_path_size_raw(file) >= 0) { free(port); return; }
-    sprintf(temporary, "%s/.tmp.%lld", dir, (long long)getpid());
-    int fd = open(temporary, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    sprintf(base, "%s/", dir);
+    int fd = fk_store_new(base, "t", 0600, temporary);
     if (fd < 0) { free(port); return; }
     int size = sprintf(footer, "\nfkend2 %016llx\n", seal);
     int complete = fk_closure_put(fd, port, pn) && fk_closure_put(fd, footer, size);
     free(port);
     if (close(fd) != 0 || !complete || rename(temporary, file) != 0) { unlink(temporary); return; }
+    fk_store_sweep(dir);
     for (;;) {
         DIR *d = opendir(dir);
         if (!d) return;
@@ -31500,30 +31663,33 @@ static void fk_bml_store_put(const char *path, const char *packet, long long n) 
         if (count <= FK_BML_STORE_KEEP || unlink(oldest) != 0) return;
     }
 }
-/* The memo is written beside itself under this process's name (<memo>.tmp.<pid>) and renamed into place, so a reader
- * meets the whole memo or the one before it; its seal (fkend2) covers every byte above it. Answers 1 when the memo
- * stands whole, 0 when it could not be written (nothing is left behind). */
-static int fk_bml_low_memo_write(const char *path, const char *packet, long long n) {
-    char memo[4400], primary[4400], temporary[4500], footer[32];
+/* The memo is written beside itself under a name no other process shares (<memo>.tmp<pid>.<seq>) and renamed into place,
+ * so a reader meets the whole memo or the one before it; its seal (fkend2) covers every byte above it. The packet is
+ * stamped with this kernel's build first. Answers 1 when the memo stands whole, 0 when it could not be written. */
+static int fk_bml_low_memo_write(const char *path, const char *packet_in, long long n) {
+    char memo[4400], primary[4400], temporary[4600], footer[32];
+    char *packet = fk_bml_stamp(packet_in, n);
+    if (!packet) return 0;
     if (!fk_bml_memo_name(path, 0, primary) ||
-        !fk_bml_memo_name(path, fk_bml_memo_owner_is(primary, path) == 0 ? 1 : 0, memo)) return 0;
-    sprintf(temporary, "%s.tmp.%lld", memo, (long long)getpid());
-    int fd = open(temporary, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-    if (fd < 0) return 0;
+        !fk_bml_memo_name(path, fk_bml_memo_owner_is(primary, path) == 0 ? 1 : 0, memo)) { free(packet); return 0; }
+    int fd = fk_store_new(memo, "tmp", 0644, temporary);
+    if (fd < 0) { free(packet); return 0; }
     int size = sprintf(footer, "\nfkend2 %016llx\n", fk_bytes_fnv1a(packet, n));
     int complete = fk_closure_put(fd, packet, n) && fk_closure_put(fd, footer, size);
     if (close(fd) != 0) complete = 0;
-    if (complete && rename(temporary, memo) == 0) { fk_bml_store_put(path, packet, n); return 1; }
+    if (complete && rename(temporary, memo) == 0) { fk_bml_store_put(path, packet, n); free(packet); return 1; }
     unlink(temporary);
+    free(packet);
     return 0;
 }
-/* A memo the shared store holds for this unit, carried into this checkout: every observation is asked of THIS tree (the
- * store is read by many checkouts, so nothing it holds is trusted unseen), and a holding one is written down as this
- * checkout's own memo so the next run reads it beside its source. 0 when none holds. */
+/* A memo the shared store holds for this unit, carried into this checkout: every observation is asked of THIS tree and
+ * the kernel is this one (the store is read by many checkouts and kernels, so nothing it holds is trusted unseen), and
+ * a holding one is written down as this checkout's own memo so the next run reads it beside its source. An entry whose
+ * seal fails is damaged and is removed (it would otherwise cost every cold checkout a miss forever). 0 when none holds. */
 static char *fk_bml_store_get(const char *path, long long *out_len) {
     char dir[FK_PATH_CAP], file[FK_PATH_CAP + 64];
     unsigned long long seal;
-    if (!fk_bml_store_dir(path, dir, 0)) return 0;
+    if (!fk_bml_store_dir(path, dir, 0) || !fk_store_dir_ok(dir)) return 0;
     DIR *d = opendir(dir);
     if (!d) return 0;
     struct dirent *e;
@@ -31532,17 +31698,21 @@ static char *fk_bml_store_get(const char *path, long long *out_len) {
         if (e->d_name[0] == '.' || fk_cstrlen(e->d_name) != 16) continue;
         sprintf(file, "%s/%s", dir, e->d_name);
         long long n = 0, local_n = 0;
-        char *packet = fk_read_whole_file(file, &n);
+        char *packet = fk_store_read(file, &n);
         if (!packet) continue;
         if (n >= 25 && !memcmp(packet + n - 25, "\nfkend2 ", 8) && packet[n - 1] == '\n' &&
             fk_hex16_parse(packet + n - 17, &seal) && seal == fk_bytes_fnv1a(packet, n - 25)) {
             char *local = fk_bml_packet_port(packet, n - 25, 1, path, &local_n);
             if (local) {
                 body = fk_bml_packet_body(path, local, local_n, out_len, 0, 1);
-                if (body) fk_bml_low_memo_write(path, local, local_n);
+                if (body) {
+                    fk_bml_low_memo_write(path, local, local_n);
+                    struct timespec now[2];   /* this entry was just used: retention follows use */
+                    if (clock_gettime(CLOCK_REALTIME, &now[0]) == 0) { now[1] = now[0]; utimensat(FK_AT_FDCWD, file, now, 0); }
+                }
                 free(local);
             }
-        }
+        } else unlink(file);
         free(packet);
     }
     closedir(d);
@@ -31686,7 +31856,7 @@ static char *fk_bml_memo_read(const char *bml_path, long long *out_len, char *wh
     while (which < 2) {
         if (!fk_bml_memo_name(bml_path, which, memo)) return 0;
         which = which + 1;
-        char *packet = fk_read_whole_file(memo, &n), *body = 0;
+        char *packet = fk_store_read(memo, &n), *body = 0;
         if (packet) {
             if (n >= 25 && !memcmp(packet + n - 25, "\nfkend2 ", 8) && packet[n - 1] == '\n' &&
                 fk_hex16_parse(packet + n - 17, &seal) && seal == fk_bytes_fnv1a(packet, n - 25)) {
@@ -31891,7 +32061,11 @@ static long long fk_bml_floor_lower_needs(void) {
                 if (packet == 0) fk_die("fk_bml_floor_lower_needs: out of memory");
                 memcpy(packet, out + start, (unsigned long)plen);
                 packet[plen] = 0;
+                /* the floor's answer comes from this very kernel: its P row carries no build yet (the memo writer stamps
+                 * it), so the build is not asked of it here */
+                fk_bml_ignore_builder = 1;
                 body = fk_bml_packet_body(bml, packet, plen, &blen, moved, 1);
+                fk_bml_ignore_builder = 0;
                 if (body) {
                     int wrote = fk_bml_low_memo_write(bml, packet, plen);
                     free(body);
@@ -32242,110 +32416,280 @@ static int fk_run_closure(const char *path, const char *out) {
 /* ── The seed's version and the shared binaries ──
  * A binary's version is the digest of the seed it was built from: the bytes of runtime/fkwu-uni.c and the headers it
  * includes, and the flags it was built with (FK_SEED_KEY, given by the build). Every version built on this host is kept
- * at $HOME/.cache/fkwu/bin/<version>/fkwu, and a checkout's ./fkwu is an alias of the version its own seed names. When
- * the checkout's ./fkwu starts and its seed names another version (the kernel was edited, a branch switched, a plain
- * `cc` built it), that version is taken from the store, built there once under a lock when absent, the alias is pointed
- * at it, and the same command begins again on it. A seed edited back finds its version still built: working on the
- * kernel moves between versions at the cost of one digest. kernel_stat 90 reads whether this process runs the version
- * its checkout's seed names (1), another one (0), or stands outside a checkout (2). */
+ * at $HOME/.cache/fkwu/bin/<version>/fkwu with its seal (fkwu.seal: the SHA-256 and size of the bytes), and a checkout's
+ * ./fkwu is a CLONE of the version its own seed names (a copy-on-write file: it costs no disk, and nothing the store
+ * does to its copy -- pruning, rebuilding -- can leave a checkout without its binary).
+ *
+ * What makes the name true: the three seed files are read ONCE into memory; the digest is taken of those bytes; those
+ * same bytes are written to a private build root and compiled there, in a fixed layout (cwd = the root, the unit named
+ * runtime/fkwu-uni.c, the product named fkwu). A file edited while the build runs changes nothing the build reads, and
+ * two builds of one version are byte-identical (macOS signs a binary with its file name as the identifier, so the name
+ * and the layout belong to the version). Nothing is trusted by existing: a store binary is run only when its bytes
+ * hash to the seal beside it; a binary that fails is built again.
+ *
+ * When ./fkwu starts and its checkout's seed names another version (the kernel was edited, a branch switched, a plain
+ * `cc` built it), the version is taken from the store (built there once under a lock when absent), ./fkwu is replaced
+ * by a clone of it, and the same command begins again on it. A seed edited back finds its version still built. When the
+ * clone cannot be placed (a read-only checkout) the store's binary itself begins the command. Every path that runs
+ * a binary other than the seed's version says so on stderr, once. kernel_stat 90 reads whether this process runs the
+ * version its checkout's seed names (1), another one (0), or stands outside a checkout (2). */
 #ifndef FK_SEED_KEY
 #define FK_SEED_KEY 0ULL
 #endif
 #define FK_SEED_FLAGS "-O2"
 #define FK_SEED_KEEP 16
-static void fk_seed_say(unsigned long long key, const char *tail) {
-    char line[256];
-    int n = sprintf(line, "fkwu: seed version %016llx %s\n", key, tail);
+static void fk_seed_say(const char *head, unsigned long long key, const char *tail) {
+    char line[320];
+    int n = sprintf(line, "fkwu: %s%016llx %s\n", head, key, tail);
     write(2, line, (unsigned long)n);
 }
-static unsigned long long fk_seed_digest(void) {
-    static const char *files[] = {"runtime/fkwu-uni.c", "runtime/fkwu-node-word.h", "runtime/fkwu-optable.h", 0};
-    unsigned long long key = fk_bytes_fnv1a(FK_SEED_FLAGS, fk_cstrlen(FK_SEED_FLAGS));
-    for (int k = 0; files[k]; k++) {
-        long long n = 0;
-        char *bytes = fk_read_whole_file(files[k], &n);
-        if (!bytes) return 0;
-        key = (key ^ fk_bytes_fnv1a(files[k], fk_cstrlen(files[k]))) * 1099511628211ULL;
-        key = (key ^ fk_bytes_fnv1a(bytes, n)) * 1099511628211ULL;
-        free(bytes);
+/* ── SHA-256 (FIPS 180-4): the seal of a stored binary, and the hash an object fetched from another host answers to ── */
+static const unsigned int fk_sha_k[64] = {
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
+static unsigned int fk_sha_rotr(unsigned int x, int n) { return (x >> n) | (x << (32 - n)); }
+static void fk_sha_block(unsigned int *h, const unsigned char *p) {
+    unsigned int w[64], a, b, c, d, e, f, g, hh;
+    for (int i = 0; i < 16; i++)
+        w[i] = ((unsigned int)p[4 * i] << 24) | ((unsigned int)p[4 * i + 1] << 16) | ((unsigned int)p[4 * i + 2] << 8) | (unsigned int)p[4 * i + 3];
+    for (int i = 16; i < 64; i++) {
+        unsigned int s0 = fk_sha_rotr(w[i - 15], 7) ^ fk_sha_rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
+        unsigned int s1 = fk_sha_rotr(w[i - 2], 17) ^ fk_sha_rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
     }
-    return key ? key : 1;
+    a = h[0]; b = h[1]; c = h[2]; d = h[3]; e = h[4]; f = h[5]; g = h[6]; hh = h[7];
+    for (int i = 0; i < 64; i++) {
+        unsigned int t1 = hh + (fk_sha_rotr(e, 6) ^ fk_sha_rotr(e, 11) ^ fk_sha_rotr(e, 25)) + ((e & f) ^ (~e & g)) + fk_sha_k[i] + w[i];
+        unsigned int t2 = (fk_sha_rotr(a, 2) ^ fk_sha_rotr(a, 13) ^ fk_sha_rotr(a, 22)) + ((a & b) ^ (a & c) ^ (b & c));
+        hh = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
+    }
+    h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
+}
+/* the 64 lowercase hex digits of the SHA-256 of n bytes, in out[65] */
+static void fk_sha256_hex(const unsigned char *p, long long n, char *out) {
+    unsigned int h[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+    unsigned char tail[128];
+    long long i = 0, rem;
+    while (i + 64 <= n) { fk_sha_block(h, p + i); i += 64; }
+    rem = n - i;
+    memcpy(tail, p + i, (unsigned long)rem);
+    tail[rem] = 0x80;
+    long long pad = rem < 56 ? 64 : 128;
+    memset(tail + rem + 1, 0, (unsigned long)(pad - rem - 1));
+    unsigned long long bits = (unsigned long long)n * 8ULL;
+    for (int k = 0; k < 8; k++) tail[pad - 1 - k] = (unsigned char)(bits >> (8 * k));
+    fk_sha_block(h, tail);
+    if (pad == 128) fk_sha_block(h, tail + 64);
+    static const char hexd[] = "0123456789abcdef";
+    for (int k = 0; k < 8; k++)
+        for (int j = 0; j < 8; j++) out[k * 8 + j] = hexd[(h[k] >> (28 - 4 * j)) & 15];
+    out[64] = 0;
+}
+static const char *fk_seed_files[] = {"runtime/fkwu-uni.c", "runtime/fkwu-node-word.h", "runtime/fkwu-optable.h", 0};
+#define FK_SEED_NFILES 3
+typedef struct { char *bytes[FK_SEED_NFILES]; long long n[FK_SEED_NFILES]; unsigned long long key; } fk_seed_snapshot;
+static void fk_seed_snapshot_free(fk_seed_snapshot *s) {
+    for (int k = 0; k < FK_SEED_NFILES; k++) { free(s->bytes[k]); s->bytes[k] = 0; }
+}
+/* the seed, read once: the digest is of exactly these bytes */
+static int fk_seed_snapshot_take(fk_seed_snapshot *s) {
+    unsigned long long key = fk_bytes_fnv1a(FK_SEED_FLAGS, fk_cstrlen(FK_SEED_FLAGS));
+    for (int k = 0; k < FK_SEED_NFILES; k++) { s->bytes[k] = 0; s->n[k] = 0; }
+    for (int k = 0; k < FK_SEED_NFILES; k++) {
+        s->bytes[k] = fk_read_whole_file(fk_seed_files[k], &s->n[k]);
+        if (!s->bytes[k]) { fk_seed_snapshot_free(s); return 0; }
+        key = (key ^ fk_bytes_fnv1a(fk_seed_files[k], fk_cstrlen(fk_seed_files[k]))) * 1099511628211ULL;
+        key = (key ^ fk_bytes_fnv1a(s->bytes[k], s->n[k])) * 1099511628211ULL;
+    }
+    s->key = key ? key : 1;
+    return 1;
 }
 #if !defined(_WIN32)
 extern int flock(int, int);
-static int fk_seed_build(const char *dir, const char *binary, unsigned long long key) {
-    char temporary[FK_PATH_CAP + 64], define[64];
-    sprintf(temporary, "%s/.build.%d", dir, (int)getpid());
-    sprintf(define, "-DFK_SEED_KEY=0x%016llxULL", key);
-    pid_t pid = fork();
-    if (pid < 0) return 0;
-    if (pid == 0) {
-        dup2(2, 1);   /* the compiler speaks on stderr: stdout belongs to the command that begins again */
-        char *cc_argv[] = {"cc", FK_SEED_FLAGS, define, "-o", temporary, "runtime/fkwu-uni.c", 0};
-        execvp("cc", cc_argv);
-        _exit(127);
+/* a stored binary stands only when its bytes hash to the seal beside it: "<sha256 hex> <size>\n" */
+static int fk_seed_sealed(const char *binary, const char *seal) {
+    long long bn = 0, sn = 0;
+    char *seal_text = fk_read_whole_file(seal, &sn);
+    if (!seal_text) return 0;
+    char *bytes = fk_read_whole_file(binary, &bn);
+    int ok = 0;
+    if (bytes && bn > 0 && sn > 65) {
+        char hex[65];
+        fk_sha256_hex((const unsigned char *)bytes, bn, hex);
+        char want[96];
+        int wn = sprintf(want, "%s %lld\n", hex, bn);
+        ok = sn == wn && memcmp(seal_text, want, (unsigned long)wn) == 0;
     }
-    int status = 0;
-    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
-    /* exited by itself (no signal in the low seven bits) with status 0 */
-    if ((status & 0x7f) != 0 || ((status >> 8) & 0xff) != 0 || rename(temporary, binary) != 0) { unlink(temporary); return 0; }
-    return 1;
+    free(bytes); free(seal_text);
+    return ok;
 }
-/* the store keeps its FK_SEED_KEEP newest versions; a pruned version a checkout still names is built again on demand */
-static void fk_seed_prune(const char *root) {
+static int fk_seed_put_file(const char *path, const char *bytes, long long n) {
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (fd < 0) return 0;
+    int ok = fk_closure_put(fd, bytes, n);
+    if (close(fd) != 0) ok = 0;
+    return ok;
+}
+/* build the snapshot in a private root and publish its binary and seal into the version's directory */
+static int fk_seed_build(const fk_seed_snapshot *snap, const char *dir) {
+    char root[FK_PATH_CAP + 32], path[FK_PATH_CAP + 64], define[64], seal_text[160], hex[65], seal_tmp[FK_PATH_CAP + 64];
+    sprintf(root, "%s/.build.%d", dir, (int)getpid());
+    fk_rmdir_tree(root);
+    if (mkdir(root, 0700) != 0) return 0;
+    int ok = 1;
+    sprintf(path, "%s/runtime", root);
+    ok = ok && mkdir(path, 0700) == 0;
+    sprintf(path, "%s/out", root);
+    ok = ok && mkdir(path, 0700) == 0;
+    for (int k = 0; ok && k < FK_SEED_NFILES; k++) {
+        sprintf(path, "%s/%s", root, fk_seed_files[k]);
+        ok = fk_seed_put_file(path, snap->bytes[k], snap->n[k]);
+    }
+    if (ok) {
+        sprintf(define, "-DFK_SEED_KEY=0x%016llxULL", snap->key);
+        pid_t pid = fork();
+        if (pid < 0) ok = 0;
+        else if (pid == 0) {
+            dup2(2, 1);   /* the compiler speaks on stderr: stdout belongs to the command that begins again */
+            if (chdir(root) != 0) _exit(126);
+            char *cc_argv[] = {"cc", FK_SEED_FLAGS, define, "-o", "out/fkwu", "runtime/fkwu-uni.c", 0};
+            execvp("cc", cc_argv);
+            _exit(127);
+        } else {
+            int status = 0;
+            while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+            ok = (status & 0x7f) == 0 && ((status >> 8) & 0xff) == 0;   /* exited by itself with status 0 */
+        }
+    }
+    long long bn = 0;
+    char *built = 0;
+    if (ok) { sprintf(path, "%s/out/fkwu", root); built = fk_read_whole_file(path, &bn); ok = built != 0 && bn > 0; }
+    if (ok) {
+        fk_sha256_hex((const unsigned char *)built, bn, hex);
+        int sn = sprintf(seal_text, "%s %lld\n", hex, bn);
+        char binary[FK_PATH_CAP + 64], seal[FK_PATH_CAP + 64];
+        sprintf(binary, "%s/fkwu", dir);
+        sprintf(seal, "%s/fkwu.seal", dir);
+        sprintf(seal_tmp, "%s/fkwu.seal.%d", dir, (int)getpid());
+        unlink(seal_tmp);
+        unlink(binary);   /* the old binary leaves before the seal does: a reader never meets a binary that its seal disowns */
+        ok = fk_seed_put_file(seal_tmp, seal_text, sn) && rename(seal_tmp, seal) == 0 && rename(path, binary) == 0;
+        if (!ok) unlink(seal_tmp);
+    }
+    free(built);
+    fk_rmdir_tree(root);
+    return ok;
+}
+/* the store keeps its FK_SEED_KEEP most recently used versions (a hop touches its version); a checkout's ./fkwu is a clone,
+ * so a pruned version costs the next checkout that names it one build, never a missing binary */
+static void fk_seed_prune(const char *root, const char *keep_name) {
     for (;;) {
         DIR *d = opendir(root);
         if (!d) return;
         struct dirent *e;
         struct stat st;
-        char path[FK_PATH_CAP + 64], oldest[FK_PATH_CAP + 64];
+        char path[FK_PATH_CAP + 64], oldest[FK_PATH_CAP + 64], oldest_dir[FK_PATH_CAP + 64];
         long long count = 0, old = 0;
         while ((e = readdir(d)) != 0) {
             if (fk_cstrlen(e->d_name) != 16) continue;
             sprintf(path, "%s/%s/fkwu", root, e->d_name);
             if (stat(path, &st) != 0) continue;
             count++;
-            if (old == 0 || (long long)st.st_mtime < old) { old = (long long)st.st_mtime; sprintf(oldest, "%s", path); }
+            if (fk_cstr_eq(e->d_name, keep_name)) continue;
+            if (old == 0 || (long long)st.st_mtime < old) {
+                old = (long long)st.st_mtime;
+                sprintf(oldest, "%s", path);
+                sprintf(oldest_dir, "%s/%s", root, e->d_name);
+            }
         }
         closedir(d);
-        if (count <= FK_SEED_KEEP || unlink(oldest) != 0) return;
+        if (count <= FK_SEED_KEEP || old == 0) return;
+        unlink(oldest);
+        char seal[FK_PATH_CAP + 80];
+        sprintf(seal, "%s/fkwu.seal", oldest_dir);
+        unlink(seal);
     }
+}
+/* ./fkwu becomes a clone of the version's binary, placed by one rename */
+static int fk_seed_place(const char *binary) {
+    char tmp[64];
+    sprintf(tmp, "fkwu.alias.%d", (int)getpid());
+    unlink(tmp);
+    int done = 0;
+#if defined(__APPLE__)
+    done = clonefile(binary, tmp, 0) == 0;
+#endif
+    if (!done) {
+        long long n = 0;
+        char *bytes = fk_read_whole_file(binary, &n);
+        if (bytes && n > 0) {
+            int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL, 0755);
+            done = fd >= 0 && fk_closure_put(fd, bytes, n);
+            if (fd >= 0 && close(fd) != 0) done = 0;
+        }
+        free(bytes);
+    }
+    if (done && rename(tmp, "fkwu") == 0) return 1;
+    unlink(tmp);
+    return 0;
 }
 static void fk_seed_alias(char **argv) {
     char self[FK_PATH_CAP], alias[FK_PATH_CAP];
-    if (!argv[0] || fk_path_size_raw("runtime/fkwu-uni.c") < 0 || !realpath(argv[0], self) || !realpath("fkwu", alias) ||
-        !fk_cstr_eq(self, alias)) return;   /* only the checkout's own ./fkwu answers to the checkout's seed */
-    unsigned long long key = fk_seed_digest();
-    if (key == 0) return;
-    if (key == (unsigned long long)FK_SEED_KEY) { fk_seed_state = 1; return; }
+    if (fk_path_size_raw("runtime/fkwu-uni.c") < 0) return;   /* not a checkout's root: no seed to name */
+    fk_seed_snapshot snap;
+    if (!fk_seed_snapshot_take(&snap)) return;
+    unsigned long long key = snap.key;
+    if (key == (unsigned long long)FK_SEED_KEY) { fk_seed_state = 1; fk_seed_snapshot_free(&snap); return; }
     fk_seed_state = 0;
+    /* only the checkout's own ./fkwu answers to the checkout's seed: any other binary runs as itself */
+    if (!argv[0] || !realpath(argv[0], self) || !realpath("fkwu", alias) || !fk_cstr_eq(self, alias)) {
+        fk_seed_snapshot_free(&snap); return;
+    }
     const char *hop = getenv("FK_SEED_HOP"), *home = getenv("HOME");
-    if ((hop && hop[0]) || !home || !home[0] || fk_path_len(home) + 64 >= FK_PATH_CAP) return;
-    char root[FK_PATH_CAP], dir[FK_PATH_CAP], binary[FK_PATH_CAP + 16], lock[FK_PATH_CAP + 16], link_tmp[64];
-    sprintf(root, "%s/.cache", home); mkdir(root, 0755);
-    sprintf(root, "%s/.cache/fkwu", home); mkdir(root, 0755);
-    sprintf(root, "%s/.cache/fkwu/bin", home); mkdir(root, 0755);
-    sprintf(dir, "%s/%016llx", root, key); mkdir(dir, 0755);
+    if (hop && hop[0]) { fk_seed_snapshot_free(&snap); return; }
+    char root[FK_PATH_CAP], dir[FK_PATH_CAP], binary[FK_PATH_CAP + 16], seal[FK_PATH_CAP + 16], lock[FK_PATH_CAP + 16], name[24];
+    sprintf(name, "%016llx", key);
+    (void)home;
+    /* the store stands only when it is ours alone (a real directory owned by this user and writable by no one else) */
+    if (!fk_store_path(root, "bin", 0, 1) || !fk_store_path(dir, "bin", name, 1)) {
+        fk_seed_say("seed version ", key, "cannot be taken from the store (HOME is not usable or the store is not ours alone); this binary runs");
+        fk_seed_snapshot_free(&snap); return;
+    }
     sprintf(binary, "%s/fkwu", dir);
-    if (fk_path_size_raw(binary) < 0) {
+    sprintf(seal, "%s/fkwu.seal", dir);
+    int stands = fk_seed_sealed(binary, seal);
+    if (!stands) {
         sprintf(lock, "%s/.lock", dir);
-        int fd = open(lock, O_RDWR | O_CREAT, 0644);
+        int fd = open(lock, O_RDWR | O_CREAT, 0600);
         if (fd >= 0) flock(fd, 2 /* LOCK_EX */);
-        int built = fk_path_size_raw(binary) >= 0;
-        if (!built) {
-            fk_seed_say(key, "is built once for this host");
-            built = fk_seed_build(dir, binary, key);
-            if (built) fk_seed_prune(root);
+        stands = fk_seed_sealed(binary, seal);   /* another start may have built it while this one waited */
+        if (!stands) {
+            fk_seed_say("seed version ", key, "is built once for this host");
+            stands = fk_seed_build(&snap, dir) && fk_seed_sealed(binary, seal);
         }
         if (fd >= 0) close(fd);
-        if (!built) { fk_seed_say(key, "could not be built; the binary at hand runs"); return; }
     }
-    sprintf(link_tmp, "fkwu.alias.%d", (int)getpid());
-    unlink(link_tmp);
-    if (symlink(binary, link_tmp) != 0 || rename(link_tmp, "fkwu") != 0) { unlink(link_tmp); return; }
+    fk_seed_snapshot_free(&snap);
+    if (!stands) { fk_seed_say("seed version ", key, "could not be built; the binary at hand runs"); return; }
+    {
+        struct timespec now[2];   /* this version was used just now: the prune orders by it */
+        if (clock_gettime(CLOCK_REALTIME, &now[0]) == 0) { now[1] = now[0]; utimensat(FK_AT_FDCWD, binary, now, 0); }
+    }
+    fk_seed_prune(root, name);
     setenv("FK_SEED_HOP", "1", 1);
-    execv(binary, argv);
-    unsetenv("FK_SEED_HOP");   /* the store's binary would not begin: this one carries on */
+    if (fk_seed_place(binary)) execv("fkwu", argv);
+    else {
+        fk_seed_say("seed version ", key, "could not be placed as ./fkwu (the checkout is read-only?); the store's binary begins the command");
+        execv(binary, argv);
+    }
+    unsetenv("FK_SEED_HOP");   /* neither would begin: this binary carries on */
+    fk_seed_say("seed version ", key, "would not begin; the binary at hand runs");
 }
 #endif
 static int fk_run(int argc, char **argv) {
