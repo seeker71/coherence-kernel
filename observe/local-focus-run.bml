@@ -1,0 +1,68 @@
+// local-focus-run.bml — the planner's focus guide, answered by parallel lenses of the local model instead of one rented-or-single voice.
+//
+//   echo '{"request":"<id>","go":1}' | ./fkwu observe/local-focus-run.bml
+//
+// The planner (local-plan-run.bml) asks for the existing entry functions a request must change and keeps the answer at
+// flp-focus-path(req), a file it reads back only when its prompt matches, its status is answered, the reply is a JSON array of
+// names in the catalog and the voice was released. This door writes that same file. One prefix (the planner's own prompt), three
+// lenses (the narrowest set, the central function, the whole behaviour), one weight pass per step for all of them; every lens text
+// is cut at its closing bracket and checked by the planner's own rules (a JSON array of catalog names); of the lenses that pass, the
+// one the model was surest of (least surprise a token) is written. No lens that passes means no file: the planner asks as before.
+// stdin, one JSON line: request (id in learn/local-requests.jsonl), go (without it only the plan is said), gen (48 tokens a lens).
+// A physical run: it needs the local GPU.
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/q38-multi.bml form-stdlib/bml/form-cli-code-live.bml form-stdlib/bml/q38-lenses.bml native/metal/qwen35-dense-token-handle.fk native/metal/qwen35-dense-spec.fk
+import form-stdlib/bml/form-cli-local-plan.bml;
+section [form.bml] {
+ class LocalFocusRun {
+  def lfr-say(t) = print_str("[local-focus] " ++ t ++ "\n");
+  def lfr-opts() {
+   let line = trim(stdin-text());
+   (len(line) > 0) && (str_byte_at(line, 0) == 123) ? parse-json("local-focus", line) : json-node-object([]);
+  }
+  def lfr-int(doc, key, d) = json-object-has?(doc, key) ? json-int-value(json-object-get(doc, key)) : d;
+  def lfr-lenses() = ["\nChoose only the single most central function.\nAnswer: [\"", "\nChoose the smallest set of functions whose behavior must change.\nAnswer: [\"", "\nChoose every function whose behavior the task changes.\nAnswer: [\""];
+  // the reply up to and including its first closing bracket, after the opening the lens already gave
+  def lfr-cut-at(text, i) = i >= len(text) ? "" : str_byte_at(text, i) == 93 ? substring(text, 0, i + 1) : lfr-cut-at(text, i + 1);
+  def lfr-candidate(text) {
+   let cut = lfr-cut-at(text, 0);
+   len(cut) == 0 ? "" : "[\"" ++ cut;
+  }
+  // the planner's own rules for a focus reply: a JSON array of names, each in the catalog
+  def lfr-valid(text, names) {
+   let ok = len(text) > 0 && faj-valid(text);
+   let value = ok ? parse-json("focus-candidate", text) : json-node-null();
+   let selected = fcgp-array?(value) ? flp-strings(value) : [];
+   !nil?(selected) && len(selected) == len(json-array-elements(value)) && !any?(name => !flp-has?(names, name), selected);
+  }
+  def lfr-request(id) = flp-first(flp-queue-rows(flp-requests()), r => (String) flp-req-id(r) == id);
+  def lfr-best(cands, i, best) = i >= len(cands) ? best : lfr-best(cands, i + 1, (cands[i][0] && (best < 0 || cands[i][1] < cands[best][1])) ? i : best);
+  def lfr-run() {
+   let o = lfr-opts();
+   let id = json-object-has?(o, "request") ? json-string-value(json-object-get(o, "request")) : "";
+   let req = lfr-request(id);
+   nothing?(req) ? lfr-say("no request " ++ id ++ " in " ++ flp-requests()) : lfr-go(req, o);
+  }
+  def lfr-go(req, o) {
+   let prompt = flp-focus-prompt(req);
+   let names = flp-source-names(flp-req-files(req));
+   lfr-int(o, "go", 0) != 1 ? lfr-say("plan: go=1 reads a prompt of " ++ len(prompt).str() ++ " bytes with " ++ len(lfr-lenses()).str() ++ " lenses over " ++ len(names).str() ++ " catalog names and writes " ++ flp-focus-path(req)) : lfr-answer(req, prompt, names, lfr-int(o, "gen", 48));
+  }
+  def lfr-answer(req, prompt, names, gen) {
+   let ctx = qlz-open(4096);
+   let r = qlz-run(ctx, prompt, lfr-lenses(), gen);
+   let cands = map(t => lfr-candidate(t), r[0]);
+   let rows = map(i => [lfr-valid(cands[i], names), r[1][i]], range(0, len(cands)));
+   let a = lfr-say("prefix " ++ len(r[2]).str() ++ " ids; prefill " ++ r[3][0].str() ++ " ms, fork " ++ r[3][1].str() ++ " ms, " ++ gen.str() ++ " tokens x " ++ len(cands).str() ++ " lenses " ++ r[3][2].str() ++ " ms");
+   let b = map(i => lfr-say("lens " ++ i.str() ++ " valid " ++ rows[i][0].str() ++ " surprise " ++ rows[i][1].str() ++ " micro-nats a token: " ++ cands[i]), range(0, len(cands)));
+   let best = lfr-best(rows, 0, 0 - 1);
+   best < 0 ? lfr-say("no lens gave a valid focus: the planner asks as before") : lfr-keep(req, prompt, cands[best], len(r[2]), gen * len(cands), best);
+  }
+  def lfr-keep(req, prompt, text, promptIds, generated, lens) {
+   let made = flp-mkdirs(flp-dir() ++ "/focus");
+   let kept = write_file_text(flp-focus-path(req), json-emit(json-node-object([fhn-s("prompt", prompt), fhn-s("model", "qwen3.8-27b-lenses"), fhn-s("status", "answered"), fhn-s("text", text), fhn-n("prompt_ids", promptIds), fhn-n("generated_ids", generated), fhn-n("complete", 1), fhn-n("released", 1), fhn-s("reason", ""), fhn-s("raw", ""), fhn-n("lens", lens)])));
+   lfr-say("kept lens " ++ lens.str() ++ " at " ++ flp-focus-path(req) ++ ": " ++ text);
+  }
+ }
+ lfr-run();
+}

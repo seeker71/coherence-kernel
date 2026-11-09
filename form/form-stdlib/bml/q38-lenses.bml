@@ -1,0 +1,46 @@
+// q38-lenses.bml — the local model's parallel reasoning as one call: one prefix, N lenses, one weight pass per step, the model's own
+// judgement of which lens it is surest of.
+//
+// The prefix text is tokenized by the body's tokenizer and prefilled once on a single stream (the batched path); one Form-written
+// copy kernel forks its state into one arena slot per lens (q38m-fork-all); each lens text continues from the prefix length, all
+// streams in one pass over the weights per step (q38m-generate-scored); the head's log-sum-exp kernel reads each stream's surprise at
+// its greedy token. A door calls qlz-run and then chooses: by what the lens said (a validator of its own) and by how sure the
+// model was of it. Nothing leaves the machine; the lease, the prefill rows (span 64) and the arena are the caller's to size.
+// preludes: form-stdlib/core.fk form-stdlib/bml/q38-multi.bml form-stdlib/bml/form-cli-code-live.bml native/metal/qwen35-dense-token-handle.fk native/metal/qwen35-dense-spec.fk
+section [form.bml] {
+ class Q38Lenses {
+  def qlz-file() = "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf";
+  // the model opened for lenses: prefill rows 64, positions for prefix + lens + generation (maxpos)
+  def qlz-open(maxpos) = q38-open-span(qlz-file(), maxpos, 64);
+  def qlz-tok-go(cur, left, acc) {
+   let one = qtlc-next(cur);
+   if (qtlc-next-present?(one) && left > 0) then qlz-tok-go(qtlc-next-cursor(one), left - 1, cons(qtlc-next-value(one), acc)) else reverse(acc);
+  }
+  def qlz-tokenize(ctx, text) = qlz-tok-go(qtlc-open(ctx[9], qsx-seal-line(ctx[9]), [qtlc-text-segment(text)]), 100000, []);
+  def qlz-detok(ctx, ids) = foldl((a, id) => a ++ fcmo-decode-id(ctx[7], id), "", ids);
+  def qlz-prefill(ctx, sts, ids) = len(ids) <= 64 ? q38-prefill-span-batched(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0) : q38-prefill-span-sliced(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], ids, 0, 64);
+  // answers [texts, micro-nats a token, prefix ids, milliseconds [prefill, fork, generate]]
+  def qlz-run(ctx, prefixText, lensTexts, gen) {
+   let prefix = qlz-tokenize(ctx, prefixText);
+   let lenses = map(t => qlz-tokenize(ctx, t), lensTexts);
+   let n = len(lenses);
+   let qs0 = q38s-pipes(q38s-msl());
+   let sx = q38s-open(ctx, 8, 8);
+   let mp = q38m-pipes(q38m-msl());
+   let posb = metal_buf_alloc(64);
+   let lpb = metal_buf_alloc(64);
+   let arena = q38m-new-arena(ctx[2], n, bytes => metal_buf_alloc(bytes));
+   let sts = q38-new-state(ctx[2]);
+   let t0 = host_monotonic_ms();
+   let pre = qlz-prefill(ctx, sts, prefix);
+   let t1 = host_monotonic_ms();
+   let forked = q38m-fork-all(ctx, mp[5], sts, arena, n, len(prefix));
+   let t2 = host_monotonic_ms();
+   let scored = q38m-generate-scored(ctx, qs0, mp, arena, sx, posb, lenses, gen, len(prefix), lpb);
+   let t3 = host_monotonic_ms();
+   let freed = q38-free-state(sts);
+   [map(o => qlz-detok(ctx, o), scored[0]), map(x => x / gen, scored[1]), prefix, [t1 - t0, t2 - t1, t3 - t2]];
+  }
+ }
+ 0;
+}
