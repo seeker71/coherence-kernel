@@ -10,19 +10,29 @@
 // preludes: form-stdlib/core.fk form-stdlib/bml/q38-multi.bml form-stdlib/bml/form-cli-code-live.bml form-stdlib/bml/q38-lenses.bml native/metal/qwen35-dense-token-handle.fk native/metal/qwen35-dense-spec.fk
 section [form.bml] {
  class LocalFocusLenses {
-  def lfl-lenses() = ["\nChoose only the single most central function.\nAnswer: [\"", "\nChoose the smallest set of functions whose behavior must change.\nAnswer: [\"", "\nChoose every function whose behavior the task changes.\nAnswer: [\""];
+  // The planner's focus prompt states the request's `needs`; the request's `problem` is where its subject is often named (organ_steady
+  // stood only in the problem of frq-77b2…). Each lens's task carries the problem's opening after the shared prefix, so the prefix (and
+  // the prompt the focus file must equal) is unchanged. A lens may abstain with "[]" when no catalog function is the one the task
+  // changes (frq-77b2…'s subject is outside its catalog): an abstaining winner writes no focus and the planner asks as before; forcing
+  // a catalog name made its plan, which changed the right definition elsewhere, refuse for changing what the request did not name.
+  def lfl-background(req) {
+   let problem = flp-text(req, "problem");
+   len(problem) == 0 ? "" : "\nBackground: " ++ (len(problem) > 900 ? substring(problem, 0, 900) : problem) ++ "\n";
+  }
+  def lfl-abstain-note() = " If none of the catalog functions is the one the task changes, answer [].";
+  def lfl-tasks(req) = map(t => lfl-background(req) ++ "\n" ++ t ++ lfl-abstain-note() ++ " Answer with only a JSON array of names.", ["Choose only the single most central function.", "Choose the smallest set of functions whose behavior must change.", "Choose every function whose behavior the task changes."]);
   // the reply up to and including its first closing bracket, after the opening the lens already gave
   def lfl-cut-at(text, i) = i >= len(text) ? "" : str_byte_at(text, i) == 93 ? substring(text, 0, i + 1) : lfl-cut-at(text, i + 1);
   def lfl-candidate(text) {
    let cut = lfl-cut-at(text, 0);
-   len(cut) == 0 ? "" : "[\"" ++ cut;
+   len(cut) == 0 ? "" : "[" ++ cut;
   }
   // the planner's own rules for a focus reply: a JSON array of names, each in the catalog
   def lfl-valid(text, names) {
    let ok = len(text) > 0 && faj-valid(text);
    let value = ok ? parse-json("focus-candidate", text) : json-node-null();
    let selected = fcgp-array?(value) ? flp-strings(value) : [];
-   !nil?(selected) && len(selected) == len(json-array-elements(value)) && !any?(name => !flp-has?(names, name), selected);
+   (String) text == "[]" || (!nil?(selected) && len(selected) == len(json-array-elements(value)) && !any?(name => !flp-has?(names, name), selected));
   }
   def lfl-best(rows, i, best) = i >= len(rows) ? best : lfl-best(rows, i + 1, (rows[i][0] && (best < 0 || rows[i][1] < rows[best][1])) ? i : best);
   def lfl-keep(req, prompt, text, promptIds, generated, lens) {
@@ -35,13 +45,13 @@ section [form.bml] {
    let prompt = flp-focus-prompt(req);
    let names = flp-source-names(flp-req-files(req));
    let ctx = qlz-open(4096);
-   let r = qlz-run(ctx, prompt, lfl-lenses(), gen);
+   let r = qlz-run-ids(ctx, qlz-chat-prefix(ctx, prompt), map(t => qlz-chat-lens(ctx, t, "["), lfl-tasks(req)), gen);
    let closed = qlz-close(ctx);
    let cands = map(t => lfl-candidate(t), r[0]);
    let rows = map(i => [lfl-valid(cands[i], names), r[1][i]], range(0, len(cands)));
    let best = lfl-best(rows, 0, 0 - 1);
    let shape = "prefix " ++ len(r[2]).str() ++ " ids; prefill " ++ r[3][0].str() ++ " ms, fork " ++ r[3][1].str() ++ " ms, " ++ gen.str() ++ " tokens x " ++ len(cands).str() ++ " lenses " ++ r[3][2].str() ++ " ms; valid " ++ map(x => x[0], rows).str() ++ " surprise " ++ map(x => x[1], rows).str();
-   if (best < 0) then "no lens gave a valid focus (" ++ shape ++ ")" else {
+   if (best < 0) then "no lens gave a valid focus (" ++ shape ++ "; replies " ++ r[0].str() ++ ")" else if ((String) cands[best] == "[]") then "the surest lens abstained: no catalog function is the one the task changes, nothing kept, the planner asks as before (" ++ shape ++ ")" else {
     let kept = lfl-keep(req, prompt, cands[best], len(r[2]), gen * len(cands), best);
     "kept lens " ++ best.str() ++ ": " ++ cands[best] ++ " (" ++ shape ++ ")";
    };
