@@ -1,0 +1,62 @@
+; q38-model-kernel-band.bml — the surprise reader the local model wrote, held against the lane's own on data it was not written against.
+;
+; form_lp_model (form-stdlib/bml/q38-multi.bml, q38m-lp-model-msl) was written by three lenses of the local 27B from a spec and kept for its
+; confidence (observe/local-kernel-lane-run.bml); it agreed with the lane's q38m-lp-msl on the one dataset it was shown. This band asks it
+; again on others. Both read one threadgroup of 256 a row and write out[row] = uint(clamp(log(sum exp(x - max)) * 1e6, 0, 4e9)); their sums
+; run in different orders, so words agree within 0.5% or 2000 micro-nats.
+;
+; Expected: 15
+; Verdict 15 when every claim lands:
+;   1   both kernels compile
+;   2   the dataset the model was shown (2 rows of 1024 small multiples of 0.125): agree row for row
+;   4   2 rows of 2048 with large swings (about +-40) and one dominant spike: agree row for row (the max subtraction is what is at stake)
+;   8   a flat row of 1024 zeros and a row of one hot value: agree, and the flat row reads log(1024) = 6931472 micro-nats within the tolerance
+; REQUIRES: a live Metal device (metal_pipeline and the other metal_* doors)
+// preludes: form-stdlib/core.fk form-stdlib/bml/live.bml form-stdlib/metal-door.fk native/metal/qwen35-dense-token-handle.fk form-stdlib/bml/q38-multi.bml
+section [form.bml] {
+ class Q38ModelKernelBand {
+  def qmk-lane-msl() = "#include <metal_stdlib>\nusing namespace metal;\n" ++ q38m-lp-msl("form_lp_lane");
+  def qmk-f32s(xs) = foldl((a, x) => a ++ md-le32(md-f32-bits(x)), "", xs);
+  def qmk-near?(a, b) = (a - b < 0 ? b - a : a - b) <= (b / 200 > 2000 ? b / 200 : 2000);
+  def qmk-words(raw, i, n) = i >= n ? [] : cons(kth-u32at(raw, i), qmk-words(raw, i + 1, n));
+  // dispatch a source's kernel over rows of vocab floats; the out words
+  def qmk-run(source, name, xs, vocab, rows) {
+   let pipe = try metal_pipeline(source, name) catch 0;
+   if (!(pipe > 0)) then [] else {
+    let lg = metal_buf_alloc(len(xs) * 4);
+    let ob = metal_buf_alloc(64);
+    let w = metal_buf_write(lg, 0, qmk-f32s(xs));
+    let z = metal_buf_write(ob, 0, md-le32(0) ++ md-le32(0) ++ md-le32(0));
+    // a threadgroup-mode kernel with a barrier refuses outside a concurrent batch and the words stay zero: both kernels would then
+    // "agree" on nothing, so the batch is armed and every claim below also requires words that are not zero
+    let batch = metal_batch_concurrent();
+    let q = metal_enqueue(pipe, md-bind16([lg, ob], [vocab], 256, 0, 1, 1), rows);
+    let s = metal_sync();
+    qmk-words(metal_buf_read(ob, 0, rows * 4), 0, rows);
+   };
+  }
+  def qmk-both(xs, vocab, rows) = [qmk-run(q38m-lp-model-msl(), "form_lp_model", xs, vocab, rows), qmk-run(qmk-lane-msl(), "form_lp_lane", xs, vocab, rows)];
+  def qmk-agree?(pair, rows) = len(pair[0]) == rows && len(pair[1]) == rows && all?(i => qmk-near?(pair[0][i], pair[1][i]), range(0, rows));
+  // and not nothing: both kernels read a word above zero in the first row
+  def qmk-live?(pair) = len(pair[0]) > 0 && len(pair[1]) > 0 && pair[0][0] > 0 && pair[1][0] > 0;
+  def qmk-a(k) = ((k * 37 + (k / 1024) * 11) % 101 - 50) * 0.125;
+  // large swings and a spike: x = ((k * 53) % 161 - 80) * 0.5, with the first element of row 1 pushed to 60
+  def qmk-b(k) = k == 2048 ? 60.0 : ((k * 53) % 161 - 80) * 0.5;
+  def qmk-c1(ctx) = qmk-run(q38m-lp-model-msl(), "form_lp_model", map(k => 0.0, range(0, 1024)), 1024, 1) != [] && qmk-run(qmk-lane-msl(), "form_lp_lane", map(k => 0.0, range(0, 1024)), 1024, 1) != [];
+  def qmk-c2(ctx) {
+   let p = qmk-both(map(k => qmk-a(k), range(0, 2048)), 1024, 2);
+   qmk-agree?(p, 2) && qmk-live?(p);
+  }
+  def qmk-c4(ctx) {
+   let p = qmk-both(map(k => qmk-b(k), range(0, 4096)), 2048, 2);
+   qmk-agree?(p, 2) && qmk-live?(p);
+  }
+  def qmk-hot(k) = k == 1024 + 7 ? 30.0 : 0.0;
+  def qmk-c8(ctx) {
+   let pair = qmk-both(map(k => qmk-hot(k), range(0, 2048)), 1024, 2);
+   qmk-agree?(pair, 2) && len(pair[0]) == 2 && qmk-near?(pair[0][0], 6931472) && qmk-near?(pair[1][0], 6931472);
+  }
+  def qmk-run-band() = live-claims("q38-model-kernel-band", 0, [["compiles", 1, 1, qmk-c1], ["shown", 2, 1, qmk-c2], ["swings", 4, 1, qmk-c4], ["flat-and-hot", 8, 1, qmk-c8]]);
+ }
+ qmk-run-band();
+}
