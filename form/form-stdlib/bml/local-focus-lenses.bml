@@ -1,0 +1,51 @@
+// local-focus-lenses.bml — the planner's focus guide answered by parallel lenses of the local model, as a call a door can make.
+//
+// One prefix (the planner's own focus prompt, flp-focus-prompt), three lenses, one weight pass per step for all of them
+// (q38-lenses.bml). Each lens text is cut at its closing bracket and read by the planner's own rules (a JSON array of catalog
+// names); of the lenses that pass, the one the model was surest of (least surprise a token) is written at flp-focus-path(req), the
+// file the planner reads back only when its prompt matches, its status is answered and the reply is valid. No lens that passes means
+// no file: the planner asks as before. lfl-run opens the model, runs, closes the model and answers a status line, so a caller that
+// opens the model again in the same process (the planner's voice) starts from nothing. Needs form-cli-local-plan.bml (flp-*),
+// q38-lenses.bml and the qwen stack in its prelude closure.
+// preludes: form-stdlib/core.fk form-stdlib/bml/q38-multi.bml form-stdlib/bml/form-cli-code-live.bml form-stdlib/bml/q38-lenses.bml native/metal/qwen35-dense-token-handle.fk native/metal/qwen35-dense-spec.fk
+section [form.bml] {
+ class LocalFocusLenses {
+  def lfl-lenses() = ["\nChoose only the single most central function.\nAnswer: [\"", "\nChoose the smallest set of functions whose behavior must change.\nAnswer: [\"", "\nChoose every function whose behavior the task changes.\nAnswer: [\""];
+  // the reply up to and including its first closing bracket, after the opening the lens already gave
+  def lfl-cut-at(text, i) = i >= len(text) ? "" : str_byte_at(text, i) == 93 ? substring(text, 0, i + 1) : lfl-cut-at(text, i + 1);
+  def lfl-candidate(text) {
+   let cut = lfl-cut-at(text, 0);
+   len(cut) == 0 ? "" : "[\"" ++ cut;
+  }
+  // the planner's own rules for a focus reply: a JSON array of names, each in the catalog
+  def lfl-valid(text, names) {
+   let ok = len(text) > 0 && faj-valid(text);
+   let value = ok ? parse-json("focus-candidate", text) : json-node-null();
+   let selected = fcgp-array?(value) ? flp-strings(value) : [];
+   !nil?(selected) && len(selected) == len(json-array-elements(value)) && !any?(name => !flp-has?(names, name), selected);
+  }
+  def lfl-best(rows, i, best) = i >= len(rows) ? best : lfl-best(rows, i + 1, (rows[i][0] && (best < 0 || rows[i][1] < rows[best][1])) ? i : best);
+  def lfl-keep(req, prompt, text, promptIds, generated, lens) {
+   let made = flp-mkdirs(flp-dir() ++ "/focus");
+   let kept = write_file_text(flp-focus-path(req), json-emit(json-node-object([fhn-s("prompt", prompt), fhn-s("model", "qwen3.8-27b-lenses"), fhn-s("status", "answered"), fhn-s("text", text), fhn-n("prompt_ids", promptIds), fhn-n("generated_ids", generated), fhn-n("complete", 1), fhn-n("released", 1), fhn-s("reason", ""), fhn-s("raw", ""), fhn-n("lens", lens)])));
+   kept;
+  }
+  // answers a status line: kept (names the lens and the text) or nothing kept (why)
+  def lfl-run(req, gen) {
+   let prompt = flp-focus-prompt(req);
+   let names = flp-source-names(flp-req-files(req));
+   let ctx = qlz-open(4096);
+   let r = qlz-run(ctx, prompt, lfl-lenses(), gen);
+   let closed = qlz-close(ctx);
+   let cands = map(t => lfl-candidate(t), r[0]);
+   let rows = map(i => [lfl-valid(cands[i], names), r[1][i]], range(0, len(cands)));
+   let best = lfl-best(rows, 0, 0 - 1);
+   let shape = "prefix " ++ len(r[2]).str() ++ " ids; prefill " ++ r[3][0].str() ++ " ms, fork " ++ r[3][1].str() ++ " ms, " ++ gen.str() ++ " tokens x " ++ len(cands).str() ++ " lenses " ++ r[3][2].str() ++ " ms; valid " ++ map(x => x[0], rows).str() ++ " surprise " ++ map(x => x[1], rows).str();
+   if (best < 0) then "no lens gave a valid focus (" ++ shape ++ ")" else {
+    let kept = lfl-keep(req, prompt, cands[best], len(r[2]), gen * len(cands), best);
+    "kept lens " ++ best.str() ++ ": " ++ cands[best] ++ " (" ++ shape ++ ")";
+   };
+  }
+ }
+ 0;
+}
