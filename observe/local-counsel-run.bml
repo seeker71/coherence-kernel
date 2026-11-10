@@ -1,0 +1,47 @@
+// local-counsel-run.bml — parallel local reasoning as a door any agent can ask: one question, N lenses, one weight pass per step for all of them.
+//
+//   echo '{"go":1,"question":"…","lenses":["Answer as a safety reviewer.","Answer as a speed engineer."],"gen":160}' | ./fkwu observe/local-counsel-run.bml
+//
+// The local 27B reads the question once (a user turn, prefilled on one stream), the state is forked by one micro-kernel into a slot per
+// lens, and each lens's own text then closes the user turn and opens the assistant's with an empty think block; all lenses decode together,
+// so N lines of thought cost one pass over the weights a step (form-stdlib/bml/q38-multi.bml, q38-lenses.bml). The door prints each lens's
+// reply with the surprise the model had at its own greedy tokens (micro-nats a token: the confidence it read), and names the lens it was
+// surest of. It chooses nothing for the asker: the confidence of a line is not its worth, and a caller who needs a verdict reads them
+// itself (observe/local-focus-run.bml and observe/local-kernel-lane-run.bml check theirs by machine). Nothing leaves the machine.
+// stdin, one JSON line: go (without it only the plan is said), question (required), lenses (a list of 2..8 strings; default three
+// neutral lenses), gen (tokens a lens, default 160). A physical run: it needs the local GPU; another process holding it makes this one wait.
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/q38-multi.bml form-stdlib/bml/form-cli-code-live.bml form-stdlib/bml/q38-lenses.bml native/metal/qwen35-dense-token-handle.fk native/metal/qwen35-dense-spec.fk
+section [form.bml] {
+ class LocalCounselRun {
+  def lcr-say(t) = print_str("[local-counsel] " ++ t ++ "\n");
+  def lcr-opts() {
+   let line = trim(stdin-text());
+   (len(line) > 0) && (str_byte_at(line, 0) == 123) ? parse-json("local-counsel", line) : json-node-object([]);
+  }
+  def lcr-int(doc, key, d) = json-object-has?(doc, key) ? json-int-value(json-object-get(doc, key)) : d;
+  def lcr-str(doc, key) = json-object-has?(doc, key) ? json-string-value(json-object-get(doc, key)) : "";
+  def lcr-lenses(o) = json-object-has?(o, "lenses") ? map(t => json-string-value(t), json-array-elements(json-object-get(o, "lenses"))) : ["Answer plainly.", "Answer by naming what could go wrong first.", "Answer by naming the smallest first step."];
+  // the reply ends at the model's own end-of-turn; the tokens decoded after it (the pass runs the full count) are not part of it
+  def lcr-reply(text) {
+   let at = str_find(text, "<|im_end|>", 0);
+   at < 0 ? text : substring(text, 0, at);
+  }
+  def lcr-best(sc, i, best) = i >= len(sc) ? best : lcr-best(sc, i + 1, sc[i] < sc[best] ? i : best);
+  def lcr-run() {
+   let o = lcr-opts();
+   let question = lcr-str(o, "question");
+   let lenses = lcr-lenses(o);
+   len(question) == 0 ? lcr-say("no question: give {\"question\":\"…\"}") : (len(lenses) < 2 || len(lenses) > 8) ? lcr-say("give 2 to 8 lenses") : lcr-int(o, "go", 0) != 1 ? lcr-say("plan: go=1 reads a question of " ++ len(question).str() ++ " bytes through " ++ len(lenses).str() ++ " lenses") : lcr-go(question, lenses, lcr-int(o, "gen", 160));
+  }
+  def lcr-go(question, lenses, gen) {
+   let ctx = qlz-open(4096);
+   let r = qlz-run-ids(ctx, qlz-chat-prefix(ctx, question), map(t => qlz-chat-lens(ctx, t, ""), lenses), gen);
+   let closed = qlz-close(ctx);
+   let a = lcr-say("prefix " ++ len(r[2]).str() ++ " ids; prefill " ++ r[3][0].str() ++ " ms, fork " ++ r[3][1].str() ++ " ms, " ++ gen.str() ++ " tokens x " ++ len(lenses).str() ++ " lenses " ++ r[3][2].str() ++ " ms");
+   let b = map(i => lcr-say("lens " ++ i.str() ++ " (" ++ lenses[i] ++ ") surprise " ++ r[1][i].str() ++ " micro-nats a token:\n" ++ lcr-reply(r[0][i])), range(0, len(lenses)));
+   lcr-say("the model was surest of lens " ++ lcr-best(r[1], 0, 0).str());
+  }
+ }
+ lcr-run();
+}
