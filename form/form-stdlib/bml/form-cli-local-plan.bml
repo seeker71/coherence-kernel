@@ -599,6 +599,27 @@ section [form.bml] {
      flp-join(map(i => mc-cat([(i + 1).str(), ": ", lines[i]]), 0 .. len(lines)), "\n"), "\n\n"]);
    };
   }
+  // ── a request healed before any model opens ──
+  // A request that asks for text to go ("Drop the stale line") and quotes it in backticks is healed when none of the
+  // quoted text stands in any file it cites today; one that asks for one quoted line to be added (its needs hold that line
+  // and a sentence at most) is healed when that line already stands in a file it cites. Form reads both from the
+  // request's own words and the files' text, so no GPU minute is spent on it: the door marks it parked beside the ledger,
+  // keyed on what the request stands on, and it returns when a cited file or the request moves.
+  def flp-ticks(pieces, i, acc) = i + 1 >= len(pieces) ? acc : flp-ticks(pieces, i + 2, append(acc, [pieces[i]]));
+  def flp-quoted(text) { let p = split-on(text, "`"); len(p) < 3 ? [] : flp-ticks(p, 1, []); }
+  def flp-drop-need?(needs) = flp-starts?(needs, "Drop") || flp-starts?(needs, "Remove") || flp-starts?(needs, "Delete") || flp-starts?(needs, "drop") || flp-starts?(needs, "remove") || flp-starts?(needs, "delete");
+  def flp-healed-shown(s) = len(s) > 60 ? substring(s, 0, 60) + "..." : s;
+  def flp-healed-reading(req) {
+   let needs = trim(flp-text(req, "needs"));
+   let files = flp-req-files(req) |> filter(f => flp-exists?(f) && !flp-is-dir?(f));
+   let texts = map(f => fhn-read(f), files);
+   let stands = s => any?(t => str_find(t, s, 0) >= 0, texts);
+   let gone = flp-quoted(mc-cat([flp-text(req, "title"), "\n", flp-text(req, "problem")])) |> filter(s => len(s) >= 6);
+   let asked = flp-quoted(needs) |> filter(s => len(s) >= 24);
+   nil?(files) ? "" :
+   flp-drop-need?(needs) && !nil?(gone) && !any?(stands, gone) && any?(f => len(trim(frq-git-pickaxe(gone[0], f))) > 0, files) ? mc-cat(["head-gone: ", flp-join(files, ", "), " no longer holds ", flp-healed-shown(gone[0])]) :
+   !flp-drop-need?(needs) && len(asked) == 1 && len(needs) <= len(asked[0]) + 160 && stands(asked[0]) ? mc-cat(["needs-stand: ", flp-join(files, ", "), " already holds ", flp-healed-shown(asked[0])]) : "";
+  }
   // ── the compiler's unresolved names, beside the names that stand and share a word ──
   // A voice that writes read_lines is told by the compiler it matched nothing; the next packet then names the words that
   // do stand (core.fk's definitions and the primitive registry's rows) which share a word with each name.
@@ -619,10 +640,24 @@ section [form.bml] {
    let defs = map(p => flp-cut-at(flp-cut-at(p, " "), "\n"), after(split-on(core, "(defn ")));
    foldl((acc, n) => len(n) == 0 || flp-has?(acc, n) ? acc : append(acc, [n]), [], append(rows, defs));
   }
-  def flp-near-names(name, standing) {
+  // The near names are ranked by the rarest word they share with the name (the fewest standing names hold it), so a word
+  // that every name holds (str, len, get) never outranks one that few do (triple); the definitions of the file the plan
+  // writes come first, then the rest by that rarity, then by how many words they share. Eight at most.
+  def flp-word-weight(w, standing) = len(filter(n => str_find(n, w, 0) >= 0, standing));
+  def flp-near-key(n, weighed, own) {
+   let shared = filter(p => str_find(n, p[0], 0) >= 0, weighed);
+   nil?(shared) ? nothing() : (flp-has?(own, n) ? 0 : 1000000000) + foldl((m, p) => (Comparable) p[1] < m ? p[1] : m, 1000000, shared) * 100 + (99 - len(shared));
+  }
+  def flp-lowest(rows, k) {
+   let least = k <= 0 || nil?(rows) ? nothing() : foldl((b, r) => (Comparable) r[1] < b[1] ? r : b, rows[0], rows[1:]);
+   nothing?(least) ? [] : append([least[0]], flp-lowest(filter(r => (String) r[0] != (String) least[0], rows), k - 1));
+  }
+  def flp-near-names(name, standing, own) {
    let words = flp-name-words(name);
-   let scored = filter(p => p[1] > 0 && (String) p[0] != name, map(n => [n, len(filter(w => str_find(n, w, 0) >= 0, words))], standing));
-   take(8, append(map(p => p[0], filter(p => p[1] > 1, scored)), map(p => p[0], filter(p => p[1] == 1, scored))));
+   let all = append(own, standing);
+   let weighed = filter(p => p[1] > 0, map(w => [w, flp-word-weight(w, all)], words));
+   let keyed = nil?(weighed) ? [] : filter(r => !nothing?(r[1]), map(n => [n, (String) n == name ? nothing() : flp-near-key(n, weighed, own)], all));
+   flp-lowest(keyed, 8);
   }
   // A call whose argument count matches no definition of its name lowers to "stray ')' in value position", which names no
   // call. Form reads the reference's calls itself: each name that stands in the stdlib's .bml files, with the count it was
@@ -649,31 +684,51 @@ section [form.bml] {
    }, [], 0 .. len(text));
    found;
   }
-  // [file, params text, count] of each 'def name(' in the stdlib's .bml files
-  def flp-def-arities(name, texts) {
-   let mark = "def " + name + "(";
-   foldl((acc, ft) => {
-    let at = str_find(ft[1], mark, 0);
-    at < 0 ? acc : append(acc, [[ft[0], substring(ft[1], at + len(mark), flp-arg-end(ft[1], at + len(mark))), flp-arg-walk(ft[1], at + len(mark), 0, false, 0, false)]]);
-   }, [], texts);
+  // The stdlib's def table is read once a walk: one row per 'def name(' of the stdlib's .bml files, "\nname\tfile\tcount\tparams",
+  // kept beside the walk's ledger and removed when the next walk starts, so a call is looked up, not searched for in 800 files.
+  def flp-defs-dir() = flp-dir() + "/defs-table";
+  def flp-defs-path() = flp-defs-dir() + "/table";
+  def flp-defs-files() = split-on(nsi-text(nsi-git()), byte_to_str(0)) |> filter(p => flp-starts?(p, "form/form-stdlib/") && flp-ends?(p, ".bml"));
+  def flp-defs-name?(n) = len(n) > 0 && len(n) < 80 && all?(i => flp-ident-byte?(str_byte_at(n, i)), 0 .. len(n));
+  def flp-defs-row(file, piece) {
+   let at = str_find(piece, "(", 0);
+   let name = at < 1 ? "" : substring(piece, 0, at);
+   flp-defs-name?(name) ? mc-cat(["\n", name, "\t", file, "\t", flp-arg-walk(piece, at + 1, 0, false, 0, false).str(), "\t", flp-cut-at(substring(piece, at + 1, flp-arg-end(piece, at + 1)), "\n")]) : "";
+  }
+  def flp-defs-of-file(file) {
+   let pieces = split-on(fhn-read(file), "def ");
+   mc-cat(map(p => flp-defs-row(file, p), pieces[1:]));
+  }
+  def flp-defs-build() = mc-cat(map(flp-defs-of-file, flp-defs-files()));
+  def flp-defs-table() {
+   let path = flp-defs-path();
+   flp-exists?(path) ? fhn-read(path) : { let text = flp-defs-build(); let put = flp-put(path, text); text; };
+  }
+  def flp-defs-fresh() = host_dir_rmdir(flp-defs-dir());
+  // [file, params text, count] of each definition of name in the table
+  def flp-def-arities(name, table) = flp-def-rows(table, "\n" + name + "\t", 0, []);
+  def flp-def-rows(table, key, from, acc) {
+   let at = str_find(table, key, from);
+   let end = at < 0 ? -1 : str_find(table, "\n", at + 1);
+   let row = at < 0 ? [] : split-on(substring(table, at + 1, end < 0 ? len(table) : end), "\t");
+   at < 0 || len(row) < 4 ? acc : flp-def-rows(table, key, at + 1, append(acc, [[row[1], row[3], flp-number-at(row[2], 0)]]));
   }
   def flp-arg-end(t, i) = i >= len(t) || str_byte_at(t, i) == 41 ? i : flp-arg-end(t, i + 1);
   def flp-fits-in?(rows, n) = nil?(rows) ? false : (Comparable) rows[0][2] == n ? true : flp-fits-in?(rows[1:], n);
   def flp-arity-block(ref) {
    let calls = flp-calls-of(ref);
-   let files = split-on(nsi-text(nsi-git()), byte_to_str(0)) |> filter(p => flp-starts?(p, "form/form-stdlib/") && flp-ends?(p, ".bml"));
-   let texts = nil?(calls) ? [] : map(f => [f, fhn-read(f)], files);
-   let stands = map(c => [c[0], c[1], flp-def-arities(c[0], texts)], calls);
+   let table = nil?(calls) ? "" : flp-defs-table();
+   let stands = map(c => [c[0], c[1], flp-def-arities(c[0], table)], calls);
    let known = filter(w => !nil?(w[2]), stands);
    let wrong = take(4, filter(w => !flp-fits-in?(w[2], w[1]), known));
    nil?(wrong) ? "" : mc-cat(["\nThe compiler named no call, but a call whose argument count fits no definition of its name lowers to a stray ')'. Form read your <reference>'s calls: ", flp-join(map(w => mc-cat([w[0], " is called with ", w[1].str(), " argument", w[1] == 1 ? "" : "s", " and stands with ", flp-join(map(a => mc-cat([a[2].str(), ": ", w[0], "(", a[1], ") in ", a[0]]), w[2]), "; ")]), wrong), ". "), ". Call each with the arguments it stands with."]);
   }
-  def flp-unresolved-block(said) {
+  def flp-unresolved-block(said, own) {
    let names = flp-unresolved-names(said);
    nil?(names) ? "" : {
     let standing = flp-standing-names();
     mc-cat(["\nThe compiler found no definition for: ", flp-join(names, ", "), ". ", flp-join(map(n => {
-     let near = flp-near-names(n, standing);
+     let near = flp-near-names(n, standing, own);
      nil?(near) ? mc-cat([n, " shares no word with a name that stands."]) : mc-cat(["Names that stand and share a word with ", n, ": ", flp-join(near, ", "), "."]);
     }, names), " "), " Use a name that stands, or write the helper whole in your <reference>."]);
    };
@@ -1161,7 +1216,7 @@ section [form.bml] {
    let full = flp-p-full(plan);
    if (!nothing?(unplaced)) then flp-with-readings(flp-refused(7, mc-cat(["reference-site:", unplaced[0]]), mc-cat(["Form could not stand the <reference> definitions in ", unplaced[0], "."])), v[3], v[4])
    else if (!nothing?(broken)) then flp-with-readings(flp-refused(7, mc-cat(["reference-check:", flp-head(flp-sha(json-emit(broken)), 12)]), mc-cat(["The check ", json-emit(broken), " forbids the change your <reference> makes: with your definitions standing it prints ", flp-said(seen[2]), " (exit ", seen[4].str(), ") where it asks ", flp-said(seen[1]), " (exit ", seen[3].str(), "). A check pins what the gap keeps: leave out a check the change must break, or ask for what the changed file prints."])), v[3], v[4])
-   else if (nothing?(r[0]) && (str_find(r[2], "error", 0) >= 0)) then flp-reach(flp-refused(7, "reference-compile", mc-cat(["Your <reference> definitions, standing in a scratch copy of the file, do not compile, so they witness nothing. Write them in the file's own dialect, as its other definitions are written. fkwu said:\n", r[2], flp-quote-at(r[2], texts), flp-unresolved-block(r[2]), str_find(r[2], "stray ')'", 0) >= 0 ? flp-arity-block(ref) : ""])), v[3], v[4], r[0])
+   else if (nothing?(r[0]) && (str_find(r[2], "error", 0) >= 0)) then flp-reach(flp-refused(7, "reference-compile", mc-cat(["Your <reference> definitions, standing in a scratch copy of the file, do not compile, so they witness nothing. Write them in the file's own dialect, as its other definitions are written. fkwu said:\n", r[2], flp-quote-at(r[2], texts), flp-unresolved-block(r[2], flp-source-names(filter(w => flp-exists?(w) && !flp-is-dir?(w), flp-p-writable(plan)))), str_find(r[2], "stray ')'", 0) >= 0 ? flp-arity-block(ref) : ""])), v[3], v[4], r[0])
    else if (nothing?(r[0]) || (!((Comparable) r[0] == full))) then {
     let cases=flp-cases-read(r[2]);
     flp-with-cases(flp-reach(flp-refused(7, "unreachable", !nothing?(cases) ? flp-cases-words(cases,r[0],full,r[2]) : mc-cat(["With your <reference> definitions standing, the band reads ", flp-show(r[0]), " of ", full.str(), ": the band, the goal and the reference disagree, so no candidate the goal describes turns the band full.", if ((Comparable) len(r[2]) > 0) then mc-cat([" fkwu said:\n", r[2], flp-quote-at(r[2], texts)]) else ""])), v[3], v[4], r[0]),cases);
@@ -1435,13 +1490,39 @@ section [form.bml] {
     let parsed=observed[0]; let v=observed[1]; let row=observed[2]; let stamp=observed[3];
     flp-moot?(v) ? [3, flp-moot-witness(parsed[2], ctx, stamp, v, way, n)] : flp-held?(v) ? [1, flp-land(parsed[2], req, ctx, append(planner, [json-node-pair("reachable", if nothing?(v[5]) then json-node-null() else json-node-int(1)), json-node-pair("plan_solofall", flp-falls-node(v[6])), json-node-pair("plan_checkfall", flp-checkfall-node(v[6]))]), row)] : [0, [flp-finding(n, way, v), v[1], way[1], way[0], said[1], row, said[2], said[3]]];
    }
-   def flp-heard(req, ctx, memory, n, way, said, started) {
+   // ── a case's expected string, written from the reference's printed value ──
+  // The voice cannot know how a value prints (a tuple, a list of strings, a string holding JSON). A case that failed
+  // under the reference whose expected value and printed value read the same once quoting, brackets, commas and
+  // blanks are put aside differs from the reference only in its print: Form writes the printed value as the case's
+  // expected, from the reference's own run. The band then runs once more, and rungs 2 and 3 still measure whether
+  // the case tells today's code from the reference's, so a case that holds under every stub stays refused.
+  def flp-strip-print(s) = foldl((t, m) => mc-cat(split-on(t, m)), s, ["\\", "\"", "'", " ", "\n", "\t", ",", ":", "(", ")", "[", "]", "{", "}"]);
+  def flp-print-same?(actual, expected) = (String) actual != (String) expected && len(flp-strip-print(actual)) > 0 && (String) flp-strip-print(actual) == (String) flp-strip-print(expected) && faj-valid(actual);
+  def flp-printed-rows(v) { let c = flp-cases-of(v); nothing?(c) ? [] : filter(r => flp-print-same?(r[2], r[3]), c[2]); }
+  def flp-printed-case(item, i, rows) {
+   let row = flp-first(rows, r => (Comparable) r[0] == i);
+   nothing?(row) ? item : oh-set(item, "equals", parse-json("printed-value", row[2]));
+  }
+  def flp-printed-repair(said, v) {
+   let rows = flp-printed-rows(v);
+   let text = nil?(rows) ? nothing() : flp-block(said[1], "cases");
+   nothing?(text) || !faj-valid(text) ? nothing() : {
+    let items = json-array-elements(parse-json("plan-cases", text));
+    let next = map(i => flp-printed-case(items[i], i, rows), 0 .. len(items));
+    let said2 = ["answered", mc-cat(["<cases>\n", json-emit(json-node-array(next)), "\n</cases>"]), 0, 0, len(said) > 4 ? said[4] : ""];
+    let kept = flp-case-repaired(said[1], said2);
+    print_str(mc-cat(["[local-plan:printed] ", len(rows).str(), " case(s) now expect the value the reference printed: ", flp-join(map(r => (r[0] + 1).str(), rows), ", ")]));
+    kept;
+   };
+  }
+  def flp-heard(req, ctx, memory, n, way, said, started) {
     let planner=flp-planner(memory,n,way,said);
     let observed=flp-observed(req,ctx,n,way,said,started,planner);
     let v=observed[1];
     let reuse=v[0]==7 && len(said)>4 && said[4] != "" ? flp-recheck(req,ctx,said[4]) : ["refused",[],""];
     if reuse[0]=="queued" then [1,reuse[1]] else {
-     let repaired=v[0]==7 && said[0]=="answered" ? flp-reference-care(req,ctx,said,v) : nothing();
+     let printed=v[0]==7 && said[0]=="answered" ? flp-printed-repair(said,v) : nothing();
+     let repaired=!nothing?(printed) ? printed : v[0]==7 && said[0]=="answered" ? flp-reference-care(req,ctx,said,v) : nothing();
      if nothing?(repaired) then flp-finish(req,ctx,n,way,said,planner,observed) else if repaired[0]=="attention" then {
       let reply=len(said)>4 ? said[4] : "";
       let declined=append(v[:2],append(["Native reference care: "+repaired[1]+"\nRetained result: "+repaired[4]+"\nOriginal refusal: "+v[2]],v[3:]));
@@ -1630,7 +1711,8 @@ section [form.bml] {
   // on. The ledger holds more than a walk's memory (a recheck, a care row), so the next pick reads the mark rather than
   // reading the rows again; a request whose digest moved reads unmarked and takes one option.
   def flp-park-path(ledger) = ledger ++ ".parked";
-  def flp-park-mark(req, ctx, why) = fhn-append(flp-park-path(flp-ctx-ledger(ctx)), json-emit(json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("request", flp-req-id(req)), fhn-s("source_digest", flp-source-digest(req)), fhn-s("why", why)])) ++ "\n");
+  def flp-park-mark(req, ctx, why) = flp-park-mark-at(req, flp-ctx-ledger(ctx), why);
+  def flp-park-mark-at(req, ledger, why) = fhn-append(flp-park-path(ledger), json-emit(json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("request", flp-req-id(req)), fhn-s("source_digest", flp-source-digest(req)), fhn-s("why", why)])) ++ "\n");
   def flp-park-marked?(req, ledger) {
    let rows = filter(r => (String) flp-text(r, "request") == flp-req-id(req), flp-queue-rows(flp-park-path(ledger)));
    nil?(rows) ? false : { let today = flp-source-digest(req); any?(r => (String) flp-text(r, "source_digest") == today, rows); };
@@ -1643,7 +1725,10 @@ section [form.bml] {
    oac-node?(ack) ? (flp-outcome-still?(next) ? { print_str(flp-still-line(context[0], next)); flp-park-mark(context[0],context[1],"still"); flp-after-decline(context[0],context[1],next); } : flp-ways-spent?(next, flp-ctx-voices(context[1])) ? { print_str(flp-spent-line(context[0], next)); flp-park-mark(context[0],context[1],"spent"); flp-after-decline(context[0],context[1],next); } : again(next)) :
     oac-one?(ack) ? flp-ended(oac-payload(ack),memory) : flp-after-decline(context[0],context[1],memory);
   }
-  def flp-walk-from(req,ctx,memory) = flp-walk-owned(req,flp-with-admission-start(ctx,len(memory)),memory);
+  def flp-walk-from(req,ctx,memory) {
+   let fresh = flp-defs-fresh();
+   flp-walk-owned(req,flp-with-admission-start(ctx,len(memory)),memory);
+  }
   def flp-release-pending?(memory) = !nil?(memory) && flp-release-held?(flp-row-admission(memory[-1][5]));
   def flp-walk-owned(req, ctx, memory) {
    // Releasing and verifying an answer already produced consumes no new
