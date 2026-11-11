@@ -337,16 +337,24 @@ section [form.bml] {
   def flp-packet(req, lens, feedback, prior, queue) {
    let head = mc-cat([flp-intro(), "\n\n", flp-case-words(), "\nThe witness imports form-stdlib/core.fk. Use start .. end for end-exclusive integer ranges, such as 0 .. len(xs); never enumerate a dynamic index range as literals. substring(text,start,end) also uses an exclusive end, not a length. str_byte_at(text,index) returns the integer byte.\n", flp-lens-text(lens), "\n\nThe request:\n", flp-request-text(req), "\n", flp-files-block(req), "\n"]);
    let tail = mc-cat([flp-case-reply(), flp-feedback-block(feedback, prior), "\nThe original task and current observations take precedence:\n", flp-text(req,"needs"), "\n", flp-text(req,"evidence")]);
-   mc-cat([head, flp-callers-within(req, flp-packet-budget() - len(head) - len(tail)), tail]);
+   mc-cat([head, flp-callers-block(req), tail]);
   }
-  // One decode reads the whole packet before its first reply id, and an 80 KB packet ran past 20 minutes with no row. The
-  // callers' source stands while the packet fits; past that their paths stand, and a packet still past the budget opens no
-  // voice (flp-attempt).
-  def flp-packet-budget() = 48000;
-  def flp-callers-within(req, room) {
-   let whole = flp-callers-block(req);
-   len(whole) <= room ? whole : mc-cat(["Read-only callers stand in ", flp-join(map(source=>source[0],flp-callers(req)),", "), "; their source is past this packet's budget, so keep each definition's existing contract.\n\n"]);
+  // No byte limit stands on a packet. One decode reads the whole packet before its first reply id, so what a packet costs is the
+  // time reading it takes at the rate this machine MEASURED lately (the median prefill_tok_s of the last 24 rows of the local-run
+  // ledger, ids taken as a third of the bytes). The window the caller holds must hold that reading beside the measured option
+  // floor (observe/local-plan-run.bml lpr-ask); a window that cannot holds the option (the walk resumes it with the options left),
+  // and with no window, or no measured rate yet, nothing bounds the packet. The callers' source always stands whole.
+  def flp-rate-path() = "receipts/local-run-ledger.jsonl";
+  def flp-rate-of(line) {
+   let at = str_find(line, "\"prefill_tok_s\":", 0);
+   (at < 0) || (len(line) <= at + 16) || (str_byte_at(line, at + 16) < 48) || (str_byte_at(line, at + 16) > 57) ? nothing() : flp-number-at(line, at + 16);
   }
+  def flp-rates() {
+   let lines = file_size(flp-rate-path()) < 1 ? [] : flp-lines(fhn-read(flp-rate-path()));
+   let recent = len(lines) > 24 ? lines[(len(lines) - 24):] : lines;
+   hw-sorted(filter(r => !nothing?(r) && r > 0, map(l => flp-rate-of(l), recent)));
+  }
+  def flp-read-ms(packet, rates) = nil?(rates) ? 0 : ((len(packet) / 3) * 1000) / rates[len(rates) / 2];
   // ── the reply: <plan>, <goal> and <band> ──
   def flp-unfence(s) {
    let t = trim(s);
@@ -1234,10 +1242,9 @@ section [form.bml] {
    let way = focusing ? [choice[0],choice[1],"focus"] : choice;
    let feedback = if nil?(memory) then "" else memory[-1][0];
    let prior = if nil?(memory) then "" else memory[-1][4];
-   let packet = focusing ? flp-focus-packet(req,feedback,base,way[1]) : repairing ? flp-case-repair-packet(req,feedback,prior,way[1]) : flp-packet(req, way[1], feedback, prior, flp-ctx-queue(ctx));
+   let whole = focusing ? flp-focus-packet(req,feedback,base,way[1]) : repairing ? flp-case-repair-packet(req,feedback,prior,way[1]) : flp-packet(req, way[1], feedback, prior, flp-ctx-queue(ctx));
    let started = now_unix_ms();
-   let fits = len(packet) <= flp-packet-budget();
-   let heard = fits ? flp-ask(flp-ctx-voice(ctx), packet, way[0], n, way[1]) : ["unread",mc-cat(["The packet holds ",len(packet).str()," bytes past the budget of ",flp-packet-budget().str(),", so no voice opened: the request's files stand whole in it, and what it stands on must narrow."]),0,0,""];
+   let heard = flp-ask(flp-ctx-voice(ctx), whole, way[0], n, way[1]);
    let answered = fat-has(["answered","incomplete"],heard[0]);
    let said = focusing && answered ? flp-focus-repaired(base,heard,flp-copies-kept(map(m=>m[5],memory))) : repairing && answered ? flp-case-repaired(prior,heard) : heard;
    if ((String) said[0] == "held") then [2, said] else flp-heard(req, ctx, memory, n, way, said, started);

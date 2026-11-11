@@ -308,8 +308,9 @@ printed numbers are my subtraction and say so.
   Those rules are the 3B door's own, read in place through the judge's import of that door (`ll-digest`, `ll-better`,
   `ll-milli`, `ll-id`, `ll-reading-of`, `ll-shared`, `ll-negative-pairs`): one definition serves both lifts. The band is
   `form/form-stdlib/tests/qwen-last-block-judge-band.bml`, verdict **127**, exit 0, no model, about 15 s with two door runs as
-  children (64 is the per-row clause: the judge's `better` needs the mean to fall and no held-out row to rise, as
-  `docs/native-session-learning.md` promises, and the row names `valid_rows_worse`). It proves:
+  children (64 is the per-row clause: since 2026-11-11 the judge's `better` needs the mean to fall by at least one standard error of
+  the per-row falls, so a spread inside a clear fall promotes and a fall inside the rows' noise does not; no single row vetoes, and
+  the row names `valid_rows_worse`). It proves:
   - better 1 for a lower child, and 0 for a higher or equal one even when its rejected loss fell;
   - a missing adapter file and a missing config are refused by name, and the door run as a child exits 1 with no governor line;
   - the fixture pair's A and B read back by their spans to the floats written;
