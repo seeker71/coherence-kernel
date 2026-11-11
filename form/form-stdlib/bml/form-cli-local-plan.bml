@@ -338,7 +338,7 @@ section [form.bml] {
   def flp-envelope-refusal(reading) = nothing?(reading) || len(reading[3]) == 0 ? nothing() : ["envelope-ended", mc-cat(["Your reply left its envelope at ", reading[3], " and no next token the voice weighed kept it inside, so it ended there. Write the whole reply again: <plan>, <goal>, <cases> or <band>, then <reference>, each block closed."])];
   def flp-packet(req, lens, feedback, prior, queue) {
    let head = mc-cat([flp-intro(), "\n\n", flp-case-words(), "\nThe witness imports form-stdlib/core.fk. Use start .. end for end-exclusive integer ranges, such as 0 .. len(xs); never enumerate a dynamic index range as literals. substring(text,start,end) also uses an exclusive end, not a length. str_byte_at(text,index) returns the integer byte.\n", flp-lens-text(lens), "\n\nThe request:\n", flp-request-text(req), "\n", flp-files-block(req), "\n"]);
-   let tail = mc-cat([flp-case-reply(), flp-feedback-block(feedback, prior), "\nThe original task and current observations take precedence:\n", flp-text(req,"needs"), "\n", flp-text(req,"evidence")]);
+   let tail = mc-cat([flp-head-block(req), flp-case-reply(), flp-feedback-block(feedback, prior), "\nThe original task and current observations take precedence:\n", flp-text(req,"needs"), "\n", flp-text(req,"evidence")]);
    mc-cat([head, flp-callers-block(req), tail]);
   }
   // No byte limit stands on a packet. One decode reads the whole packet before its first reply id, so what a packet costs is the
@@ -427,7 +427,8 @@ section [form.bml] {
   def flp-case-argument(value) = fcgp-object?(value) ? "parse-json(\"case-argument\"," + flp-said(json-emit(value)) + ")" : fcgp-array?(value) ? "[" + flp-join(map(flp-case-argument,json-array-elements(value)),",") + "]" : flp-case-value(value);
   def flp-case-call(item) = json-object-has?(item,"call") ? fcgp-str(item,"call") : fcgp-str(item,"function") + "(" + flp-join(map(flp-case-argument,json-array-elements(json-object-get(item,"arguments"))),",") + ")";
   def flp-source-path(path) = flp-starts?(path,"form-stdlib/") ? "form/" + path : path;
-  def flp-case-check(definition) = json-node-object([fhn-s("tool","rg"),json-node-pair("arguments",flp-json-strings(["-c","-F",flp-file-bml?(definition[2]) ? "def " + definition[0] + "(" : flp-fk-mark(definition[0]),definition[2]])),fhn-s("stdout","1\n")]);
+  def flp-case-check(definition) = (String) definition[0] == flp-head-name() ? flp-head-check(definition[2]) : flp-case-check-def(definition);
+  def flp-case-check-def(definition) = json-node-object([fhn-s("tool","rg"),json-node-pair("arguments",flp-json-strings(["-c","-F",flp-file-bml?(definition[2]) ? "def " + definition[0] + "(" : flp-fk-mark(definition[0]),definition[2]])),fhn-s("stdout","1\n")]);
   def flp-case-plan(obj) {
    let writable=flp-strs(obj,"writable");
    let sources=flp-strs(obj,"sources") |> map(flp-source-path) |> filter(path=>!flp-has?(writable,path));
@@ -541,8 +542,91 @@ section [form.bml] {
    let at = str_find(text, flp-bml-mark(name), from);
    if (at < 0) then -1 else if ((Comparable) flp-indent-end(text, flp-line-start(text, at)) == at) then at else flp-bml-find(text, name, (at + 1));
   }
-  def flp-def-in?(text, name) = if flp-bml-surface?(text) then (flp-bml-find(text, name, 0) >= 0) else (str_find(text, flp-fk-mark(name), 0) >= 0);
+  def flp-def-in?(text, name) = if (String) name == flp-head-name() then true else if flp-bml-surface?(text) then (flp-bml-find(text, name, 0) >= 0) else (str_find(text, flp-fk-mark(name), 0) >= 0);
   def flp-def-present?(d) = flp-exists?(d[2]) && flp-def-in?(fhn-read(d[2]), d[0]);
+  // ── a head-line request: the file's head is the thing to change, not a definition ──
+  // A request whose every cited line lies in the leading comment lines of one Form source has no definition to change, so
+  // the plan names the file's head as its one definition, "@head": its <reference> is the head whole, a case reads the
+  // file's text (read_file), and under a stub the file stands as today's (the head is today's, so a case that reads
+  // the new head fails there). Head lines are the leading run of blank, ';' and '//' lines, trailing blanks left out.
+  def flp-head-name() = "@head";
+  def flp-head-line?(line) = len(trim(line)) == 0 || flp-starts?(trim(line), ";") || flp-starts?(trim(line), "//");
+  def flp-head-count(lines, i) = i >= len(lines) || !flp-head-line?(lines[i]) ? i : flp-head-count(lines, i + 1);
+  def flp-head-trim(lines, k) = k > 0 && len(trim(lines[k - 1])) == 0 ? flp-head-trim(lines, k - 1) : k;
+  def flp-head-lines(text) { let lines = flp-lines(text); take(flp-head-trim(lines, flp-head-count(lines, 0)), lines); }
+  def flp-head-text(text) = flp-join(flp-head-lines(text), "\n");
+  def flp-head-of(text) { let h = flp-head-text(text); len(h) == 0 ? nothing() : h; }
+  def flp-head-put(text, head) = head + substring(text, len(flp-head-text(text)), len(text));
+  def flp-head-placed(text, ref) { let h = flp-head-of(ref); nothing?(text) || nothing?(h) ? nothing() : flp-head-put(text, h); }
+  // "path:N" or "path:N-M" (a list of lines is not a cite): [path, last line], or nothing
+  def flp-head-cite(s) {
+   let at = flp-last-find(s, ":", 0, -1);
+   let rest = at < 0 ? "" : substring(s, at + 1, len(s));
+   let digit = len(rest) > 0 && str_byte_at(rest, 0) >= 48 && str_byte_at(rest, 0) <= 57;
+   let dash = str_find(rest, "-", 0);
+   !digit || str_find(rest, ",", 0) >= 0 ? nothing() : [substring(s, 0, at), flp-number-at(rest, dash < 0 ? 0 : dash + 1)];
+  }
+  def flp-head-cites(req) = map(flp-head-cite, flp-strs(req, "where"));
+  def flp-head-file(req) { let cites = flp-head-cites(req); nil?(cites) || any?(c => nothing?(c), cites) ? nothing() : cites[0][0]; }
+  def flp-head-request?(req) {
+   let cites = flp-head-cites(req);
+   let file = flp-head-file(req);
+   let code = !nothing?(file) && (flp-ends?(file, ".fk") || flp-ends?(file, ".bml")) && flp-exists?(file);
+   // a request whose needs name a definition of that file stands in the definition, whatever line it cites
+   code && nil?(flp-source-names([file]) |> filter(name => flp-mentioned?(flp-text(req, "needs"), name, 0))) && all?(c =>(String) c[0] == file && !nothing?(c[1]) && c[1] >= 1 && c[1] <= flp-head-count(flp-lines(fhn-read(file)), 0), cites);
+  }
+  // a check pinning what a head edit keeps: the file's last non-blank line, as today's file prints it
+  def flp-head-check(file) {
+   let kept = filter(l => len(trim(l)) > 0, flp-lines(fhn-read(file)));
+   json-node-object([fhn-s("tool", "tail"), json-node-pair("arguments", flp-json-strings(["-n", "1", file])), fhn-s("stdout", (nil?(kept) ? "" : kept[len(kept) - 1]) + "\n")]);
+  }
+  def flp-head-block(req) {
+   let file = flp-head-request?(req) ? flp-head-file(req) : nothing();
+   nothing?(file) ? "" : {
+    let lines = flp-head-lines(fhn-read(file));
+    mc-cat(["\nThis request cites line(s) of the head of ", file, ", comment lines before its first code, so it has no definition to change. Plan it as a head-line edit: ",
+     "writable [\"", file, "\"]; definitions [{\"name\":\"", flp-head-name(), "\",\"params\":[],\"file\":\"", file, "\"}]; the <goal> names ", flp-head-name(), "; <reference> holds ",
+     "the file's whole head as it must read after the change, every leading comment line, the ones that stay copied unchanged, and no code after them. ",
+     "Each case is a {call,equals} that reads the file, such as {\"call\":\"str_find(read_file(\\\"", file, "\\\"), \\\"<text the head must hold>\\\", 0) >= 0\",\"equals\":true}, ",
+     "or with \"< 0\" for a line that must go; with today's head each of those cases fails, so no case may ask for today's text. Today's head:\n",
+     flp-join(map(i => mc-cat([(i + 1).str(), ": ", lines[i]]), 0 .. len(lines)), "\n"), "\n\n"]);
+   };
+  }
+  // ── the compiler's unresolved names, beside the names that stand and share a word ──
+  // A voice that writes read_lines is told by the compiler it matched nothing; the next packet then names the words that
+  // do stand (core.fk's definitions and the primitive registry's rows) which share a word with each name.
+  def flp-unresolved-mark() = "[unresolved-call] '";
+  def flp-unresolved-from(said, from, acc) {
+   let at = str_find(said, flp-unresolved-mark(), from);
+   let start = at + len(flp-unresolved-mark());
+   let end = at < 0 ? -1 : str_find(said, "'", start);
+   at < 0 || end < 0 ? acc : flp-unresolved-from(said, end + 1, flp-has?(acc, substring(said, start, end)) ? acc : append(acc, [substring(said, start, end)]));
+  }
+  def flp-unresolved-names(said) = flp-unresolved-from(said, 0, []);
+  def flp-name-words(name) = filter(w => len(w) > 2, foldl((acc, p) => append(acc, split-on(p, "-")), [], split-on(name, "_")));
+  def flp-standing-names() {
+   let registry = fhn-read("form/form-stdlib/primitive-registry.fk");
+   let core = fhn-read("form/form-stdlib/core.fk");
+   let after = pieces => pieces[1:];
+   let rows = map(p => flp-cut-at(p, "\""), after(split-on(registry, "prim(\"")));
+   let defs = map(p => flp-cut-at(flp-cut-at(p, " "), "\n"), after(split-on(core, "(defn ")));
+   foldl((acc, n) => len(n) == 0 || flp-has?(acc, n) ? acc : append(acc, [n]), [], append(rows, defs));
+  }
+  def flp-near-names(name, standing) {
+   let words = flp-name-words(name);
+   let scored = filter(p => p[1] > 0 && (String) p[0] != name, map(n => [n, len(filter(w => str_find(n, w, 0) >= 0, words))], standing));
+   take(8, append(map(p => p[0], filter(p => p[1] > 1, scored)), map(p => p[0], filter(p => p[1] == 1, scored))));
+  }
+  def flp-unresolved-block(said) {
+   let names = flp-unresolved-names(said);
+   nil?(names) ? "" : {
+    let standing = flp-standing-names();
+    mc-cat(["\nThe compiler found no definition for: ", flp-join(names, ", "), ". ", flp-join(map(n => {
+     let near = flp-near-names(n, standing);
+     nil?(near) ? mc-cat([n, " shares no word with a name that stands."]) : mc-cat(["Names that stand and share a word with ", n, ": ", flp-join(near, ", "), "."]);
+    }, names), " "), " Use a name that stands, or write the helper whole in your <reference>."]);
+   };
+  }
   def flp-shape(plan, ctx) = flp-shape-at(plan,ctx,false);
   def flp-shape-at(plan, ctx, owned) {
    let id = flp-p-id(plan);
@@ -809,15 +893,17 @@ section [form.bml] {
    if (at >= 0) then flp-bml-replace(text, d, make, at) else flp-bml-insert(text, d, make);
   }
   def flp-blank(bml) = if bml then "section [form.bml] {\n class LocalPlanStub {\n }\n 0;\n}\n" else "(do\n    0)\n";
-  def flp-stub-def(text, d, bml, flavor) = if nothing?(text) then text else if bml then flp-bml-place(text, d, raw => flp-bml-def(d[0], raw, flavor)) else flp-fk-place(text, d, params => flp-fk-def(d[0], params, flavor));
+  def flp-stub-def(text, d, bml, flavor) = if nothing?(text) || (String) d[0] == flp-head-name() then text else if bml then flp-bml-place(text, d, raw => flp-bml-def(d[0], raw, flavor)) else flp-fk-place(text, d, params => flp-fk-def(d[0], params, flavor));
   // the planner's reference: each definition's whole text as its <reference> block writes it
   def flp-file-bml?(w) = if flp-exists?(w) then flp-bml-surface?(fhn-read(w)) else flp-ends?(w, ".bml");
-  def flp-ref-text(ref, d, bml) {
+  def flp-ref-text(ref, d, bml) = (String) d[0] == flp-head-name() ? flp-head-of(ref) : flp-ref-text-def(ref, d, bml);
+  def flp-ref-text-def(ref, d, bml) {
    let at = if bml then flp-bml-find(ref, d[0], 0) else str_find(ref, flp-fk-mark(d[0]), 0);
    let end = if (at < 0) then -1 else if bml then flp-bml-end(ref, at, (at - flp-line-start(ref, at))) else flp-sexp-end(ref, at, 0, false);
    if ((at < 0) || (end < 0)) then nothing() else trim(substring(ref, at, end));
   }
-  def flp-ref-def(text, d, bml, ref) {
+  def flp-ref-def(text, d, bml, ref) = (String) d[0] == flp-head-name() ? flp-head-placed(text, ref) : flp-ref-def-of(text, d, bml, ref);
+  def flp-ref-def-of(text, d, bml, ref) {
    let body = flp-ref-text(ref, d, bml);
    if (nothing?(text) || nothing?(body)) then nothing() else if bml then flp-bml-place(text, d, raw => body) else flp-fk-place(text, d, params => body);
   }
@@ -909,7 +995,7 @@ section [form.bml] {
    let changed = filter(n=>any?(d=>(String) d[0]==n,flp-p-defs(plan)),names);
    let absent = flp-first(names,n=>!flp-has?(changed,n) && str_find(flp-p-text(plan),n+"(",0)<0);
    let manifest = flp-join(map(d=>d[0],flp-p-defs(plan)),", ");
-   if nil?(names) || flp-on-request?(plan,req) then flp-held()
+   if nil?(names) || flp-on-request?(plan,req) || flp-head-request?(req) then flp-held()
    else if nil?(changed) then flp-refused(6,mc-cat(["request-definition:",names[0]]),mc-cat(["The request names ",flp-join(names,", ")," and the plan changes ",manifest,": a definition your reference writes as today's text leaves the manifest. Change what the request names."]))
    else if !nothing?(absent) then flp-refused(6,mc-cat(["request-definition:",absent]),mc-cat(["The request names ",absent,", which the plan neither changes nor calls in a case. Change it, or call it in a case that reads what the request asks of it."]))
    else flp-held();
@@ -1024,7 +1110,7 @@ section [form.bml] {
    let full = flp-p-full(plan);
    if (!nothing?(unplaced)) then flp-with-readings(flp-refused(7, mc-cat(["reference-site:", unplaced[0]]), mc-cat(["Form could not stand the <reference> definitions in ", unplaced[0], "."])), v[3], v[4])
    else if (!nothing?(broken)) then flp-with-readings(flp-refused(7, mc-cat(["reference-check:", flp-head(flp-sha(json-emit(broken)), 12)]), mc-cat(["The check ", json-emit(broken), " forbids the change your <reference> makes: with your definitions standing it prints ", flp-said(seen[2]), " (exit ", seen[4].str(), ") where it asks ", flp-said(seen[1]), " (exit ", seen[3].str(), "). A check pins what the gap keeps: leave out a check the change must break, or ask for what the changed file prints."])), v[3], v[4])
-   else if (nothing?(r[0]) && (str_find(r[2], "error", 0) >= 0)) then flp-reach(flp-refused(7, "reference-compile", mc-cat(["Your <reference> definitions, standing in a scratch copy of the file, do not compile, so they witness nothing. Write them in the file's own dialect, as its other definitions are written. fkwu said:\n", r[2], flp-quote-at(r[2], texts)])), v[3], v[4], r[0])
+   else if (nothing?(r[0]) && (str_find(r[2], "error", 0) >= 0)) then flp-reach(flp-refused(7, "reference-compile", mc-cat(["Your <reference> definitions, standing in a scratch copy of the file, do not compile, so they witness nothing. Write them in the file's own dialect, as its other definitions are written. fkwu said:\n", r[2], flp-quote-at(r[2], texts), flp-unresolved-block(r[2])])), v[3], v[4], r[0])
    else if (nothing?(r[0]) || (!((Comparable) r[0] == full))) then {
     let cases=flp-cases-read(r[2]);
     flp-with-cases(flp-reach(flp-refused(7, "unreachable", !nothing?(cases) ? flp-cases-words(cases,r[0],full,r[2]) : mc-cat(["With your <reference> definitions standing, the band reads ", flp-show(r[0]), " of ", full.str(), ": the band, the goal and the reference disagree, so no candidate the goal describes turns the band full.", if ((Comparable) len(r[2]) > 0) then mc-cat([" fkwu said:\n", r[2], flp-quote-at(r[2], texts)]) else ""])), v[3], v[4], r[0]),cases);
