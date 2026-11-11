@@ -24,9 +24,13 @@ section [form.bml] {
   def qlwt-door() = "qwen-last-block-train";
   def qlwt-spec() = [["out", "str"], ["rows", "str"], ["valid", "str"], ["valid_rows", "int"], ["negatives", "str"], ["heldout_every", "int"], ["steps", "int"], ["lr_micro", "int"], ["margin_milli", "int"], ["neg_every", "int"], ["val_every", "int"], ["captures", "str"], ["valid_captures", "str"], ["neg_captures", "str"], ["wall_s", "int"], ["seed_micro", "int"], ["dev_every", "int"], ["dev_upto", "int"]];
   def qlwt-model() = "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf";
-  def qlwt-maxpos() = 256;
   def qlwt-span() = 64;
-  def qlwt-cap() = 160;
+  // The window is measured, never held: rows are read whole (cap 0), the longest row's ids are the window the scratch and the
+  // training tape are sized for, and the context holds that window rounded up to a span. The memory governor admits the real
+  // bytes, so a longer row slows or waits for memory; it is not cut.
+  def qlwt-longest(rows) = foldl((m, r) => qlbt-row-n(r) + 1 > m ? qlbt-row-n(r) + 1 : m, 0, rows);
+  def qlwt-window(prepared) = qlwt-longest(append(append(prepared[0], prepared[1]), prepared[2]));
+  def qlwt-rounded(w) = ((w + qlwt-span() - 1) / qlwt-span()) * qlwt-span();
   def qlwt-rank() = 8;
   def qlwt-alpha() = 16.0;
   def qlwt-scale() = qlwt-alpha() / (qlwt-rank() + 0.0);
@@ -111,10 +115,10 @@ section [form.bml] {
    wa + wb;
   };
   def qlwt-step-json(e) = "{\"step\":" ++ e[0].str() ++ ",\"neg\":" ++ e[1].str() ++ ",\"line\":" ++ e[2].str() ++ ",\"mean\":" ++ e[3].str() ++ ",\"grad\":" ++ e[4].str() ++ ",\"ms\":" ++ e[5].str() ++ "}";
-  def qlwt-config(L, c, rowsPath, trainLines, rejLines, negPath, steps, mean0, mean1) = "{\"model\":\"" ++ qlwt-model() ++ "\",\"fine_tune_type\":\"lora\",\"owner\":\"Form-native-Metal\",\"door\":\"observe/qwen-last-block-train-run.bml\",\"lora_parameters\":{\"rank\":" ++ qlwt-rank().str() ++ ",\"alpha\":" ++ qlwt-alpha().str() ++ ",\"scale\":" ++ qlwt-scale().str() ++ ",\"dropout\":0.0},\"layers\":[" ++ L.str() ++ "],\"targets\":[\"ffn_down\"],\"tensors\":[\"" ++ qlh-rr-name(L, "ffn_down", "a") ++ "\",\"" ++ qlh-rr-name(L, "ffn_down", "b") ++ "\"],\"optimizer\":\"adam\",\"learning_rate\":" ++ record_get(c, "lr").str() ++ ",\"batch_size\":1,\"mask_prompt\":1,\"ids_cap\":" ++ qlwt-cap().str() ++ ",\"data\":\"" ++ rowsPath ++ "\",\"rows\":" ++ qlwt-ints(trainLines) ++ ",\"objective\":\"accepted CE descent; rejected hinge at base + margin\",\"margin\":" ++ record_get(c, "margin").str() ++ ",\"neg_every\":" ++ record_get(c, "neg_every").str() ++ ",\"rejected_source\":\"" ++ negPath ++ "\",\"rejected_rows\":" ++ qlwt-ints(rejLines) ++ ",\"dev_rows\":" ++ qlwt-ints(map(p => p[0][0], record_get(c, "dev"))) ++ ",\"selection\":\"" ++ (nil?(record_get(c, "dev")) ? "the last step" : "the lowest dev mean, read every " ++ record_get(c, "val_every").str() ++ " steps") ++ "\",\"trained_native_steps\":" ++ steps.str() ++ ",\"mean_loss_step0\":" ++ mean0.str() ++ ",\"mean_loss_step20\":" ++ mean1.str() ++ ",\"worn\":0}\n";
+  def qlwt-config(L, c, rowsPath, trainLines, rejLines, negPath, steps, mean0, mean1) = "{\"model\":\"" ++ qlwt-model() ++ "\",\"fine_tune_type\":\"lora\",\"owner\":\"Form-native-Metal\",\"door\":\"observe/qwen-last-block-train-run.bml\",\"lora_parameters\":{\"rank\":" ++ qlwt-rank().str() ++ ",\"alpha\":" ++ qlwt-alpha().str() ++ ",\"scale\":" ++ qlwt-scale().str() ++ ",\"dropout\":0.0},\"layers\":[" ++ L.str() ++ "],\"targets\":[\"ffn_down\"],\"tensors\":[\"" ++ qlh-rr-name(L, "ffn_down", "a") ++ "\",\"" ++ qlh-rr-name(L, "ffn_down", "b") ++ "\"],\"optimizer\":\"adam\",\"learning_rate\":" ++ record_get(c, "lr").str() ++ ",\"batch_size\":1,\"mask_prompt\":1,\"ids_cap\":" ++ record_get(c, "window").str() ++ ",\"data\":\"" ++ rowsPath ++ "\",\"rows\":" ++ qlwt-ints(trainLines) ++ ",\"objective\":\"accepted CE descent; rejected hinge at base + margin\",\"margin\":" ++ record_get(c, "margin").str() ++ ",\"neg_every\":" ++ record_get(c, "neg_every").str() ++ ",\"rejected_source\":\"" ++ negPath ++ "\",\"rejected_rows\":" ++ qlwt-ints(rejLines) ++ ",\"dev_rows\":" ++ qlwt-ints(map(p => p[0][0], record_get(c, "dev"))) ++ ",\"selection\":\"" ++ (nil?(record_get(c, "dev")) ? "the last step" : "the lowest dev mean, read every " ++ record_get(c, "val_every").str() ++ " steps") ++ "\",\"trained_native_steps\":" ++ steps.str() ++ ",\"mean_loss_step0\":" ++ mean0.str() ++ ",\"mean_loss_step20\":" ++ mean1.str() ++ ",\"worn\":0}\n";
   // the rows are prepared before the lease and the context: the tokfast index is host work, and the machine should not carry a model session through it
   def qlwt-rows(src, x, c) {
-   let cap = qlwt-cap();
+   let cap = 0;
    let t0 = host_monotonic_ms();
    let trainRows = qlwt-prepared("accepted", src, x, record_get(c, "train_lines"), cap);
    let validRows = qlwt-prepared("held-out", src, x, record_get(c, "valid_lines"), cap);
@@ -127,7 +131,7 @@ section [form.bml] {
    record_set(c,"stage","capture");
    let geo = ctx[2];
    let L = qlbj-last-block(geo);
-   let cap = qlwt-cap();
+   let cap = record_get(c, "window");
    let trainRows = prepared[0];
    let validRows = prepared[1];
    let negRows = prepared[2];
@@ -156,7 +160,7 @@ section [form.bml] {
   def qlwt-train(ctx, L, c, train, valid, negGrad, negHeld) {
    record_set(c,"stage","training");
    let geo = ctx[2];
-   let cap = qlwt-cap();
+   let cap = record_get(c, "window");
    let lay = nth(ctx[3], L);
    let owner=fcms-phase-open(record_get(c,"session"),"qwen training step",[["forward",qlbf-scratch-bytes(geo,0,cap)],["training",qlbt-own-bytes(geo,cap,qlwt-rank())]]);
    record_set(c,"training-owner",owner);
@@ -217,7 +221,7 @@ section [form.bml] {
    };
   }
   def qlwt-context(c,model,src,geo,prepared) {
-   let session=fcms-session("nothing","training-context",model,src,[],[],qlwt-maxpos(),0,-1,0,0,0,0,0);
+   let session=fcms-session("nothing","training-context",model,src,[],[],record_get(c,"maxpos"),0,-1,0,0,0,0,0);
    record_set(c,"session",session);record_set(c,"completed-steps",0);record_set(c,"execution-complete",0);record_set(c,"stage","context-admission");record_set(c,"release-ok",0);record_set(QLWT-OWNED,"current",c);
    let attempted=try {
     let parts=take(2,q38-session-parts(geo,qlwt-span(),0));let own=sum(map(part=>part[1],parts));
@@ -228,8 +232,8 @@ section [form.bml] {
     let constructing=fcms-retain-owned-release(session,[],record_get(reservation,"parts"));
     record_set(fcms-release-ledger(session),"context",constructing);
     record_set(c,"stage","context-open");
-    let ctx=q38-open-span-by(model,qlwt-maxpos(),qlwt-span(),bytes=>q38x-alloc(constructing,bytes),(path,offset,bytes)=>q38x-map(constructing,path,offset,bytes));
-    record_set(c,"session",fcms-capacity-owner(session,ctx,[],qlwt-maxpos()));
+    let ctx=q38-open-span-by(model,record_get(c,"maxpos"),qlwt-span(),bytes=>q38x-alloc(constructing,bytes),(path,offset,bytes)=>q38x-map(constructing,path,offset,bytes));
+    record_set(c,"session",fcms-capacity-owner(session,ctx,[],record_get(c,"maxpos")));
     q38-context-ok?(ctx)==1 && fcms-reservation-ack(reservation,["scratch","position-scratch"]) ? qlwt-open(ctx,prepared,c) : 0;
    } catch {record_set(c,"interrupted",1);0;};
    qlwt-finish(c);
@@ -249,10 +253,13 @@ section [form.bml] {
    let c = record_new(0, "out", out, "rows", rowsPath, "negatives", negPath, "train_lines", lines, "valid_lines", valid, "neg_lines", qlbj-lines(negPath), "steps", qlwt-int(opts, "steps", 400), "lr", qlwt-int(opts, "lr_micro", 100) / 1000000.0, "margin", qlwt-int(opts, "margin_milli", 20) / 1000.0, "neg_every", qlwt-int(opts, "neg_every", 4), "val_every", qlwt-int(opts, "val_every", 100), "say_every", 10, "heldout_every", qlwt-int(opts, "heldout_every", 3), "captures", qlwt-text(opts, "captures", ".hearth/voice-wears-its-lesson/train-captures"), "valid_captures", qlwt-text(opts, "valid_captures", ".hearth/qwen-rung-4/accepted"), "neg_captures", qlwt-text(opts, "neg_captures", ".hearth/qwen-rung-4/rejected"), "wall_ms", qlwt-int(opts, "wall_s", 3000) * 1000, "seed", qlwt-int(opts, "seed_micro", 20000) / 1000000.0, "dev_every", qlwt-int(opts, "dev_every", 0), "dev_upto", qlwt-int(opts, "dev_upto", 1000000), "dev", [], "best_mean", 1.0e30, "best_step", 0, "best_a", "", "best_b", "");
    let model = qlwt-model();
    let src = fcmg-src(model);
-   let geo = q38-geo(src, qlwt-maxpos());
-   let cap = qlwt-cap();
    let x = qtf2-load(qtf2-root-for(model), qsx-seal-line(model));
    let prepared = qlwt-rows(src, x, c);
+   let window = qlwt-window(prepared);
+   let w1 = record_set(c, "window", window);
+   let w2 = record_set(c, "maxpos", qlwt-rounded(window));
+   qlwt-say("window: " ++ window.str() ++ " ids, the longest row read whole; the context holds " ++ qlwt-rounded(window).str() ++ " positions");
+   let geo = q38-geo(src, qlwt-rounded(window));
    qlwt-context(c,model,src,geo,prepared);
   }
  }
