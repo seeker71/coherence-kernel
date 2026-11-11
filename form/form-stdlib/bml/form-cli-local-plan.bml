@@ -624,6 +624,50 @@ section [form.bml] {
    let scored = filter(p => p[1] > 0 && (String) p[0] != name, map(n => [n, len(filter(w => str_find(n, w, 0) >= 0, words))], standing));
    take(8, append(map(p => p[0], filter(p => p[1] > 1, scored)), map(p => p[0], filter(p => p[1] == 1, scored))));
   }
+  // A call whose argument count matches no definition of its name lowers to "stray ')' in value position", which names no
+  // call. Form reads the reference's calls itself: each name that stands in the stdlib's .bml files, with the count it was
+  // called with and the counts it stands with, so the next packet names the call, not the compiler's column.
+  def flp-ident-byte?(b) = (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b == 45 || b == 95 || b == 63;
+  def flp-ident-start(t, i) = i > 0 && flp-ident-byte?(str_byte_at(t, i - 1)) ? flp-ident-start(t, i - 1) : i;
+  // the arguments between the '(' before i and its close: -1 when none closes
+  def flp-arg-walk(t, i, depth, quoted, commas, seen) {
+   let b = i >= len(t) ? 0 : str_byte_at(t, i);
+   i >= len(t) ? -1 :
+   quoted ? (b == 92 ? flp-arg-walk(t, i + 2, depth, true, commas, seen) : flp-arg-walk(t, i + 1, depth, b != 34, commas, seen)) :
+   b == 34 ? flp-arg-walk(t, i + 1, depth, true, commas, true) :
+   b == 40 || b == 91 || b == 123 ? flp-arg-walk(t, i + 1, depth + 1, false, commas, true) :
+   b == 41 || b == 93 || b == 125 ? (depth == 0 ? (seen ? commas + 1 : 0) : flp-arg-walk(t, i + 1, depth - 1, false, commas, true)) :
+   b == 44 && depth == 0 ? flp-arg-walk(t, i + 1, depth, false, commas + 1, seen) :
+   flp-arg-walk(t, i + 1, depth, false, commas, seen || !flp-blank-byte?(b));
+  }
+  // [name, arguments] of each call in text; a name the text defines itself ('def name(') is left out
+  def flp-calls-of(text) {
+   let found = foldl((acc, i) => str_byte_at(text, i) != 40 || i == 0 || !flp-ident-byte?(str_byte_at(text, i - 1)) ? acc : {
+    let name = substring(text, flp-ident-start(text, i), i);
+    let n = flp-arg-walk(text, i + 1, 0, false, 0, false);
+    n < 0 || len(name) < 3 || flp-has?(map(c => c[0], acc), name) || str_find(text, "def " + name + "(", 0) >= 0 ? acc : append(acc, [[name, n]]);
+   }, [], 0 .. len(text));
+   found;
+  }
+  // [file, params text, count] of each 'def name(' in the stdlib's .bml files
+  def flp-def-arities(name, texts) {
+   let mark = "def " + name + "(";
+   foldl((acc, ft) => {
+    let at = str_find(ft[1], mark, 0);
+    at < 0 ? acc : append(acc, [[ft[0], substring(ft[1], at + len(mark), flp-arg-end(ft[1], at + len(mark))), flp-arg-walk(ft[1], at + len(mark), 0, false, 0, false)]]);
+   }, [], texts);
+  }
+  def flp-arg-end(t, i) = i >= len(t) || str_byte_at(t, i) == 41 ? i : flp-arg-end(t, i + 1);
+  def flp-fits-in?(rows, n) = nil?(rows) ? false : (Comparable) rows[0][2] == n ? true : flp-fits-in?(rows[1:], n);
+  def flp-arity-block(ref) {
+   let calls = flp-calls-of(ref);
+   let files = split-on(nsi-text(nsi-git()), byte_to_str(0)) |> filter(p => flp-starts?(p, "form/form-stdlib/") && flp-ends?(p, ".bml"));
+   let texts = nil?(calls) ? [] : map(f => [f, fhn-read(f)], files);
+   let stands = map(c => [c[0], c[1], flp-def-arities(c[0], texts)], calls);
+   let known = filter(w => !nil?(w[2]), stands);
+   let wrong = take(4, filter(w => !flp-fits-in?(w[2], w[1]), known));
+   nil?(wrong) ? "" : mc-cat(["\nThe compiler named no call, but a call whose argument count fits no definition of its name lowers to a stray ')'. Form read your <reference>'s calls: ", flp-join(map(w => mc-cat([w[0], " is called with ", w[1].str(), " argument", w[1] == 1 ? "" : "s", " and stands with ", flp-join(map(a => mc-cat([a[2].str(), ": ", w[0], "(", a[1], ") in ", a[0]]), w[2]), "; ")]), wrong), ". "), ". Call each with the arguments it stands with."]);
+  }
   def flp-unresolved-block(said) {
    let names = flp-unresolved-names(said);
    nil?(names) ? "" : {
@@ -1117,7 +1161,7 @@ section [form.bml] {
    let full = flp-p-full(plan);
    if (!nothing?(unplaced)) then flp-with-readings(flp-refused(7, mc-cat(["reference-site:", unplaced[0]]), mc-cat(["Form could not stand the <reference> definitions in ", unplaced[0], "."])), v[3], v[4])
    else if (!nothing?(broken)) then flp-with-readings(flp-refused(7, mc-cat(["reference-check:", flp-head(flp-sha(json-emit(broken)), 12)]), mc-cat(["The check ", json-emit(broken), " forbids the change your <reference> makes: with your definitions standing it prints ", flp-said(seen[2]), " (exit ", seen[4].str(), ") where it asks ", flp-said(seen[1]), " (exit ", seen[3].str(), "). A check pins what the gap keeps: leave out a check the change must break, or ask for what the changed file prints."])), v[3], v[4])
-   else if (nothing?(r[0]) && (str_find(r[2], "error", 0) >= 0)) then flp-reach(flp-refused(7, "reference-compile", mc-cat(["Your <reference> definitions, standing in a scratch copy of the file, do not compile, so they witness nothing. Write them in the file's own dialect, as its other definitions are written. fkwu said:\n", r[2], flp-quote-at(r[2], texts), flp-unresolved-block(r[2])])), v[3], v[4], r[0])
+   else if (nothing?(r[0]) && (str_find(r[2], "error", 0) >= 0)) then flp-reach(flp-refused(7, "reference-compile", mc-cat(["Your <reference> definitions, standing in a scratch copy of the file, do not compile, so they witness nothing. Write them in the file's own dialect, as its other definitions are written. fkwu said:\n", r[2], flp-quote-at(r[2], texts), flp-unresolved-block(r[2]), str_find(r[2], "stray ')'", 0) >= 0 ? flp-arity-block(ref) : ""])), v[3], v[4], r[0])
    else if (nothing?(r[0]) || (!((Comparable) r[0] == full))) then {
     let cases=flp-cases-read(r[2]);
     flp-with-cases(flp-reach(flp-refused(7, "unreachable", !nothing?(cases) ? flp-cases-words(cases,r[0],full,r[2]) : mc-cat(["With your <reference> definitions standing, the band reads ", flp-show(r[0]), " of ", full.str(), ": the band, the goal and the reference disagree, so no candidate the goal describes turns the band full.", if ((Comparable) len(r[2]) > 0) then mc-cat([" fkwu said:\n", r[2], flp-quote-at(r[2], texts)]) else ""])), v[3], v[4], r[0]),cases);
