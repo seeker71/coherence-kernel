@@ -4,10 +4,10 @@
 // (q38-lenses.bml). Each lens text is cut at its closing bracket and read by the planner's own rules (a JSON array of catalog
 // names); of the lenses that pass, the one the model was surest of (least surprise a token) is written at flp-focus-path(req), the
 // file the planner reads back only when its prompt matches, its status is answered and the reply is valid. No lens that passes means
-// no file: the planner asks as before. lfl-run opens the model, runs, closes the model and answers a status line, so a caller that
-// opens the model again in the same process (the planner's voice) starts from nothing. Needs form-cli-local-plan.bml (flp-*),
+// no file: the planner asks as before. lfl-run asks a standing resident server (serve-client.bml) one request a lens; with none standing it opens
+// the model, runs, closes the model and answers a status line, so a caller that opens the model again in the same process (the planner's voice) starts from nothing. Needs form-cli-local-plan.bml (flp-*),
 // q38-lenses.bml and the qwen stack in its prelude closure.
-// preludes: form-stdlib/core.fk form-stdlib/bml/q38-multi.bml form-stdlib/bml/form-cli-code-live.bml form-stdlib/bml/q38-lenses.bml native/metal/qwen35-dense-token-handle.fk native/metal/qwen35-dense-spec.fk
+// preludes: form-stdlib/core.fk form-stdlib/bml/q38-multi.bml form-stdlib/bml/form-cli-code-live.bml form-stdlib/bml/q38-lenses.bml form-stdlib/bml/serve-client.bml native/metal/qwen35-dense-token-handle.fk native/metal/qwen35-dense-spec.fk
 section [form.bml] {
  class LocalFocusLenses {
   // The planner's focus prompt states the request's `needs`; the request's `problem` is where its subject is often named (organ_steady
@@ -41,18 +41,45 @@ section [form.bml] {
    kept;
   }
   // answers a status line: kept (names the lens and the text) or nothing kept (why)
+  // A resident server that stands (observe/qwen-serve-run.bml) holds the GPU lease and the weights: the lenses are asked of it, one request each (who "focus"), and decode beside
+  // every other sequence it serves. With none standing, or when it does not answer, this process opens a session of its own, as it always did.
   def lfl-run(req, gen) {
    let prompt = flp-focus-prompt(req);
    let names = flp-source-names(flp-req-files(req));
+   let st = svc-standing(svc-default-dir());
+   (String) st[0] == "standing" ? lfl-run-served(req, gen, prompt, names) : lfl-run-own(req, gen, prompt, names);
+  }
+  def lfl-run-own(req, gen, prompt, names) {
    let ctx = qlz-open(4096);
    let r = qlz-run-ids(ctx, qlz-chat-prefix(ctx, prompt), map(t => qlz-chat-lens(ctx, t, "["), lfl-tasks(req)), gen);
    let closed = qlz-close(ctx);
-   let cands = map(t => lfl-candidate(t), r[0]);
-   let rows = map(i => [lfl-valid(cands[i], names), r[1][i]], range(0, len(cands)));
+   let shape = "prefix " ++ len(r[2]).str() ++ " ids; prefill " ++ r[3][0].str() ++ " ms, fork " ++ r[3][1].str() ++ " ms, " ++ gen.str() ++ " tokens x " ++ len(r[0]).str() ++ " lenses " ++ r[3][2].str() ++ " ms";
+   lfl-conclude(req, gen, prompt, names, map(t => lfl-candidate(t), r[0]), r[1], len(r[2]), shape, r[0]);
+  }
+  // the server's reply is the lens's own text from the start of the assistant's turn (the stop string "]" may or may not stand in it): an array begins "["; closed here when the stop trimmed it
+  def lfl-served-candidate(text) {
+   let cut = lfl-cut-at(text, 0);
+   len(text) == 0 || str_byte_at(text, 0) != 91 ? "" : len(cut) > 0 ? cut : text ++ "]";
+  }
+  def lfl-run-served(req, gen, prompt, names) {
+   let dir = svc-default-dir();
+   let tasks = lfl-tasks(req);
+   let ids = map(i => svc-submit(dir, "f" ++ i.str(), svc-spec-json(prompt, tasks[i], 1, gen, ["]"], 0, "focus")), range(0, len(tasks)));
+   let got = map(id => len(id) == 0 ? ["unserved", "the spool refused the request file"] : svc-wait(dir, id, 0), ids);
+   let down = filter(g => (String) g[0] != "answered", got);
+   nil?(down) ? lfl-served-conclude(req, gen, prompt, names, map(g => g[1], got)) : lfl-run-own(req, gen, prompt, names);
+  }
+  def lfl-served-conclude(req, gen, prompt, names, docs) {
+   let texts = map(d => svc-str(d, "text"), docs);
+   let shape = "served by the resident server: prompt " ++ svc-int(docs[0], "prompt_ids").str() ++ " ids a lens; queue " ++ svc-int(docs[0], "queue_ms").str() ++ " ms, prefill " ++ svc-int(docs[0], "prefill_ms").str() ++ " ms, decode " ++ svc-int(docs[0], "decode_ms").str() ++ " ms on lens 0, " ++ len(docs).str() ++ " lenses, rent_tokens 0";
+   lfl-conclude(req, gen, prompt, names, map(t => lfl-served-candidate(t), texts), map(d => svc-int(d, "surprise_micro_nats"), docs), svc-int(docs[0], "prompt_ids"), shape, texts);
+  }
+  def lfl-conclude(req, gen, prompt, names, cands, surprises, promptIds, shape0, replies) {
+   let rows = map(i => [lfl-valid(cands[i], names), surprises[i]], range(0, len(cands)));
    let best = lfl-best(rows, 0, 0 - 1);
-   let shape = "prefix " ++ len(r[2]).str() ++ " ids; prefill " ++ r[3][0].str() ++ " ms, fork " ++ r[3][1].str() ++ " ms, " ++ gen.str() ++ " tokens x " ++ len(cands).str() ++ " lenses " ++ r[3][2].str() ++ " ms; valid " ++ map(x => x[0], rows).str() ++ " surprise " ++ map(x => x[1], rows).str();
-   if (best < 0) then "no lens gave a valid focus (" ++ shape ++ "; replies " ++ r[0].str() ++ ")" else if ((String) cands[best] == "[]") then "the surest lens abstained: no catalog function is the one the task changes, nothing kept, the planner asks as before (" ++ shape ++ ")" else {
-    let kept = lfl-keep(req, prompt, cands[best], len(r[2]), gen * len(cands), best);
+   let shape = shape0 ++ "; valid " ++ map(x => x[0], rows).str() ++ " surprise " ++ map(x => x[1], rows).str();
+   if (best < 0) then "no lens gave a valid focus (" ++ shape ++ "; replies " ++ replies.str() ++ ")" else if ((String) cands[best] == "[]") then "the surest lens abstained: no catalog function is the one the task changes, nothing kept, the planner asks as before (" ++ shape ++ ")" else {
+    let kept = lfl-keep(req, prompt, cands[best], promptIds, gen * len(cands), best);
     "kept lens " ++ best.str() ++ ": " ++ cands[best] ++ " (" ++ shape ++ ")";
    };
   }
