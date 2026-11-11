@@ -688,7 +688,12 @@ section [form.bml] {
   // kept beside the walk's ledger and removed when the next walk starts, so a call is looked up, not searched for in 800 files.
   def flp-defs-dir() = flp-dir() + "/defs-table";
   def flp-defs-path() = flp-defs-dir() + "/table";
-  def flp-defs-files() = split-on(nsi-text(nsi-git()), byte_to_str(0)) |> filter(p => flp-starts?(p, "form/form-stdlib/") && flp-ends?(p, ".bml"));
+  def flp-defs-files() = split-on(nsi-text(nsi-git()), byte_to_str(0)) |> filter(p => flp-starts?(p, "form/form-stdlib/") && (flp-ends?(p, ".bml") || (flp-ends?(p, ".fk") && !flp-starts?(p, "form/form-stdlib/tests/"))));
+  // a .fk file's (defn name rows read "\n@name\tfile", so an arity lookup, which reads "\nname\t", never meets one
+  def flp-defn-row(file, piece) {
+   let name = flp-cut-at(flp-cut-at(flp-cut-at(piece, " "), "\n"), ")");
+   flp-defs-name?(name) ? mc-cat(["\n@", name, "\t", file, "\t0\t"]) : "";
+  }
   def flp-defs-name?(n) = len(n) > 0 && len(n) < 80 && all?(i => flp-ident-byte?(str_byte_at(n, i)), 0 .. len(n));
   def flp-defs-row(file, piece) {
    let at = str_find(piece, "(", 0);
@@ -696,8 +701,24 @@ section [form.bml] {
    flp-defs-name?(name) ? mc-cat(["\n", name, "\t", file, "\t", flp-arg-walk(piece, at + 1, 0, false, 0, false).str(), "\t", flp-cut-at(substring(piece, at + 1, flp-arg-end(piece, at + 1)), "\n")]) : "";
   }
   def flp-defs-of-file(file) {
-   let pieces = split-on(fhn-read(file), "def ");
-   mc-cat(map(p => flp-defs-row(file, p), pieces[1:]));
+   let fk = flp-ends?(file, ".fk");
+   let pieces = split-on(fhn-read(file), fk ? "(defn " : "def ");
+   mc-cat(map(p => fk ? flp-defn-row(file, p) : flp-defs-row(file, p), pieces[1:]));
+  }
+  // the files that define name (bml defs and .fk defns), not counting the plan's own: where a band that cannot compile finds it
+  def flp-definers(name, table, skip) {
+   let rows = append(flp-def-arities(name, table), flp-def-arities("@" + name, table));
+   foldl((acc, r) => flp-has?(acc, r[0]) || flp-has?(skip, r[0]) ? acc : append(acc, [r[0]]), [], rows);
+  }
+  // a name the compiler could not find stands in a file the band does not load: say which, so the plan's sources name it
+  def flp-defined-block(said, plan) {
+   let names = flp-unresolved-names(said);
+   let skip = append(flp-p-writable(plan), flp-p-sources(plan));
+   nil?(names) ? "" : {
+    let table = flp-defs-table();
+    let lines = map(n => { let at = flp-definers(n, table, skip); nil?(at) ? "" : mc-cat([n, " stands in ", flp-join(take(3, at), ", "), "; name that file in the plan's sources, so the band loads it. "]); }, names) |> filter(l => len(l) > 0);
+    nil?(lines) ? "" : mc-cat(["\nForm found where the compiler's unresolved names stand: ", mc-cat(lines)]);
+   };
   }
   def flp-defs-build() = mc-cat(map(flp-defs-of-file, flp-defs-files()));
   def flp-defs-table() {
@@ -906,7 +927,7 @@ section [form.bml] {
    let full = flp-p-full(plan);
    let standing = all?(d => flp-def-present?(d), flp-p-defs(plan));
    if !nothing?(missing) then flp-refused(1,"source-snapshot:" + missing,"The source snapshot could not be retained and read back: " + missing)
-   else if (nothing?(r[0]) && standing) then flp-refused(1, "band-no-number:today", mc-cat(["Every definition the plan names stands in today's files, yet the band does not end with a number on them: a band ends with a number for any candidate, today's included.", if ((Comparable) len(r[2]) > 0) then mc-cat([" fkwu said:\n", r[2]]) else if ((Comparable) r[1] == 1) then mc-cat([" It did not end within ", (flp-ctx-deadline(ctx) / 1000).str(), " s."]) else " It printed no number."]))
+   else if (nothing?(r[0]) && standing) then flp-refused(1, "band-no-number:today", mc-cat(["Every definition the plan names stands in today's files, yet the band does not end with a number on them: a band ends with a number for any candidate, today's included.", if ((Comparable) len(r[2]) > 0) then mc-cat([" fkwu said:\n", r[2], flp-defined-block(r[2], plan)]) else if ((Comparable) r[1] == 1) then mc-cat([" It did not end within ", (flp-ctx-deadline(ctx) / 1000).str(), " s."]) else " It printed no number."]))
    else if nothing?(r[0]) then flp-held() else if ((Comparable) r[0] == full) then flp-with-readings(flp-refused(2, "gap-closed", mc-cat(["On today's files the band already reads its full ", full.str(), ": the gap is closed, so there is nothing for the lane to do. Ask for a value today's definitions do not give.", nothing?(flp-cases-read(r[2])) ? "" : mc-cat([" All ", flp-cases-read(r[2])[1].str(), " of your cases hold on today's text, so they measure what already stands. Call the definition whose answer the request changes, with an input the request names, and an expected value today's text does not give: read today's text and walk the input through it. Name only the definitions you change."])])), r[0], []) else if (r[0] > full) then flp-with-readings(flp-refused(2, "band-above-full", mc-cat(["On today's files the band reads ", r[0].str(), ", above its full ", full.str(), ": its claim bits do not sum to full."])), r[0], []) else flp-with-readings(flp-held(), r[0], []);
   }
   // ── (1)+(3) each named definition a stub ──
@@ -1060,7 +1081,7 @@ section [form.bml] {
    let r = flp-band-run(path, flp-ctx-deadline(ctx));
    let full = flp-p-full(plan);
    if ((Comparable) r[1] == 1) then flp-refused(1, mc-cat(["band-deadline:", flavor]), mc-cat(["With each named definition a stub ", flp-stub-words(flavor), ", the band did not end within ", (flp-ctx-deadline(ctx) / 1000).str(), " s; a band ends for any candidate."]))
-   else if nothing?(r[0]) then flp-refused(1, mc-cat(["band-no-number:", flavor]), if flp-compile-words?(r[2]) then mc-cat(["The band does not compile on fkwu (each named definition standing as a stub ", flp-stub-words(flavor), "), so it cannot read a candidate. fkwu said:\n", r[2]]) else if flp-refusal-words?(r[2]) then mc-cat(["The band compiled, and with each named definition a stub ", flp-stub-words(flavor), " its run stopped by name before a number: a prelude's own flow at import, or a case the try could not hold, met the stub's answer. A .bml writable's flow is held under a stub; a .fk door's flow and a source door's are not, and a band over one reads no number under a stub its flow consumes. fkwu said:\n", r[2]]) else mc-cat(["With each named definition a stub ", flp-stub-words(flavor), ", the band did not exit 0 with a number on its last line, so it cannot read a candidate.", if ((Comparable) len(r[2]) > 0) then mc-cat([" fkwu said:\n", r[2]]) else " It printed no number: a band ends with a number for any answer."]))
+   else if nothing?(r[0]) then flp-refused(1, mc-cat(["band-no-number:", flavor]), if flp-compile-words?(r[2]) then mc-cat(["The band does not compile on fkwu (each named definition standing as a stub ", flp-stub-words(flavor), "), so it cannot read a candidate. fkwu said:\n", r[2], flp-defined-block(r[2], plan)]) else if flp-refusal-words?(r[2]) then mc-cat(["The band compiled, and with each named definition a stub ", flp-stub-words(flavor), " its run stopped by name before a number: a prelude's own flow at import, or a case the try could not hold, met the stub's answer. A .bml writable's flow is held under a stub; a .fk door's flow and a source door's are not, and a band over one reads no number under a stub its flow consumes. fkwu said:\n", r[2]]) else mc-cat(["With each named definition a stub ", flp-stub-words(flavor), ", the band did not exit 0 with a number on its last line, so it cannot read a candidate.", if ((Comparable) len(r[2]) > 0) then mc-cat([" fkwu said:\n", r[2]]) else " It printed no number: a band ends with a number for any answer."]))
    else if (r[0] >= full) then flp-with-readings(flp-refused(3, mc-cat(["band-full-under-stub:", flavor]), mc-cat(["With each named definition a stub ", flp-stub-words(flavor), ", the band still reads ", r[0].str(), " of ", full.str(), ": its claims do not test the definitions. Each claim must ask for a value the stub cannot give."])), nothing(), [r[0]])
    else flp-with-cases(flp-with-readings(flp-held(), nothing(), [r[0]]), flp-cases-read(r[2]));
   }
