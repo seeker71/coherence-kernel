@@ -1,0 +1,197 @@
+; q38-split-attn-band.bml — flash-decoding of the full-attention layers (form-stdlib/bml/q38-split-attention.bml) against the one-group-per-head kernel
+; (q38-gqa-tg-msl) and the stream-row kernel (q38m-gqa-msl), on synthetic K/V with live Metal. No model opens.
+;
+; The split changes the order of every sum (scores by simd tree, values by chunk, chunks by the log-sum-exp rule), so the claims are held to a float
+; tolerance, not to bytes: the largest of |a - b| / (|b| + 0.05) over all outputs must stay at or under 1e-3 (the band reads it in millionths), with
+; scores of standard deviation near 10 so that the maxima differ from chunk to chunk and a wrong merge shows at once.
+;
+; Expected: 511
+; Verdict 511 when every claim lands:
+;   1   a small geometry (12 query heads over 2 kv heads of 64) at lengths 1, 2, 255, 256, 257, 600 and 1025: single stream, split and combine against q38-gqa-tg-msl
+;   2   the 27B's geometry (24 query heads over 4 kv heads of 256) at lengths 1, 4097, 12001 and 12500: single stream against q38-gqa-tg-msl
+;   4   chunk sizes 64 and 128 at length 1000 (the chunk is a constant of the dispatch)
+;   8   stream rows, the 27B's geometry, three streams at lengths 12000, 301 and 1 in one dispatch each: split and combine against q38m-gqa-msl
+;   16  stream rows, the small geometry, four streams at lengths 256, 257, 3 and 700
+;   32  q38sp-fits? answers yes for the 27B's geometry at 12500 positions and a long context, no for a head of 48, a GQA group of 9 and a scratch too small
+;       for the partials
+;   64  the pipelines of q38-pipes at q38sp-index() and the next index are the split and the combine: the single-stream claim again through them
+;   128 span rows (prefill and speculative verify): 1 to 64 consecutive positions of one stream over a shared cache, token t over pos0 + t + 1 positions, at
+;       pos0 0, 250, 255, 4000 and 12000, the split span kernels against the speculative lane's span kernel (decode's order) and the prefill lane's
+;   256 one token at the same length through the single-stream dispatch, a stream row and the last token of a span of 4 (a token's chunk is read from its own
+;       length, whichever lane runs it): the three lanes' outputs equal byte for byte, so decode, speculative verify and the stream rows keep one set of ids
+; REQUIRES: a live Metal device
+// preludes: form-stdlib/core.fk form-stdlib/bml/live.bml form-stdlib/metal-door.fk native/metal/qwen35-dense-token-handle.fk form-stdlib/bml/q38-multi.bml
+section [form.bml] {
+ class Q38SplitAttnBand {
+  def sab-fill-msl() = "#include <metal_stdlib>\nkernel void fill_f32(device float* b [[buffer(0)]], constant uint& n [[buffer(1)]], constant uint& salt [[buffer(2)]], constant float& amp [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; uint x = (i * 37u + salt * 101u + (i / 211u) * 13u) % 211u; b[i] = (float(x) * 0.0047f - 0.45f) * amp; }\nkernel void cmp_f32(device const float* a [[buffer(0)]], device const float* b [[buffer(1)]], device uint* out [[buffer(2)]], constant uint& n [[buffer(3)]], uint lid [[thread_position_in_grid]]) { float m = 0.0f; for (uint i = lid; i < n; i += 256u) { float e = metal::fabs(a[i] - b[i]) / (metal::fabs(b[i]) + 0.05f); if (!(e == e)) { e = 1.0e30f; } m = metal::max(m, e); } out[lid] = (uint)metal::min(m * 1.0e6f, 4.0e9f); }";
+  def sab-msl() = kth-msl() ++ q38-gqa-tg-msl("ref_gqa") ++ q38m-gqa-msl("ref_rows") ++ q38s-gqa-msl() ++ q38pa-msl() ++ q38sp-msl();
+  // ntok consecutive positions from pos0 over one shared cache: the split span kernels against a span kernel (refname: the speculative lane's
+  // form_q38s_gqa_span, in decode's order, or the prefill lane's form_gqa_span_cooperative_f32)
+  def sab-span(msl, nq, nkv, hd, pos0, ntok, refname) {
+   let fp = metal_pipeline(sab-fill-msl(), "fill_f32");
+   let cp = metal_pipeline(sab-fill-msl(), "cmp_f32");
+   let kvd = nkv * hd;
+   let stride = pos0 + ntok + 50;
+   let hq = sab-fill(fp, ntok * nq * hd, 3, 3.0);
+   let hk = sab-fill(fp, stride * kvd, 5, 3.0);
+   let hv = sab-fill(fp, stride * kvd, 7, 1.0);
+   let hy1 = metal_buf_alloc(ntok * nq * hd * 4);
+   let hy2 = metal_buf_alloc(ntok * nq * hd * 4);
+   let hs = metal_buf_alloc(2 * ntok * nq * stride * 4);
+   let top = pos0 + ntok;
+   let nspl = q38sp-nspl(top, 0);
+   let hp = metal_buf_alloc(ntok * nq * nspl * (hd + 2) * 4);
+   let sc = md-f32-bits(1.0);
+   let e1 = metal_enqueue(metal_pipeline(msl, refname), md-bind16([hq, hk, hv, hy1, hs], [pos0, nq, nkv, hd, sc, stride, ntok], 256, 0, 1, 0), nq * ntok);
+   let y1 = metal_sync();
+   let e2 = sab-run-recs(q38sp-span-recs(metal_pipeline(msl, "form_q38_gqa_split_span_f32"), metal_pipeline(msl, "form_q38_gqa_combine_span_f32"), hq, hk, hv, hp, hy2, pos0, nq, nkv, hd, sc, ntok));
+   sab-err(cp, hy2, hy1, ntok * nq * hd);
+  }
+  // one token at npos positions through the three lanes: the single-stream dispatch, a stream row, and the last token of a span of 4. Same bytes out.
+  def sab-ident(msl, nq, nkv, hd, npos) {
+   let fp = metal_pipeline(sab-fill-msl(), "fill_f32");
+   let kvd = nkv * hd;
+   let stride = npos + 50;
+   let hq = sab-fill(fp, nq * hd, 3, 3.0);
+   let hk = sab-fill(fp, stride * kvd, 5, 3.0);
+   let hv = sab-fill(fp, stride * kvd, 7, 1.0);
+   let hyA = metal_buf_alloc(nq * hd * 4);
+   let hyB = metal_buf_alloc(nq * hd * 4);
+   let hyC = metal_buf_alloc(4 * nq * hd * 4);
+   let sc = md-f32-bits(1.0);
+   let nspl = q38sp-nspl(npos, 0);
+   let hp = metal_buf_alloc(4 * nq * nspl * (hd + 2) * 4);
+   let hb = metal_buf_alloc(4);
+   let w = metal_buf_write(hb, 0, md-le32(npos - 1));
+   let a = sab-run-recs(q38sp-recs(metal_pipeline(msl, "form_q38_gqa_split_f32"), metal_pipeline(msl, "form_q38_gqa_combine_f32"), hq, hk, hv, hp, hyA, npos, nq, nkv, hd, sc, 0));
+   let b0 = metal_batch_concurrent();
+   let b1 = metal_enqueue(metal_pipeline(msl, "form_q38m_gqa_split"), md-bind16([hq, hk, hv, hp, hb], [nq, nkv, hd, sc, 0, nspl, nq * hd, stride * kvd, nq * nspl * (hd + 2), 1], 256, 0, 1, 1), nkv * nspl);
+   let b2 = metal_enqueue(metal_pipeline(msl, "form_q38m_gqa_combine"), md-bind16([hp, hyB, hb], [nq, hd, 0, nspl, nq * hd, nq * nspl * (hd + 2), 1], 256, 0, 1, 1), nq);
+   let y2 = metal_sync();
+   let hq4 = metal_buf_alloc(4 * nq * hd * 4);
+   let wq = metal_buf_write(hq4, 3 * nq * hd * 4, metal_buf_read(hq, 0, nq * hd * 4));
+   let c = sab-run-recs(q38sp-span-recs(metal_pipeline(msl, "form_q38_gqa_split_span_f32"), metal_pipeline(msl, "form_q38_gqa_combine_span_f32"), hq4, hk, hv, hp, hyC, npos - 4, nq, nkv, hd, sc, 4));
+   let ra = metal_buf_read(hyA, 0, nq * hd * 4);
+   ra == metal_buf_read(hyB, 0, nq * hd * 4) && ra == metal_buf_read(hyC, 3 * nq * hd * 4, nq * hd * 4);
+  }
+  def sab-c-ident(ctx) {
+   let msl = sab-msl();
+   sab-ident(msl, 24, 4, 256, 12001) && sab-ident(msl, 24, 4, 256, 300) && sab-ident(msl, 24, 4, 256, 5000) && sab-ident(msl, 12, 2, 64, 4) && sab-ident(msl, 12, 2, 64, 700);
+  }
+  def sab-c-span(ctx) {
+   let msl = sab-msl();
+   sab-ok(sab-span(msl, 12, 2, 64, 0, 1, "form_q38s_gqa_span")) && sab-ok(sab-span(msl, 12, 2, 64, 250, 9, "form_q38s_gqa_span")) && sab-ok(sab-span(msl, 12, 2, 64, 255, 3, "form_gqa_span_cooperative_f32")) && sab-ok(sab-span(msl, 24, 4, 256, 0, 64, "form_q38s_gqa_span")) && sab-ok(sab-span(msl, 24, 4, 256, 4000, 64, "form_gqa_span_cooperative_f32")) && sab-ok(sab-span(msl, 24, 4, 256, 12000, 8, "form_q38s_gqa_span"));
+  }
+  def sab-fill(fp, n, salt, amp) {
+   let h = metal_buf_alloc(n * 4);
+   let e = metal_enqueue(fp, md-bind16([h], [n, salt, md-f32-bits(amp)], 256, 0, 0, 0), n);
+   let y = metal_sync();
+   h;
+  }
+  def sab-uints(xs) = foldl((a, x) => a ++ md-le32(x), "", xs);
+  def sab-max(raw, i, m) = i >= 256 ? m : sab-max(raw, i + 1, kth-u32at(raw, i) > m ? kth-u32at(raw, i) : m);
+  // largest error, in millionths, between two float buffers of n
+  def sab-err(cp, a, b, n) {
+   let out = metal_buf_alloc(1024);
+   let e = metal_enqueue(cp, md-bind16([a, b, out], [n], 256, 0, 0, 0), 256);
+   let y = metal_sync();
+   sab-max(metal_buf_read(out, 0, 1024), 0, 0);
+  }
+  def sab-run-recs(rs) {
+   let b = metal_batch_concurrent();
+   let e = foldl((a, r) => a + metal_enqueue(r[0], r[1], r[2]), 0, rs);
+   let y = metal_sync();
+   e;
+  }
+  // one stream at npos positions: [error of the split against q38-gqa-tg-msl, split fits?]
+  def sab-single(msl, nq, nkv, hd, npos, chunk0) {
+   let chunk = chunk0;
+   let fp = metal_pipeline(sab-fill-msl(), "fill_f32");
+   let cp = metal_pipeline(sab-fill-msl(), "cmp_f32");
+   let kvd = nkv * hd;
+   let stride = npos + 300;
+   let hq = sab-fill(fp, nq * hd, 3, 3.0);
+   let hk = sab-fill(fp, stride * kvd, 5, 3.0);
+   let hv = sab-fill(fp, stride * kvd, 7, 1.0);
+   let hy1 = metal_buf_alloc(nq * hd * 4);
+   let hy2 = metal_buf_alloc(nq * hd * 4);
+   let hs = metal_buf_alloc(2 * nq * stride * 4);
+   let nspl = q38sp-nspl(npos, chunk);
+   let hp = metal_buf_alloc(nq * nspl * (hd + 2) * 4);
+   let sc = md-f32-bits(1.0);
+   let e1 = metal_enqueue(metal_pipeline(msl, "ref_gqa"), md-bind16([hq, hk, hv, hy1, hs], [npos, nq, nkv, hd, sc, stride], 256, 0, 1, 0), nq);
+   let y1 = metal_sync();
+   let e2 = sab-run-recs(q38sp-recs(metal_pipeline(msl, "form_q38_gqa_split_f32"), metal_pipeline(msl, "form_q38_gqa_combine_f32"), hq, hk, hv, hp, hy2, npos, nq, nkv, hd, sc, chunk));
+   sab-err(cp, hy2, hy1, nq * hd);
+  }
+  def sab-singles(msl, nq, nkv, hd, nposs, chunk) {
+   if (len(nposs) == 0) then 0 else {
+    let e = sab-single(msl, nq, nkv, hd, nposs[0], chunk);
+    let rest = sab-singles(msl, nq, nkv, hd, nposs[1:], chunk);
+    e > rest ? e : rest;
+   };
+  }
+  // stream rows: each row its own length, in one dispatch each of split and combine, against q38m-gqa-msl in one dispatch
+  def sab-rows(msl, nq, nkv, hd, nposs, chunk0) {
+   let chunk = chunk0;
+   let fp = metal_pipeline(sab-fill-msl(), "fill_f32");
+   let cp = metal_pipeline(sab-fill-msl(), "cmp_f32");
+   let rows = len(nposs);
+   let top = foldl((m, n) => n > m ? n : m, 0, nposs);
+   let kvd = nkv * hd;
+   let stride = top + 50;
+   let hq = sab-fill(fp, rows * nq * hd, 3, 3.0);
+   let hk = sab-fill(fp, rows * stride * kvd, 5, 3.0);
+   let hv = sab-fill(fp, rows * stride * kvd, 7, 1.0);
+   let hy1 = metal_buf_alloc(rows * nq * hd * 4);
+   let hy2 = metal_buf_alloc(rows * nq * hd * 4);
+   let hs = metal_buf_alloc(rows * 2 * nq * stride * 4);
+   let nspl = q38sp-nspl(top, chunk);
+   let pstride = nq * nspl * (hd + 2);
+   let hp = metal_buf_alloc(rows * pstride * 4);
+   let hb = metal_buf_alloc(rows * 4);
+   let w = metal_buf_write(hb, 0, sab-uints(map(n => n - 1, nposs)));
+   let sc = md-f32-bits(1.0);
+   let e1 = metal_enqueue(metal_pipeline(msl, "ref_rows"), md-bind16([hq, hk, hv, hy1, hs, hb], [nq, nkv, hd, sc, stride, nq * hd, stride * kvd, 2 * nq * stride, rows], 256, 0, 1, 0), nq * rows);
+   let y1 = metal_sync();
+   let b2 = metal_batch_concurrent();
+   let e2 = metal_enqueue(metal_pipeline(msl, "form_q38m_gqa_split"), md-bind16([hq, hk, hv, hp, hb], [nq, nkv, hd, sc, chunk, nspl, nq * hd, stride * kvd, pstride, rows], 256, 0, 1, 1), rows * nkv * nspl);
+   let e3 = metal_enqueue(metal_pipeline(msl, "form_q38m_gqa_combine"), md-bind16([hp, hy2, hb], [nq, hd, chunk, nspl, nq * hd, pstride, rows], 256, 0, 1, 1), rows * nq);
+   let y2 = metal_sync();
+   sab-err(cp, hy2, hy1, rows * nq * hd);
+  }
+  def sab-ok(e) = e <= 1000;
+  def sab-c-small(ctx) = sab-ok(sab-singles(sab-msl(), 12, 2, 64, [1, 2, 255, 256, 257, 600, 1025], 256));
+  def sab-c-prod(ctx) = sab-ok(sab-singles(sab-msl(), 24, 4, 256, [1, 4097, 12001, 12500], 256)) && sab-ok(sab-singles(sab-msl(), 24, 4, 256, [1, 100, 513, 4097, 12001, 20001], 0));
+  def sab-c-chunks(ctx) = sab-ok(sab-singles(sab-msl(), 24, 4, 256, [1000], 64)) && sab-ok(sab-singles(sab-msl(), 24, 4, 256, [1000], 128));
+  def sab-c-rows-prod(ctx) = sab-ok(sab-rows(sab-msl(), 24, 4, 256, [12000, 301, 1], 256));
+  def sab-c-rows-small(ctx) = sab-ok(sab-rows(sab-msl(), 12, 2, 64, [256, 257, 3, 700], 256)) && sab-ok(sab-rows(sab-msl(), 12, 2, 64, [900, 17, 1, 450], 0)) && sab-ok(sab-rows(sab-msl(), 24, 4, 256, [12000, 301, 1], 0));
+  def sab-c-fits(ctx) = q38sp-fits?(24, 4, 256, 12800, q38sp-nspl(12500, 256)) && q38sp-fits?(24, 4, 256, 3000000, q38sp-nspl(2900000, 256)) && !q38sp-fits?(24, 4, 48, 12800, 49) && !q38sp-fits?(18, 2, 64, 12800, 49) && !q38sp-fits?(24, 4, 256, 100, 49);
+  // the pinned index into q38-pipes: the same single-stream claim, the pipelines taken from the lane's own list
+  def sab-c-pipes(ctx) {
+   let msl = q38-msl();
+   let ps = q38-pipes(msl);
+   let fp = metal_pipeline(sab-fill-msl(), "fill_f32");
+   let cp = metal_pipeline(sab-fill-msl(), "cmp_f32");
+   let nq = 24;
+   let nkv = 4;
+   let hd = 256;
+   let npos = 3001;
+   let kvd = nkv * hd;
+   let stride = npos + 300;
+   let hq = sab-fill(fp, nq * hd, 3, 3.0);
+   let hk = sab-fill(fp, stride * kvd, 5, 3.0);
+   let hv = sab-fill(fp, stride * kvd, 7, 1.0);
+   let hy1 = metal_buf_alloc(nq * hd * 4);
+   let hy2 = metal_buf_alloc(nq * hd * 4);
+   let hs = metal_buf_alloc(2 * nq * stride * 4);
+   let sc = md-f32-bits(1.0);
+   let e1 = metal_enqueue(ps[qlslc-cooperative-gqa-pipeline()], md-bind16([hq, hk, hv, hy1, hs], [npos, nq, nkv, hd, sc, stride], 256, 0, 1, 0), nq);
+   let y1 = metal_sync();
+   let e2 = sab-run-recs(q38sp-recs(ps[q38sp-index()], ps[q38sp-index() + 1], hq, hk, hv, hs, hy2, npos, nq, nkv, hd, sc, 0));
+   ps[q38sp-index()] > 0 && ps[q38sp-index() + 1] > 0 && sab-ok(sab-err(cp, hy2, hy1, nq * hd));
+  }
+  def sab-run() = live-claims("q38-split-attn-band", 0, [["small", 1, 1, sab-c-small], ["prod", 2, 1, sab-c-prod], ["chunks", 4, 1, sab-c-chunks], ["rows-prod", 8, 1, sab-c-rows-prod], ["rows-small", 16, 1, sab-c-rows-small], ["fits", 32, 1, sab-c-fits], ["pipes", 64, 1, sab-c-pipes], ["span", 128, 1, sab-c-span], ["identity", 256, 1, sab-c-ident]]);
+ }
+ sab-run();
+}

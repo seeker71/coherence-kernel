@@ -1,0 +1,89 @@
+; q38-split-attn-probe.bml — where the long-context decode attention time goes: the single-stream kernel (q38-gqa-tg-msl) and the stream-row kernel
+; (q38m-gqa-msl) timed on synthetic K/V at the 27B's attention geometry (24 query heads, 4 kv heads, head dim 256), reps dispatches in one batch
+; (16 reps = the 16 full-attention layers of one decoded token). Not a band: it answers a table of milliseconds.
+// preludes: form-stdlib/core.fk form-stdlib/bml/live.bml form-stdlib/metal-door.fk native/metal/qwen35-dense-token-handle.fk form-stdlib/bml/q38-multi.bml
+section [form.bml] {
+ class Q38SplitProbe {
+  def sp-nq() = 24;
+  def sp-nkv() = 4;
+  def sp-hd() = 256;
+  def sp-fill-msl() = "#include <metal_stdlib>\nkernel void fill_f32(device float* b [[buffer(0)]], constant uint& n [[buffer(1)]], constant uint& salt [[buffer(2)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; uint x = (i * 37u + salt * 101u) % 211u; b[i] = float(x) * 0.0047f - 0.45f; }";
+  // QK only: scores for every position, no softmax, no PV
+  def sp-qk-msl(fname) = "kernel void " ++ fname ++ " (device const float* q [[buffer(0)]], device const float* kc [[buffer(1)]], device const float* vc [[buffer(2)]], device float* y [[buffer(3)]], device float* sc [[buffer(4)]], constant uint& npos [[buffer(5)]], constant uint& nq [[buffer(6)]], constant uint& nkv [[buffer(7)]], constant uint& hd [[buffer(8)]], constant float& scale [[buffer(9)]], constant uint& sstride [[buffer(10)]], uint3 tgpig [[threadgroup_position_in_grid]], ushort tiisg [[thread_index_in_simdgroup]], ushort sgitg [[simdgroup_index_in_threadgroup]]) { uint h = tgpig.x; if (h >= nq) return; uint lid = (uint)sgitg * 32u + (uint)tiisg; uint grp = nq / nkv; uint kvh = h / grp; uint KVD = nkv * hd; uint qoff = h * hd; uint koff = kvh * hd; uint S = h * sstride; for (uint t = lid; t < npos; t += 256u) { float acc = 0.0f; for (uint c = 0u; c < hd; ++c) { acc = metal::fma(q[qoff + c], kc[t * KVD + koff + c], acc); } sc[S + t] = acc * scale; } }";
+  // PV only: the weighted value walk over scratch weights already there
+  def sp-pv-msl(fname) = "kernel void " ++ fname ++ " (device const float* q [[buffer(0)]], device const float* kc [[buffer(1)]], device const float* vc [[buffer(2)]], device float* y [[buffer(3)]], device float* sc [[buffer(4)]], constant uint& npos [[buffer(5)]], constant uint& nq [[buffer(6)]], constant uint& nkv [[buffer(7)]], constant uint& hd [[buffer(8)]], constant float& scale [[buffer(9)]], constant uint& sstride [[buffer(10)]], uint3 tgpig [[threadgroup_position_in_grid]], ushort tiisg [[thread_index_in_simdgroup]], ushort sgitg [[simdgroup_index_in_threadgroup]]) { uint h = tgpig.x; if (h >= nq) return; uint lid = (uint)sgitg * 32u + (uint)tiisg; uint grp = nq / nkv; uint kvh = h / grp; uint KVD = nkv * hd; uint qoff = h * hd; uint koff = kvh * hd; uint E = (nq + h) * sstride; for (uint c = lid; c < hd; c += 256u) { float acc = 0.0f; for (uint t = 0u; t < npos; ++t) { acc = metal::fma(vc[t * KVD + koff + c], sc[E + t], acc); } y[qoff + c] = acc; } }";
+  def sp-msl() = kth-msl() ++ q38-gqa-tg-msl("ref_gqa") ++ q38m-gqa-msl("rows_gqa") ++ q38sp-msl() ++ sp-qk-msl("qk_only") ++ sp-pv-msl("pv_only");
+  def sp-s(n) = value_str(n);
+  def sp-fill(fp, n, salt) {
+   let h = metal_buf_alloc(n * 4);
+   let e = metal_enqueue(fp, md-bind16([h], [n, salt], 256, 0, 0, 0), n);
+   let y = metal_sync();
+   h;
+  }
+  def sp-enq(pipe, hs, consts, groups, reps, i) = i >= reps ? 0 : metal_enqueue(pipe, md-bind16(hs, consts, 256, 0, 1, 1), groups) + sp-enq(pipe, hs, consts, groups, reps, i + 1);
+  def sp-time(pipe, hs, consts, groups, reps) {
+   let b = metal_batch_concurrent();
+   let t0 = now_unix_ms();
+   let e = sp-enq(pipe, hs, consts, groups, reps, 0);
+   let y = metal_sync();
+   let r = metal_buf_read(hs[3], 0, 4);
+   value_str(now_unix_ms() - t0) ++ "/e" ++ value_str(e);
+  }
+  def sp-case(msl, npos, rows, reps) {
+   let fp = metal_pipeline(sp-fill-msl(), "fill_f32");
+   let kvd = sp-nkv() * sp-hd();
+   let qd = sp-nq() * sp-hd();
+   let hq = sp-fill(fp, qd * rows, 3);
+   let hk = sp-fill(fp, npos * kvd * rows, 5);
+   let hv = sp-fill(fp, npos * kvd * rows, 7);
+   let hy = metal_buf_alloc(qd * rows * 4);
+   let hs = metal_buf_alloc(2 * sp-nq() * npos * rows * 4);
+   let ps = metal_buf_alloc(rows * 4);
+   let w = metal_buf_write(ps, 0, foldl((a, x) => a ++ md-le32(x), "", map(r => npos - 1, range(0, rows))));
+   let sc = md-f32-bits(0.0625);
+   let c1 = [npos, sp-nq(), sp-nkv(), sp-hd(), sc, npos];
+   let cr = [sp-nq(), sp-nkv(), sp-hd(), sc, npos, qd, npos * kvd, 2 * sp-nq() * npos, rows];
+   let w1 = sp-time(metal_pipeline(msl, "ref_gqa"), [hq, hk, hv, hy, hs], c1, sp-nq(), 1);
+   let t1 = sp-time(metal_pipeline(msl, "ref_gqa"), [hq, hk, hv, hy, hs], c1, sp-nq(), reps);
+   let tqk = sp-time(metal_pipeline(msl, "qk_only"), [hq, hk, hv, hy, hs], c1, sp-nq(), reps);
+   let tpv = sp-time(metal_pipeline(msl, "pv_only"), [hq, hk, hv, hy, hs], c1, sp-nq(), reps);
+   let tr = sp-time(metal_pipeline(msl, "rows_gqa"), [hq, hk, hv, hy, hs, ps], cr, sp-nq() * rows, reps);
+   let ts = sp-split-times(msl, hq, hk, hv, hy, npos, reps, [0, 256], rows, ps);
+   "npos " ++ sp-s(npos) ++ " rows " ++ sp-s(rows) ++ " reps " ++ sp-s(reps) ++ ": ref_gqa " ++ sp-s(t1) ++ " ms, qk_only " ++ sp-s(tqk) ++ " ms, pv_only " ++ sp-s(tpv) ++ " ms, rows_gqa " ++ sp-s(tr) ++ " ms | split(chunk:single/rows) " ++ ts;
+  }
+  def sp-recs-go(rs, reps, i) = i >= reps ? 0 : foldl((a, r) => a + metal_enqueue(r[0], r[1], r[2]), 0, rs) + sp-recs-go(rs, reps, i + 1);
+  def sp-split-times(msl, hq, hk, hv, hy, npos, reps, chunks, rows, ps) {
+   if (len(chunks) == 0) then "" else {
+    let ch = chunks[0];
+    let nspl = q38sp-nspl(npos, ch);
+    let kvd = sp-nkv() * sp-hd();
+    let qd = sp-nq() * sp-hd();
+    let part = metal_buf_alloc(rows * sp-nq() * nspl * (sp-hd() + 2) * 4);
+    let sc = md-f32-bits(0.0625);
+    let one = sp-time-recs-h(q38sp-recs(metal_pipeline(msl, "form_q38_gqa_split_f32"), metal_pipeline(msl, "form_q38_gqa_combine_f32"), hq, hk, hv, part, hy, npos, sp-nq(), sp-nkv(), sp-hd(), sc, ch), reps, hy);
+    let pstride = sp-nq() * nspl * (sp-hd() + 2);
+    let rr = sp-time-recs-h([[metal_pipeline(msl, "form_q38m_gqa_split"), md-bind16([hq, hk, hv, part, ps], [sp-nq(), sp-nkv(), sp-hd(), sc, ch, nspl, qd, npos * kvd, pstride, rows], 256, 0, 1, 1), rows * sp-nkv() * nspl], [metal_pipeline(msl, "form_q38m_gqa_combine"), md-bind16([part, hy, ps], [sp-nq(), sp-hd(), ch, nspl, qd, pstride, rows], 256, 0, 1, 1), rows * sp-nq()]], reps, hy);
+    " " ++ sp-s(ch) ++ ":" ++ one ++ "/" ++ rr ++ sp-split-times(msl, hq, hk, hv, hy, npos, reps, chunks[1:], rows, ps);
+   };
+  }
+  def sp-time-recs-h(rs, reps, hy) {
+   let b = metal_batch_concurrent();
+   let t0 = now_unix_ms();
+   let e = sp-recs-go(rs, reps, 0);
+   let y = metal_sync();
+   let r = metal_buf_read(hy, 0, 4);
+   value_str(now_unix_ms() - t0);
+  }
+  def sp-run() {
+   let msl = sp-msl();
+   let a0 = sp-case(msl, 100, 1, 64);
+   let a1 = sp-case(msl, 300, 1, 64);
+   let a = sp-case(msl, 1000, 1, 64);
+   let b = sp-case(msl, 4000, 1, 64);
+   let c = sp-case(msl, 12500, 1, 64);
+   let d = sp-case(msl, 12500, 2, 64);
+   a0 ++ "\n" ++ a1 ++ "\n" ++ a ++ "\n" ++ b ++ "\n" ++ c ++ "\n" ++ d ++ "\n" ++ sp-s(metal_pipeline(msl, "ref_gqa")) ++ sp-s(metal_pipeline(msl, "rows_gqa")) ++ sp-s(metal_pipeline(msl, "qk_only")) ++ sp-s(metal_pipeline(msl, "pv_only")) ++ sp-s(metal_pipeline(sp-fill-msl(), "fill_f32"));
+  }
+ }
+ sp-run();
+}

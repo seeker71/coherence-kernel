@@ -1,0 +1,64 @@
+// q38-split-attention.bml — flash-decoding for the full-attention layers: the KV positions of one decoded token are split across threadgroups.
+//
+// The decode attention of a full layer (q38-gqa-tg-msl) ran one 256-thread group per query head: 24 groups on a 40-core GPU, each walking all
+// npos positions, its value walk a serial per-channel loop over npos. At a 12.5k-position context that is 124 ms a token over 16 layers, all of it
+// latency (the same kernel at 2 streams cost the same), a small share of the memory bandwidth the bytes need (q38-split-attn-probe.bml).
+//
+// Two kernels. The SPLIT kernel runs a group for every (kv head, chunk of `chunk` positions) and serves the whole GQA group of query heads of
+// that kv head from one read of K and V: scores for its chunk in threadgroup memory, a softmax of its own (chunk max m, sum l of exp(s - m)),
+// and the weighted value sum, written as a partial [acc[hd], m, l] at record (head * nspl + split) * (hd + 2) of the partial buffer. The COMBINE
+// kernel merges a head's splits with the log-sum-exp rule: M = max m_s, L = sum l_s exp(m_s - M), y = sum acc_s exp(m_s - M) / L. Any
+// context length is split into ceil(npos / chunk) chunks; no length is refused. The partials live in the attention scratch the session already holds
+// (2 * nq * maxpos floats): q38sp-fits? answers whether one token's partials fit it, and the caller keeps the unsplit kernel for a geometry that does not.
+//
+// Each kernel exists in two spellings from one body: ROWS 0 (one stream, npos a constant) and ROWS 1 (stream rows, each row's npos from posb[row] + 1,
+// row r's q at r * qstride, its cache at r * kvstride, its partials at r * pstride). The reference is q38-gqa-tg-msl; the band (tests/q38-split-attn-band.bml)
+// holds the split within float tolerance of it at several lengths, among them 12000+ and lengths that are not a multiple of the chunk.
+section [form.bml] {
+ class Q38SplitAttention {
+  // positions a split group reads: a sixteenth of the context, at least 32 (a context of a few positions still spreads over several groups) and at most
+  // 256 (a group's scores sit in threadgroup memory, 8 heads x 256). A longer context is more splits of 256, never a refusal.
+  def q38sp-chunk(npos) = (npos + 15) / 16 < 32 ? 32 : ((npos + 15) / 16 > 256 ? 256 : (npos + 15) / 16);
+  // The chunk a dispatch names is 0 for "this token's own": the kernels read it from the token's length (the formula of q38sp-chunk), so a token's
+  // arithmetic is the same whichever lane runs it (decode, speculative verify, prefill, stream rows) and the lanes' ids stay identical. The splits a dispatch
+  // lays out are those of its longest token, at least 16 (a token under 4096 positions has at most 16 splits).
+  def q38sp-nspl(npos, chunk) {
+   let c = chunk == 0 ? q38sp-chunk(npos) : chunk;
+   let n = (npos + c - 1) / c;
+   chunk == 0 && n < 16 ? 16 : n;
+  }
+  // the geometry the kernel serves: a GQA group of at most 8 heads, a head dim of a whole number of simd lanes up to 256, and the partials of one
+  // token inside the scratch (2 * nq * stride floats)
+  def q38sp-fits?(nq, nkv, hd, stride, nspl) = nkv > 0 && nq % nkv == 0 && nq / nkv <= 8 && hd % 32 == 0 && hd <= 256 && nq * nspl * (hd + 2) <= 2 * nq * stride;
+  def q38sp-split-msl(fname, rows) {
+   let args = "(device const float* q [[buffer(0)]], device const float* kc [[buffer(1)]], device const float* vc [[buffer(2)]], device float* part [[buffer(3)]], " ++ (rows == 1 ? "device const uint* posb [[buffer(4)]], constant uint& nq [[buffer(5)]], constant uint& nkv [[buffer(6)]], constant uint& hd [[buffer(7)]], constant float& scale [[buffer(8)]], constant uint& chunk [[buffer(9)]], constant uint& nspl [[buffer(10)]], constant uint& qstride [[buffer(11)]], constant uint& kvstride [[buffer(12)]], constant uint& pstride [[buffer(13)]], constant uint& nrows [[buffer(14)]], " : (rows == 2 ? "constant uint& pos0 [[buffer(4)]], constant uint& nq [[buffer(5)]], constant uint& nkv [[buffer(6)]], constant uint& hd [[buffer(7)]], constant float& scale [[buffer(8)]], constant uint& chunk [[buffer(9)]], constant uint& nspl [[buffer(10)]], constant uint& ntok [[buffer(11)]], " : "constant uint& npos [[buffer(4)]], constant uint& nq [[buffer(5)]], constant uint& nkv [[buffer(6)]], constant uint& hd [[buffer(7)]], constant float& scale [[buffer(8)]], constant uint& chunk [[buffer(9)]], constant uint& nspl [[buffer(10)]], ")) ++ "uint3 tgpig [[threadgroup_position_in_grid]], ushort tiisg [[thread_index_in_simdgroup]], ushort sgitg [[simdgroup_index_in_threadgroup]]) { ";
+   let pro = rows == 1 ? "uint row = tgpig.x / (nkv * nspl); if (row >= nrows) return; uint npos = posb[row] + 1u; device const float* qr = q + row * qstride; device const float* kcr = kc + row * kvstride; device const float* vcr = vc + row * kvstride; device float* pr = part + row * pstride; uint r = tgpig.x - row * (nkv * nspl); " : (rows == 2 ? "uint gid = tgpig.x; uint row = gid % ntok; uint r = gid / ntok; uint npos = pos0 + row + 1u; device const float* qr = q + row * nq * hd; device const float* kcr = kc; device const float* vcr = vc; device float* pr = part + row * nq * nspl * (hd + 2u); " : "uint row = 0u; uint r = tgpig.x; device const float* qr = q; device const float* kcr = kc; device const float* vcr = vc; device float* pr = part; ");
+   let body = "uint kvh = r / nspl; uint s = r - kvh * nspl; uint ch = chunk; if (ch == 0u) { ch = (npos + 15u) / 16u; ch = ch < 32u ? 32u : (ch > 256u ? 256u : ch); } uint lo = s * ch; if (lo >= npos) return; uint n = npos - lo; if (n > ch) { n = ch; } uint grp = nq / nkv; uint KVD = nkv * hd; uint koff = kvh * hd; uint lane = (uint)tiisg; uint sg = (uint)sgitg; uint lid = sg * 32u + lane; threadgroup float sq[2048]; threadgroup float ssc[2048]; for (uint i = lid; i < grp * hd; i += 256u) { sq[i] = qr[kvh * grp * hd + i]; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); for (uint t = sg; t < n; t += 8u) { float a[8]; for (uint g = 0u; g < 8u; ++g) { a[g] = 0.0f; } device const float* kp = kcr + (lo + t) * KVD + koff; for (uint c = lane; c < hd; c += 32u) { float kv = kp[c]; for (uint g = 0u; g < 8u; ++g) { if (g < grp) { a[g] = metal::fma(sq[g * hd + c], kv, a[g]); } } } for (uint g = 0u; g < 8u; ++g) { if (g < grp) { float tot = metal::simd_sum(a[g]); if (lane == 0u) { ssc[g * 256u + t] = tot * scale; } } } } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (sg < grp) { float mx = -3.4e38f; for (uint t = lane; t < n; t += 32u) { mx = metal::max(mx, ssc[sg * 256u + t]); } mx = metal::simd_max(mx); float ls = 0.0f; for (uint t = lane; t < n; t += 32u) { float e = fexp(ssc[sg * 256u + t] - mx); ssc[sg * 256u + t] = e; ls = ls + e; } ls = metal::simd_sum(ls); if (lane == 0u) { device float* rec = pr + ((kvh * grp + sg) * nspl + s) * (hd + 2u); rec[hd] = mx; rec[hd + 1u] = ls; } } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); for (uint c = lid; c < hd; c += 256u) { float o[8]; for (uint g = 0u; g < 8u; ++g) { o[g] = 0.0f; } device const float* vp = vcr + lo * KVD + koff + c; for (uint t = 0u; t < n; ++t) { float v = vp[t * KVD]; for (uint g = 0u; g < 8u; ++g) { if (g < grp) { o[g] = metal::fma(v, ssc[g * 256u + t], o[g]); } } } for (uint g = 0u; g < 8u; ++g) { if (g < grp) { pr[((kvh * grp + g) * nspl + s) * (hd + 2u) + c] = o[g]; } } } }";
+   "kernel void " ++ fname ++ " " ++ args ++ pro ++ body;
+  }
+  def q38sp-combine-msl(fname, rows) {
+   let args = "(device const float* part [[buffer(0)]], device float* y [[buffer(1)]], " ++ (rows == 1 ? "device const uint* posb [[buffer(2)]], constant uint& nq [[buffer(3)]], constant uint& hd [[buffer(4)]], constant uint& chunk [[buffer(5)]], constant uint& nspl [[buffer(6)]], constant uint& qstride [[buffer(7)]], constant uint& pstride [[buffer(8)]], constant uint& nrows [[buffer(9)]], " : (rows == 2 ? "constant uint& pos0 [[buffer(2)]], constant uint& nq [[buffer(3)]], constant uint& hd [[buffer(4)]], constant uint& chunk [[buffer(5)]], constant uint& nspl [[buffer(6)]], constant uint& ntok [[buffer(7)]], " : "constant uint& npos [[buffer(2)]], constant uint& nq [[buffer(3)]], constant uint& hd [[buffer(4)]], constant uint& chunk [[buffer(5)]], constant uint& nspl [[buffer(6)]], ")) ++ "uint3 tgpig [[threadgroup_position_in_grid]], ushort tiisg [[thread_index_in_simdgroup]], ushort sgitg [[simdgroup_index_in_threadgroup]]) { ";
+   let pro = rows == 1 ? "uint row = tgpig.x / nq; if (row >= nrows) return; uint npos = posb[row] + 1u; uint h = tgpig.x - row * nq; uint pbase = row * pstride; uint ybase = row * qstride; " : (rows == 2 ? "uint gid = tgpig.x; uint row = gid / nq; if (row >= ntok) return; uint npos = pos0 + row + 1u; uint h = gid - row * nq; uint pbase = row * nq * nspl * (hd + 2u); uint ybase = row * nq * hd; " : "uint h = tgpig.x; uint pbase = 0u; uint ybase = 0u; ");
+   let body = "uint lid = (uint)sgitg * 32u + (uint)tiisg; uint ch = chunk; if (ch == 0u) { ch = (npos + 15u) / 16u; ch = ch < 32u ? 32u : (ch > 256u ? 256u : ch); } uint ns = (npos + ch - 1u) / ch; uint RS = hd + 2u; device const float* pr = part + pbase + h * nspl * RS; float M = -3.4e38f; for (uint s = 0u; s < ns; ++s) { M = metal::max(M, pr[s * RS + hd]); } float L = 0.0f; for (uint s = 0u; s < ns; ++s) { L = L + pr[s * RS + hd + 1u] * fexp(pr[s * RS + hd] - M); } float inv = 1.0f / L; for (uint c = lid; c < hd; c += 256u) { float a = 0.0f; for (uint s = 0u; s < ns; ++s) { a = metal::fma(pr[s * RS + c], fexp(pr[s * RS + hd] - M), a); } y[ybase + h * hd + c] = a * inv; } }";
+   "kernel void " ++ fname ++ " " ++ args ++ pro ++ body;
+  }
+  // the six kernels the lanes compile: single-stream split and combine, stream-row split and combine, and span (ntok consecutive positions of one stream,
+  // token t over pos0 + t + 1 positions of the shared cache; the token is the fastest-varying group index, so the groups that read one chunk run together)
+  def q38sp-msl() = q38sp-split-msl("form_q38_gqa_split_f32", 0) ++ q38sp-combine-msl("form_q38_gqa_combine_f32", 0) ++ q38sp-split-msl("form_q38m_gqa_split", 1) ++ q38sp-combine-msl("form_q38m_gqa_combine", 1) ++ q38sp-split-msl("form_q38_gqa_split_span_f32", 2) ++ q38sp-combine-msl("form_q38_gqa_combine_span_f32", 2);
+  // records for a span of ntok tokens at positions pos0 .. pos0 + ntok - 1: [split, combine]. The partials need ntok * nq * nspl * (hd + 2) floats of the
+  // span scratch (2 * nq * maxpos floats a token), which q38sp-fits? at the span's longest length answers for.
+  def q38sp-span-recs(sp, cp, q, kc, vc, part, y, pos0, nq, nkv, hd, scaleBits, ntok) {
+   let top = pos0 + ntok;
+   let chunk = 0;
+   let nspl = q38sp-nspl(top, chunk);
+   [[sp, md-bind16([q, kc, vc, part], [pos0, nq, nkv, hd, scaleBits, chunk, nspl, ntok], 256, 0, 1, 1), ntok * nkv * nspl], [cp, md-bind16([part, y], [pos0, nq, hd, chunk, nspl, ntok], 256, 0, 1, 1), ntok * nq]];
+  }
+  // records for one token at npos positions: [split, combine] as [pipeline, binding, groups]. ps2 = [split pipeline, combine pipeline].
+  // bs: q, k cache, v cache, partial scratch, y.
+  def q38sp-recs(sp, cp, q, kc, vc, part, y, npos, nq, nkv, hd, scaleBits, chunk) {
+   let nspl = q38sp-nspl(npos, chunk);
+   [[sp, md-bind16([q, kc, vc, part], [npos, nq, nkv, hd, scaleBits, chunk, nspl], 256, 0, 1, 1), nkv * nspl], [cp, md-bind16([part, y], [npos, nq, hd, chunk, nspl], 256, 0, 1, 1), nq]];
+  }
+ }
+ 0;
+}

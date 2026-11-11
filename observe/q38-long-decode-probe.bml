@@ -1,0 +1,86 @@
+// q38-long-decode-probe.bml — what one decoded token costs at a long context, single stream and stream rows, with no prefill.
+//
+//   echo '{"go":1,"pos":12500,"steps":12}' | ./fkwu observe/q38-long-decode-probe.bml
+//
+// The model opens once with room for pos + steps positions; the KV the steps attend over is whatever the buffers hold (zeros: the attention
+// kernels' cost does not depend on the values, but untouched pages are not backed memory, so every K and V is written with a pattern first), so a
+// context of 12.5k positions costs the seconds of the open and the steps, not the minutes a real prefill of 12.5k ids takes. Reads the ms of each decode step: one stream through the lane the planner runs (q38-forward), then two
+// stream rows through the counsel's multi-stream pass (q38m-step-core), at the position given and at position 100 for the short-context floor.
+// A physical run: it needs the local GPU and holds its lease.
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/q38-multi.bml form-stdlib/bml/form-cli-code-live.bml form-stdlib/bml/q38-lenses.bml native/metal/qwen35-dense-token-handle.fk native/metal/qwen35-dense-spec.fk
+section [form.bml] {
+ class Q38LongDecodeProbe {
+  def ldp-say(t) = print_str("[long-decode] " ++ t ++ "\n");
+  def ldp-opts() {
+   let line = trim(stdin-text());
+   (len(line) > 0) && (str_byte_at(line, 0) == 123) ? parse-json("q38-long-decode", line) : json-node-object([]);
+  }
+  def ldp-int(doc, key, d) = json-object-has?(doc, key) ? json-int-value(json-object-get(doc, key)) : d;
+  // one stream: steps decodes from position p0, each timed; answers the ms of every step
+  def ldp-single(ctx, sts, p0, steps, i, acc) {
+   if (i >= steps) then reverse(acc) else {
+    let t0 = host_monotonic_ms();
+    let id = q38-forward(ctx[0], ctx[1], ctx[2], ctx[3], sts, ctx[4], ctx[5], ctx[6], 1000 + i, p0 + i);
+    let t1 = host_monotonic_ms();
+    ldp-single(ctx, sts, p0, steps, i + 1, cons(t1 - t0, acc));
+   };
+  }
+  // n stream rows: steps passes from position p0, each timed
+  def ldp-rows(ctx, qs, mp, arena, sx, posb, lpb, n, p0, steps, i, acc) {
+   if (i >= steps) then reverse(acc) else {
+    let t0 = host_monotonic_ms();
+    let r = q38m-step-core(ctx, qs, mp, arena, sx, posb, map(s => 1000 + i + s, range(0, n)), map(s => p0 + i, range(0, n)), lpb);
+    let t1 = host_monotonic_ms();
+    ldp-rows(ctx, qs, mp, arena, sx, posb, lpb, n, p0, steps, i + 1, cons(t1 - t0, acc));
+   };
+  }
+  // Untouched buffers are pages the machine has not backed: a read of them costs the cache, not the memory, and a bandwidth-bound kernel would read
+  // faster than it ever does over a real cache. Every K and V the steps attend over is written first, a deterministic pattern of small values.
+  def ldp-fill-msl() = "#include <metal_stdlib>\nkernel void fill_f32(device float* b [[buffer(0)]], constant uint& n [[buffer(1)]], constant uint& salt [[buffer(2)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; uint x = (i * 37u + salt * 101u + (i / 211u) * 13u) % 211u; b[i] = (float(x) * 0.0047f - 0.45f) * 0.5f; }";
+  def ldp-fill-one(fp, h, n, salt) {
+   let e = metal_enqueue(fp, md-bind16([h], [n, salt], 256, 0, 0, 0), n);
+   let y = metal_sync();
+   n;
+  }
+  def ldp-fill-layers(fp, geo, sts, arena, rows, l) {
+   if (l >= geo[21]) then 0 else {
+    let a = kth-full?(l, geo[22]) ? ldp-fill-one(fp, nth(sts, l)[2], geo[18] * geo[20], 5 + l) + ldp-fill-one(fp, nth(sts, l)[3], geo[18] * geo[20], 7 + l) + ldp-fill-one(fp, nth(arena, l)[2], rows * geo[18] * geo[20], 9 + l) + ldp-fill-one(fp, nth(arena, l)[3], rows * geo[18] * geo[20], 11 + l) : 0;
+    ldp-fill-layers(fp, geo, sts, arena, rows, l + 1);
+   };
+  }
+  def ldp-fill-all(geo, sts, arena, rows) = ldp-fill-layers(metal_pipeline(ldp-fill-msl(), "fill_f32"), geo, sts, arena, rows, 0);
+  def ldp-join(xs) = len(xs) == 0 ? "" : value_str(xs[0]) ++ (len(xs) > 1 ? " " ++ ldp-join(xs[1:]) : "");
+  def ldp-mean(xs) = foldl((a, x) => a + x, 0, xs) / len(xs);
+  def ldp-run() {
+   let o = ldp-opts();
+   let p0 = ldp-int(o, "pos", 12500);
+   let steps = ldp-int(o, "steps", 12);
+   let rows = ldp-int(o, "rows", 2);
+   ldp-int(o, "go", 0) != 1 ? ldp-say("plan: go=1 opens the 27B with room for " ++ value_str(p0 + steps + 8) ++ " positions and times " ++ value_str(steps) ++ " single-stream steps and " ++ value_str(steps) ++ " steps of " ++ value_str(rows) ++ " stream rows at position " ++ value_str(p0) ++ " and at 100") : ldp-go(p0, steps, rows);
+  }
+  def ldp-go(p0, steps, rows) {
+   let ctx = qlz-open(p0 + steps + 8);
+   let sts = q38-new-state(ctx[2]);
+   let qs0 = q38s-pipes(q38s-msl());
+   let sx = q38s-open(ctx, 8, 8);
+   let mp = q38m-pipes(q38m-msl());
+   let posb = metal_buf_alloc(64);
+   let lpb = metal_buf_alloc(64);
+   let arena = q38m-new-arena(ctx[2], rows, bytes => metal_buf_alloc(bytes));
+   let filled = ldp-fill-all(ctx[2], sts, arena, rows);
+   let warm = ldp-single(ctx, sts, 0, 3, 0, []);
+   let a = ldp-single(ctx, sts, 100, steps, 0, []);
+   let b = ldp-single(ctx, sts, p0, steps, 0, []);
+   let c = ldp-rows(ctx, qs0, mp, arena, sx, posb, lpb, rows, 100, steps, 0, []);
+   let d = ldp-rows(ctx, qs0, mp, arena, sx, posb, lpb, rows, p0, steps, 0, []);
+   let s1 = ldp-say("single stream at 100: mean " ++ value_str(ldp-mean(a)) ++ " ms, steps " ++ ldp-join(a));
+   let s2 = ldp-say("single stream at " ++ value_str(p0) ++ ": mean " ++ value_str(ldp-mean(b)) ++ " ms, steps " ++ ldp-join(b));
+   let s3 = ldp-say(value_str(rows) ++ " stream rows at 100: mean " ++ value_str(ldp-mean(c)) ++ " ms, steps " ++ ldp-join(c));
+   let s4 = ldp-say(value_str(rows) ++ " stream rows at " ++ value_str(p0) ++ ": mean " ++ value_str(ldp-mean(d)) ++ " ms, steps " ++ ldp-join(d));
+   let freed = q38-free-state(sts) + q38-free-state(arena) + q38s-close(sx) + q38-free-handle(posb) + q38-free-handle(lpb);
+   qlz-close(ctx);
+  }
+ }
+ ldp-run();
+}
