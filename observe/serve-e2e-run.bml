@@ -4,9 +4,11 @@
 //   echo '{"dir":"/tmp/form-serve","mode":"concurrent"}' | ./fkwu observe/serve-e2e-run.bml
 //   echo '{"dir":"/tmp/form-serve","mode":"serial"}'     | ./fkwu observe/serve-e2e-run.bml
 //
-// The server must stand (observe/qwen-serve-run.bml, slots 4, maxpos 14336 or more). set mixed (default): oneword (priority 2, no count: it ends at the model's end of turn),
+// The server must stand (observe/qwen-serve-run.bml, its pool of blocks large enough for the set's longest prompt). set paged: seven rows of different lengths (a one-word, two short stories, a 1.3k, a 4.1k, a sampled one and
+// a 15.7k-id prompt, longer than the old 14336-position slot); set ident: greedy and sampled rows up to 12.5k ids, for text equality between servers (each run writes <dir>/e2e-<label>.texts); set sampled: `rows` drawn rows.
+// set mixed (default): oneword (priority 2, no count: it ends at the model's end of turn),
 // short (priority 1, 1200 tokens), medium (about 1.4k prompt ids), long (about 4k) and xlong (priority 1, about 12.5k ids, 100 tokens). set decode: four short prompts of `tokens` each
-// (default 400), where the weight pass is shared by four decoding rows and prefill is not the cost. mode concurrent puts every request in the spool at once (a fifth has to wait for a
+// (default 400; `rows` of them, default 4, at most 8), where the weight pass is shared by the decoding rows and prefill is not the cost. mode concurrent puts every request in the spool at once (a fifth has to wait for a
 // slot: its queue_ms says so); mode serial asks them one at a time, each after the last one's reply. Each run writes <dir>/e2e-[<set>-]<mode>.jsonl; the
 // serial run compares every reply's text with the concurrent run's (greedy decoding and bit-identical rows: the texts must be equal) and says the aggregate tokens a second of each.
 // NOTE (2026-11-11): the Mac's GPU throttles under minutes of sustained load: the same four-row decode ran at 164 ms a step right after a run and 91 ms after 150 s of rest, so a pair of
@@ -18,23 +20,35 @@
 section [form.bml] {
  class ServeE2eRun {
   def e2e-say(t) = print_str("[e2e] " ++ t ++ "\n");
-  def e2e-spec() = [["dir", "str"], ["mode", "str"], ["set", "str"], ["tokens", "int"], ["sentences", "int"], ["wait_ms", "int"]];
+  def e2e-spec() = [["dir", "str"], ["mode", "str"], ["set", "str"], ["tokens", "int"], ["sentences", "int"], ["wait_ms", "int"], ["rows", "int"]];
   // the filler: n numbered sentences, about 18 ids each
   def e2e-fill(n) = foldl((a, i) => a ++ "The quick brown fox " ++ i.str() ++ " jumps over the lazy dog near the river bank. ", "", range(0, n));
-  // [label, prompt, max_tokens, priority]
-  def e2e-requests(set, n, tok) = (String) set == "decode" ? [
-   ["d1", "Write a long story about a lighthouse keeper who finds a message in a bottle.", tok, 0],
-   ["d2", "Explain in great detail how a bicycle works.", tok, 0],
-   ["d3", "Write a long poem about the sea and the sailors who cross it.", tok, 0],
-   ["d4", "Describe the history of the printing press at length.", tok, 0]
+  def e2e-ask() = "\nQuestion: roughly how many sentences did you just read, and what do they have in common? Answer at length.";
+  def e2e-topics() = ["Write a long story about a lighthouse keeper who finds a message in a bottle.", "Explain in great detail how a bicycle works.", "Write a long poem about the sea and the sailors who cross it.", "Describe the history of the printing press at length.", "Explain how a cell divides, step by step, in detail.", "Write a long story about a fox who learns to read.", "Describe how bridges carry their loads, in detail.", "Write a long letter from a traveler to a friend about a mountain town."];
+  // [label, prompt, max_tokens, priority, temperature_milli, seed]
+  def e2e-requests(set, n, tok, rows) = (String) set == "decode" ? map(i => ["d" ++ (i + 1).str(), e2e-topics()[i], tok, 0, 0, 0], range(0, rows > 8 ? 8 : rows)) : (String) set == "sampled" ? map(i => ["s" ++ (i + 1).str(), e2e-topics()[i], tok, 0, 700, 11 + i], range(0, rows > 8 ? 8 : rows)) : (String) set == "ident" ? [
+   ["i-greedy", e2e-topics()[0], 160, 0, 0, 0],
+   ["i-sampled", e2e-topics()[1], 160, 0, 700, 7],
+   ["i-medium", e2e-fill(n / 9) ++ e2e-ask(), 120, 0, 0, 0],
+   ["i-long", e2e-fill(n / 3) ++ e2e-ask(), 100, 0, 0, 0],
+   ["i-xlong", e2e-fill(n) ++ e2e-ask(), 80, 0, 0, 0],
+   ["i-xsampled", e2e-fill(n / 2) ++ e2e-ask(), 100, 0, 800, 5]
+  ] : (String) set == "paged" ? [
+   ["oneword", "Reply with the single word: yes", 0, 2, 0, 0],
+   ["short", e2e-topics()[0], 400, 1, 0, 0],
+   ["medium", e2e-fill(n / 9) ++ e2e-ask(), 200, 0, 0, 0],
+   ["long", e2e-fill(n / 3) ++ e2e-ask(), 150, 0, 0, 0],
+   ["sampled", e2e-topics()[5], 300, 0, 700, 3],
+   ["huge", e2e-fill(n + n / 4) ++ e2e-ask(), 120, 1, 0, 0],
+   ["short2", e2e-topics()[2], 300, 0, 0, 0]
   ] : [
-   ["oneword", "Reply with the single word: yes", 0, 2],
-   ["short", "Write a long story about a lighthouse keeper who finds a message in a bottle.", 1200, 1],
-   ["medium", e2e-fill(n / 9) ++ "\nQuestion: roughly how many sentences did you just read, and what do they have in common? Answer at length.", 200, 0],
-   ["long", e2e-fill(n / 3) ++ "\nQuestion: roughly how many sentences did you just read, and what do they have in common? Answer at length.", 150, 0],
-   ["xlong", e2e-fill(n) ++ "\nQuestion: roughly how many sentences did you just read, and what do they have in common? Answer at length.", 100, 1]
+   ["oneword", "Reply with the single word: yes", 0, 2, 0, 0],
+   ["short", e2e-topics()[0], 1200, 1, 0, 0],
+   ["medium", e2e-fill(n / 9) ++ e2e-ask(), 200, 0, 0, 0],
+   ["long", e2e-fill(n / 3) ++ e2e-ask(), 150, 0, 0, 0],
+   ["xlong", e2e-fill(n) ++ e2e-ask(), 100, 1, 0, 0]
   ];
-  def e2e-body(r) = svc-spec-json(r[1], "", 1, r[2], [], r[3], "e2e-" ++ r[0]);
+  def e2e-body(r) = svc-spec-json-drawn(r[1], "", 1, r[2], [], r[3], "e2e-" ++ r[0], r[4], r[5]);
   def e2e-row(label, doc, client_ms) = json-node-object([svs-s("label", label), svs-s("status", svc-str(doc, "status")), svs-n("prompt_ids", svc-int(doc, "prompt_ids")), svs-n("generated_ids", svc-int(doc, "generated_ids")), svs-n("queue_ms", svc-int(doc, "queue_ms")), svs-n("prefill_ms", svc-int(doc, "prefill_ms")), svs-n("decode_ms", svc-int(doc, "decode_ms")), svs-n("wall_ms", svc-int(doc, "wall_ms")), svs-n("client_ms", client_ms), json-node-pair("decode_tok_s", json-node-float-text(svc-float-text(doc))), svs-s("text", svc-str(doc, "text"))]);
   def svc-float-text(doc) = json-object-has?(doc, "decode_tok_s") ? json-emit(json-object-get(doc, "decode_tok_s")) : "0";
   def e2e-say-row(label, doc, client_ms) = e2e-say(label ++ ": " ++ svc-str(doc, "status") ++ " prompt_ids=" ++ svc-int(doc, "prompt_ids").str() ++ " generated_ids=" ++ svc-int(doc, "generated_ids").str() ++ " queue_ms=" ++ svc-int(doc, "queue_ms").str() ++ " prefill_ms=" ++ svc-int(doc, "prefill_ms").str() ++ " decode_tok_s=" ++ svc-float-text(doc) ++ " client_ms=" ++ client_ms.str());
@@ -44,7 +58,7 @@ section [form.bml] {
    let mode = svs-str(o, "mode", "concurrent");
    let st = svc-standing(dir);
    let set = svs-str(o, "set", "mixed");
-   let reqs = e2e-requests(set, svs-int(o, "sentences", 700), svs-int(o, "tokens", 400));
+   let reqs = e2e-requests(set, svs-int(o, "sentences", 700), svs-int(o, "tokens", 400), svs-int(o, "rows", 4));
    let label = (String) set == "mixed" ? mode : set ++ "-" ++ mode;
    (String) st[0] != "standing" ? e2e-say("no server stands: " ++ st[1]) : (String) mode == "serial" ? e2e-serial(dir, label, reqs, svs-int(o, "wait_ms", 0)) : e2e-concurrent(dir, label, reqs, svs-int(o, "wait_ms", 0));
   }
@@ -71,6 +85,7 @@ section [form.bml] {
    let tokens = foldl((a, d) => a + svc-int(d[1], "generated_ids"), 0, good);
    let prompts = foldl((a, d) => a + svc-int(d[1], "prompt_ids"), 0, good);
    let w = write_file(dir ++ "/e2e-" ++ mode ++ ".jsonl", foldl((a, d) => a ++ json-emit(e2e-row(d[0], d[1], d[2])) ++ "\n", "", good));
+   let wt = write_file(dir ++ "/e2e-" ++ mode ++ ".texts", foldl((a, d) => a ++ d[0] ++ " | " ++ svc-str(d[1], "status") ++ " | " ++ svc-str(d[1], "text") ++ "\n----\n", "", good));
    let said = e2e-say(mode ++ ": " ++ len(good).str() ++ " of " ++ len(reqs).str() ++ " answered, wall " ++ wall.str() ++ " ms, " ++ tokens.str() ++ " tokens generated, " ++ prompts.str() ++ " prompt ids: aggregate " ++ e2e-rate(tokens, wall) ++ " generated tok/s, " ++ e2e-rate(tokens + prompts, wall) ++ " ids/s");
    str_find(mode, "serial", 0) >= 0 ? e2e-compare(dir, mode, good) : 0;
   }

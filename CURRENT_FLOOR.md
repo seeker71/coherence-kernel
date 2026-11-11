@@ -111,15 +111,19 @@ form/form-stdlib/tests/door-options-band -> 1023  (door-options.bml: empty and {
                                             an unknown key (named, with the keys the door has), a key of the wrong kind (a string for an
                                             integer, a float, null, a bool, an object), a key given twice are each refused; the reading alone
                                             and a scratch door that ends in exit 1 and prints `<door>: <why>` before its next statement)
-form/form-stdlib/tests/serve-sched-band  -> 8191  (serve-sched.bml (with the prefix cache's seams: snapshot points and a begin that answers the cached ids; and sampling's: temperature_milli and seed carried into the pass's rows), the scheduler of the resident server observe/qwen-serve-run.bml, against a scripted
+form/native/metal/tests/q38-split-attn-band -> 4095  (the split-KV attention against the one-group-per-head kernel, and PAGED KV: the same kernels through a block table, equal BYTE FOR BYTE at blocks of 16 and 256, scattered tables, rows to 20001 positions, spans across block edges; live Metal)
+form/form-stdlib/tests/serve-sched-band  -> 32767  (PAGED KV in the scheduler: a block pool, admission by free blocks and the machine's budget (a prompt waits, never refused), growth a block at a time, release at the end, the cache's entries let go first, a sequence of 500 ids past the old slot, a yield that requeues the reply so far and ends with the text it would have had alone, pool-full and pool-too-small the only ends of the pool's own; serve-sched.bml (with the prefix cache's seams: snapshot points and a begin that answers the cached ids; and sampling's: temperature_milli and seed carried into the pass's rows), the scheduler of the resident server observe/qwen-serve-run.bml, against a scripted
                                             fake step function, no model: the strict spool reading; admission into free slots; priority; chunked
                                             prefill beside a decoding stream (it decodes 4 steps between two chunks and is never stalled more than a
-                                            chunk), a prompt read alone at full speed; eviction and its four statuses; the rows of a pass; the pressure
-                                            limit; prompts that do not fit; the ledger row; stop strings)
+                                            chunk), a prompt read alone at full speed; eviction and its statuses; the rows of a pass; the standing limit and the pool's budget;
+                                            an empty prompt and a prompt larger than the whole pool; the ledger row; stop strings)
 form/form-stdlib/tests/serve-client-band -> 63    (serve-client.bml over a scratch spool: standing judged by pid and start, a request put in whole and read
                                             back strictly, a reply taken, a bounded wait, a dead server named, the planner's voice shape)
 observe/qwen-serve-run.bml               the resident server (vLLM's continuous batching, chunked prefill and flash-decoding, native): one fkwu process
-                                            holds the lease and the 27B's weights and KV, serves a spool (default /tmp/form-serve), one weight pass a step for every
+                                            holds the lease and the 27B's weights and a POOL OF KV BLOCKS (paged: 512 blocks of 256 positions, a table row a sequence; no slot, so
+                                            no prompt-exceeds-slot or context-full: a 15678-id prompt, past the old 14336 slot, ran beside six others; eight 400-id rows on a
+                                            9-block pool yielded and resumed with text byte-equal to the large pool's; paged and contiguous servers wrote byte-identical text,
+                                            greedy and sampled, 31 to 12528 ids; four rows 36.4 tok/s paged vs 36.3 contiguous, six 37.5, eight 34.1), serves a spool (default /tmp/form-serve), one weight pass a step for every
                                             live sequence. Clients: observe/serve-ask-run.bml; the planner (lpr-spoken) and counsel (lcr-go) route through it when
                                             it stands, else name why and open their own. Physical test: observe/serve-e2e-run.bml. PREFIX CACHE (2026-11-11): the
                                             prefill lane keeps a snapshot of its state at a chat request's question end, at 1024/2048/4096... ids and at each prompt's

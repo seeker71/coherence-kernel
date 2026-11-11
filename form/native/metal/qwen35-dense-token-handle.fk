@@ -472,6 +472,21 @@ section [form.bml] {
     // Every op here is the per-token one with the token axis in the operation
     // instead of a loop around it. The stream is identical, line for line; it is
     // issued once for the span rather than once per position.
+    // the cache store and the attention of a span in a layer's contiguous state (st[2], st[3] hold positions at pos * kvd)
+    def q38-span-kv-attn(ps, bs, geo, st, pos0, ntok) = {
+        metal_enqueue(ps[37], q38-b16([bs[24], st[2]], [geo[20], pos0, ntok], 0, 1), geo[20] * ntok);
+        metal_enqueue(ps[37], q38-b16([bs[25], st[3]], [geo[20], pos0, ntok], 0, 0), geo[20] * ntok);
+        q38-gqa-span-split?(geo, pos0, ntok) ? q38-gqa-span-split(ps, bs, geo, st, pos0, ntok) : q38pa-enqueue(nth(ps, q38pa-index()), [bs[22], st[2], st[3], bs[26], bs[27]], [pos0, geo[12], geo[13], geo[14], geo[17], geo[18], ntok], geo[12] * ntok, 1);
+    };
+    // The same for a layer whose K and V are blocks of the pool (a state row with a fifth word, the page descriptor [tbl, bsh, tstride, tbase, split rows, kv write rows, split span, kv write span,
+    // combine span, combine rows]): the store and the split attention read and write through the sequence's table row from word pg[3]. The span's partials must fit the scratch
+    // (q38-gqa-span-split?); a longer context than the scratch carries is the caller's to open with a larger maxpos.
+    def q38-span-kv-attn-pg(ps, bs, geo, st, pos0, ntok) = {
+        let pg = st[4];
+        metal_enqueue(pg[7], q38-b16([bs[24], st[2], pg[0]], [geo[20], pos0, ntok, pg[1], pg[3], 0], 0, 1), geo[20] * ntok);
+        metal_enqueue(pg[7], q38-b16([bs[25], st[3], pg[0]], [geo[20], pos0, ntok, pg[1], pg[3], 0], 0, 0), geo[20] * ntok);
+        q38-run(q38sp-paged-span-recs(pg[6], pg[8], bs[22], st[2], st[3], bs[27], bs[26], pg[0], pg[3], pg[1], pos0, geo[12], geo[13], geo[14], geo[17], ntok));
+    };
     def q38-full-attn-span(ps, bs, geo, lay, st, pos0, ntok) = {
         let nqhd = geo[12] * geo[14];
         let nkvhd = geo[13] * geo[14];
@@ -485,9 +500,7 @@ section [form.bml] {
         metal_enqueue(ps[35], q38-b16([bs[24], kth-tv-h(lay[9]), bs[24]], [geo[13], geo[14], geo[6], ntok], 0, 0), geo[13] * ntok);
         metal_enqueue(ps[36], q38-b16([bs[22]], [geo[12], geo[14], geo[15], pos0, geo[16], ntok], 0, 1), geo[12] * (geo[15] / 2) * ntok);
         metal_enqueue(ps[36], q38-b16([bs[24]], [geo[13], geo[14], geo[15], pos0, geo[16], ntok], 0, 0), geo[13] * (geo[15] / 2) * ntok);
-        metal_enqueue(ps[37], q38-b16([bs[24], st[2]], [geo[20], pos0, ntok], 0, 1), geo[20] * ntok);
-        metal_enqueue(ps[37], q38-b16([bs[25], st[3]], [geo[20], pos0, ntok], 0, 0), geo[20] * ntok);
-        q38-gqa-span-split?(geo, pos0, ntok) ? q38-gqa-span-split(ps, bs, geo, st, pos0, ntok) : q38pa-enqueue(nth(ps, q38pa-index()), [bs[22], st[2], st[3], bs[26], bs[27]], [pos0, geo[12], geo[13], geo[14], geo[17], geo[18], ntok], geo[12] * ntok, 1);
+        (Comparable) len(st) > 4 ? q38-span-kv-attn-pg(ps, bs, geo, st, pos0, ntok) : q38-span-kv-attn(ps, bs, geo, st, pos0, ntok);
         metal_enqueue(ps[17], q38-b16([bs[26], bs[23]], [nqhd * ntok], 0, 1), nqhd * ntok);
         q38-mv-batch(ps, lay[10], bs[26], bs[10], ntok, 1);
         metal_enqueue(ps[19], q38-b16([bs[33], bs[10], bs[33]], [geo[0] * ntok], 0, 1), geo[0] * ntok);

@@ -97,7 +97,7 @@ section [form.bml] {
     // are kept as values on one record the session carries in slot 20 (after the adapter, sampler, cursor, draft and spec
     // owners), keyed by the printed phase, so a caller reads them back instead of parsing a print. The open creates the
     // clock before it queues for admission (fcms-open-sized) and attaches it where the open settles (fcms-open-held); every
-    // decode step adds its own span (fcms-forward, the planned step, the speculative walk); each decode checkpoint and the
+    // decode step adds its own span (fcms-forward, the planned step, the speculative walk); each decode progress pulse and the
     // release stamp their instants. A session that did not come through the admitted door (fcms-none, a band's fixture)
     // carries no clock, and every reading of it is nothing(), never 0. The printed stage lines are as they were.
     def fcms-clock-slot() = 20;
@@ -545,12 +545,14 @@ section [form.bml] {
     // Checkpoints arrive after 1, 2, 4, 8... local steps: O(log n) terminal
     // frames retain liveness for an unbounded turn without turning a long
     // answer into a second token stream.
-    def fcms-decode-checkpoint?(steps-to-checkpoint) = steps-to-checkpoint <= 1 ? 1 : 0;
-    def fcms-decode-next-left(steps-to-checkpoint, checkpoint-width) = (Comparable) fcms-decode-checkpoint?(steps-to-checkpoint) == 1 ? checkpoint-width : steps-to-checkpoint - 1;
-    def fcms-decode-next-width(steps-to-checkpoint, checkpoint-width) = (Comparable) fcms-decode-checkpoint?(steps-to-checkpoint) == 1 ? checkpoint-width * 2 : checkpoint-width;
-    def fcms-decode-pulse(completed-steps) = fcmg-live-stage(("model-session-decode-checkpoint-" + completed-steps.str()), 8388613);
-    // the same checkpoint, stamped on the session's clock first (the grammar's own pulse, form-token-grammar.bml ftg-feed, has no session and only prints)
-    def fcms-decode-pulse-of(s, completed-steps) = { fcms-clock-stamp(fcms-clock-of(s), ("model-session-decode-checkpoint-" + completed-steps.str())); fcms-decode-pulse(completed-steps); };
+    def fcms-decode-pulse-due?(steps-to-pulse) = steps-to-pulse <= 1 ? 1 : 0;
+    def fcms-decode-next-left(steps-to-pulse, pulse-width) = (Comparable) fcms-decode-pulse-due?(steps-to-pulse) == 1 ? pulse-width : steps-to-pulse - 1;
+    def fcms-decode-next-width(steps-to-pulse, pulse-width) = (Comparable) fcms-decode-pulse-due?(steps-to-pulse) == 1 ? pulse-width * 2 : pulse-width;
+    def fcms-decode-pulse(completed-steps) = fcmg-live-stage(("model-session-decode-progress-" + completed-steps.str()), 8388613);
+    // The decode-progress PULSE: a stage line "model-session-decode-progress-N" says the walk has completed N steps, with N doubling (1, 2, 4, 8, 16 ... 8192 ... and on) so the lines stay few however long an
+    // answer runs. It reports progress and nothing more: no N is a limit, a budget or a place the walk may stop, and a walk that runs past any of them runs on.
+    // The same pulse, stamped on the session's clock first (the grammar's own pulse, form-token-grammar.bml ftg-feed, has no session and only prints)
+    def fcms-decode-pulse-of(s, completed-steps) = { fcms-clock-stamp(fcms-clock-of(s), ("model-session-decode-progress-" + completed-steps.str())); fcms-decode-pulse(completed-steps); };
     def fcms-decode-pulse-for(s) = n => fcms-decode-pulse-of(s, n);
     // result = (ids pending pos stopped). Returned ids are model speech only;
     // the stop/control prediction is retained separately for the next crossing.
@@ -571,15 +573,15 @@ section [form.bml] {
         let retain=record_get(progress,"retain");if value_kind(retain)=="closure" then retain(s) else 0;1;
     };
     def fcms-progress-ids(progress) = record_get(progress,"reversed") ? reverse(record_get(progress,"ids")) : record_get(progress,"ids");
-    def fcms-walk-by(step, s, id, pos, left, stops, out, steps-to-checkpoint, checkpoint-width, completed-steps) = fcms-walk-observed(nothing(),step,s,id,pos,left,stops,out,steps-to-checkpoint,checkpoint-width,completed-steps);
+    def fcms-walk-by(step, s, id, pos, left, stops, out, steps-to-pulse, pulse-width, completed-steps) = fcms-walk-observed(nothing(),step,s,id,pos,left,stops,out,steps-to-pulse,pulse-width,completed-steps);
     def fcms-walk-ended(progress,s,out,id,pos,stopped) {fcms-progress-set(progress,fcms-open-stream(s,pos,id,stopped,len(out)),out,0);[out,id,pos,stopped];}
-    def fcms-walk-observed(progress,step, s, id, pos, left, stops, out, steps-to-checkpoint, checkpoint-width, completed-steps) = id < 0 ? fcms-walk-ended(progress,s,out,-1,pos,1) : (Comparable) q38-stop?(id, stops) == 1 ? fcms-walk-ended(progress,s,out,id,pos,1) : left <= 0 ? fcms-walk-ended(progress,s,out,id,pos,0) : {
+    def fcms-walk-observed(progress,step, s, id, pos, left, stops, out, steps-to-pulse, pulse-width, completed-steps) = id < 0 ? fcms-walk-ended(progress,s,out,-1,pos,1) : (Comparable) q38-stop?(id, stops) == 1 ? fcms-walk-ended(progress,s,out,id,pos,1) : left <= 0 ? fcms-walk-ended(progress,s,out,id,pos,0) : {
         let out2 = append(out, [id]);
         let completed2 = completed-steps + 1;
         fcms-progress-set(progress,fcms-open-stream(s,pos,id,0,len(out2)),out2,0);
-        let pulse = (Comparable) fcms-decode-checkpoint?(steps-to-checkpoint) == 1 ? fcms-decode-pulse-of(s, completed2) : 0;
-        let next-left = fcms-decode-next-left(steps-to-checkpoint, checkpoint-width);
-        let next-width = fcms-decode-next-width(steps-to-checkpoint, checkpoint-width);
+        let pulse = (Comparable) fcms-decode-pulse-due?(steps-to-pulse) == 1 ? fcms-decode-pulse-of(s, completed2) : 0;
+        let next-left = fcms-decode-next-left(steps-to-pulse, pulse-width);
+        let next-width = fcms-decode-next-width(steps-to-pulse, pulse-width);
         (Comparable) left == 1 ? [out2, id, pos, 0] : {
             let nid = step(s, id, pos);
             fcms-progress-set(progress,fcms-open-stream(s,pos+1,nid,nid<0 || q38-stop?(nid,stops),len(out2)),out2,0);
@@ -603,7 +605,7 @@ section [form.bml] {
         next;
     };
     def fcms-step-for(s, n) = fcms-plannable?(s, n) ? fcms-planned-step(fcms-ctx(s), fcms-sts(s), q38-plan(fcms-ctx(s), fcms-sts(s))) : fcms-forward;
-    def fcms-walk(s, id, pos, left, stops, out, steps-to-checkpoint, checkpoint-width, completed-steps) = fcms-walk-observed(fcms-progress-of(s),fcms-step-for(s, left), s, id, pos, left, stops, out, steps-to-checkpoint, checkpoint-width, completed-steps);
+    def fcms-walk(s, id, pos, left, stops, out, steps-to-pulse, pulse-width, completed-steps) = fcms-walk-observed(fcms-progress-of(s),fcms-step-for(s, left), s, id, pos, left, stops, out, steps-to-pulse, pulse-width, completed-steps);
     // generation = tag text ids updated-session. No generated text is needed to
     // resume; the bytes are exposed only for the Form/BMF boundary that asks.
     def fcms-generation(text, ids, session) = ["form-cli-model-session-generation-v1", text, ids, session];

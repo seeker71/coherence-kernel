@@ -5,7 +5,7 @@
 ; tolerance, not to bytes: the largest of |a - b| / (|b| + 0.05) over all outputs must stay at or under 1e-3 (the band reads it in millionths), with
 ; scores of standard deviation near 10 so that the maxima differ from chunk to chunk and a wrong merge shows at once.
 ;
-; Expected: 511
+; Expected: 4095
 ; Verdict 511 when every claim lands:
 ;   1   a small geometry (12 query heads over 2 kv heads of 64) at lengths 1, 2, 255, 256, 257, 600 and 1025: single stream, split and combine against q38-gqa-tg-msl
 ;   2   the 27B's geometry (24 query heads over 4 kv heads of 256) at lengths 1, 4097, 12001 and 12500: single stream against q38-gqa-tg-msl
@@ -19,12 +19,20 @@
 ;       pos0 0, 250, 255, 4000 and 12000, the split span kernels against the speculative lane's span kernel (decode's order) and the prefill lane's
 ;   256 one token at the same length through the single-stream dispatch, a stream row and the last token of a span of 4 (a token's chunk is read from its own
 ;       length, whichever lane runs it): the three lanes' outputs equal byte for byte, so decode, speculative verify and the stream rows keep one set of ids
+;   512  PAGED KV, single stream: the cache lives in blocks of a pool a table points at (blocks of 16 and of 256 positions, the table scattered so neighbours are far apart in the pool, the pool
+;        filled by the paged span store): the paged split + combine equal the contiguous split + combine BYTE FOR BYTE, at lengths on and either side of a block edge and a chunk edge, the small
+;        geometry and the 27B's, chunks 0 and 256, up to 20001 positions (a sequence longer than the old 14336-position slot)
+;   1024 PAGED KV, stream rows: five rows of different lengths (20001, 14337, 12000, 301, 1 on the 27B's geometry; blocks of 16 beside rows of 15, 16 and 17) with a table row each, blocks of
+;        different rows interleaved in the pool: the paged rows kernels equal the contiguous ones, and the paged store of each row's next key at its own position (form_q38m_kvw_rows_pg)
+;        then the attention again equal the contiguous store and attention, bytes
+;   2048 PAGED KV, span: 1 to 64 consecutive positions from pos0 0, 250, 255, 4000, 12000, 14330 and 20000 written through the table by the span store and read by the paged split span kernels
+;        equal the contiguous span kernels, bytes
 ; REQUIRES: a live Metal device
 // preludes: form-stdlib/core.fk form-stdlib/bml/live.bml form-stdlib/metal-door.fk native/metal/qwen35-dense-token-handle.fk form-stdlib/bml/q38-multi.bml
 section [form.bml] {
  class Q38SplitAttnBand {
   def sab-fill-msl() = "#include <metal_stdlib>\nkernel void fill_f32(device float* b [[buffer(0)]], constant uint& n [[buffer(1)]], constant uint& salt [[buffer(2)]], constant float& amp [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; uint x = (i * 37u + salt * 101u + (i / 211u) * 13u) % 211u; b[i] = (float(x) * 0.0047f - 0.45f) * amp; }\nkernel void cmp_f32(device const float* a [[buffer(0)]], device const float* b [[buffer(1)]], device uint* out [[buffer(2)]], constant uint& n [[buffer(3)]], uint lid [[thread_position_in_grid]]) { float m = 0.0f; for (uint i = lid; i < n; i += 256u) { float e = metal::fabs(a[i] - b[i]) / (metal::fabs(b[i]) + 0.05f); if (!(e == e)) { e = 1.0e30f; } m = metal::max(m, e); } out[lid] = (uint)metal::min(m * 1.0e6f, 4.0e9f); }";
-  def sab-msl() = kth-msl() ++ q38-gqa-tg-msl("ref_gqa") ++ q38m-gqa-msl("ref_rows") ++ q38s-gqa-msl() ++ q38pa-msl() ++ q38sp-msl();
+  def sab-msl() = kth-msl() ++ q38-gqa-tg-msl("ref_gqa") ++ q38m-gqa-msl("ref_rows") ++ q38s-gqa-msl() ++ q38pa-msl() ++ q38sp-msl() ++ q38m-kvwrite-msl("form_q38m_kvw_rows");
   // ntok consecutive positions from pos0 over one shared cache: the split span kernels against a span kernel (refname: the speculative lane's
   // form_q38s_gqa_span, in decode's order, or the prefill lane's form_gqa_span_cooperative_f32)
   def sab-span(msl, nq, nkv, hd, pos0, ntok, refname) {
@@ -191,7 +199,139 @@ section [form.bml] {
    let e2 = sab-run-recs(q38sp-recs(ps[q38sp-index()], ps[q38sp-index() + 1], hq, hk, hv, hs, hy2, npos, nq, nkv, hd, sc, 0));
    ps[q38sp-index()] > 0 && ps[q38sp-index() + 1] > 0 && sab-ok(sab-err(cp, hy2, hy1, nq * hd));
   }
-  def sab-run() = live-claims("q38-split-attn-band", 0, [["small", 1, 1, sab-c-small], ["prod", 2, 1, sab-c-prod], ["chunks", 4, 1, sab-c-chunks], ["rows-prod", 8, 1, sab-c-rows-prod], ["rows-small", 16, 1, sab-c-rows-small], ["fits", 32, 1, sab-c-fits], ["pipes", 64, 1, sab-c-pipes], ["span", 128, 1, sab-c-span], ["identity", 256, 1, sab-c-ident]]);
+  // ── PAGED KV: the same attention through a block table, byte for byte ──
+  // The paged kernels (q38sp-paged-msl, q38m-kvspan-pg-msl, q38m-kvwrite-pg-msl) change only where a position's K and V are read and written; the arithmetic is the contiguous kernel's in its order, so each
+  // claim holds the paged output EQUAL BYTE FOR BYTE to the contiguous split's, not within a tolerance. The pool is scattered by a table that is not contiguous (physical block (i * 37) % P + 1, P prime > the
+  // blocks used, so neighbours in a sequence are far apart in the pool and blocks of different rows interleave); the blocks are of 16 positions (bsh 4) and of 256 (bsh 8), so chunks straddle blocks.
+  def sab-pg-prime(n) = n < 101 ? 101 : n < 331 ? 331 : n < 1009 ? 1009 : 4099;
+  def sab-pg-phys(i, p) = 1 + (i * 37) % p;
+  def sab-pg-blocks(npos, bsh) = (npos + q38pg-bsz(bsh) - 1) / q38pg-bsz(bsh);
+  // the table of `rows` rows of nb columns, row r column j the physical block of its (r * nb + j)th block
+  def sab-pg-table(rows, nb, p) = map(k => sab-pg-phys(k, p), range(0, rows * nb));
+  def sab-pg-pool(p, bsh, kvd) = metal_buf_alloc((p + 1) * q38pg-bsz(bsh) * kvd * 4);
+  // scatter npos positions starting at source float soff of src into the pool through table row (tbase words in)
+  def sab-pg-scatter(ppipe, src, pool, tbl, kvd, npos, bsh, tbase, soff) {
+   let e = metal_enqueue(ppipe, md-bind16([src, pool, tbl], [kvd, 0, npos, bsh, tbase, soff], 0, 0, 0, 0), npos * kvd);
+   metal_sync();
+  }
+  // one stream at npos positions, contiguous split against paged split: 1 when the bytes are equal
+  def sab-paged-single(msl, nq, nkv, hd, npos, bsh, chunk) {
+   let pmsl = q38pg-msl();
+   let fp = metal_pipeline(sab-fill-msl(), "fill_f32");
+   let kvd = nkv * hd;
+   let nb = sab-pg-blocks(npos, bsh);
+   let p = sab-pg-prime(nb);
+   let hq = sab-fill(fp, nq * hd, 3, 3.0);
+   let hk = sab-fill(fp, npos * kvd, 5, 3.0);
+   let hv = sab-fill(fp, npos * kvd, 7, 1.0);
+   let hy1 = metal_buf_alloc(nq * hd * 4);
+   let hy2 = metal_buf_alloc(nq * hd * 4);
+   let nspl = q38sp-nspl(npos, chunk);
+   let hp = metal_buf_alloc(nq * nspl * (hd + 2) * 4);
+   let hp2 = metal_buf_alloc(nq * nspl * (hd + 2) * 4);
+   let sc = md-f32-bits(1.0);
+   let tbl = metal_buf_alloc(nb * 4);
+   let tw = metal_buf_write(tbl, 0, sab-uints(sab-pg-table(1, nb, p)));
+   let pk = sab-pg-pool(p, bsh, kvd);
+   let pv = sab-pg-pool(p, bsh, kvd);
+   let sp = sab-pg-scatter(metal_pipeline(pmsl, "form_q38_kvspan_pg"), hk, pk, tbl, kvd, npos, bsh, 0, 0);
+   let sq = sab-pg-scatter(metal_pipeline(pmsl, "form_q38_kvspan_pg"), hv, pv, tbl, kvd, npos, bsh, 0, 0);
+   let a = sab-run-recs(q38sp-recs(metal_pipeline(msl, "form_q38_gqa_split_f32"), metal_pipeline(msl, "form_q38_gqa_combine_f32"), hq, hk, hv, hp, hy1, npos, nq, nkv, hd, sc, chunk));
+   let b = sab-run-recs(q38sp-paged-recs(metal_pipeline(pmsl, "form_q38_gqa_split_pg_f32"), metal_pipeline(msl, "form_q38_gqa_combine_f32"), hq, pk, pv, hp2, hy2, tbl, 0, bsh, npos, nq, nkv, hd, sc, chunk));
+   metal_buf_read(hy1, 0, nq * hd * 4) == metal_buf_read(hy2, 0, nq * hd * 4);
+  }
+  def sab-paged-singles(msl, nq, nkv, hd, nposs, bsh, chunk) = nil?(nposs) ? true : sab-paged-single(msl, nq, nkv, hd, nposs[0], bsh, chunk) && sab-paged-singles(msl, nq, nkv, hd, nposs[1:], bsh, chunk);
+  // stream rows, each row its own length and its own table row: contiguous rows kernels against paged rows kernels, then the store of one new position per row through the table
+  // (form_q38m_kvw_rows_pg) against the contiguous store (form_q38m_kvw_rows), the attention read again: all bytes equal
+  def sab-paged-rows(msl, nq, nkv, hd, nposs, bsh, chunk) {
+   let pmsl = q38pg-msl();
+   let fp = metal_pipeline(sab-fill-msl(), "fill_f32");
+   let rows = len(nposs);
+   let top = foldl((m, n) => n > m ? n : m, 0, nposs);
+   let kvd = nkv * hd;
+   let stride = top + 50;
+   let nb = sab-pg-blocks(top, bsh);
+   let p = sab-pg-prime(rows * nb);
+   let hq = sab-fill(fp, rows * nq * hd, 3, 3.0);
+   let hk = sab-fill(fp, rows * stride * kvd, 5, 3.0);
+   let hv = sab-fill(fp, rows * stride * kvd, 7, 1.0);
+   let hy1 = metal_buf_alloc(rows * nq * hd * 4);
+   let hy2 = metal_buf_alloc(rows * nq * hd * 4);
+   let hy3 = metal_buf_alloc(rows * nq * hd * 4);
+   let hy4 = metal_buf_alloc(rows * nq * hd * 4);
+   let hs = metal_buf_alloc(rows * 2 * nq * stride * 4);
+   let nspl = q38sp-nspl(top, chunk);
+   let pstride = nq * nspl * (hd + 2);
+   let hp = metal_buf_alloc(rows * pstride * 4);
+   let hp2 = metal_buf_alloc(rows * pstride * 4);
+   let hb = metal_buf_alloc(rows * 4);
+   let w = metal_buf_write(hb, 0, sab-uints(map(n => n - 1, nposs)));
+   let sc = md-f32-bits(1.0);
+   let tbl = metal_buf_alloc(rows * nb * 4);
+   let tw = metal_buf_write(tbl, 0, sab-uints(sab-pg-table(rows, nb, p)));
+   let pk = sab-pg-pool(p, bsh, kvd);
+   let pv = sab-pg-pool(p, bsh, kvd);
+   let sc1 = foldl((a, r) => a + sab-pg-scatter(metal_pipeline(pmsl, "form_q38_kvspan_pg"), hk, pk, tbl, kvd, nposs[r], bsh, r * nb, r * stride * kvd), 0, range(0, rows));
+   let sc2 = foldl((a, r) => a + sab-pg-scatter(metal_pipeline(pmsl, "form_q38_kvspan_pg"), hv, pv, tbl, kvd, nposs[r], bsh, r * nb, r * stride * kvd), 0, range(0, rows));
+   let b1 = metal_batch_concurrent();
+   let e1 = metal_enqueue(metal_pipeline(msl, "form_q38m_gqa_split"), md-bind16([hq, hk, hv, hp, hb], [nq, nkv, hd, sc, chunk, nspl, nq * hd, stride * kvd, pstride, rows], 256, 0, 1, 1), rows * nkv * nspl);
+   let e2 = metal_enqueue(metal_pipeline(msl, "form_q38m_gqa_combine"), md-bind16([hp, hy1, hb], [nq, hd, chunk, nspl, nq * hd, pstride, rows], 256, 0, 1, 1), rows * nq);
+   let y1 = metal_sync();
+   let b2 = metal_batch_concurrent();
+   let e3 = metal_enqueue(metal_pipeline(pmsl, "form_q38m_gqa_split_pg"), md-bind16([hq, pk, pv, hp2, hb, tbl], [nq, nkv, hd, sc, chunk, nspl, nq * hd, pstride, rows, bsh, 0, nb], 256, 0, 1, 1), rows * nkv * nspl);
+   let e4 = metal_enqueue(metal_pipeline(msl, "form_q38m_gqa_combine"), md-bind16([hp2, hy2, hb], [nq, hd, chunk, nspl, nq * hd, pstride, rows], 256, 0, 1, 1), rows * nq);
+   let y2 = metal_sync();
+   // the store of a new key at each row's own position: the contiguous store and the paged store, then the attention over both
+   let hn = sab-fill(fp, rows * kvd, 11, 2.0);
+   let b3 = metal_batch_concurrent();
+   let e5 = metal_enqueue(metal_pipeline(msl, "form_q38m_kvw_rows"), md-bind16([hn, hk, hb], [kvd, stride, rows], 256, 0, 0, 1), kvd * rows);
+   let e6 = metal_enqueue(metal_pipeline(pmsl, "form_q38m_kvw_rows_pg"), md-bind16([hn, pk, hb, tbl], [kvd, bsh, nb, rows], 256, 0, 0, 1), kvd * rows);
+   let y3 = metal_sync();
+   let b4 = metal_batch_concurrent();
+   let e7 = metal_enqueue(metal_pipeline(msl, "form_q38m_gqa_split"), md-bind16([hq, hk, hv, hp, hb], [nq, nkv, hd, sc, chunk, nspl, nq * hd, stride * kvd, pstride, rows], 256, 0, 1, 1), rows * nkv * nspl);
+   let e8 = metal_enqueue(metal_pipeline(msl, "form_q38m_gqa_combine"), md-bind16([hp, hy3, hb], [nq, hd, chunk, nspl, nq * hd, pstride, rows], 256, 0, 1, 1), rows * nq);
+   let y4 = metal_sync();
+   let b5 = metal_batch_concurrent();
+   let e9 = metal_enqueue(metal_pipeline(pmsl, "form_q38m_gqa_split_pg"), md-bind16([hq, pk, pv, hp2, hb, tbl], [nq, nkv, hd, sc, chunk, nspl, nq * hd, pstride, rows, bsh, 0, nb], 256, 0, 1, 1), rows * nkv * nspl);
+   let e10 = metal_enqueue(metal_pipeline(msl, "form_q38m_gqa_combine"), md-bind16([hp2, hy4, hb], [nq, hd, chunk, nspl, nq * hd, pstride, rows], 256, 0, 1, 1), rows * nq);
+   let y5 = metal_sync();
+   metal_buf_read(hy1, 0, rows * nq * hd * 4) == metal_buf_read(hy2, 0, rows * nq * hd * 4) && metal_buf_read(hy3, 0, rows * nq * hd * 4) == metal_buf_read(hy4, 0, rows * nq * hd * 4);
+  }
+  // ntok consecutive positions of one stream from pos0, the contiguous split span kernels against the paged ones (the prefill lane writing and reading the pool)
+  def sab-paged-span(msl, nq, nkv, hd, pos0, ntok, bsh) {
+   let pmsl = q38pg-msl();
+   let fp = metal_pipeline(sab-fill-msl(), "fill_f32");
+   let kvd = nkv * hd;
+   let top = pos0 + ntok;
+   let nb = sab-pg-blocks(top, bsh);
+   let p = sab-pg-prime(nb);
+   let hq = sab-fill(fp, ntok * nq * hd, 3, 3.0);
+   let hk = sab-fill(fp, top * kvd, 5, 3.0);
+   let hv = sab-fill(fp, top * kvd, 7, 1.0);
+   let hy1 = metal_buf_alloc(ntok * nq * hd * 4);
+   let hy2 = metal_buf_alloc(ntok * nq * hd * 4);
+   let nspl = q38sp-nspl(top, 0);
+   let hp = metal_buf_alloc(ntok * nq * nspl * (hd + 2) * 4);
+   let hp2 = metal_buf_alloc(ntok * nq * nspl * (hd + 2) * 4);
+   let sc = md-f32-bits(1.0);
+   let tbl = metal_buf_alloc(nb * 4);
+   let tw = metal_buf_write(tbl, 0, sab-uints(sab-pg-table(1, nb, p)));
+   let pk = sab-pg-pool(p, bsh, kvd);
+   let pv = sab-pg-pool(p, bsh, kvd);
+   // the positions before pos0 are scattered whole; the span's own ntok are written by the span store from a source holding them at its row 0
+   let s1 = pos0 > 0 ? sab-pg-scatter(metal_pipeline(pmsl, "form_q38_kvspan_pg"), hk, pk, tbl, kvd, pos0, bsh, 0, 0) : 0;
+   let s2 = pos0 > 0 ? sab-pg-scatter(metal_pipeline(pmsl, "form_q38_kvspan_pg"), hv, pv, tbl, kvd, pos0, bsh, 0, 0) : 0;
+   let s3 = metal_enqueue(metal_pipeline(pmsl, "form_q38_kvspan_pg"), md-bind16([hk, pk, tbl], [kvd, pos0, ntok, bsh, 0, pos0 * kvd], 0, 0, 0, 0), ntok * kvd);
+   let s4 = metal_enqueue(metal_pipeline(pmsl, "form_q38_kvspan_pg"), md-bind16([hv, pv, tbl], [kvd, pos0, ntok, bsh, 0, pos0 * kvd], 0, 0, 0, 0), ntok * kvd);
+   let y0 = metal_sync();
+   let a = sab-run-recs(q38sp-span-recs(metal_pipeline(msl, "form_q38_gqa_split_span_f32"), metal_pipeline(msl, "form_q38_gqa_combine_span_f32"), hq, hk, hv, hp, hy1, pos0, nq, nkv, hd, sc, ntok));
+   let b = sab-run-recs(q38sp-paged-span-recs(metal_pipeline(pmsl, "form_q38_gqa_split_span_pg_f32"), metal_pipeline(msl, "form_q38_gqa_combine_span_f32"), hq, pk, pv, hp2, hy2, tbl, 0, bsh, pos0, nq, nkv, hd, sc, ntok));
+   metal_buf_read(hy1, 0, ntok * nq * hd * 4) == metal_buf_read(hy2, 0, ntok * nq * hd * 4);
+  }
+  def sab-c-pg-single(ctx) = sab-paged-singles(sab-msl(), 12, 2, 64, [1, 2, 15, 16, 17, 255, 256, 257, 600, 1025], 4, 0) && sab-paged-singles(sab-msl(), 12, 2, 64, [1, 255, 256, 257, 600, 1025], 8, 256) && sab-paged-singles(sab-msl(), 24, 4, 256, [1, 4097, 12001, 20001], 8, 0) && sab-paged-singles(sab-msl(), 24, 4, 256, [12001], 4, 256);
+  def sab-c-pg-rows(ctx) = sab-paged-rows(sab-msl(), 12, 2, 64, [256, 257, 3, 700], 4, 0) && sab-paged-rows(sab-msl(), 12, 2, 64, [900, 17, 1, 450, 16, 15], 4, 256) && sab-paged-rows(sab-msl(), 24, 4, 256, [20001, 14337, 12000, 301, 1], 8, 0);
+  def sab-c-pg-span(ctx) = sab-paged-span(sab-msl(), 12, 2, 64, 0, 1, 4) && sab-paged-span(sab-msl(), 12, 2, 64, 250, 9, 4) && sab-paged-span(sab-msl(), 12, 2, 64, 255, 3, 8) && sab-paged-span(sab-msl(), 24, 4, 256, 0, 64, 8) && sab-paged-span(sab-msl(), 24, 4, 256, 4000, 64, 8) && sab-paged-span(sab-msl(), 24, 4, 256, 12000, 8, 8) && sab-paged-span(sab-msl(), 24, 4, 256, 20000, 64, 8) && sab-paged-span(sab-msl(), 24, 4, 256, 14330, 64, 8);
+  def sab-run() = live-claims("q38-split-attn-band", 0, [["small", 1, 1, sab-c-small], ["prod", 2, 1, sab-c-prod], ["chunks", 4, 1, sab-c-chunks], ["rows-prod", 8, 1, sab-c-rows-prod], ["rows-small", 16, 1, sab-c-rows-small], ["fits", 32, 1, sab-c-fits], ["pipes", 64, 1, sab-c-pipes], ["span", 128, 1, sab-c-span], ["identity", 256, 1, sab-c-ident], ["pg-single", 512, 1, sab-c-pg-single], ["pg-rows", 1024, 1, sab-c-pg-rows], ["pg-span", 2048, 1, sab-c-pg-span]]);
  }
  sab-run();
 }

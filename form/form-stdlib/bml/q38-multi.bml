@@ -30,6 +30,72 @@ section [form.bml] {
   // The key (or value) store into each stream's own cache: stream row's cache is the arena slice at row * maxpos * kvd, and its
   // position is posb[row]. kth-copyoff-msl's store with the row and position folded into the destination.
   def q38m-kvwrite-msl(fname) = "kernel void " ++ fname ++ " (device const float* s [[buffer(0)]], device float* d [[buffer(1)]], device const uint* posb [[buffer(2)]], constant uint& kvd [[buffer(3)]], constant uint& maxpos [[buffer(4)]], constant uint& nrows [[buffer(5)]], uint gid [[thread_position_in_grid]]) { if (gid >= nrows * kvd) return; uint row = gid / kvd; uint i = gid - row * kvd; d[row * maxpos * kvd + posb[row] * kvd + i] = s[row * kvd + i]; }";
+  // ── PAGED KV: the block pool's kernels ──
+  // A full layer's K (and V) of every sequence is one pool of blocks (q38pg-new-arena); a sequence's position p is at block table[p >> bsh], row p & (2^bsh - 1), the table one row a slot of the
+  // uint buffer tbl (tstride words a row). The store, the split attention (q38sp-paged-msl) and the copy are the kernels above with that address in front.
+  // The key (or value) store of every stream row at its own position, through the table (q38m-kvwrite-msl's store)
+  def q38m-kvwrite-pg-msl(fname) = "kernel void " ++ fname ++ " (device const float* s [[buffer(0)]], device float* d [[buffer(1)]], device const uint* posb [[buffer(2)]], device const uint* tbl [[buffer(3)]], constant uint& kvd [[buffer(4)]], constant uint& bsh [[buffer(5)]], constant uint& tstride [[buffer(6)]], constant uint& nrows [[buffer(7)]], uint gid [[thread_position_in_grid]]) { if (gid >= nrows * kvd) return; uint row = gid / kvd; uint i = gid - row * kvd; d[pg_off(tbl + row * tstride, posb[row], bsh, kvd) + i] = s[row * kvd + i]; }";
+  // The key (or value) store of a span of ntok consecutive positions of one stream, through the table from word tbase (the prefill lane's form_cache_span_f32 store)
+  def q38m-kvspan-pg-msl(fname) = "kernel void " ++ fname ++ " (device const float* s [[buffer(0)]], device float* d [[buffer(1)]], device const uint* tbl [[buffer(2)]], constant uint& kvd [[buffer(3)]], constant uint& pos0 [[buffer(4)]], constant uint& ntok [[buffer(5)]], constant uint& bsh [[buffer(6)]], constant uint& tbase [[buffer(7)]], constant uint& soff [[buffer(8)]], uint gid [[thread_position_in_grid]]) { if (gid >= ntok * kvd) return; uint t = gid / kvd; uint i = gid - t * kvd; d[pg_off(tbl + tbase, pos0 + t, bsh, kvd) + i] = s[soff + t * kvd + i]; }";
+  // a plain copy of n floats from s[soff ..] to d[doff ..]: a block's rows into another block (a prefix's partial block is copied, never shared, before a second sequence writes after it)
+  def q38m-pgcopy-msl(fname) = "kernel void " ++ fname ++ " (device const float* s [[buffer(0)]], device float* d [[buffer(1)]], constant uint& soff [[buffer(2)]], constant uint& doff [[buffer(3)]], constant uint& n [[buffer(4)]], uint gid [[thread_position_in_grid]]) { if (gid >= n) return; d[doff + gid] = s[soff + gid]; }";
+  def q38pg-bsz(bsh) = bsh <= 0 ? 1 : 2 * q38pg-bsz(bsh - 1);
+  def q38pg-msl() = kth-msl() ++ q38sp-paged-msl() ++ q38m-kvwrite-pg-msl("form_q38m_kvw_rows_pg") ++ q38m-kvspan-pg-msl("form_q38_kvspan_pg") ++ q38m-pgcopy-msl("form_q38pg_copy");
+  // the paged pipelines, in the order the page descriptor names them: [split rows, kv write rows, split span, kv write span, copy, split single]
+  def q38pg-pipes() = [metal_pipeline(q38pg-msl(), "form_q38m_gqa_split_pg"), metal_pipeline(q38pg-msl(), "form_q38m_kvw_rows_pg"), metal_pipeline(q38pg-msl(), "form_q38_gqa_split_span_pg_f32"), metal_pipeline(q38pg-msl(), "form_q38_kvspan_pg"), metal_pipeline(q38pg-msl(), "form_q38pg_copy"), metal_pipeline(q38pg-msl(), "form_q38_gqa_split_pg_f32")];
+  // The page descriptor a full layer's state row carries as its fifth word: [tbl, bsh, tstride, tbase, split rows, kv write rows, split span, kv write span, combine span, combine rows].
+  // The decode arena's descriptors have tbase 0 (row k reads table row k); a sequence's prefill state names its own table row as tbase.
+  def q38pg-page(tbl, bsh, tstride, tbase, pp, mp, qs0) = [tbl, bsh, tstride, tbase, pp[0], pp[1], pp[2], pp[3], qs0, mp[8]];
+  def q38pg-with-base(page, tbase) = [page[0], page[1], page[2], tbase, page[4], page[5], page[6], page[7], page[8], page[9]];
+  // The pools and per-slot recurrent state of the paged arena: per layer, a full layer is [0, 0, K pool, V pool, page] (the pool is nblocks * 2^bsh positions of kvd floats), a linear layer is
+  // [conv, delta] of nslots streams side by side and 0, 0 as the unpaged arena (q38m-new-arena) lays them.
+  def q38pg-new-arena(geo, nslots, nblocks, bsh, page, allocate) = q38pg-arena-go(0, geo, nslots, nblocks, bsh, page, allocate);
+  def q38pg-arena-go(l, geo, nslots, nblocks, bsh, page, allocate) = l >= geo[21] ? [] : cons(kth-full?(l, geo[22]) ? [0, 0, allocate(nblocks * q38pg-bsz(bsh) * geo[20] * 4), allocate(nblocks * q38pg-bsz(bsh) * geo[20] * 4), page] : [allocate(geo[1] * geo[23] * nslots * 4), allocate(geo[3] * geo[5] * geo[4] * nslots * 4), 0, 0], q38pg-arena-go(l + 1, geo, nslots, nblocks, bsh, page, allocate));
+  // a prefill state over the arena's pools: the full layers share the arena's pool buffers and name the sequence's table row; the linear layers are fresh recurrent state of one stream
+  def q38pg-new-state(geo, arena, tbase, allocate) = q38pg-state-go(0, geo, arena, tbase, allocate);
+  def q38pg-state-go(l, geo, arena, tbase, allocate) = l >= geo[21] ? [] : cons(kth-full?(l, geo[22]) ? [0, 0, arena[l][2], arena[l][3], q38pg-with-base(arena[l][4], tbase)] : [allocate(geo[1] * geo[23] * 4), allocate(geo[3] * geo[5] * geo[4] * 4), 0, 0], q38pg-state-go(l + 1, geo, arena, tbase, allocate));
+  // the recurrent state alone (a prefix snapshot's linear half): fresh buffers for the linear layers, nothing for the full ones
+  def q38pg-new-linear(geo, allocate) = q38pg-linear-go(0, geo, allocate);
+  def q38pg-linear-go(l, geo, allocate) = l >= geo[21] ? [] : cons(kth-full?(l, geo[22]) ? [0, 0, 0, 0] : [allocate(geo[1] * geo[23] * 4), allocate(geo[3] * geo[5] * geo[4] * 4), 0, 0], q38pg-linear-go(l + 1, geo, allocate));
+  // a copy of the linear layers' recurrent state of one stream (src, a state of one stream) into slot s of dst (an arena) or slot 0 of a one-stream state; the full layers' K and V are blocks, copied by q38pg-copy-block
+  def q38pg-copy-linear(pipe, geo, src, dst, s, l) {
+   if (l >= geo[21]) then 0 else {
+    let a = kth-full?(l, geo[22]) ? 0 : q38m-fork-layer(pipe, geo, l, src[l], dst[l], s, 0);
+    q38pg-copy-linear(pipe, geo, src, dst, s, l + 1);
+   };
+  }
+  // positions [0, n) of block a (physical) into block b: every full layer's K and V
+  def q38pg-copy-block(pp, geo, arena, bsh, a, b, n) = q38pg-copy-block-go(pp, geo, arena, bsh, a, b, n, 0);
+  def q38pg-copy-block-go(pp, geo, arena, bsh, a, b, n, l) {
+   if (l >= geo[21]) then 0 else {
+    let a1 = kth-full?(l, geo[22]) ? q38pg-copy-rows(pp, arena[l][2], a * q38pg-bsz(bsh) * geo[20], b * q38pg-bsz(bsh) * geo[20], n * geo[20]) : 0;
+    let a2 = kth-full?(l, geo[22]) ? q38pg-copy-rows(pp, arena[l][3], a * q38pg-bsz(bsh) * geo[20], b * q38pg-bsz(bsh) * geo[20], n * geo[20]) : 0;
+    q38pg-copy-block-go(pp, geo, arena, bsh, a, b, n, l + 1);
+   };
+  }
+  def q38pg-copy-rows(pp, buf, soff, doff, count) = count <= 0 ? 0 : metal_enqueue(pp[4], md-bind16([buf, buf], [soff, doff, count], 256, 0, 0, 1), count);
+  // the table words of a sequence's blocks written into row `row` of the table buffer (a list of physical block ids from column 0)
+  def q38pg-write-table(tbl, tstride, row, blocks) = metal_buf_write(tbl, row * tstride * 4, q38m-uints(blocks));
+  // the store and the attention of a full layer's stream rows in a contiguous arena (a slot's cache at row * maxpos * kvd)
+  def q38m-kv-attn(mp, bs, geo, st, posb, ntok, maxn) {
+   let kvd = geo[20];
+   metal_enqueue(mp[3], md-bind16([bs[24], st[2], posb], [kvd, geo[18], ntok], 256, 0, 0, 1), kvd * ntok);
+   metal_enqueue(mp[3], md-bind16([bs[25], st[3], posb], [kvd, geo[18], ntok], 256, 0, 0, 0), kvd * ntok);
+   q38m-attn(mp, bs, geo, st, posb, ntok, maxn);
+  }
+  // the attention and the store of every stream row of a full layer through the table (the arena's page descriptor, st[4])
+  def q38m-kv-attn-pg(mp, bs, geo, st, posb, ntok, maxn) {
+   let pg = st[4];
+   let kvd = geo[20];
+   let nqhd = geo[12] * geo[14];
+   let chunk = 0;
+   let nspl = q38sp-nspl(maxn, chunk);
+   let pstride = 2 * geo[12] * geo[18];
+   metal_enqueue(pg[5], md-bind16([bs[24], st[2], posb, pg[0]], [kvd, pg[1], pg[2], ntok], 256, 0, 0, 1), kvd * ntok);
+   metal_enqueue(pg[5], md-bind16([bs[25], st[3], posb, pg[0]], [kvd, pg[1], pg[2], ntok], 256, 0, 0, 0), kvd * ntok);
+   metal_enqueue(pg[4], md-bind16([bs[22], st[2], st[3], bs[27], posb, pg[0]], [geo[12], geo[13], geo[14], geo[17], chunk, nspl, nqhd, pstride, ntok, pg[1], pg[3], pg[2]], 256, 0, 1, 1), ntok * geo[13] * nspl);
+   metal_enqueue(pg[9], md-bind16([bs[27], bs[26], posb], [geo[12], geo[14], chunk, nspl, nqhd, pstride, ntok], 256, 0, 1, 1), geo[12] * ntok);
+  }
   // ── the driver: one step of N streams, one pass over the weights ──
   // The pipelines of the five kernels, [delta, conv, rope, kv write, attention], compiled from kth-msl's helpers plus the kernels.
   def q38m-msl() = kth-msl() ++ q38m-delta-msl("form_q38m_delta_rows") ++ q38m-conv-msl("form_q38m_conv_rows") ++ q38m-rope-msl("form_q38m_rope_rows") ++ q38m-kvwrite-msl("form_q38m_kvw_rows") ++ q38m-gqa-msl("form_q38m_gqa_rows") ++ q38m-fork-msl("form_q38m_fork") ++ q38m-lp-msl("form_q38m_lp") ++ q38m-sample-msl("form_q38m_sample");
@@ -84,9 +150,8 @@ section [form.bml] {
    metal_enqueue(ps[35], q38-b16([bs[24], kth-tv-h(lay[9]), bs[24]], [geo[13], geo[14], geo[6], ntok], 0, 0), geo[13] * ntok);
    metal_enqueue(mp[2], md-bind16([bs[22], posb], [geo[12], geo[14], geo[15], geo[16], nqhd, ntok], 256, 0, 0, 1), geo[12] * (geo[15] / 2) * ntok);
    metal_enqueue(mp[2], md-bind16([bs[24], posb], [geo[13], geo[14], geo[15], geo[16], kvd, ntok], 256, 0, 0, 0), geo[13] * (geo[15] / 2) * ntok);
-   metal_enqueue(mp[3], md-bind16([bs[24], st[2], posb], [kvd, geo[18], ntok], 256, 0, 0, 1), kvd * ntok);
-   metal_enqueue(mp[3], md-bind16([bs[25], st[3], posb], [kvd, geo[18], ntok], 256, 0, 0, 0), kvd * ntok);
-   q38m-attn(mp, bs, geo, st, posb, ntok, maxn);
+   // a state row that carries a page descriptor (its fifth word) keeps its K and V in the block pool: the store and the attention go through the table
+   len(st) > 4 ? q38m-kv-attn-pg(mp, bs, geo, st, posb, ntok, maxn) : q38m-kv-attn(mp, bs, geo, st, posb, ntok, maxn);
    metal_enqueue(ps[17], q38-b16([bs[26], bs[23]], [nqhd * ntok], 0, 1), nqhd * ntok);
    q38s-mv-res(ps, qs, lay[10], bs[26], bs[10], bs[33], ntok, kth-tv-r(lay[10]), 1);
    1;

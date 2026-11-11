@@ -1,29 +1,37 @@
 // qwen-serve-run.bml — the resident serving loop: ONE long-lived fkwu process that owns the Qwen3.8-27B weights and the KV and serves every request from a spool.
 //
 //   echo '{"go":1}' | ./fkwu observe/qwen-serve-run.bml                       serve until a file named stop appears in the spool, finishing what runs
-//   echo '{"go":1,"slots":4,"maxpos":14336,"dir":"/tmp/form-serve"}' | ./fkwu observe/qwen-serve-run.bml
+//   echo '{"go":1,"rows":8,"blocks":512,"dir":"/tmp/form-serve"}' | ./fkwu observe/qwen-serve-run.bml
 //   echo '{"prompt":"…","max_tokens":200}' | ./fkwu observe/serve-ask-run.bml      a client: request in, reply out (see that door)
 //
 // The techniques of vLLM, native in Form/BML/Metal (no vLLM here: it has no Metal backend). CONTINUOUS BATCHING: sequences join and leave between steps and ONE
 // pass over the weights (q38m-step-core, the stream-row kernels of q38-multi.bml) advances every live sequence at once, so the 29 GB of weights are read once for
-// all of them. PAGED KV, as far as a slot is a page: the arena holds `slots` sequences' states side by side; a finished sequence's slot is free for the next at
-// once and its scratch prefill state goes back. FLASH-DECODING: the split-KV attention (q38-split-attention.bml) serves every row. CHUNKED PREFILL: a new prompt is
-// read 64 ids at a time on the prefill lane (the batched span path, into a scratch state), one chunk a tick when the scheduler says it is due, then forked into
-// its slot by one copy kernel, so a long prompt does not stall the streams that decode (form-stdlib/bml/serve-sched.bml; its band needs no model).
+// all of them. PAGED KV: the K and V of every full-attention layer are one POOL of blocks (`blocks` of `block_positions` positions, default 512 of 256), a sequence's positions
+// are blocks of it through a table row (q38pg-*, the paged kernels of q38-split-attention.bml and q38-multi.bml: the contiguous kernels' arithmetic with the address indirected,
+// byte-identical), taken as the sequence advances and given back when it ends; the prefill lane writes into the pool through the same table. A row of the decode pass is only the
+// sequence's recurrent state (conv and delta of the linear layers), so the sequences held at once are as many as the pool carries, up to `rows`. FLASH-DECODING: the split-KV
+// attention (q38-split-attention.bml) serves every row. CHUNKED PREFILL: a new prompt is read 64 ids at a time on the prefill lane (the batched span path), one chunk a tick when
+// the scheduler says it is due, its recurrent state then copied into its row by one copy kernel, so a long prompt does not stall the streams that decode
+// (form-stdlib/bml/serve-sched.bml; its band needs no model). The PREFIX CACHE keeps blocks too: an entry is copies of a prefix's blocks and its recurrent state, taken from the same pool and let
+// go, least recently used first, when the pool or the machine is short.
 //
 // The spool (default /tmp/form-serve, one for the machine as the GPU lease is): req/<id>.json one request a file (a client writes tmp/ then renames); the server
 // claims it into work/, writes reply/<id>.json (whole or absent) and one row of ledger.jsonl: id, who, status, prompt_ids, generated_ids, wall_ms, queue_ms,
 // prefill_ms, decode_ms, decode_tok_s, surprise_micro_nats, slot, rent_tokens 0. status.json names the server (pid, start) for the clients; a file named stop ends
 // it after what runs is finished; a file named limit holds a standing limit on sequences admitted at once.
 //
-// PRESSURE SLOWS OR YIELDS, NEVER TRUNCATES. The memory governor's reading (memory-governor.bml mg-sense) sets how many sequences may be ADMITTED at once
-// (svs-limit): fewer when the machine's available bytes fall under what a slot may take plus the reserve, never below one, and never a cut of a sequence that runs.
-// A reply ends at the model's end of turn, at a stop string or a count its request named, or at the slot's own end (`maxpos`), named context-full.
+// PRESSURE SLOWS OR YIELDS, NEVER TRUNCATES. The memory governor's reading (memory-governor.bml mg-sense) sets how many blocks the pool may have in use while others run
+// (svs-budget): a prompt waits in the queue when the pool or the budget cannot give its blocks, goes in when others free them, and the cache's least recently used entries go first;
+// a sequence that finds the pool empty yields its blocks and is read again later, never cut, and a sequence alone is never held. A reply ends at the model's end of turn, at a stop
+// string or a count its request named: no position of its own is its last (only the pool's own whole size bounds one, and a prompt or a sequence that alone outgrows it is named
+// pool-too-small or pool-full, with the numbers).
 // The server holds the GPU lease for its whole life with an owner line that names it (gpu-lease-door-hold: every turn inside inherits it); other tenants wait. The
 // live ear (observe/ear-live-native.fk) skips its whisper pass while .hearth/ear.yield stands and the lease is held, so this door writes that flag while it
 // serves (yield_ear 1, the default) and removes it at the end if it wrote it.
 //
-// stdin, one JSON line, strict: go (1 to serve; without it only the plan is said), dir, slots (1..8, default 4), maxpos (positions a slot owns, default 16384),
+// stdin, one JSON line, strict: go (1 to serve; without it only the plan is said), dir, rows (1..8, default 8: the rows of the decode pass, each one sequence's recurrent state;
+// 8 is the widest matvec the spec lane specializes, q38s-nt-max), blocks (the pool's blocks, default 512; fewer when the attention scratch cannot hold the partials of that many
+// positions), block_positions (a power of two, default 256), maxpos (the positions the attention scratch is opened for, default 65536: it bounds the pool, no sequence),
 // chunk (prompt ids a prefill chunk, default and most 64), share (the percent of the decoders' wall time a prefill may take while they decode, default 100),
 // poll_ms (the nap when nothing runs, default 20), idle_exit_ms (end after this long idle; 0 never, default 0), yield_ear (0 or 1, default 1),
 // reserve_gib (what the machine keeps for others, default 8), limit (a standing limit on sequences admitted at once, 0 none).
@@ -31,10 +39,10 @@
 // preflight-exec: forbidden
 // preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/door-options.bml form-stdlib/bml/q38-multi.bml form-stdlib/bml/form-cli-code-live.bml form-stdlib/bml/q38-lenses.bml form-stdlib/bml/memory-governor.bml form-stdlib/bml/serve-sched.bml form-stdlib/spool-bell-transport.fk native/metal/qwen35-dense-token-handle.fk native/metal/qwen35-dense-spec.fk form-stdlib/bml/ledger.bml form-stdlib/bml/host-fs.bml form-stdlib/bml/coordination.bml form-stdlib/query-lane-resolve.bml form-stdlib/qwen35-artifact-seal-reader.fk form-stdlib/bml/local-run.bml
 section [form.bml] {
- let SV = record_new(0, "cache", [], "serial", 0,"packed", "", "evict_at", 0, "cache_hits", 0, "cache_ids", 0, "sts", [],"limit", 1, "limit_at", 0, "beat_at", 0, "beat_say", 0, "served", 0, "tokens", 0, "yield", 0, "step_ms", 0, "steps", 0, "ticks", 0);
+ let SV = record_new(0, "cache", [], "serial", 0,"packed", "", "evict_at", 0, "cache_hits", 0, "cache_ids", 0, "sts", [],"limit", 1, "limit_at", 0, "budget", -1, "budget_at", 0, "beat_at", 0, "beat_say", 0, "served", 0, "tokens", 0, "yield", 0, "step_ms", 0, "steps", 0, "ticks", 0);
  class QwenServeRun {
   def qsr-say(t) = print_str("[serve] " ++ t ++ "\n");
-  def qsr-spec() = [["go", "int"], ["dir", "str"], ["slots", "int"], ["maxpos", "int"], ["chunk", "int"], ["share", "int"], ["poll_ms", "int"], ["idle_exit_ms", "int"], ["yield_ear", "int"], ["reserve_gib", "int"], ["limit", "int"]];
+  def qsr-spec() = [["go", "int"], ["dir", "str"], ["rows", "int"], ["blocks", "int"], ["block_positions", "int"], ["maxpos", "int"], ["chunk", "int"], ["share", "int"], ["poll_ms", "int"], ["idle_exit_ms", "int"], ["yield_ear", "int"], ["reserve_gib", "int"], ["limit", "int"]];
   def qsr-int(o, key, d) = json-object-has?(o, key) ? json-int-value(json-object-get(o, key)) : d;
   def qsr-str(o, key, d) = json-object-has?(o, key) ? json-string-value(json-object-get(o, key)) : d;
   def qsr-clamp(x, lo, hi) = x < lo ? lo : x > hi ? hi : x;
@@ -47,17 +55,21 @@ section [form.bml] {
    w < 0 ? -1 : host_path_rename(stage, path);
   }
   def qsr-append(path, text) = sbt-append-count(path, text);
+  // the block's log2 (positions a block holds are a power of two: the kernels read p >> bsh and p & (2^bsh - 1))
+  def qsr-log2(n) = n <= 1 ? 0 : 1 + qsr-log2(n / 2);
   def qsr-run() {
    let o = dop-doc("qwen-serve", stdin-text(), qsr-spec());
    let dir = qsr-str(o, "dir", "/tmp/form-serve");
-   let slots = qsr-clamp(qsr-int(o, "slots", 4), 1, 8);
-   let maxpos = qsr-clamp(qsr-int(o, "maxpos", 16384), 256, 262144);
-   qsr-int(o, "go", 0) != 1 ? qsr-say("plan: go=1 serves " ++ slots.str() ++ " slots of " ++ maxpos.str() ++ " positions from the spool " ++ dir ++ " until a file named stop appears there") : qsr-held(o, dir, slots, maxpos);
+   let rows = qsr-clamp(qsr-int(o, "rows", 8), 1, 8);
+   let maxpos = qsr-clamp(qsr-int(o, "maxpos", 65536), 256, 1048576);
+   let bsh = qsr-clamp(qsr-log2(qsr-int(o, "block_positions", 256)), 0, 8);
+   let blocks = qsr-clamp(qsr-int(o, "blocks", 512), 2, 1000000);
+   qsr-int(o, "go", 0) != 1 ? qsr-say("plan: go=1 serves up to " ++ rows.str() ++ " rows from a pool of " ++ blocks.str() ++ " blocks of " ++ q38pg-bsz(bsh).str() ++ " positions (attention scratch for " ++ maxpos.str() ++ ") from the spool " ++ dir ++ " until a file named stop appears there") : qsr-held(o, dir, rows, maxpos, blocks, bsh);
   }
-  def qsr-held(o, dir, slots, maxpos) {
+  def qsr-held(o, dir, rows, maxpos, blocks, bsh) {
    let made = qsr-dirs(dir);
    let st = qsr-standing-at(dir);
-   (String) st[0] == "standing" ? qsr-say("a server already stands for " ++ dir ++ " (pid " ++ json-int-value(json-object-get(st[1], "pid")).str() ++ "); this one does not start") : gpu-lease-door-hold("qwen-serve resident server pid " ++ host_pid().str() ++ " spool " ++ dir ++ " slots " ++ slots.str() ++ " maxpos " ++ maxpos.str(), () => qsr-serve(o, dir, slots, maxpos));
+   (String) st[0] == "standing" ? qsr-say("a server already stands for " ++ dir ++ " (pid " ++ json-int-value(json-object-get(st[1], "pid")).str() ++ "); this one does not start") : gpu-lease-door-hold("qwen-serve resident server pid " ++ host_pid().str() ++ " spool " ++ dir ++ " rows " ++ rows.str() ++ " pool " ++ blocks.str() ++ " blocks of " ++ q38pg-bsz(bsh).str(), () => qsr-serve(o, dir, rows, maxpos, blocks, bsh));
   }
   def qsr-standing-at(dir) {
    let t = read_file(dir ++ "/status.json");
@@ -68,32 +80,45 @@ section [form.bml] {
    (String) value_kind(row) == "list" && row[5] == json-int-value(json-object-get(doc, "start")) && json-int-value(json-object-get(doc, "pid")) != host_pid() ? ["standing", doc] : ["absent", "no live server"];
   }
   // ── the model, the lanes and the loop ──
-  def qsr-serve(o, dir, slots, maxpos) {
+  def qsr-serve(o, dir, rows, maxpos, blocks, bsh) {
    let start = host_process(host_pid())[5];
    let label = "qwen-serve pid " ++ host_pid().str();
-   let w0 = qsr-status(dir, "opening", start, label, svs-new(slots));
+   let w0 = qsr-status(dir, "opening", start, label, svs-new(rows), nothing());
    let yielded = qsr-yield-on(qsr-int(o, "yield_ear", 1));
    let t0 = host_monotonic_ms();
    let ctx = qlz-open(maxpos);
-   len(ctx) == 0 ? qsr-ended(dir, yielded, "the model did not open (file " ++ qlz-file() ++ ")") : qsr-opened(o, dir, slots, maxpos, start, label, yielded, t0, ctx);
+   len(ctx) == 0 ? qsr-ended(dir, yielded, "the model did not open (file " ++ qlz-file() ++ ")") : qsr-opened(o, dir, rows, maxpos, blocks, bsh, start, label, yielded, t0, ctx);
   }
-  def qsr-opened(o, dir, slots, maxpos, start, label, yielded, t0, ctx) {
+  // The pool holds as many blocks as were asked unless the attention scratch cannot hold the partials of that many positions (q38sp-fits?): the split kernels write nspl partials a row, nspl the
+  // longest sequence's positions over 256, and the scratch was opened for `maxpos`; the pool is then the blocks that fit, and the door says so (a larger maxpos opens a larger scratch).
+  def qsr-fit-blocks(geo, bsh, blocks) = blocks <= 2 ? blocks : q38sp-fits?(geo[12], geo[13], geo[14], geo[18], q38sp-nspl(blocks * q38pg-bsz(bsh), 0)) ? blocks : qsr-fit-blocks(geo, bsh, (blocks * 15) / 16);
+  def qsr-opened(o, dir, rows, maxpos, blocks0, bsh, start, label, yielded, t0, ctx) {
+   let geo = ctx[2];
+   let blocks = qsr-fit-blocks(geo, bsh, blocks0);
    let qs0 = q38s-pipes(q38s-msl());
    let sx = q38s-open(ctx, 8, 8);
    let mp = q38m-pipes(q38m-msl());
+   let pp = q38pg-pipes();
    let posb = metal_buf_alloc(64);
    let lpb = metal_buf_alloc(64);
    let spb = metal_buf_alloc(256);
-   let arena = q38m-new-arena(ctx[2], slots, bytes => metal_buf_alloc(bytes));
+   // one table row a decode row and one more for the prefill lane, a sequence able to hold every block
+   let tstride = blocks;
+   let tbl = metal_buf_alloc((rows + 1) * tstride * 4);
+   let page = q38pg-page(tbl, bsh, tstride, 0, pp, mp, ctx[0][q38sp-index() + 3]);
+   let arena = q38pg-new-arena(geo, rows, blocks, bsh, page, bytes => metal_buf_alloc(bytes));
+   let pool = svb-new(blocks, q38pg-bsz(bsh));
    let eos = qsx-load(ctx[9])[2];
-   let c = [ctx, qs0, mp, arena, sx, posb, lpb, dir, eos, slots, o, start, label, yielded, spb];
-   let a = qsr-say("opened in " ++ (host_monotonic_ms() - t0).str() ++ " ms: " ++ slots.str() ++ " slots of " ++ maxpos.str() ++ " positions, " ++ (q38-state-bytes(ctx[2]) / 1048576).str() ++ " MiB a slot, spool " ++ dir ++ ", end-of-turn id " ++ eos.str());
-   let w = qsr-status(dir, "standing", start, label, svs-new(slots));
-   let why = qsr-loop(c, qsr-env(c, maxpos), svs-new(slots), 0, host_monotonic_ms());
-   let freed = qsr-cache-free() + q38-free-state(arena) +q38s-close(sx) + q38-free-handle(posb) + q38-free-handle(lpb) + q38-free-handle(spb) +q38-free-state(record_get(SV, "sts"));
+   let c = [ctx, qs0, mp, arena, sx, posb, lpb, dir, eos, rows, o, start, label, yielded, spb, pool, pp, tbl, tstride, bsh, page];
+   let a = qsr-say("opened in " ++ (host_monotonic_ms() - t0).str() ++ " ms: " ++ rows.str() ++ " rows, a pool of " ++ blocks.str() ++ " blocks of " ++ q38pg-bsz(bsh).str() ++ " positions (" ++ (blocks * q38pg-bsz(bsh)).str() ++ " in all" ++ (blocks < blocks0 ? ", fewer than the " ++ blocks0.str() ++ " asked: the attention scratch of " ++ maxpos.str() ++ " positions holds no more partials" : "") ++ "), " ++ (qsr-block-bytes(c) / 1048576).str() ++ " MiB a block, spool " ++ dir ++ ", end-of-turn id " ++ eos.str());
+   let w = qsr-status(dir, "standing", start, label, svs-new(rows), pool);
+   let why = qsr-loop(c, qsr-env(c), svs-new(rows), 0, host_monotonic_ms());
+   let freed = qsr-cache-free(c) + q38-free-state(arena) + q38s-close(sx) + q38-free-handle(posb) + q38-free-handle(lpb) + q38-free-handle(spb) + q38-free-handle(tbl) + qsr-free-sts(record_get(SV, "sts"));
    let closed = qlz-close(ctx);
    qsr-ended(dir, yielded, why);
   }
+  // the bytes of one block over every full layer's K and V
+  def qsr-block-bytes(c) = q38pg-bsz(c[19]) * c[0][2][20] * 4 * 2 * q38-full-layers(c[0][2][21], c[0][2][22]);
   def qsr-ended(dir, yielded, why) {
    let a = qsr-say("ended: " ++ why ++ "; served " ++ record_get(SV, "served").str() ++ " requests, " ++ record_get(SV, "tokens").str() ++ " tokens");
    let b = host_path_remove(dir ++ "/status.json");
@@ -107,97 +132,132 @@ section [form.bml] {
    want == 1 && file_size(".hearth/ear.yield") < 0 ? { let w = write_file(".hearth/ear.yield", "qwen-serve pid " ++ host_pid().str() ++ " holds the GPU lease\n"); 1; } : 0;
   }
   // ── the functions the scheduler is given ──
-  def qsr-env(c, maxpos) = [() => host_monotonic_ms(), () => qsr-limit(c), s => qsr-begin(c, s), (s, ids, pos) => qsr-chunk(c, s, ids, pos), s => qsr-fork(c, s), rows => qsr-decode(c, rows), s => qsr-stop-hit(c, s), maxpos, tok => tok == c[8], qsr-clamp(qsr-int(c[10], "chunk", 64), 1, 64), qsr-clamp(qsr-int(c[10], "share", 100), 1, 10000), (s, count) => qsr-snap(c, s, count)];
+  def qsr-env(c) = [() => host_monotonic_ms(), () => qsr-limit(c), s => qsr-begin(c, s), (s, ids, pos) => qsr-chunk(c, s, ids, pos), s => qsr-fork(c, s), rows => qsr-decode(c, rows), s => qsr-stop-hit(c, s), c[15], tok => tok == c[8], qsr-clamp(qsr-int(c[10], "chunk", 64), 1, 64), qsr-clamp(qsr-int(c[10], "share", 100), 1, 10000), (s, count) => qsr-snap(c, s, count), () => qsr-budget(c), need => qsr-reclaim(c, need)];
   // ── the prefix cache ──
-  // A prompt read once is read once: the prefill lane's state after a prefix of ids is kept (a snapshot: the full layers' K and V to that position and the linear layers' state),
+  // A prompt read once is read once: the prefill lane's state after a prefix of ids is kept (a snapshot: the full layers' K and V to that position, as BLOCKS taken from the pool, and the linear layers' state),
   // and a later request whose ids begin with the same prefix starts from a copy of it and reads only what follows. Where a snapshot is taken: at every prompt's end (a session's next
   // turn continues it), at the boundary between a counsel's question and a lens's own text (N lenses read the question once), and at 1024, 2048, 4096, 8192 ... ids (two packets that
-  // share a long head share it). An entry is [the ids packed four bytes each, how many, the state, the last use]; it is compared by those bytes, never assumed. The pages a state
-  // never touched are not backed, so an entry costs the memory of the positions it holds. PRESSURE YIELDS: when the machine's available bytes fall under a slot's worth plus the
-  // reserve the least recently used entry is released (qsr-evict), one a reading, until the pressure is gone or none is left; no count caps the cache.
+  // share a long head share it). An entry is [the ids packed four bytes each, how many, the linear state, the last use, the serial, the blocks]; it is compared by those bytes, never assumed. An entry
+  // costs the blocks of the positions it holds. PRESSURE YIELDS: when the pool has too few blocks for a prompt or a sequence's next position, or the machine's available bytes fall under a few blocks plus the
+  // reserve, the least recently used entry is released (qsr-release-lru), one at a time, until the pressure is gone or none is left; no count caps the cache.
   def qsr-key(packed, n) = substring(packed, 0, 4 * n);
   def qsr-entry-count(e) = e[1];
   def qsr-entry-match?(e, packed, most) = e[1] <= most && qsr-key(packed, e[1]) == e[0];
   def qsr-cache-best(packed, most) = foldl((best, e) => qsr-entry-match?(e, packed, most) && (nothing?(best) || e[1] > best[1]) ? e : best, nothing(), record_get(SV, "cache"));
   def qsr-cache-has?(packed, n) = any?(e => e[1] == n && e[0] == qsr-key(packed, n), record_get(SV, "cache"));
   // an entry is told by its serial (e[4]), never by comparing states
-  def qsr-cache-touch(e) = record_set(SV, "cache", map(x => x[4] == e[4] ? [x[0], x[1], x[2], host_monotonic_ms(), x[4]] : x, record_get(SV, "cache")));
-  def qsr-cache-add(packed, n, sts) {
+  def qsr-cache-touch(e) = record_set(SV, "cache", map(x => x[4] == e[4] ? [x[0], x[1], x[2], host_monotonic_ms(), x[4], x[5]] : x, record_get(SV, "cache")));
+  def qsr-cache-add(packed, n, lin, blocks) {
    let serial = record_get(SV, "serial") + 1;
    let a = record_set(SV, "serial", serial);
-   record_set(SV, "cache", append(record_get(SV, "cache"), [[qsr-key(packed, n), n, sts, host_monotonic_ms(), serial]]));
+   record_set(SV, "cache", append(record_get(SV, "cache"), [[qsr-key(packed, n), n, lin, host_monotonic_ms(), serial, blocks]]));
   }
-  // a copy of the first n positions of one state into another: the fork kernel with the destination read as slot 0 of a one-slot arena
-  def qsr-clone(c, src, dst, n) = gpu-lease-turn("qwen serve snapshot", () => {
+  // the recurrent state alone is what a state's linear layers hold: the buffers of a prefill state or an entry (the full layers' K and V are the pool's, never freed here)
+  def qsr-free-sts(sts) = foldl((n, row) => n + q38-free-handle(row[0]) + q38-free-handle(row[1]), 0, sts);
+  // positions [0, n) of the blocks src copied into the blocks dst (block j of one to block j of the other, the last one's first n - j * bsz positions), every full layer's K and V
+  def qsr-copy-blocks(c, src, dst, n) {
+   let bsz = q38pg-bsz(c[19]);
+   foldl((a, j) => a + q38pg-copy-block(c[16], c[0][2], c[3], c[19], src[j], dst[j], n - j * bsz > bsz ? bsz : n - j * bsz), 0, range(0, svb-blocks-for(bsz, n)));
+  }
+  // an entry restored into a sequence's blocks and recurrent state, or the sequence's into an entry's
+  def qsr-restore(c, e, blocks, sts) = gpu-lease-turn("qwen serve prefix hit", () => {
    let batch = metal_batch_concurrent();
-   let moved = q38m-fork-layers(c[2][5], c[0][2], src, dst, 0, n, 0);
+   let lin = q38pg-copy-linear(c[2][5], c[0][2], e[2], sts, 0, 0);
+   let moved = qsr-copy-blocks(c, e[5], blocks, e[1]);
    metal_sync();
   });
-  // the prefill lane opens a state for a sequence: a copy of the longest cached prefix of its ids (at most all but the last, which is the first decode row's input), else a fresh one.
-  // Answers how many ids the state already holds.
+  // the prefill lane opens a state for a sequence: its table row written (the prefill row), a copy of the longest cached prefix of its ids (at most all but the last, which is the first decode row's input),
+  // else a fresh one. Answers how many ids the state already holds.
   def qsr-begin(c, s) {
-   let sts = q38-new-state(c[0][2]);
+   let sts = q38pg-new-state(c[0][2], c[3], c[9] * c[18], bytes => metal_buf_alloc(bytes));
    let packed = q38m-uints(s[3]);
    let a = record_set(SV, "sts", sts);
    let b = record_set(SV, "packed", packed);
+   let w = q38pg-write-table(c[17], c[18], c[9], s[24]);
    let hit = qsr-cache-best(packed, len(s[3]) - 1);
    nothing?(hit) ? 0 : qsr-hit(c, s, hit, sts);
   }
   def qsr-hit(c, s, hit, sts) {
-   let moved = qsr-clone(c, hit[2], sts, hit[1]);
+   let moved = qsr-restore(c, hit, s[24], sts);
    let a = qsr-cache-touch(hit);
    let b = record_set(SV, "cache_hits", record_get(SV, "cache_hits") + 1);
    let d = record_set(SV, "cache_ids", record_get(SV, "cache_ids") + hit[1]);
    let said = qsr-say("prefix cache: " ++ s[0] ++ " starts from " ++ hit[1].str() ++ " of its " ++ len(s[3]).str() ++ " ids");
    hit[1];
   }
-  // the lane has read `count` ids: keep the state as it stands unless an entry for exactly this prefix exists
+  // the lane has read `count` ids: keep the state as it stands unless an entry for exactly this prefix exists or the pool (the cache's own least recently used entries let go first) and the machine have
+  // no blocks to spare for it (a snapshot is a convenience, never taken from a sequence)
   def qsr-snap(c, s, count) {
    let packed = record_get(SV, "packed");
-   qsr-cache-has?(packed, count) ? 0 : qsr-snap-keep(c, packed, count);
+   qsr-cache-has?(packed, count) ? 0 : qsr-snap-room(c, s, packed, count, svb-blocks-for(q38pg-bsz(c[19]), count));
   }
-  def qsr-snap-keep(c, packed, count) {
-   let dst = q38-new-state(c[0][2]);
-   let moved = qsr-clone(c, record_get(SV, "sts"), dst, count);
-   qsr-cache-add(packed, count, dst);
+  def qsr-snap-room(c, s, packed, count, k) {
+   let have = svb-free-n(c[15]) >= k ? svb-free-n(c[15]) : qsr-reclaim(c, k);
+   let b = qsr-budget(c);
+   have < k || (b >= 0 && svb-used(c[15]) + k > b) ? 0 : qsr-snap-keep(c, s, packed, count, k);
+  }
+  def qsr-snap-keep(c, s, packed, count, k) {
+   let blocks = svb-take(c[15], k);
+   let lin = q38pg-new-linear(c[0][2], bytes => metal_buf_alloc(bytes));
+   let moved = gpu-lease-turn("qwen serve snapshot", () => {
+    let batch = metal_batch_concurrent();
+    let l = q38pg-copy-linear(c[2][5], c[0][2], record_get(SV, "sts"), lin, 0, 0);
+    let m = qsr-copy-blocks(c, s[24], blocks, count);
+    metal_sync();
+   });
+   qsr-cache-add(packed, count, lin, blocks);
    count;
   }
-  // the least recently used entry is released when the machine's available bytes fall under a slot plus the reserve (one entry a reading, read at most every 2 s)
+  // the least recently used entry is released when the machine's available bytes fall under a few blocks plus the reserve (one entry a reading, read at most every 2 s)
   def qsr-evict(c) = host_monotonic_ms() - record_get(SV, "evict_at") < 2000 || nil?(record_get(SV, "cache")) ? 0 : qsr-evict-read(c);
   def qsr-evict-read(c) {
    let a = record_set(SV, "evict_at", host_monotonic_ms());
    let vm = mg-sense();
    let avail = mg-vm-ok?(vm) ? mg-available(vm) : -1;
-   avail >= 0 && avail < q38-state-bytes(c[0][2]) + qsr-int(c[10], "reserve_gib", 8) * 1073741824 ? qsr-evict-one(avail) : 0;
+   avail >= 0 && avail < 4 * qsr-block-bytes(c) + qsr-int(c[10], "reserve_gib", 8) * 1073741824 ? qsr-release-lru(c, "pressure: " ++ mg-gib-text(avail) ++ " available") : 0;
   }
-  def qsr-evict-one(avail) {
+  def qsr-release-lru(c, why) {
    let rows = record_get(SV, "cache");
    let old = foldl((o, e) => e[3] < o[3] ? e : o, rows[0], rows);
    let a = record_set(SV, "cache", filter(e => e[4] != old[4], rows));
-   let f = q38-free-state(old[2]);
-   qsr-say("pressure: released the prefix cache's entry of " ++ old[1].str() ++ " ids (" ++ mg-gib-text(avail) ++ " available)");
+   let b = svb-release(c[15], old[5]);
+   let f = qsr-free-sts(old[2]);
+   qsr-say("released the prefix cache's entry of " ++ old[1].str() ++ " ids (" ++ why ++ ")");
   }
-  def qsr-cache-free() = foldl((n, e) => n + q38-free-state(e[2]), 0, record_get(SV, "cache"));
-  // the prompt's own end is kept too: its state is the entry, no copy
+  // blocks free for `need` taken by letting entries go, least recently used first; answers the blocks free
+  def qsr-reclaim(c, need) = svb-free-n(c[15]) >= need || nil?(record_get(SV, "cache")) ? svb-free-n(c[15]) : qsr-reclaim-more(c, need);
+  def qsr-reclaim-more(c, need) {
+   let r = qsr-release-lru(c, "the pool is short of " ++ need.str() ++ " blocks");
+   qsr-reclaim(c, need);
+  }
+  def qsr-cache-free(c) = foldl((n, e) => n + qsr-free-sts(e[2]), 0, record_get(SV, "cache"));
+  // the prompt's own end is kept too: the blocks of its positions gain the entry as an owner (no copy; positions past the prompt are the sequence's own and the entry never reads them), its recurrent
+  // state is the entry's (the prefill state itself, a copy went into the row)
   def qsr-adopt(c, s, sts) {
    let packed = record_get(SV, "packed");
-   qsr-cache-has?(packed, s[8]) ? q38-free-state(sts) : qsr-cache-add(packed, s[8], sts);
+   qsr-cache-has?(packed, s[8]) ? qsr-free-sts(sts) : qsr-adopt-keep(c, s, packed, sts);
+  }
+  def qsr-adopt-keep(c, s, packed, sts) {
+   let blocks = take(svb-blocks-for(q38pg-bsz(c[19]), s[8]), s[24]);
+   let a = svb-retain(c[15], blocks);
+   qsr-cache-add(packed, s[8], sts, blocks);
   }
   def qsr-chunk(c, s, ids, pos) = q38-prefill-span-batched(c[0][0], c[0][1], c[0][2], c[0][3], record_get(SV, "sts"), c[0][4], c[0][5], c[0][6], ids, pos);
-  // the scratch state's first s[8] positions (and the linear layers' state) are copied into the sequence's slot; the scratch goes back
+  // the prefill state's recurrent state is copied into the sequence's row of the arena (its K and V are already the pool's blocks); the state is adopted by the prefix cache or goes back
   def qsr-fork(c, s) {
    let sts = record_get(SV, "sts");
    let done = gpu-lease-turn("qwen serve fork", () => {
     let batch = metal_batch_concurrent();
-    let moved = q38m-fork-layers(c[2][5], c[0][2], sts, c[3], s[7], s[8], 0);
+    let moved = q38pg-copy-linear(c[2][5], c[0][2], sts, c[3], s[7], 0);
     metal_sync();
    });
    let freed = qsr-adopt(c, s, sts);
    record_set(SV, "sts", []);
   }
-  // one pass over the weights for every row; answers [greedy id, surprise in micro-nats] a row
+  // one pass over the weights for every row; answers [greedy id, surprise in micro-nats] a row. Each row's table row is written first: its sequence's blocks, or the sink's for a free row.
   def qsr-decode(c, rows) {
    let t0 = host_monotonic_ms();
+   let tw = foldl((a, x) => a + qsr-table-row(c, x), 0, rows);
    // a row that names a temperature draws its token (q38m-sample-msl); every other row keeps the greedy id, and a pass of greedy rows runs no draw kernel at all
    let sampled = any?(x => x[3] > 0, rows);
    let r = sampled ? q38m-step-draw(c[0], c[1], c[2], c[3], c[4], c[5], map(x => x[1], rows), map(x => x[2], rows), c[6], c[14], map(x => [x[3], x[3] > 0 ? q38m-sample-key(x[4], x[5]) : 0], rows)) : q38m-step-core(c[0], c[1], c[2], c[3], c[4], c[5], map(x => x[1], rows), map(x => x[2], rows), c[6]);
@@ -205,24 +265,37 @@ section [form.bml] {
    let b = record_set(SV, "steps", record_get(SV, "steps") + 1);
    map(i => [r[0][i], r[1][i]], range(0, len(rows)));
   }
+  def qsr-table-row(c, x) {
+   let w = q38pg-write-table(c[17], c[18], x[0], nil?(x[6]) ? [0] : x[6]);
+   1;
+  }
   // a stop string the request named, looked for in the tail of what the sequence said
-  def qsr-stop-hit(c, s) = nil?(s[5]) ? false : qsr-has-any?(qlz-detok(c[0], reverse(take(24, s[9]))), s[5]);
+  // (a token is at least one byte of text, so a stop string of n bytes lies within the last n ids: the tail looked at is the longest stop's length, and at least 24 ids)
+  def qsr-stop-hit(c, s) = nil?(s[5]) ? false : qsr-has-any?(qlz-detok(c[0], reverse(take(foldl((a, st) => len(st) > a ? len(st) : a, 24, s[5]), s[9]))), s[5]);
   def qsr-has-any?(text, stops) = any?(st => len(st) > 0 && str_find(text, st, 0) >= 0, stops);
-  // the machine's reading sets how many sequences are admitted at once; read at most every 2 s, said when it changes
+  // the standing limit on sequences admitted at once (the `limit` option or file; 0 none), read at most every 2 s
   def qsr-limit(c) = host_monotonic_ms() - record_get(SV, "limit_at") < 2000 ? record_get(SV, "limit") : qsr-limit-read(c);
   def qsr-limit-read(c) {
-   let vm = mg-sense();
-   let avail = mg-vm-ok?(vm) ? mg-available(vm) : -1;
    let ctlf = read_file(c[7] ++ "/limit");
    let ctl = nothing?(ctlf) ? 0 : (str_to_int(trim(ctlf)) ?? 0);
-   let o = c[10];
-   let n = svs-limit(c[9], avail, q38-state-bytes(c[0][2]), qsr-int(o, "reserve_gib", 8) * 1073741824, qsr-pick-ctl(qsr-int(o, "limit", 0), ctl));
-   let said = n != record_get(SV, "limit") ? qsr-say("pressure: admitting " ++ n.str() ++ " of " ++ c[9].str() ++ " at once (" ++ mg-gib-text(avail < 0 ? 0 : avail) ++ " available, standing limit " ++ qsr-pick-ctl(qsr-int(o, "limit", 0), ctl).str() ++ ")") : 0;
+   let n = svs-limit(c[9], qsr-pick-ctl(qsr-int(c[10], "limit", 0), ctl));
+   let said = n != record_get(SV, "limit") ? qsr-say("standing limit: admitting " ++ n.str() ++ " of " ++ c[9].str() ++ " rows at once") : 0;
    let a = record_set(SV, "limit", n);
    let b = record_set(SV, "limit_at", host_monotonic_ms());
    n;
   }
   def qsr-pick-ctl(a, b) = a > 0 && (b <= 0 || a < b) ? a : b > 0 ? b : 0;
+  // the machine's pressure on the pool: how many blocks may be in use while others run (svs-budget; negative none claimed), read at most every 2 s, said when it changes
+  def qsr-budget(c) = host_monotonic_ms() - record_get(SV, "budget_at") < 2000 ? record_get(SV, "budget") : qsr-budget-read(c);
+  def qsr-budget-read(c) {
+   let vm = mg-sense();
+   let avail = mg-vm-ok?(vm) ? mg-available(vm) : -1;
+   let b = svs-budget(svb-used(c[15]), avail, qsr-block-bytes(c), qsr-int(c[10], "reserve_gib", 8) * 1073741824);
+   let said = b != record_get(SV, "budget") && b >= 0 && svb-used(c[15]) + 1 > b ? qsr-say("pressure: the pool may have " ++ b.str() ++ " of its " ++ svb-capacity(c[15]).str() ++ " blocks in use (" ++ mg-gib-text(avail < 0 ? 0 : avail) ++ " available): a new prompt waits") : 0;
+   let a = record_set(SV, "budget", b);
+   let d = record_set(SV, "budget_at", host_monotonic_ms());
+   b;
+  }
   // ── the loop ──
   // each tick: claim and read the requests that arrived, run the scheduler one tick, write what finished, keep the status. Answers why it ended.
   def qsr-loop(c, env, S, idle_since, now0) {
@@ -281,7 +354,8 @@ section [form.bml] {
   def qsr-ids-at(c, r, pre) = r[3] == 1 ? append(pre, qlz-chat-lens(c[0], r[2], "")) : qlz-tokenize(c[0], r[1]);
   def qsr-insert(x, xs) = nil?(xs) ? [x] : x == xs[0] ? xs : x < xs[0] ? cons(x, xs) : cons(xs[0], qsr-insert(x, xs[1:]));
   // the snapshot positions of a sequence of n ids (the lane reads n - 1): the question's end, and 1024, 2048, 4096 ... ids; each strictly inside what the lane reads
-  def qsr-points(boundary, n) = foldl((acc, p) => p > 0 && p < n - 1 ? qsr-insert(p, acc) : acc, [], cons(boundary, [1024, 2048, 4096, 8192, 16384, 32768]));
+  def qsr-doubles(p, n) = p >= n - 1 ? [] : cons(p, qsr-doubles(p * 2, n));
+  def qsr-points(boundary, n) = foldl((acc, p) => p > 0 && p < n - 1 ? qsr-insert(p, acc) : acc, [], cons(boundary, qsr-doubles(1024, n)));
   def qsr-take(c, S, id, arrive, r) {
    let t0 = host_monotonic_ms();
    let pre = r[3] == 1 ? qlz-chat-prefix(c[0], r[1]) : [];
@@ -295,7 +369,7 @@ section [form.bml] {
   // every ask the server answers also lands one row in the machine's local-run ledger (receipts/local-run-ledger.jsonl), where the planner's read-time model and the rate
   // readings look: the ids the lane READ this time (the prompt less what the prefix cache already held, so a cached prompt never reads as a fast prefill) and the ms it took
   def qsr-local-run(c, s, text) {
-   let status = (String) s[15] == "refused" || (String) s[15] == "server-error" || (String) s[15] == "empty-prompt" || (String) s[15] == "prompt-exceeds-slot" ? "unavailable" : "answered";
+   let status = (String) s[15] == "refused" || (String) s[15] == "server-error" || (String) s[15] == "empty-prompt" || (String) s[15] == "pool-too-small" || (String) s[15] == "pool-full" ? "unavailable" : "answered";
    let result = [status, text, len(s[3]) - s[21], s[17], qlz-file(), 1, 1, status == "answered" ? "" : "serve-" ++ s[15], "", [], ""];
    // a read of fewer than 16 ids is all fixed cost (the copy of a cached state, the first chunk's launch): no prefill rate is stated for it
    local-run-record-timed(result, s[19] - s[2], len(s[3]) - s[21] < 16 ? 0 : s[16], svs-decode-ms(s));
@@ -313,21 +387,21 @@ section [form.bml] {
    1;
   }
   // the status the clients read, at most once a second; a line for a person every 10 s while anything runs
-  def qsr-status(dir, state, start, label, S) = qsr-put(dir, dir ++ "/status.json", svs-status-row(S, host_pid(), start, label ++ " " ++ state, now_unix_ms()) ++ "\n");
+  def qsr-status(dir, state, start, label, S, pool) = qsr-put(dir, dir ++ "/status.json", svs-status-row(S, host_pid(), start, label ++ " " ++ state, now_unix_ms(), nothing?(pool) ? 0 : svb-used(pool), nothing?(pool) ? 0 : svb-capacity(pool), nothing?(pool) ? 0 : svb-bsz(pool)) ++ "\n");
   def qsr-beat(c, S) {
    let now = host_monotonic_ms();
    now - record_get(SV, "beat_at") < 1000 ? 0 : qsr-beat-write(c, S, now);
   }
   def qsr-beat-write(c, S, now) {
-   let w = qsr-status(c[7], "standing", c[11], c[12], S);
+   let w = qsr-status(c[7], "standing", c[11], c[12], S, c[15]);
    let a = record_set(SV, "beat_at", now);
-   let said = now - record_get(SV, "beat_say") > 10000 && !svs-idle?(S) ? qsr-said-live(S, now) : 0;
+   let said = now - record_get(SV, "beat_say") > 10000 && !svs-idle?(S) ? qsr-said-live(c, S, now) : 0;
    1;
   }
-  def qsr-said-live(S, now) {
+  def qsr-said-live(c, S, now) {
    let ticks = record_get(SV, "ticks");
    let steps = record_get(SV, "steps");
-   let said = qsr-say("live " ++ svs-live(S).str() ++ " queued " ++ svs-queued(S).str() ++ " prefilling " ++ (svs-prefilling?(S) ? 1 : 0).str() ++ "; since the last line " ++ (now - record_get(SV, "beat_say")).str() ++ " ms, " ++ ticks.str() ++ " ticks, " ++ steps.str() ++ " decode steps averaging " ++ (steps > 0 ? record_get(SV, "step_ms") / steps : 0).str() ++ " ms");
+   let said = qsr-say("pool " ++ svb-used(c[15]).str() ++ " of " ++ svb-capacity(c[15]).str() ++ " blocks in use, " ++ len(record_get(SV, "cache")).str() ++ " cached prefixes" ++ "; live " ++ svs-live(S).str() ++ " queued " ++ svs-queued(S).str() ++ " prefilling " ++ (svs-prefilling?(S) ? 1 : 0).str() ++ "; since the last line " ++ (now - record_get(SV, "beat_say")).str() ++ " ms, " ++ ticks.str() ++ " ticks, " ++ steps.str() ++ " decode steps averaging " ++ (steps > 0 ? record_get(SV, "step_ms") / steps : 0).str() ++ " ms");
    let a = record_set(SV, "beat_say", now);
    let b = record_set(SV, "step_ms", 0);
    let c = record_set(SV, "steps", 0);

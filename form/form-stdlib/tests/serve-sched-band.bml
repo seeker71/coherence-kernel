@@ -3,7 +3,7 @@
 ; The fake model: a sequence's next id is its fed id + 1 (so a prompt ending in id L generates L+1, L+2 ... and the end of turn is any id >= 20); a chunk
 ; of the prefill lane costs 400 ms of a fake clock, a decode step 100 ms, a fork 10 ms. The band reads the order of the events the scheduler asked for.
 ;
-; Expected: 8191
+; Expected: 32767
 ; Verdict 8191 when every claim lands:
 ;   1     the spool reading: a well-formed request reads (chat 1 and priority 0 by default, the file's id, never the document's); a typo'd key, malformed JSON, an
 ;         empty request, no prompt and a negative count are refused by name; an envelope and a grammar are refused as envelope-unsupported
@@ -13,24 +13,37 @@
 ;         (share 100: 400 ms of chunk to 100 ms of step) and its decode is never stalled for more than one chunk
 ;   16    a prompt read alone (nothing decoding) goes through its chunks back to back at full speed
 ;   32    eviction: a finished sequence's slot is free again at once; its reply holds every id before the end of turn and none of it; the stop, length,
-;         stop-string and context-full statuses each arrive by name
-;   64    the rows of a pass: slots 0 and 2 live and 1 free make three rows, the free one fed id 0 at position 0 and ignored
-;   128   the pressure limit: svs-limit answers by the machine's bytes, never below one, never above the slots, a standing limit lowers it; with the limit at 1 a
-;         second request waits though a slot is free, and it is admitted when the limit rises; sequences already running are never cut by a falling limit
-;   256   a prompt that does not fit its slot and an empty prompt end by name (prompt-exceeds-slot, empty-prompt) and take no slot
+;         stop-string statuses each arrive by name; a sequence of 15 positions in a pool of one block of 16 ends at the model's end of turn (no context-full status exists)
+;   64    the rows of a pass: slots 0 and 2 live and 1 free make three rows, the free one fed id 0 at position 0 and ignored (its table the sink's: []); a live row names its blocks
+;   128   the standing limit and the pool's budget: svs-limit answers the rows or a person's lower limit; svs-budget answers the blocks the machine lets the pool have in use (negative
+;         when unreadable, never below what is in use); with the limit at 1 a second request waits though a row is free, and it is admitted when the limit rises; sequences already
+;         running are never cut by a falling limit
+;   256   an empty prompt ends by name (empty-prompt) and takes no row; a prompt larger than the whole pool with nothing else to give ends by name (pool-too-small) and takes no block
 ;   512   the ledger row: id, who, status, prompt_ids, generated_ids, queue_ms, prefill_ms, decode_tok_s and rent_tokens 0 read back from the JSON; the reply carries the text
 ;   1024  the stop strings: the text ends at the earliest stop string, and the stop string is no part of it
 ;   2048  the prefix cache's seams: the prefill lane's chunks end on the snapshot positions and ask for the state to be kept there; a begin that answers a count of prompt ids the
 ;         cache holds starts the lane from it (no snapshot already passed, cached_ids in the ledger row), a count past the prompt clamps to what the lane reads, anything else is no hit
 ;   4096  sampling's seams: temperature_milli and seed read from the spool (a negative temperature refused by name), carried by the sequence into the pass's rows [slot, id, position,
 ;         temperature, seed, tokens said] and into the ledger row
+;   8192  PAGED KV: a prompt of 500 ids (far past the old slot) takes 32 blocks of 16, one more as its decode crosses position 512, and gives all back; with a pool of 11 usable blocks
+;         a second prompt of 6 blocks WAITS (queued, not refused) beside a free row until the first ends; a row names its sequence's blocks in table order
+;   16384 PRESSURE YIELDS, NEVER CUTS: two sequences that need 6 blocks in a pool of 3 both run, the later gives its block back when the pool is empty and ends with the same reply as
+;         alone (a yield counted); a sequence that alone holds the pool ends by name (pool-full); a cache entry that holds blocks is let go for a prompt (reclaim); the machine's
+;         budget holds a second prompt back while the first runs though blocks are free, never the first
 ;
 ; REQUIRES: the built ./fkwu and the body root as the working directory.
 // preludes: form-stdlib/core.fk form-stdlib/json.fk form-stdlib/bml/live.bml form-stdlib/bml/serve-sched.bml
 section [form.bml] {
- let SB = record_new(0, "ev", [], "t", 0, "limit", 8, "last", [], "hit", 0);
+ let SB = record_new(0, "ev", [], "t", 0, "limit", 8, "last", [], "hit", 0, "pool", [], "budget", -1, "entry", []);
  class ServeSchedBand {
+  // a pool of n blocks of 16 positions (the fake cache's entry, the machine's budget and the pool go back to their defaults)
+  def sb-pool(n) {
+   let a = record_set(SB, "budget", -1);
+   let b = record_set(SB, "entry", []);
+   record_set(SB, "pool", svb-new(n, 16));
+  }
   def sb-reset(limit) {
+   let p = sb-pool(4096);
    let h = record_set(SB, "hit", 0);
    let a = record_set(SB, "ev", []);
    let b = record_set(SB, "t", 0);
@@ -60,7 +73,15 @@ section [form.bml] {
    sb-tick(10);
   }
   def sb-stop(s) = len(s[5]) > 0 && s[17] >= 3;
-  def sb-env(cap, share) = [() => record_get(SB, "t"), () => record_get(SB, "limit"), sb-begin, sb-chunk, sb-fork, sb-decode, sb-stop, cap, tok => tok >= 20, 64, share, sb-snap];
+  // the fake cache's one entry (blocks it holds) is let go when the pool is asked for blocks it does not have; the machine's budget is the band's to set
+  def sb-reclaim(need) {
+   let e = record_get(SB, "entry");
+   let a = nil?(e) ? 0 : sb-log(["r", need, len(e)]);
+   let b = nil?(e) ? 0 : svb-release(record_get(SB, "pool"), e);
+   let c = record_set(SB, "entry", []);
+   svb-free-n(record_get(SB, "pool"));
+  }
+  def sb-env(share) = [() => record_get(SB, "t"), () => record_get(SB, "limit"), sb-begin, sb-chunk, sb-fork, sb-decode, sb-stop, record_get(SB, "pool"), tok => tok >= 20, 64, share, sb-snap, () => record_get(SB, "budget"), sb-reclaim];
   def sb-seq(id, prio, arrive, n, last, max, stops) = svs-seq([id, "p", "", 1, max, stops, prio, "band"], append(range(0, n - 1), [last]), arrive);
   def sb-run(S, env, ticks, fin) = ticks <= 0 || svs-idle?(S) ? [S, fin] : { let r = svs-tick(S, env); sb-run(r[0], env, ticks - 1, append(fin, r[1])); };
   def sb-events(kind) = filter(e => e[1][0] == kind, record_get(SB, "ev"));
@@ -85,9 +106,9 @@ section [form.bml] {
   def sb-c-admission(ctx) {
    let a = sb-reset(8);
    let S = svs-submit(svs-submit(svs-submit(svs-new(2), sb-seq("a", 0, 0, 3, 15, 0, [])), sb-seq("b", 0, 1, 3, 15, 0, [])), sb-seq("c", 0, 2, 3, 15, 0, []));
-   let first = svs-tick(S, sb-env(1000, 100));
+   let first = svs-tick(S, sb-env(100));
    let again = sb-reset(8);
-   let r = sb-run(S, sb-env(1000, 100), 200, []);
+   let r = sb-run(S, sb-env(100), 200, []);
    let begins = sb-events("b");
    let c = sb-fin(r[1], "c")[0];
    len(r[1]) == 3 && svs-idle?(r[0]) && len(begins) == 3
@@ -101,7 +122,7 @@ section [form.bml] {
   def sb-c-priority(ctx) {
    let a = sb-reset(8);
    let S = svs-submit(svs-submit(svs-submit(svs-submit(svs-new(1), sb-seq("busy", 0, 0, 2, 15, 0, [])), sb-seq("low", 0, 1, 2, 15, 0, [])), sb-seq("high", 5, 9, 2, 15, 0, [])), sb-seq("low2", 0, 3, 2, 15, 0, []));
-   let r = sb-run(S, sb-env(1000, 100), 400, []);
+   let r = sb-run(S, sb-env(100), 400, []);
    let order = map(e => e[1][1], sb-events("b"));
    sb-c-priority-ok(order);
   }
@@ -111,9 +132,9 @@ section [form.bml] {
   def sb-c-interleave(ctx) {
    let a = sb-reset(8);
    let S0 = svs-submit(svs-new(2), sb-seq("short", 0, 0, 2, 0 - 970, 0, []));
-   let warm = sb-run(S0, sb-env(5000, 100), 3, []);
+   let warm = sb-run(S0, sb-env(100), 3, []);
    let S1 = svs-submit(warm[0], sb-seq("long", 0, 0, 641, 15, 0, []));
-   let r = sb-run(S1, sb-env(5000, 100), 3000, warm[1]);
+   let r = sb-run(S1, sb-env(100), 3000, warm[1]);
    let ev = record_get(SB, "ev");
    let chunks = filter(e => e[1][0] == "c" && (String) e[1][1] == "long", ev);
    let gaps = sb-gaps(chunks);
@@ -127,7 +148,7 @@ section [form.bml] {
   def sb-c-alone(ctx) {
    let a = sb-reset(8);
    let S = svs-submit(svs-new(2), sb-seq("solo", 0, 0, 321, 15, 0, []));
-   let r = sb-run(S, sb-env(5000, 100), 400, []);
+   let r = sb-run(S, sb-env(100), 400, []);
    let ev = record_get(SB, "ev");
    let cs = filter(e => e[1][0] == "c", ev);
    let firstd = filter(e => e[1][0] == "d", ev)[0];
@@ -137,18 +158,19 @@ section [form.bml] {
   def sb-c-evict(ctx) {
    let a = sb-reset(8);
    let S = svs-submit(svs-submit(svs-submit(svs-submit(svs-new(4), sb-seq("e", 0, 0, 2, 17, 0, [])), sb-seq("l", 0, 0, 2, 5, 4, [])), sb-seq("s", 0, 0, 2, 5, 0, ["END"])), sb-seq("x", 0, 0, 2, 5, 0, []));
-   let r = sb-run(S, sb-env(1000, 100), 400, []);
+   let r = sb-run(S, sb-env(100), 400, []);
    let e = sb-fin(r[1], "e")[0];
    let l = sb-fin(r[1], "l")[0];
    let st = sb-fin(r[1], "s")[0];
    let x = sb-fin(r[1], "x")[0];
-   let cap = sb-run(svs-submit(svs-new(1), sb-seq("cap", 0, 0, 2, 5, 0, [])), sb-env(10, 100), 400, []);
+   let p2 = sb-pool(2);
+   let cap = sb-run(svs-submit(svs-new(1), sb-seq("cap", 0, 0, 2, 5, 0, [])), sb-env(100), 400, []);
    let capped = sb-fin(cap[1], "cap")[0];
    (String) e[15] == "stop" && svs-gen(e) == [18, 19] && svs-gen-n(e) == 2
     && (String) l[15] == "length" && svs-gen(l) == [6, 7, 8, 9]
     && (String) st[15] == "stop-string" && svs-gen-n(st) == 3
     && (String) x[15] == "stop" && svs-gen-n(x) == 14
-    && (String) capped[15] == "context-full" && capped[11] == 10
+    && (String) capped[15] == "stop" && capped[11] == 15
     && svs-idle?(r[0]) && svs-free-slot(r[0]) == 0;
   }
   // claim 64
@@ -156,39 +178,101 @@ section [form.bml] {
    let a = sb-reset(8);
    let live = [svs-put(svs-put(svs-put(sb-seq("p", 0, 0, 2, 5, 0, []), 7, 0), 10, 41), 11, 7), svs-put(svs-put(svs-put(sb-seq("q", 0, 0, 2, 5, 0, []), 7, 2), 10, 43), 11, 9)];
    let S = [[], nothing(), live, 0, 0, 4];
-   svs-rows(S) == [[0, 41, 7, 0, 0, 0], [1, 0, 0, 0, 0, 0], [2, 43, 9, 0, 0, 0]];
+   svs-rows(S) == [[0, 41, 7, 0, 0, 0, []], [1, 0, 0, 0, 0, 0, []], [2, 43, 9, 0, 0, 0, []]];
   }
   // claim 128
   def sb-c-limit(ctx) {
    let gib = 1073741824;
-   let a = svs-limit(8, 100 * gib, 3 * gib, 8 * gib, 0) == 8 && svs-limit(8, 20 * gib, 3 * gib, 8 * gib, 0) == 4 && svs-limit(8, 9 * gib, 3 * gib, 8 * gib, 0) == 1
-    && svs-limit(8, 2 * gib, 3 * gib, 8 * gib, 0) == 1 && svs-limit(8, 0 - 1, 3 * gib, 8 * gib, 0) == 8 && svs-limit(8, 100 * gib, 3 * gib, 8 * gib, 2) == 2 && svs-limit(2, 100 * gib, 3 * gib, 8 * gib, 0) == 2;
+   let a = svs-limit(8, 0) == 8 && svs-limit(8, 2) == 2 && svs-limit(2, 5) == 2 && svs-limit(8, -1) == 8
+    && svs-budget(10, 100 * gib, gib / 2, 8 * gib) == 10 + 184 && svs-budget(10, 9 * gib, gib / 2, 8 * gib) == 12 && svs-budget(10, 8 * gib, gib / 2, 8 * gib) == 10 && svs-budget(10, 2 * gib, gib / 2, 8 * gib) == 10
+    && svs-budget(10, 0 - 1, gib / 2, 8 * gib) == -1 && svs-budget(10, 100 * gib, 0, 8 * gib) == -1;
    let r0 = sb-reset(1);
    let S = svs-submit(svs-submit(svs-new(4), sb-seq("one", 0, 0, 2, 5, 0, [])), sb-seq("two", 0, 0, 2, 5, 0, []));
-   let t1 = svs-tick(S, sb-env(1000, 100));
-   let t2 = svs-tick(t1[0], sb-env(1000, 100));
+   let t1 = svs-tick(S, sb-env(100));
+   let t2 = svs-tick(t1[0], sb-env(100));
    let waits = svs-active(t2[0]) == 1 && svs-queued(t2[0]) == 1;
    let up = record_set(SB, "limit", 4);
-   let t3 = svs-tick(t2[0], sb-env(1000, 100));
+   let t3 = svs-tick(t2[0], sb-env(100));
    let both = svs-active(t3[0]) == 2 && svs-queued(t3[0]) == 0;
    let down = record_set(SB, "limit", 1);
-   let t4 = sb-run(t3[0], sb-env(1000, 100), 400, []);
+   let t4 = sb-run(t3[0], sb-env(100), 400, []);
    a && waits && both && len(t4[1]) >= 1 && svs-idle?(t4[0]) && all?(s => (String) s[15] == "stop" && s[17] == 14, t4[1]);
   }
-  // claim 256
+  // claim 256: an empty prompt ends by name and takes no row; a prompt larger than the whole pool, with nothing else to give, ends by name with the pool at fault (pool-too-small)
   def sb-c-refuse(ctx) {
    let a = sb-reset(8);
+   let p = sb-pool(3);
    let S = svs-submit(svs-submit(svs-new(2), sb-seq("big", 0, 0, 40, 5, 0, [])), svs-seq(["empty", "p", "", 1, 0, [], 0, "band"], [], 0));
-   let r = sb-run(S, sb-env(30, 100), 50, []);
+   let r = sb-run(S, sb-env(100), 50, []);
    let big = sb-fin(r[1], "big")[0];
    let empty = sb-fin(r[1], "empty")[0];
-   (String) big[15] == "prompt-exceeds-slot" && (String) empty[15] == "empty-prompt" && len(sb-events("b")) == 0 && svs-idle?(r[0]);
+   (String) big[15] == "pool-too-small" && (String) empty[15] == "empty-prompt" && len(sb-events("b")) == 0 && svs-idle?(r[0]) && svb-free-n(record_get(SB, "pool")) == 2;
+  }
+  // claim 8192: PAGED KV. (a) a prompt of 500 ids, far past what a slot of 30 or 4000 positions held, is read and decoded: it takes 32 blocks of 16 for its positions, one more as its decode crosses
+  // position 512, and gives every one back at its end; (b) with the pool at 11 blocks and a row free a second prompt of 6 blocks WAITS (queued, not refused) until the first ends, then runs;
+  // (c) the block table a row hands the pass is the sequence's blocks in order
+  def sb-c-paged(ctx) {
+   let a = sb-reset(8);
+   let p = sb-pool(100);
+   let ra = sb-run(svs-submit(svs-new(2), sb-seq("big", 0, 0, 500, 0, 0, [])), sb-env(100), 600, []);
+   let big = sb-fin(ra[1], "big")[0];
+   let okA = (String) big[15] == "stop" && big[17] == 19 && len(big[24]) == 33 && svb-free-n(record_get(SB, "pool")) == 99 && len(sb-events("c")) == 8 && svs-gen(big) == range(1, 20);
+   let b = sb-reset(8);
+   let p2 = sb-pool(12);
+   let S = svs-submit(svs-submit(svs-new(2), sb-seq("w1", 0, 0, 90, 15, 0, [])), sb-seq("w2", 0, 1, 90, 15, 0, []));
+   let t1 = svs-tick(S, sb-env(100));
+   let t2 = svs-tick(t1[0], sb-env(100));
+   let waits = svs-active(t2[0]) == 1 && svs-queued(t2[0]) == 1 && svb-used(record_get(SB, "pool")) == 6 && svs-free-slot(t2[0]) >= 0;
+   let rb = sb-run(t2[0], sb-env(100), 600, append(t1[1], t2[1]));
+   let begins = map(e => e[1][1], sb-events("b"));
+   let okB = waits && len(rb[1]) == 2 && all?(s => (String) s[15] == "stop", rb[1]) && begins == ["w1", "w2"] && svs-idle?(rb[0]) && svb-free-n(record_get(SB, "pool")) == 11;
+   let live = [svs-put(svs-put(svs-put(svs-put(sb-seq("t", 0, 0, 2, 5, 0, []), 7, 0), 10, 41), 11, 7), 24, [9, 3, 77])];
+   let okC = svs-rows([[], nothing(), live, 0, 0, 4]) == [[0, 41, 7, 0, 0, 0, [9, 3, 77]]];
+   okA && okB && okC;
+  }
+  // claim 16384: PRESSURE YIELDS, NEVER CUTS. (a) two sequences whose positions need 6 blocks in a pool of 3: both are admitted on one block, the later one gives its block back when the pool is empty and is
+  // queued with its reply so far, the earlier finishes, the later is read again and ends with the SAME reply it would have had alone (1 to 19), a yield counted in its ledger; (b) a sequence that alone holds the whole pool
+  // and needs more ends by name (pool-full) with the ids it said; (c) a prompt the pool cannot hold while a cache entry holds blocks: the entry is let go (reclaim) and the prompt goes in; (d) the machine's budget
+  // holds a second prompt back while the first runs though blocks are free, never the first (a sequence alone is never held), and it goes in when the first ends
+  def sb-c-yield(ctx) {
+   let a = sb-reset(8);
+   let p = sb-pool(4);
+   let S = svs-submit(svs-submit(svs-new(2), sb-seq("A", 0, 0, 14, 0, 0, [])), sb-seq("B", 0, 1, 14, 0, 0, []));
+   let r = sb-run(S, sb-env(100), 900, []);
+   let fa = sb-fin(r[1], "A")[0];
+   let fb = sb-fin(r[1], "B")[0];
+   let okA = len(r[1]) == 2 && (String) fa[15] == "stop" && (String) fb[15] == "stop" && svs-gen(fa) == range(1, 20) && svs-gen(fb) == range(1, 20) && svs-yields(fb) >= 1 && svs-yields(fa) == 0 && svs-idle?(r[0]) && svb-free-n(record_get(SB, "pool")) == 3
+    && take(14, fb[3]) == fb[25] && fb[3][14:] == take(len(fb[3]) - 14, svs-gen(fb)) && len(fb[3]) > 14 && len(fb[25]) == 14;
+   let b = sb-reset(8);
+   let p2 = sb-pool(3);
+   let rb = sb-run(svs-submit(svs-new(2), sb-seq("solo", 0, 0, 14, 0, 0, [])), sb-env(100), 900, []);
+   let solo = sb-fin(rb[1], "solo")[0];
+   let okB = (String) solo[15] == "pool-full" && solo[17] == 19 && svs-gen(solo) == range(1, 20) && svb-free-n(record_get(SB, "pool")) == 2 && svs-idle?(rb[0]);
+   let c = sb-reset(8);
+   let p3 = sb-pool(10);
+   let held = svb-take(record_get(SB, "pool"), 8);
+   let e = record_set(SB, "entry", held);
+   let rc = sb-run(svs-submit(svs-new(2), sb-seq("fit", 0, 0, 40, 15, 0, [])), sb-env(100), 400, []);
+   let evr = sb-events("r");
+   let okC = len(evr) == 1 && evr[0][1][1] == 3 && evr[0][1][2] == 8 && len(rc[1]) == 1 && (String) rc[1][0][15] == "stop" && svb-free-n(record_get(SB, "pool")) == 9;
+   let d = sb-reset(8);
+   let p4 = sb-pool(100);
+   let bg = record_set(SB, "budget", 8);
+   let S4 = svs-submit(svs-submit(svs-new(2), sb-seq("b1", 0, 0, 100, 15, 0, [])), sb-seq("b2", 0, 1, 100, 15, 0, []));
+   let u1 = svs-tick(S4, sb-env(100));
+   let u2 = svs-tick(u1[0], sb-env(100));
+   let u3 = svs-tick(u2[0], sb-env(100));
+   let held2 = svs-active(u3[0]) == 1 && svs-queued(u3[0]) == 1 && svb-used(record_get(SB, "pool")) >= 7;
+   let rd = sb-run(u3[0], sb-env(100), 600, []);
+   let begins = map(e => e[1][1], sb-events("b"));
+   let okD = held2 && begins == ["b1", "b2"] && len(rd[1]) == 2 && all?(s => (String) s[15] == "stop", rd[1]) && svs-idle?(rd[0]);
+   okA && okB && okC && okD;
   }
   // claim 512
   def sb-c-ledger(ctx) {
    let a = sb-reset(8);
    let S = svs-submit(svs-new(2), sb-seq("led", 2, 0, 3, 15, 0, []));
-   let r = sb-run(S, sb-env(1000, 100), 100, []);
+   let r = sb-run(S, sb-env(100), 100, []);
    let s = r[1][0];
    let row = parse-json("band", svs-ledger-row(s, 123));
    let reply = parse-json("band", svs-reply-row(s, "hello \"there\"\nline", 123));
@@ -197,7 +281,7 @@ section [form.bml] {
     && json-int-value(json-object-get(row, "priority")) == 2 && json-int-value(json-object-get(row, "queue_ms")) == 0 && json-int-value(json-object-get(row, "prefill_ms")) == 410
     && json-int-value(json-object-get(row, "decode_ms")) == 500 && !json-object-has?(row, "text") && json-object-has?(row, "decode_tok_s")
     && svs-tok-s10(s) == 80 && (String) json-string-value(json-object-get(reply, "text")) == "hello \"there\"\nline"
-    && (String) svs-refused-row("z", "no prompt", 5) != "" && sb-has(svs-status-row(r[0], 77, 5, "owner line", 9), "\"pid\":77");
+    && (String) svs-refused-row("z", "no prompt", 5) != "" && sb-has(svs-status-row(r[0], 77, 5, "owner line", 9, 3, 100, 256), "\"pid\":77") && sb-has(svs-status-row(r[0], 77, 5, "owner line", 9, 3, 100, 256), "\"blocks_used\":3");
   }
   // claim 2048: the prefix cache's two seams. A prompt of 201 ids (200 read) with snapshot points 64 and 128: the lane's chunks end on each point and the state is kept
   // there (chunks 64, 64, 64, 8; snaps at 64 then 128, each after its own chunk). With the cache holding 128 ids the lane reads from 128 (chunks 64, 8), keeps no snapshot
@@ -206,7 +290,7 @@ section [form.bml] {
   def sb-c-prefix(ctx) {
    let a = sb-reset(8);
    let S0 = svs-submit(svs-new(2), svs-with-points(sb-seq("pa", 0, 0, 201, 15, 0, []), [64, 128]));
-   let r0 = sb-run(S0, sb-env(5000, 100), 100, []);
+   let r0 = sb-run(S0, sb-env(100), 100, []);
    let ev0 = record_get(SB, "ev");
    let cs0 = filter(e => e[1][0] == "c", ev0);
    let ss0 = filter(e => e[1][0] == "s", ev0);
@@ -214,7 +298,7 @@ section [form.bml] {
    let ok0 = map(e => e[1][3], cs0) == [64, 64, 64, 8] && map(e => e[1][2], ss0) == [64, 128] && order0 == ["c", "s", "c", "s", "c", "c"] && len(r0[1]) == 1 && r0[1][0][21] == 0;
    let b = sb-reset(8);
    let h = record_set(SB, "hit", 128);
-   let r1 = sb-run(svs-submit(svs-new(2), svs-with-points(sb-seq("pb", 0, 0, 201, 15, 0, []), [64, 128, 192])), sb-env(5000, 100), 100, []);
+   let r1 = sb-run(svs-submit(svs-new(2), svs-with-points(sb-seq("pb", 0, 0, 201, 15, 0, []), [64, 128, 192])), sb-env(100), 100, []);
    let ev1 = record_get(SB, "ev");
    let cs1 = filter(e => e[1][0] == "c", ev1);
    let ss1 = filter(e => e[1][0] == "s", ev1);
@@ -222,11 +306,11 @@ section [form.bml] {
    let ok1 = map(e => e[1][2], cs1) == [128, 192] && map(e => e[1][3], cs1) == [64, 8] && map(e => e[1][2], ss1) == [192] && json-int-value(json-object-get(row1, "cached_ids")) == 128 && (String) r1[1][0][15] == "stop";
    let c = sb-reset(8);
    let h2 = record_set(SB, "hit", 500);
-   let r2 = sb-run(svs-submit(svs-new(2), sb-seq("pc", 0, 0, 201, 15, 0, [])), sb-env(5000, 100), 100, []);
+   let r2 = sb-run(svs-submit(svs-new(2), sb-seq("pc", 0, 0, 201, 15, 0, [])), sb-env(100), 100, []);
    let ok2 = len(sb-events("c")) == 0 && len(r2[1]) == 1 && r2[1][0][21] == 200 && svs-gen(r2[1][0])[0] == 16;
    let d = sb-reset(8);
    let h3 = record_set(SB, "hit", nothing());
-   let r3 = sb-run(svs-submit(svs-new(2), sb-seq("pd", 0, 0, 201, 15, 0, [])), sb-env(5000, 100), 100, []);
+   let r3 = sb-run(svs-submit(svs-new(2), sb-seq("pd", 0, 0, 201, 15, 0, [])), sb-env(100), 100, []);
    ok0 && ok1 && ok2 && len(sb-events("c")) == 4 && r3[1][0][21] == 0;
   }
   // claim 4096: sampling's seams. temperature_milli and seed read from the spool (default 0 and 0, a negative temperature and the key `temperature` refused by name); the sequence carries them,
@@ -242,12 +326,12 @@ section [form.bml] {
    let row = parse-json("band", svs-ledger-row(svs-put(seq, 6, "done"), 5));
    (String) a[0] == "ok" && a[1][8] == 700 && a[1][9] == 9 && b[1][8] == 0 && b[1][9] == 0 && (String) c[0] == "refused" && sb-has(c[1], "temperature_milli below zero")
     && (String) d[0] == "refused" && sb-has(d[1], "unknown key \"temperature\"") && seq[22] == 700 && seq[23] == 9
-    && rows == [[0, 0, 0, 0, 0, 0], [1, 41, 7, 700, 9, 3]] && json-int-value(json-object-get(row, "temperature_milli")) == 700;
+    && rows == [[0, 0, 0, 0, 0, 0, []], [1, 41, 7, 700, 9, 3, []]] && json-int-value(json-object-get(row, "temperature_milli")) == 700;
   }
   // claim 1024
   def sb-c-trim(ctx) = (String) svs-trim-stop("alpha END beta STOP gamma", ["STOP", "END"]) == "alpha " && (String) svs-trim-stop("alpha beta", ["STOP"]) == "alpha beta" && (String) svs-trim-stop("abc", [""]) == "abc" && (String) svs-trim-stop("STOPabc", ["STOP"]) == "";
  }
  let ctx = 0;
- let verdict = live-claims("serve-sched-band", ctx, [["parse", 1, 1, sb-c-parse], ["admission", 2, 1, sb-c-admission], ["priority", 4, 1, sb-c-priority], ["interleave", 8, 1, sb-c-interleave], ["alone", 16, 1, sb-c-alone], ["evict", 32, 1, sb-c-evict], ["rows", 64, 1, sb-c-rows], ["limit", 128, 1, sb-c-limit], ["refuse", 256, 1, sb-c-refuse], ["ledger", 512, 1, sb-c-ledger], ["trim", 1024, 1, sb-c-trim], ["prefix", 2048, 1, sb-c-prefix], ["draw", 4096, 1, sb-c-draw]]);
+ let verdict = live-claims("serve-sched-band", ctx, [["parse", 1, 1, sb-c-parse], ["admission", 2, 1, sb-c-admission], ["priority", 4, 1, sb-c-priority], ["interleave", 8, 1, sb-c-interleave], ["alone", 16, 1, sb-c-alone], ["evict", 32, 1, sb-c-evict], ["rows", 64, 1, sb-c-rows], ["limit", 128, 1, sb-c-limit], ["refuse", 256, 1, sb-c-refuse], ["ledger", 512, 1, sb-c-ledger], ["trim", 1024, 1, sb-c-trim], ["prefix", 2048, 1, sb-c-prefix], ["draw", 4096, 1, sb-c-draw], ["paged", 8192, 1, sb-c-paged], ["yield", 16384, 1, sb-c-yield]]);
  verdict;
 }
