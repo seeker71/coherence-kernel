@@ -37,7 +37,7 @@ refused plan answered the same plan byte for byte in three options. The surprise
 
 ## The ledgers
 
-`/tmp/form-serve/ledger.jsonl` has one row a request (who, status, ids, `cached_ids`, ms, rent_tokens 0). Each answer also
+The spool's own ledger has one row a request (who, status, ids, `cached_ids`, ms, rent_tokens 0). Each answer also
 lands one row in `receipts/local-run-ledger.jsonl` (the ids the lane read this time and the ms they took), which the planner's
 read-time estimate reads; the planner's own plan rows land in `receipts/query-coverage-ledger.jsonl` with rent_tokens 0.
 
