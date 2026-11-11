@@ -37,6 +37,8 @@ section [form.bml] {
   // queue remains shared; an interactive ticket receives a bounded head start.
   let GPL-INTENT = record_new(0,"interactive",0);
    let GPL-CLAIMS = record_new(0,"owners",record_new(0));
+   // the tickets this image opened and has not closed: a ticket of this pid that is not here is a cell's, left by a deadline that bypassed defer
+   let GPL-TICKETS = record_new(0);
   def gpu-lease-interactive?() = record_get(GPL-INTENT,"interactive") == 1;
   def gpu-lease-with-interactive(run) {
    let saved=record_get(GPL-INTENT,"interactive");
@@ -155,9 +157,10 @@ section [form.bml] {
   // defer. Its leftover ticket is then inert while the process remains alive.
   def gpl-ticket-open(lock) {
    let made=host_dir_mkdir(gpl-wait-dir(lock)); let ticket=nps-file-open(gpl-ticket-path(lock),1);
-   if value_kind(ticket)!="list" then nothing() else if gpl-ticket-lock(ticket[1])==0 then ticket else { nps-file-settle(ticket); nothing(); };
+   if value_kind(ticket)!="list" then nothing() else if gpl-ticket-lock(ticket[1])==0 then { record_set(GPL-TICKETS,gpl-ticket-path(lock),1); ticket; } else { nps-file-settle(ticket); nothing(); };
   }
   def gpl-ticket-close(lock,ticket) {
+   let unregistered=record_set(GPL-TICKETS,gpl-ticket-path(lock),0);
    let removed=host_path_remove(gpl-ticket-path(lock));
    nps-file-settle(ticket);
   }
@@ -182,7 +185,13 @@ section [form.bml] {
    let text = read_file(gpl-wait-dir(lock) ++ "/" ++ name);
    let lines = nothing?(text) ? [] : gpl-lines(text);
    let start = nil?(lines) ? 0 : gpl-int(str_to_int(lines[0]));
-   let retained = pid > 0 && start > 0 && host_alive(pid) != 0 && gpl-same-process?(pid,start) != 0 && gpl-ticket-live(gpl-wait-dir(lock) ++ "/" ++ name,lines) != 0;
+   // a ticket of this very pid that this image never opened (or closed) is a cell's, left behind by a deadline that bypassed defer: its descriptor
+   // belongs to a run that is over, so the lock it holds says nothing about a waiter; the file goes, and no other client queues behind it
+   let own = pid == host_pid();
+   let path = gpl-wait-dir(lock) ++ "/" ++ name;
+   let leftover = own && start > 0 && (Comparable) record_get(GPL-TICKETS, path) != 1;
+   let swept = leftover ? host_path_remove(path) : 0;
+   let retained = !leftover && pid > 0 && start > 0 && host_alive(pid) != 0 && gpl-same-process?(pid,start) != 0 && gpl-ticket-live(path,lines) != 0;
    !retained ? [] : [pid,start,len(lines) > 1 ? gpl-int(str_to_int(lines[1])) : 0];
   }
   def gpl-before?(a,b) = a[2] < b[2] || (a[2] == b[2] && a[0] < b[0]);
