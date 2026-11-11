@@ -298,6 +298,27 @@ section [form.bml] {
     !nil?(record_get(state,"unreadable")) ? mg-reservation-held(verdict,"lease-observation-unavailable",need+pending,pending) : mg-reservation-grant-of(verdict,need+pending,pending,nothing());
    }
    def mg-lease-ask-read(dir,need) = mg-lease-ask-read-at(dir,need,mg-sense(),now_unix_ms());
+   // The door's first question, asked before any row is read or any byte is mapped: what would a run that maps `key` (shared bytes,
+   // charged once across the live leases of the same key, never copied) and holds `own` bytes of its own add to what the live leases
+   // already promised, and would the machine still leave `reserve` bytes free? Read-only: it takes no lease and removes no file.
+   // Answers the grant shape [granted, reason, available, wired, mem, need, pending, nothing]; need is the total promised with this run,
+   // so need - pending is what this run adds. A refusal is the governor's reading, never a kill: the caller ends with that line.
+   def mg-door-ask-at(dir,who,key,shared,own,reserve,vm) {
+    let state=mg-lease-read-state(dir);let rows=record_get(state,"rows");
+    let row=mg-reservation-new(host_pid(),who,key,shared,own,now_unix_ms(),"door-ask");
+    let pending=mg-reservation-pending(rows);let need=mg-reservation-pending(append(rows,[row]));
+    let bare=mg-verdict(vm,need);let kept=mg-verdict(vm,need+reserve);
+    !nil?(record_get(state,"unreadable")) ? mg-reservation-held(bare,"lease-observation-unavailable",need,pending)
+    : mg-granted?(kept) ? mg-reservation-grant-of(kept,need,pending,nothing())
+    : mg-granted?(bare) ? mg-reservation-held(bare,"reserve "++mg-gib-text(reserve)++" must stay free",need,pending)
+    : mg-reservation-held(bare,bare[1],need,pending);
+   }
+   def mg-door-line(who,key,shared,own,reserve,v) = "[memory] "++(mg-granted?(v) ? "granted" : "held")++" "++who++": adds "++mg-gib-text(v[5]-v[6])++" to "++mg-gib-text(v[6])++" already promised"++(shared+own>v[5]-v[6] ? " (the bytes of "++key++" are already promised by a live lease: shared, not copied)" : "")++"; "++v[1]++" (available "++mg-gib-text(v[2])++", wired "++mg-gib-text(v[3])++" of "++mg-gib-text(v[4])++", reserve "++mg-gib-text(reserve)++")";
+   def mg-door-first(who,key,shared,own,reserve) {
+    let v=mg-door-ask-at(mg-lease-dir(),who,key,shared,own,reserve,mg-sense());
+    let said=print_str(mg-door-line(who,key,shared,own,reserve,v));
+    v;
+   }
    def mg-lease-wait-read(dir,who,need,until) = mg-wait-ask(who,need,until,()=>mg-lease-ask-read(dir,need),mg-rest,mg-now,mg-nap-first());
    def mg-lease-note(v) = len(v)>6 && v[6]>0 ? "; retained reservations still count "+mg-gib-text(v[6])+" as pending" : "";
    def mg-lease-age-s(row,now) = (now - row[5])/1000;

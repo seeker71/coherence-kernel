@@ -69,7 +69,17 @@ section [form.bml] {
   def qsr-held(o, dir, rows, maxpos, blocks, bsh) {
    let made = qsr-dirs(dir);
    let st = qsr-standing-at(dir);
-   (String) st[0] == "standing" ? qsr-say("a server already stands for " ++ dir ++ " (pid " ++ json-int-value(json-object-get(st[1], "pid")).str() ++ "); this one does not start") : gpu-lease-door-hold("qwen-serve resident server pid " ++ host_pid().str() ++ " spool " ++ dir ++ " rows " ++ rows.str() ++ " pool " ++ blocks.str() ++ " blocks of " ++ q38pg-bsz(bsh).str(), () => qsr-serve(o, dir, rows, maxpos, blocks, bsh));
+   (String) st[0] == "standing" ? qsr-say("a server already stands for " ++ dir ++ " (pid " ++ json-int-value(json-object-get(st[1], "pid")).str() ++ "); this one does not start") : qsr-asked(o, dir, rows, maxpos, blocks, bsh);
+  }
+  // The memory governor is asked first, before the GPU lease or a byte of the model is mapped: the weights (charged once with any live lease of the same file, so a second open of the
+  // same model is shared mapping, not a copy) and reserve_gib kept free. A refusal is the governor's line and the door's exit; a grant is a lease the server holds while it stands.
+  def qsr-asked(o, dir, rows, maxpos, blocks, bsh) {
+   let wbytes = file_size(qlz-file());
+   let first = mg-door-first("qwen-serve resident server", qlz-file(), wbytes, 0, qsr-int(o, "reserve_gib", 8) * 1073741824);
+   let refused = !mg-granted?(first) ? dop-refuse("qwen-serve", mg-held-reason() ++ first[1] ++ "; refused before the GPU lease or any mapping") : 0;
+   let lease = mg-lease("qwen-serve resident server pid " ++ host_pid().str(), qlz-file(), wbytes, 0);
+   let kept = record_set(SV, "lease", mg-reservation-of(lease));
+   gpu-lease-door-hold("qwen-serve resident server pid " ++ host_pid().str() ++ " spool " ++ dir ++ " rows " ++ rows.str() ++ " pool " ++ blocks.str() ++ " blocks of " ++ q38pg-bsz(bsh).str(), () => qsr-serve(o, dir, rows, maxpos, blocks, bsh));
   }
   def qsr-standing-at(dir) {
    let t = read_file(dir ++ "/status.json");
@@ -87,6 +97,7 @@ section [form.bml] {
    let yielded = qsr-yield-on(qsr-int(o, "yield_ear", 1));
    let t0 = host_monotonic_ms();
    let ctx = qlz-open(maxpos);
+   let acked = len(ctx) == 0 ? 0 : qsr-lease-ack();
    len(ctx) == 0 ? qsr-ended(dir, yielded, "the model did not open (file " ++ qlz-file() ++ ")") : qsr-opened(o, dir, rows, maxpos, blocks, bsh, start, label, yielded, t0, ctx);
   }
   // The pool holds as many blocks as were asked unless the attention scratch cannot hold the partials of that many positions (q38sp-fits?): the split kernels write nspl partials a row, nspl the
@@ -119,11 +130,15 @@ section [form.bml] {
   }
   // the bytes of one block over every full layer's K and V
   def qsr-block-bytes(c) = q38pg-bsz(c[19]) * c[0][2][20] * 4 * 2 * q38-full-layers(c[0][2][21], c[0][2][22]);
+  // the weights show in the machine's own reading once mapped: the lease's shared promise is then observed, and it goes back when the server ends
+  def qsr-lease-ack() = record?(record_get(SV, "lease")) ? mg-reservation-ack-shared(record_get(SV, "lease")) : 0;
+  def qsr-lease-release() = record?(record_get(SV, "lease")) ? mg-reservation-release(record_get(SV, "lease")) : 0;
   def qsr-ended(dir, yielded, why) {
    let a = qsr-say("ended: " ++ why ++ "; served " ++ record_get(SV, "served").str() ++ " requests, " ++ record_get(SV, "tokens").str() ++ " tokens");
    let b = host_path_remove(dir ++ "/status.json");
    let d = host_path_remove(dir ++ "/stop");
    let y = yielded == 1 ? host_path_remove(".hearth/ear.yield") : 0;
+   let l = qsr-lease-release();
    0;
   }
   // the live ear stands down while this server holds the lease and the flag stands; the door writes the flag if it was absent and takes it away at the end
