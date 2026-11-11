@@ -96,7 +96,12 @@ absent (equal rest before each), against 5.0 tok/s with it passing (0.8 passes/s
 - More than 8 rows: the specialized matvec widths and the head's logits buffer are 8 wide (`q38s-nt-max`); a wider pass takes the
   batched matmul for its projections and a logits buffer sized by the rows.
 - Swapping a yielded sequence's blocks out instead of reading it again (a yield is a recompute today: the prompt and the reply so far are read again).
-- A request's `fresh` start that retires its own stale witness band (`band-exists` stops every later option of a request whose
-  earlier plan left `.hearth/local-plans/witnesses/<id>-band.bml`).
+- The planner's repair lane (`lrpr-repair`, repair_turns of coding) opens its own in-process session beside a standing server: the
+  server holds `/tmp/form-gpu.lock`, so that session waits on the lease and the walk stalls (witnessed 2026-11-11: 35 minutes of
+  nanosleep at 20% CPU and 9% GPU until the server released the lease, then the repair ran at once). The repair's coding asks belong
+  on the server's spool like every other planner ask.
+
+A walk retires a stale witness band itself (`lpr-retire-stale-band`): a band under `.hearth/local-plans/witnesses/` that no queue row
+carries is a plan that never queued, so it and its compiled sidecars are removed before the first voice opens.
 - Any A/B on this Mac gives both arms equal rest first: the GPU throttles under minutes of load, and other tenants
   (a browser's renderer, another agent's planner) move a reading more than a kernel does.
