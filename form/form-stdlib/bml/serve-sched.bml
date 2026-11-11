@@ -13,8 +13,9 @@
 // named, or the slot's own end (the positions the server was opened with): that last is named "context-full" in the reply, never silent.
 //
 // A sequence is a list [id, priority, arrive_ms, prompt_ids, max_new, stops, phase, slot, fed, gen_ids_reversed, feed, pos, admit_ms,
-// decode_start_ms, surprise_sum, status, prefill_ms, gen_n, who, end_ms]; the state S is [queue, prefilling, live, prefill_ms, decode_ms,
-// nslots]; the env is [now, limit, begin, chunk, fork, decode, stop-hit, cap, eos?, chunk-size, share-pct].
+// decode_start_ms, surprise_sum, status, prefill_ms, gen_n, who, end_ms, snapshot_points, cached_ids]; the state S is [queue, prefilling, live,
+// prefill_ms, decode_ms, nslots]; the env is [now, limit, begin, chunk, fork, decode, stop-hit, cap, eos?, chunk-size, share-pct, snap]. begin answers the
+// prompt ids a prefix cache already holds in the state it opened (the lane reads on from there); snap(s, count) keeps the state as it stands after `count` ids.
 // preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/door-options.bml
 section [form.bml] {
  class ServeSched {
@@ -42,7 +43,10 @@ section [form.bml] {
   def svs-r-chat(r) = r[3];
   // ── a sequence ──
   def svs-put(xs, i, v) = append(append(take(i, xs), [v]), xs[i + 1:]);
-  def svs-seq(r, ids, now) = [r[0], r[6], now, ids, r[4], r[5], "queued", -1, 0, [], 0, 0, 0, 0, 0, "", 0, 0, r[7], 0];
+  // fields 20 and 21: the positions at which the prefill lane keeps a snapshot of its state for later requests that share the prefix (the server names them,
+  // sorted, each under the last prompt position), and how many prompt ids the prefix cache already held when the sequence began (read from the state, never from the prompt)
+  def svs-seq(r, ids, now) = [r[0], r[6], now, ids, r[4], r[5], "queued", -1, 0, [], 0, 0, 0, 0, 0, "", 0, 0, r[7], 0, [], 0];
+  def svs-with-points(s, points) = svs-put(s, 20, points);
   def svs-id(s) = s[0];
   def svs-prio(s) = s[1];
   def svs-ids(s) = s[3];
@@ -86,6 +90,7 @@ section [form.bml] {
   def svs-eos-call(env, tok) { let f = env[8]; f(tok); }
   def svs-chunk-size(env) = env[9];
   def svs-share(env) = env[10];
+  def svs-snap-call(env, s, count) { let f = env[11]; f(s, count); }
   // ── one tick: admit, one prefill chunk when it is due, one decode step for every live sequence ──
   // answers [S', the sequences finished this tick (phase done, status set)]
   def svs-tick(S, env) {
@@ -104,10 +109,15 @@ section [form.bml] {
    n == 0 ? [[rest, S[1], S[2], S[3], S[4], S[5]], [svs-finish(svs-put(best, 12, t), "empty-prompt", t)]] : n + 1 > svs-cap(env) ? [[rest, S[1], S[2], S[3], S[4], S[5]], [svs-finish(svs-put(best, 12, t), "prompt-exceeds-slot", t)]] : svs-admit-run(S, env, rest, best, t);
   }
   def svs-admit-run(S, env, rest, best, t) {
-   let seq = svs-put(svs-put(svs-put(best, 6, "prefill"), 7, svs-free-slot(S)), 12, t);
-   let begun = svs-begin-call(env, seq);
+   let seq0 = svs-put(svs-put(svs-put(best, 6, "prefill"), 7, svs-free-slot(S)), 12, t);
+   // begin answers how many prompt ids the prefix cache already holds in the state it opened (0 for none): the prefill lane starts there
+   let hit = svs-hit-clamp(svs-begin-call(env, seq0), len(best[3]) - 1);
+   let seq = svs-put(svs-put(seq0, 8, hit), 21, hit);
    [[rest, seq, S[2], 0, 0, S[5]], []];
   }
+  def svs-hit-clamp(hit, most) = (String) value_kind(hit) != "int" || hit < 0 ? 0 : hit > most ? most : hit;
+  // the first snapshot position past where the lane has read to, or -1
+  def svs-next-point(points, fed) = nil?(points) ? -1 : points[0] > fed ? points[0] : svs-next-point(points[1:], fed);
   // the prefill lane reads all but the last prompt id (the last is the first decode row's input); a chunk runs when it is due
   def svs-prefill-turn(S, env) = nothing?(S[1]) ? [S, []] : svs-due?(S, env) ? svs-prefill-run(S, env, S[1]) : [S, []];
   def svs-due?(S, env) = len(S[1][3]) - 1 - S[1][8] <= 0 || nil?(S[2]) || S[3] * 100 <= S[4] * svs-share(env);
@@ -115,9 +125,13 @@ section [form.bml] {
    let t0 = svs-now(env);
    let target = len(pf[3]) - 1;
    let left = target - pf[8];
-   let n = left > svs-chunk-size(env) ? svs-chunk-size(env) : left < 0 ? 0 : left;
+   let point = svs-next-point(pf[20], pf[8]);
+   let room = point > 0 && point - pf[8] < left ? point - pf[8] : left;
+   let n = room > svs-chunk-size(env) ? svs-chunk-size(env) : room < 0 ? 0 : room;
    let ran = n > 0 ? svs-chunk-call(env, pf, take(n, pf[3][pf[8]:]), pf[8]) : 0;
    let pf1 = svs-put(pf, 8, pf[8] + n);
+   // a chunk that ends on a snapshot position keeps the state as it stands there (a request that shares this prefix reads from it)
+   let snapped = n > 0 && pf1[8] == point ? svs-snap-call(env, pf1, point) : 0;
    let t1 = svs-now(env);
    pf1[8] >= target ? svs-join(S, env, pf1) : [[S[0], pf1, S[2], S[3] + (nil?(S[2]) ? 0 : t1 - t0), S[4], S[5]], []];
   }
@@ -153,7 +167,7 @@ section [form.bml] {
   def svs-decode-ms(s) = s[19] - s[13] < 0 ? 0 : s[19] - s[13];
   // tokens a second in tenths, over the span the sequence decoded (joined to ended)
   def svs-tok-s10(s) = svs-decode-ms(s) <= 0 ? 0 : s[17] * 10000 / svs-decode-ms(s);
-  def svs-fields(s, at_unix_ms) = [svs-s("id", s[0]), svs-s("who", s[18]), svs-s("status", s[15]), svs-n("priority", s[1]), svs-n("prompt_ids", len(s[3])), svs-n("generated_ids", s[17]), svs-n("wall_ms", s[19] - s[2]), svs-n("queue_ms", s[12] - s[2]), svs-n("prefill_ms", s[16]), svs-n("decode_ms", svs-decode-ms(s)), json-node-pair("decode_tok_s", json-node-float-text(svs-tenths(svs-tok-s10(s)))), svs-n("surprise_micro_nats", s[17] > 0 ? s[14] / s[17] : 0), svs-n("slot", s[7]), svs-n("rent_tokens", 0), svs-n("at_unix_ms", at_unix_ms)];
+  def svs-fields(s, at_unix_ms) = [svs-s("id", s[0]), svs-s("who", s[18]), svs-s("status", s[15]), svs-n("priority", s[1]), svs-n("prompt_ids", len(s[3])), svs-n("cached_ids", s[21]),svs-n("generated_ids", s[17]), svs-n("wall_ms", s[19] - s[2]), svs-n("queue_ms", s[12] - s[2]), svs-n("prefill_ms", s[16]), svs-n("decode_ms", svs-decode-ms(s)), json-node-pair("decode_tok_s", json-node-float-text(svs-tenths(svs-tok-s10(s)))), svs-n("surprise_micro_nats", s[17] > 0 ? s[14] / s[17] : 0), svs-n("slot", s[7]), svs-n("rent_tokens", 0), svs-n("at_unix_ms", at_unix_ms)];
   def svs-ledger-row(s, at_unix_ms) = json-emit(json-node-object(svs-fields(s, at_unix_ms)));
   def svs-reply-row(s, text, at_unix_ms) = json-emit(json-node-object(append(svs-fields(s, at_unix_ms), [svs-s("text", text)])));
   def svs-refused-row(fid, why, at_unix_ms) = json-emit(json-node-object([svs-s("id", fid), svs-s("status", "refused"), svs-s("reason", why), svs-n("generated_ids", 0), svs-n("rent_tokens", 0), svs-n("at_unix_ms", at_unix_ms), svs-s("text", "")]));

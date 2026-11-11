@@ -31,7 +31,7 @@
 // preflight-exec: forbidden
 // preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/door-options.bml form-stdlib/bml/q38-multi.bml form-stdlib/bml/form-cli-code-live.bml form-stdlib/bml/q38-lenses.bml form-stdlib/bml/memory-governor.bml form-stdlib/bml/serve-sched.bml form-stdlib/spool-bell-transport.fk native/metal/qwen35-dense-token-handle.fk native/metal/qwen35-dense-spec.fk
 section [form.bml] {
- let SV = record_new(0, "sts", [], "limit", 1, "limit_at", 0, "beat_at", 0, "beat_say", 0, "served", 0, "tokens", 0, "yield", 0, "step_ms", 0, "steps", 0, "ticks", 0);
+ let SV = record_new(0, "cache", [], "serial", 0,"packed", "", "evict_at", 0, "cache_hits", 0, "cache_ids", 0, "sts", [],"limit", 1, "limit_at", 0, "beat_at", 0, "beat_say", 0, "served", 0, "tokens", 0, "yield", 0, "step_ms", 0, "steps", 0, "ticks", 0);
  class QwenServeRun {
   def qsr-say(t) = print_str("[serve] " ++ t ++ "\n");
   def qsr-spec() = [["go", "int"], ["dir", "str"], ["slots", "int"], ["maxpos", "int"], ["chunk", "int"], ["share", "int"], ["poll_ms", "int"], ["idle_exit_ms", "int"], ["yield_ear", "int"], ["reserve_gib", "int"], ["limit", "int"]];
@@ -89,7 +89,7 @@ section [form.bml] {
    let a = qsr-say("opened in " ++ (host_monotonic_ms() - t0).str() ++ " ms: " ++ slots.str() ++ " slots of " ++ maxpos.str() ++ " positions, " ++ (q38-state-bytes(ctx[2]) / 1048576).str() ++ " MiB a slot, spool " ++ dir ++ ", end-of-turn id " ++ eos.str());
    let w = qsr-status(dir, "standing", start, label, svs-new(slots));
    let why = qsr-loop(c, qsr-env(c, maxpos), svs-new(slots), 0, host_monotonic_ms());
-   let freed = q38-free-state(arena) + q38s-close(sx) + q38-free-handle(posb) + q38-free-handle(lpb) + q38-free-state(record_get(SV, "sts"));
+   let freed = qsr-cache-free() + q38-free-state(arena) +q38s-close(sx) + q38-free-handle(posb) + q38-free-handle(lpb) + q38-free-state(record_get(SV, "sts"));
    let closed = qlz-close(ctx);
    qsr-ended(dir, yielded, why);
   }
@@ -106,10 +106,81 @@ section [form.bml] {
    want == 1 && file_size(".hearth/ear.yield") < 0 ? { let w = write_file(".hearth/ear.yield", "qwen-serve pid " ++ host_pid().str() ++ " holds the GPU lease\n"); 1; } : 0;
   }
   // ── the functions the scheduler is given ──
-  def qsr-env(c, maxpos) = [() => host_monotonic_ms(), () => qsr-limit(c), s => qsr-begin(c, s), (s, ids, pos) => qsr-chunk(c, s, ids, pos), s => qsr-fork(c, s), rows => qsr-decode(c, rows), s => qsr-stop-hit(c, s), maxpos, tok => tok == c[8], qsr-clamp(qsr-int(c[10], "chunk", 64), 1, 64), qsr-clamp(qsr-int(c[10], "share", 100), 1, 10000)];
+  def qsr-env(c, maxpos) = [() => host_monotonic_ms(), () => qsr-limit(c), s => qsr-begin(c, s), (s, ids, pos) => qsr-chunk(c, s, ids, pos), s => qsr-fork(c, s), rows => qsr-decode(c, rows), s => qsr-stop-hit(c, s), maxpos, tok => tok == c[8], qsr-clamp(qsr-int(c[10], "chunk", 64), 1, 64), qsr-clamp(qsr-int(c[10], "share", 100), 1, 10000), (s, count) => qsr-snap(c, s, count)];
+  // ── the prefix cache ──
+  // A prompt read once is read once: the prefill lane's state after a prefix of ids is kept (a snapshot: the full layers' K and V to that position and the linear layers' state),
+  // and a later request whose ids begin with the same prefix starts from a copy of it and reads only what follows. Where a snapshot is taken: at every prompt's end (a session's next
+  // turn continues it), at the boundary between a counsel's question and a lens's own text (N lenses read the question once), and at 1024, 2048, 4096, 8192 ... ids (two packets that
+  // share a long head share it). An entry is [the ids packed four bytes each, how many, the state, the last use]; it is compared by those bytes, never assumed. The pages a state
+  // never touched are not backed, so an entry costs the memory of the positions it holds. PRESSURE YIELDS: when the machine's available bytes fall under a slot's worth plus the
+  // reserve the least recently used entry is released (qsr-evict), one a reading, until the pressure is gone or none is left; no count caps the cache.
+  def qsr-key(packed, n) = substring(packed, 0, 4 * n);
+  def qsr-entry-count(e) = e[1];
+  def qsr-entry-match?(e, packed, most) = e[1] <= most && qsr-key(packed, e[1]) == e[0];
+  def qsr-cache-best(packed, most) = foldl((best, e) => qsr-entry-match?(e, packed, most) && (nothing?(best) || e[1] > best[1]) ? e : best, nothing(), record_get(SV, "cache"));
+  def qsr-cache-has?(packed, n) = any?(e => e[1] == n && e[0] == qsr-key(packed, n), record_get(SV, "cache"));
+  // an entry is told by its serial (e[4]), never by comparing states
+  def qsr-cache-touch(e) = record_set(SV, "cache", map(x => x[4] == e[4] ? [x[0], x[1], x[2], host_monotonic_ms(), x[4]] : x, record_get(SV, "cache")));
+  def qsr-cache-add(packed, n, sts) {
+   let serial = record_get(SV, "serial") + 1;
+   let a = record_set(SV, "serial", serial);
+   record_set(SV, "cache", append(record_get(SV, "cache"), [[qsr-key(packed, n), n, sts, host_monotonic_ms(), serial]]));
+  }
+  // a copy of the first n positions of one state into another: the fork kernel with the destination read as slot 0 of a one-slot arena
+  def qsr-clone(c, src, dst, n) = gpu-lease-turn("qwen serve snapshot", () => {
+   let batch = metal_batch_concurrent();
+   let moved = q38m-fork-layers(c[2][5], c[0][2], src, dst, 0, n, 0);
+   metal_sync();
+  });
+  // the prefill lane opens a state for a sequence: a copy of the longest cached prefix of its ids (at most all but the last, which is the first decode row's input), else a fresh one.
+  // Answers how many ids the state already holds.
   def qsr-begin(c, s) {
    let sts = q38-new-state(c[0][2]);
-   record_set(SV, "sts", sts);
+   let packed = q38m-uints(s[3]);
+   let a = record_set(SV, "sts", sts);
+   let b = record_set(SV, "packed", packed);
+   let hit = qsr-cache-best(packed, len(s[3]) - 1);
+   nothing?(hit) ? 0 : qsr-hit(c, s, hit, sts);
+  }
+  def qsr-hit(c, s, hit, sts) {
+   let moved = qsr-clone(c, hit[2], sts, hit[1]);
+   let a = qsr-cache-touch(hit);
+   let b = record_set(SV, "cache_hits", record_get(SV, "cache_hits") + 1);
+   let d = record_set(SV, "cache_ids", record_get(SV, "cache_ids") + hit[1]);
+   let said = qsr-say("prefix cache: " ++ s[0] ++ " starts from " ++ hit[1].str() ++ " of its " ++ len(s[3]).str() ++ " ids");
+   hit[1];
+  }
+  // the lane has read `count` ids: keep the state as it stands unless an entry for exactly this prefix exists
+  def qsr-snap(c, s, count) {
+   let packed = record_get(SV, "packed");
+   qsr-cache-has?(packed, count) ? 0 : qsr-snap-keep(c, packed, count);
+  }
+  def qsr-snap-keep(c, packed, count) {
+   let dst = q38-new-state(c[0][2]);
+   let moved = qsr-clone(c, record_get(SV, "sts"), dst, count);
+   qsr-cache-add(packed, count, dst);
+   count;
+  }
+  // the least recently used entry is released when the machine's available bytes fall under a slot plus the reserve (one entry a reading, read at most every 2 s)
+  def qsr-evict(c) = host_monotonic_ms() - record_get(SV, "evict_at") < 2000 || nil?(record_get(SV, "cache")) ? 0 : qsr-evict-read(c);
+  def qsr-evict-read(c) {
+   let a = record_set(SV, "evict_at", host_monotonic_ms());
+   let vm = mg-sense();
+   let avail = mg-vm-ok?(vm) ? mg-available(vm) : -1;
+   avail >= 0 && avail < q38-state-bytes(c[0][2]) + qsr-int(c[10], "reserve_gib", 8) * 1073741824 ? qsr-evict-one(avail) : 0;
+  }
+  def qsr-evict-one(avail) {
+   let rows = record_get(SV, "cache");
+   let old = foldl((o, e) => e[3] < o[3] ? e : o, rows[0], rows);
+   let a = record_set(SV, "cache", filter(e => e[4] != old[4], rows));
+   let f = q38-free-state(old[2]);
+   qsr-say("pressure: released the prefix cache's entry of " ++ old[1].str() ++ " ids (" ++ mg-gib-text(avail) ++ " available)");
+  }
+  def qsr-cache-free() = foldl((n, e) => n + q38-free-state(e[2]), 0, record_get(SV, "cache"));
+  // the prompt's own end is kept too: its state is the entry, no copy
+  def qsr-adopt(c, s, sts) {
+   let packed = record_get(SV, "packed");
+   qsr-cache-has?(packed, s[8]) ? q38-free-state(sts) : qsr-cache-add(packed, s[8], sts);
   }
   def qsr-chunk(c, s, ids, pos) = q38-prefill-span-batched(c[0][0], c[0][1], c[0][2], c[0][3], record_get(SV, "sts"), c[0][4], c[0][5], c[0][6], ids, pos);
   // the scratch state's first s[8] positions (and the linear layers' state) are copied into the sequence's slot; the scratch goes back
@@ -120,7 +191,7 @@ section [form.bml] {
     let moved = q38m-fork-layers(c[2][5], c[0][2], sts, c[3], s[7], s[8], 0);
     metal_sync();
    });
-   let freed = q38-free-state(sts);
+   let freed = qsr-adopt(c, s, sts);
    record_set(SV, "sts", []);
   }
   // one pass over the weights for every row; answers [greedy id, surprise in micro-nats] a row
@@ -161,6 +232,7 @@ section [form.bml] {
   }
   def qsr-after(c, env, r, stopping, idle_since) {
    let wrote = qsr-finish(c, r[1]);
+   let eased = qsr-evict(c);
    let beat = qsr-beat(c, r[0]);
    let idle = svs-idle?(r[0]);
    let now = host_monotonic_ms();
@@ -202,11 +274,16 @@ section [form.bml] {
    let said = qsr-say("refused " ++ id ++ ": " ++ why);
    S;
   }
-  def qsr-ids(c, r) = r[3] == 1 ? append(qlz-chat-prefix(c[0], r[1]), qlz-chat-lens(c[0], r[2], "")) : qlz-tokenize(c[0], r[1]);
+  // a chat request is the user turn (the question) and then the turn's own end (the lens text, the assistant's opening): its question ends at `boundary` ids, where a snapshot is kept
+  def qsr-ids-at(c, r, pre) = r[3] == 1 ? append(pre, qlz-chat-lens(c[0], r[2], "")) : qlz-tokenize(c[0], r[1]);
+  def qsr-insert(x, xs) = nil?(xs) ? [x] : x == xs[0] ? xs : x < xs[0] ? cons(x, xs) : cons(xs[0], qsr-insert(x, xs[1:]));
+  // the snapshot positions of a sequence of n ids (the lane reads n - 1): the question's end, and 1024, 2048, 4096 ... ids; each strictly inside what the lane reads
+  def qsr-points(boundary, n) = foldl((acc, p) => p > 0 && p < n - 1 ? qsr-insert(p, acc) : acc, [], cons(boundary, [1024, 2048, 4096, 8192, 16384, 32768]));
   def qsr-take(c, S, id, arrive, r) {
    let t0 = host_monotonic_ms();
-   let ids = qsr-ids(c, r);
-   let seq = svs-seq(r, ids, arrive);
+   let pre = r[3] == 1 ? qlz-chat-prefix(c[0], r[1]) : [];
+   let ids = qsr-ids-at(c, r, pre);
+   let seq = svs-with-points(svs-seq(r, ids, arrive), qsr-points(len(pre), len(ids)));
    let said = qsr-say("claimed " ++ id ++ " (" ++ r[7] ++ ", priority " ++ r[6].str() ++ "): " ++ len(ids).str() ++ " prompt ids, tokenized in " ++ (host_monotonic_ms() - t0).str() ++ " ms");
    svs-submit(S, seq);
   }

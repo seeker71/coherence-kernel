@@ -1,0 +1,54 @@
+// ear-yield-load-run.fk — the live ear's cadence with no microphone: the stand-in that exercises the yield path while the mic is unavailable.
+//
+//   echo 60 | ./fkwu observe/ear-yield-load-run.fk        stand for 60 s (default 60), one stdin line
+//
+// The ear (observe/ear-live-native.fk) cannot start without the microphone grant (AudioQueueStart waits on the grant, or the stream start is refused). This door keeps the
+// ear's DECISION and its LOAD: every beat it asks the ear's own predicate (form-stdlib/bml/ear-yield.bml, el-yielding?: the .hearth/ear.yield flag while ANOTHER process holds
+// the GPU lease) and, when it is not yielding, runs one native whisper-large-v3-turbo transcription of a fixture recording (the cadence's pass on a window, over the same weights
+// and kernels the ear's turbo pass uses); when it is yielding it prints the ear's own yield line, passes nothing and naps 200 ms (a chunk). It reports a reading per 10 s beat:
+// passes, yields, pass ms, so the other tenant's decode rate (the server's ledger) can be read beside the stand-in's pass rate. It holds no lease and writes no flag.
+// stdin: run seconds. stdout: "[ear-load] beat ..." lines and one "[ear-load] total ..." line.
+// preflight-exec: forbidden
+import form/form-stdlib/bml/ear-yield.bml;
+import form-stdlib/native-whisper-transcribe.bml;
+section [form.bml] {
+    def eyl-cat(xs) = (Comparable) len(xs) == 0 ? "" : ((String) xs[0] + eyl-cat(xs[1:]));
+    def eyl-wav() = "model/fixtures/whisper-native/lingua-libre-book-16k.wav";
+    def eyl-pass() {
+        let t0 = host_monotonic_ms();
+        let r = nwt-transcribe(nws-base(), eyl-wav(), "", "", "", "");
+        host_monotonic_ms() - t0;
+    }
+    // state: [passes, yields, pass_ms, beat_passes, beat_yields, beat_pass_ms, beat_start]
+    def eyl-loop(until, st) {
+        let now = now_unix_ms();
+        now >= until ? st : eyl-step(until, st, now);
+    }
+    def eyl-step(until, st, now) {
+        let yielding = el-yielding?();
+        let ms = yielding ? 0 : eyl-pass();
+        let napped = yielding ? host_sleep_ms(200) : 0;
+        let said = yielding ? print_str(eyl-cat(["[ear] yield: lease held by pid ", el-lease-pid().str(), ", whisper pass skipped, the window waits at ", now_unix_ms().str(), " ms\n"])) : 0;
+        let st1 = [st[0] + (yielding ? 0 : 1), st[1] + (yielding ? 1 : 0), st[2] + ms, st[3] + (yielding ? 0 : 1), st[4] + (yielding ? 1 : 0), st[5] + ms, st[6]];
+        eyl-beat(until, st1);
+    }
+    def eyl-beat(until, st) {
+        let now = now_unix_ms();
+        now - st[6] < 10000 ? eyl-loop(until, st) : {
+            let said = print_str(eyl-cat(["[ear-load] beat passes ", st[3].str(), " yields ", st[4].str(), " pass_ms ", st[5].str(), " yielding_now ", (el-yielding?() ? 1 : 0).str(), "\n"]));
+            eyl-loop(until, [st[0], st[1], st[2], 0, 0, 0, now]);
+        };
+    }
+    def eyl-first-line() = {
+        let l = read_line();
+        nothing?(l) ? "" : trim(l);
+    };
+    let secs = {
+        let l = eyl-first-line();
+        (Comparable) len(l) == 0 ? 60 : str_to_int(l);
+    };
+    let t0 = now_unix_ms();
+    let st = eyl-loop(t0 + 1000 * secs, [0, 0, 0, 0, 0, 0, t0]);
+    print_str(eyl-cat(["[ear-load] total passes ", st[0].str(), " yields ", st[1].str(), " pass_ms ", st[2].str(), " over ", (now_unix_ms() - t0).str(), " ms\n"]));
+    0;
+}

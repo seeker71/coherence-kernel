@@ -111,7 +111,7 @@ form/form-stdlib/tests/door-options-band -> 1023  (door-options.bml: empty and {
                                             an unknown key (named, with the keys the door has), a key of the wrong kind (a string for an
                                             integer, a float, null, a bool, an object), a key given twice are each refused; the reading alone
                                             and a scratch door that ends in exit 1 and prints `<door>: <why>` before its next statement)
-form/form-stdlib/tests/serve-sched-band  -> 2047  (serve-sched.bml, the scheduler of the resident server observe/qwen-serve-run.bml, against a scripted
+form/form-stdlib/tests/serve-sched-band  -> 4095  (serve-sched.bml (with the prefix cache's seams: snapshot points and a begin that answers the cached ids), the scheduler of the resident server observe/qwen-serve-run.bml, against a scripted
                                             fake step function, no model: the strict spool reading; admission into free slots; priority; chunked
                                             prefill beside a decoding stream (it decodes 4 steps between two chunks and is never stalled more than a
                                             chunk), a prompt read alone at full speed; eviction and its four statuses; the rows of a pass; the pressure
@@ -121,7 +121,12 @@ form/form-stdlib/tests/serve-client-band -> 31    (serve-client.bml over a scrat
 observe/qwen-serve-run.bml               the resident server (vLLM's continuous batching, chunked prefill and flash-decoding, native): one fkwu process
                                             holds the lease and the 27B's weights and KV, serves a spool (default /tmp/form-serve), one weight pass a step for every
                                             live sequence. Clients: observe/serve-ask-run.bml; the planner (lpr-spoken) and counsel (lcr-go) route through it when
-                                            it stands, else name why and open their own. Physical test: observe/serve-e2e-run.bml
+                                            it stands, else name why and open their own. Physical test: observe/serve-e2e-run.bml. PREFIX CACHE (2026-11-11): the
+                                            prefill lane keeps a snapshot of its state at a chat request's question end, at 1024/2048/4096... ids and at each prompt's
+                                            end; a later request whose ids begin with one starts from a copy and reads only the rest (2614-id prompt again: prefill
+                                            19.5 s -> 0.18 s; counsel's 3 lenses on 5620 ids: 43 s + 0.6 s + 0.6 s; texts and surprise equal a cold run); pressure
+                                            releases the least recently used entry, no count caps it. observe/ear-yield-load-run.fk is the ear's cadence with no mic
+                                            (form-stdlib/bml/ear-yield.bml holds the one yield predicate the ear and the stand-in share)
 ./fkwu gate/structural-gate-run.fk       -> structural-gate-v6 [2, 0, 2, 0] then 1: "2 declared carrier(s) and 0 fixture(s) stand; no
                                             other foreign file" (total/unclassified/carrier/fixture). The gate is an ALLOWLIST: Form (.fk
                                             .bml .form .bmf), the C seed (.c .h .m .metal), documents and data (.md .mdc .txt .json .jsonl

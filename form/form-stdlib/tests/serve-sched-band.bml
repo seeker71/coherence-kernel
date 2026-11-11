@@ -3,8 +3,8 @@
 ; The fake model: a sequence's next id is its fed id + 1 (so a prompt ending in id L generates L+1, L+2 ... and the end of turn is any id >= 20); a chunk
 ; of the prefill lane costs 400 ms of a fake clock, a decode step 100 ms, a fork 10 ms. The band reads the order of the events the scheduler asked for.
 ;
-; Expected: 2047
-; Verdict 2047 when every claim lands:
+; Expected: 4095
+; Verdict 4095 when every claim lands:
 ;   1     the spool reading: a well-formed request reads (chat 1 and priority 0 by default, the file's id, never the document's); a typo'd key, malformed JSON, an
 ;         empty request, no prompt and a negative count are refused by name; an envelope and a grammar are refused as envelope-unsupported
 ;   2     admission: with two slots and three requests, two run together, the third waits and is admitted into the slot the first finishing one frees
@@ -20,13 +20,16 @@
 ;   256   a prompt that does not fit its slot and an empty prompt end by name (prompt-exceeds-slot, empty-prompt) and take no slot
 ;   512   the ledger row: id, who, status, prompt_ids, generated_ids, queue_ms, prefill_ms, decode_tok_s and rent_tokens 0 read back from the JSON; the reply carries the text
 ;   1024  the stop strings: the text ends at the earliest stop string, and the stop string is no part of it
+;   2048  the prefix cache's seams: the prefill lane's chunks end on the snapshot positions and ask for the state to be kept there; a begin that answers a count of prompt ids the
+;         cache holds starts the lane from it (no snapshot already passed, cached_ids in the ledger row), a count past the prompt clamps to what the lane reads, anything else is no hit
 ;
 ; REQUIRES: the built ./fkwu and the body root as the working directory.
 // preludes: form-stdlib/core.fk form-stdlib/json.fk form-stdlib/bml/live.bml form-stdlib/bml/serve-sched.bml
 section [form.bml] {
- let SB = record_new(0, "ev", [], "t", 0, "limit", 8, "last", []);
+ let SB = record_new(0, "ev", [], "t", 0, "limit", 8, "last", [], "hit", 0);
  class ServeSchedBand {
   def sb-reset(limit) {
+   let h = record_set(SB, "hit", 0);
    let a = record_set(SB, "ev", []);
    let b = record_set(SB, "t", 0);
    let c = record_set(SB, "limit", limit);
@@ -44,13 +47,18 @@ section [form.bml] {
    let a = sb-log(["c", s[0], pos, len(ids)]);
    sb-tick(400);
   }
-  def sb-begin(s) = sb-log(["b", s[0], s[7]]);
+  // begin answers the prompt ids the fake prefix cache holds (SB "hit"): the lane reads on from there
+  def sb-begin(s) {
+   let a = sb-log(["b", s[0], s[7]]);
+   record_get(SB, "hit");
+  }
+  def sb-snap(s, count) = sb-log(["s", s[0], count]);
   def sb-fork(s) {
    let a = sb-log(["f", s[0], s[7]]);
    sb-tick(10);
   }
   def sb-stop(s) = len(s[5]) > 0 && s[17] >= 3;
-  def sb-env(cap, share) = [() => record_get(SB, "t"), () => record_get(SB, "limit"), sb-begin, sb-chunk, sb-fork, sb-decode, sb-stop, cap, tok => tok >= 20, 64, share];
+  def sb-env(cap, share) = [() => record_get(SB, "t"), () => record_get(SB, "limit"), sb-begin, sb-chunk, sb-fork, sb-decode, sb-stop, cap, tok => tok >= 20, 64, share, sb-snap];
   def sb-seq(id, prio, arrive, n, last, max, stops) = svs-seq([id, "p", "", 1, max, stops, prio, "band"], append(range(0, n - 1), [last]), arrive);
   def sb-run(S, env, ticks, fin) = ticks <= 0 || svs-idle?(S) ? [S, fin] : { let r = svs-tick(S, env); sb-run(r[0], env, ticks - 1, append(fin, r[1])); };
   def sb-events(kind) = filter(e => e[1][0] == kind, record_get(SB, "ev"));
@@ -189,10 +197,40 @@ section [form.bml] {
     && svs-tok-s10(s) == 80 && (String) json-string-value(json-object-get(reply, "text")) == "hello \"there\"\nline"
     && (String) svs-refused-row("z", "no prompt", 5) != "" && sb-has(svs-status-row(r[0], 77, 5, "owner line", 9), "\"pid\":77");
   }
+  // claim 2048: the prefix cache's two seams. A prompt of 201 ids (200 read) with snapshot points 64 and 128: the lane's chunks end on each point and the state is kept
+  // there (chunks 64, 64, 64, 8; snaps at 64 then 128, each after its own chunk). With the cache holding 128 ids the lane reads from 128 (chunks 64, 8), keeps no snapshot
+  // it already passed, and the finished sequence's ledger row names cached_ids 128. A hit past the prompt clamps to the 200 ids the lane reads (no chunk at all, the row's
+  // first input is the last id); a begin that answers something other than a count is no hit.
+  def sb-c-prefix(ctx) {
+   let a = sb-reset(8);
+   let S0 = svs-submit(svs-new(2), svs-with-points(sb-seq("pa", 0, 0, 201, 15, 0, []), [64, 128]));
+   let r0 = sb-run(S0, sb-env(5000, 100), 100, []);
+   let ev0 = record_get(SB, "ev");
+   let cs0 = filter(e => e[1][0] == "c", ev0);
+   let ss0 = filter(e => e[1][0] == "s", ev0);
+   let order0 = map(e => e[1][0], filter(e => e[1][0] == "c" || e[1][0] == "s", ev0));
+   let ok0 = map(e => e[1][3], cs0) == [64, 64, 64, 8] && map(e => e[1][2], ss0) == [64, 128] && order0 == ["c", "s", "c", "s", "c", "c"] && len(r0[1]) == 1 && r0[1][0][21] == 0;
+   let b = sb-reset(8);
+   let h = record_set(SB, "hit", 128);
+   let r1 = sb-run(svs-submit(svs-new(2), svs-with-points(sb-seq("pb", 0, 0, 201, 15, 0, []), [64, 128, 192])), sb-env(5000, 100), 100, []);
+   let ev1 = record_get(SB, "ev");
+   let cs1 = filter(e => e[1][0] == "c", ev1);
+   let ss1 = filter(e => e[1][0] == "s", ev1);
+   let row1 = parse-json("band", svs-ledger-row(r1[1][0], 5));
+   let ok1 = map(e => e[1][2], cs1) == [128, 192] && map(e => e[1][3], cs1) == [64, 8] && map(e => e[1][2], ss1) == [192] && json-int-value(json-object-get(row1, "cached_ids")) == 128 && (String) r1[1][0][15] == "stop";
+   let c = sb-reset(8);
+   let h2 = record_set(SB, "hit", 500);
+   let r2 = sb-run(svs-submit(svs-new(2), sb-seq("pc", 0, 0, 201, 15, 0, [])), sb-env(5000, 100), 100, []);
+   let ok2 = len(sb-events("c")) == 0 && len(r2[1]) == 1 && r2[1][0][21] == 200 && svs-gen(r2[1][0])[0] == 16;
+   let d = sb-reset(8);
+   let h3 = record_set(SB, "hit", nothing());
+   let r3 = sb-run(svs-submit(svs-new(2), sb-seq("pd", 0, 0, 201, 15, 0, [])), sb-env(5000, 100), 100, []);
+   ok0 && ok1 && ok2 && len(sb-events("c")) == 4 && r3[1][0][21] == 0;
+  }
   // claim 1024
   def sb-c-trim(ctx) = (String) svs-trim-stop("alpha END beta STOP gamma", ["STOP", "END"]) == "alpha " && (String) svs-trim-stop("alpha beta", ["STOP"]) == "alpha beta" && (String) svs-trim-stop("abc", [""]) == "abc" && (String) svs-trim-stop("STOPabc", ["STOP"]) == "";
  }
  let ctx = 0;
- let verdict = live-claims("serve-sched-band", ctx, [["parse", 1, 1, sb-c-parse], ["admission", 2, 1, sb-c-admission], ["priority", 4, 1, sb-c-priority], ["interleave", 8, 1, sb-c-interleave], ["alone", 16, 1, sb-c-alone], ["evict", 32, 1, sb-c-evict], ["rows", 64, 1, sb-c-rows], ["limit", 128, 1, sb-c-limit], ["refuse", 256, 1, sb-c-refuse], ["ledger", 512, 1, sb-c-ledger], ["trim", 1024, 1, sb-c-trim]]);
+ let verdict = live-claims("serve-sched-band", ctx, [["parse", 1, 1, sb-c-parse], ["admission", 2, 1, sb-c-admission], ["priority", 4, 1, sb-c-priority], ["interleave", 8, 1, sb-c-interleave], ["alone", 16, 1, sb-c-alone], ["evict", 32, 1, sb-c-evict], ["rows", 64, 1, sb-c-rows], ["limit", 128, 1, sb-c-limit], ["refuse", 256, 1, sb-c-refuse], ["ledger", 512, 1, sb-c-ledger], ["trim", 1024, 1, sb-c-trim], ["prefix", 2048, 1, sb-c-prefix]]);
  verdict;
 }
