@@ -99,7 +99,9 @@ section [form.bml] {
   }
   def lpr-voices(opts) {
    let offered = if fcgp-present?(opts, "voices") then flp-strs(opts, "voices") else filter(n => ((Comparable) mr-file?(mr-path(mr-find(n))) == 1), mr-chain-names("plan"));
-   offered;
+   // a standing server answers every ask with the weights it holds: the options name that voice, not another the file cannot give
+   let held = filter(n => mr-path(mr-find(n)) == qlz-file(), offered);
+   lpr-served?() && !nil?(held) ? held : offered;
   }
   // The voice opens while the caller's window ("until_ms" on the host's monotonic
   // clock; nothing when no window was given) still holds an option: the median real option of that voice on the
@@ -170,7 +172,11 @@ section [form.bml] {
    let kept = write_file_text(stem ++ ".packet.txt", packet);
    let request = flp-voice-request(name, limit, budget, lpr-enquiry(rid,n), context);
    // a standing resident server answers the ask (observe/qwen-serve-run.bml, form-stdlib/bml/serve-client.bml); none standing, the reason is named and this process's own session asks
-   let served = svc-voice(packet, limit, "planner");
+   // the count the planner names (max_reply_tokens, 3072) is the in-process session's progress signal, not an end: sent to the server it would cut a plan that is still being written
+   // (witnessed 2026-11-11: status length at 3072 ids of a plan whose full reply is 5966), so the server is asked with the reply_budget when one is named and otherwise with none
+   // the first option is greedy; every later option draws at temperature 0.7 from the option's own seed: a greedy retry of a refused plan answers the same plan again (witnessed
+   // 2026-11-11: three options, three byte-identical replies), and a draw is still the same text for the same packet and seed
+   let served = svc-voice-drawn(packet, (String) value_kind(budget) == "int" ? budget : 0, "planner", n > 1 ? 700 : 0, n);
    let asked = nothing?(served) ? fcnv-ask(packet, request) : served;
    // a reply cut at the window's end names itself: its status is the window's word, not unavailable
    let v = (String) asked[7] == ftg-window-end() ? append([ftg-window-end()], asked[1:]) : asked;
@@ -223,6 +229,12 @@ section [form.bml] {
   def lpr-cold-need(model) = flp-cold-need(lpr-steer-bytes(model), 8 * flp-disk-gib());
   // A resident server (observe/qwen-serve-run.bml) that stands holds the lease and the weights for the whole machine: the ask is routed to it (svc-voice in lpr-spoken), so the
   // device is not held against the ask and the voice's weights are shared; with none standing the lease and the memory are read as they were
+  // every ask of this door goes to the standing server when one stands (a session of its own would open beside the server's lease and wait on it for good: witnessed 2026-11-11, the
+  // focus guide's 197-id ask held a planner ten minutes), else to this process's own session; the server reads no count, it ends the reply at the model's end of turn
+  def lpr-ask-anywhere(prompt, request, who) {
+   let served = svc-voice(prompt, 0, who);
+   nothing?(served) ? fcnv-ask(prompt, request) : served;
+  }
   def lpr-served?() = (String) svc-standing(svc-default-dir())[0] == "standing";
   def lpr-ask-device() = lpr-served?() ? "free" : (String) lpr-steer-lease() == "held-elsewhere" ? "held" : "free";
   def lpr-ask-shared(model) = lpr-served?() ? "shared" : lpr-model-shared?(model);
@@ -340,7 +352,7 @@ section [form.bml] {
    if (((String) flp-steer-route(voices, flp-gpu-holders()) == "none") || ((Comparable) lpr-ask-open?(model) != 1)) then nothing() else {
     let worn = lpr-steer-worn(model);
     if ((String) worn[0] == "mismatch") then nothing() else {
-     let answer = fcnv-ask(question, lpr-steer-request(model, id, worn));
+     let answer = lpr-ask-anywhere(question, lpr-steer-request(model, id, worn), "planner-steer");
      (String) answer[0] == "answered" && len(trim(answer[1])) > 0 ? [answer[1], answer[3], answer[2]] : nothing();
     }
    }
@@ -355,7 +367,7 @@ section [form.bml] {
    named || !nil?(flp-guided-focus(req)) || lpr-closed?(fcgp-num(opts,"until_ms"),lpr-floor-of(mr-chain-names("triage")[0])) || ((Comparable) lpr-ask-open?(mr-chain-names("triage")[0]) != 1) ? 0 : {
     let model=mr-chain-names("triage")[0];
     let prompt=flp-focus-prompt(req);
-    let answer=fcnv-ask(prompt,json-node-object([fhn-s("model",model),fhn-n("max_reply_tokens",1024),fhn-s("enquiry",lpr-enquiry(flp-req-id(req),-1)),fhn-s("enquiry_kind","prose")]));
+    let answer=lpr-ask-anywhere(prompt,json-node-object([fhn-s("model",model),fhn-n("max_reply_tokens",1024),fhn-s("enquiry",lpr-enquiry(flp-req-id(req),-1)),fhn-s("enquiry_kind","prose")]),"planner-guide");
     let made=flp-mkdirs(flp-dir()+"/focus");
     let kept=write_file_text(flp-focus-path(req),json-emit(json-node-object([fhn-s("prompt",prompt),fhn-s("model",model),fhn-s("status",answer[0]),fhn-s("text",answer[1]),fhn-n("prompt_ids",answer[2]),fhn-n("generated_ids",answer[3]),fhn-n("complete",answer[5]),fhn-n("released",answer[6]),fhn-s("reason",answer[7]),fhn-s("raw",answer[8])])));
     print_str("[local-plan:guide] " + json-emit(json-node-object([fhn-s("request",flp-req-id(req)),fhn-s("status",answer[0]),fhn-n("prompt_ids",answer[2]),fhn-n("generated_ids",answer[3]),fhn-s("reason",answer[7]),fhn-s("evidence",flp-focus-path(req))])));
@@ -420,7 +432,7 @@ section [form.bml] {
    if ((Comparable) lpr-ask-open?(model) != 1) then print_str(mc-cat(["[local-plan:steer] not-asked lease=", lease, " disk=", disk, " model=", model, " memory=", lpr-ask-memory(model), " cold=", lpr-cold-need(model).str(), " device=", lpr-device-held?() ? "held" : "free"])) else {
     let worn = lpr-steer-worn(model);
     if ((String) worn[0] == "mismatch") then print_str("[local-plan:steer] mismatch") else {
-     let answer = fcnv-ask(lpr-steer-question(lpr-steer-req()), lpr-steer-request(model, "live-steer", worn));
+     let answer = lpr-ask-anywhere(lpr-steer-question(lpr-steer-req()), lpr-steer-request(model, "live-steer", worn), "planner-live-steer");
      let text = (String) answer[0] == "answered" ? answer[1] : "";
      let id = mc-cat(["live-steer-", now_unix_ms().str()]);
      let stem = mc-cat([flp-dir(), "/", id]);

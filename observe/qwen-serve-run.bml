@@ -29,7 +29,7 @@
 // reserve_gib (what the machine keeps for others, default 8), limit (a standing limit on sequences admitted at once, 0 none).
 // Greedy decoding only; an envelope or a grammar in a request is refused by name (the caller runs its own session for one). A physical run: it needs the local GPU.
 // preflight-exec: forbidden
-// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/door-options.bml form-stdlib/bml/q38-multi.bml form-stdlib/bml/form-cli-code-live.bml form-stdlib/bml/q38-lenses.bml form-stdlib/bml/memory-governor.bml form-stdlib/bml/serve-sched.bml form-stdlib/spool-bell-transport.fk native/metal/qwen35-dense-token-handle.fk native/metal/qwen35-dense-spec.fk
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/door-options.bml form-stdlib/bml/q38-multi.bml form-stdlib/bml/form-cli-code-live.bml form-stdlib/bml/q38-lenses.bml form-stdlib/bml/memory-governor.bml form-stdlib/bml/serve-sched.bml form-stdlib/spool-bell-transport.fk native/metal/qwen35-dense-token-handle.fk native/metal/qwen35-dense-spec.fk form-stdlib/bml/ledger.bml form-stdlib/bml/host-fs.bml form-stdlib/bml/coordination.bml form-stdlib/query-lane-resolve.bml form-stdlib/qwen35-artifact-seal-reader.fk form-stdlib/bml/local-run.bml
 section [form.bml] {
  let SV = record_new(0, "cache", [], "serial", 0,"packed", "", "evict_at", 0, "cache_hits", 0, "cache_ids", 0, "sts", [],"limit", 1, "limit_at", 0, "beat_at", 0, "beat_say", 0, "served", 0, "tokens", 0, "yield", 0, "step_ms", 0, "steps", 0, "ticks", 0);
  class QwenServeRun {
@@ -83,13 +83,14 @@ section [form.bml] {
    let mp = q38m-pipes(q38m-msl());
    let posb = metal_buf_alloc(64);
    let lpb = metal_buf_alloc(64);
+   let spb = metal_buf_alloc(256);
    let arena = q38m-new-arena(ctx[2], slots, bytes => metal_buf_alloc(bytes));
    let eos = qsx-load(ctx[9])[2];
-   let c = [ctx, qs0, mp, arena, sx, posb, lpb, dir, eos, slots, o, start, label, yielded];
+   let c = [ctx, qs0, mp, arena, sx, posb, lpb, dir, eos, slots, o, start, label, yielded, spb];
    let a = qsr-say("opened in " ++ (host_monotonic_ms() - t0).str() ++ " ms: " ++ slots.str() ++ " slots of " ++ maxpos.str() ++ " positions, " ++ (q38-state-bytes(ctx[2]) / 1048576).str() ++ " MiB a slot, spool " ++ dir ++ ", end-of-turn id " ++ eos.str());
    let w = qsr-status(dir, "standing", start, label, svs-new(slots));
    let why = qsr-loop(c, qsr-env(c, maxpos), svs-new(slots), 0, host_monotonic_ms());
-   let freed = qsr-cache-free() + q38-free-state(arena) +q38s-close(sx) + q38-free-handle(posb) + q38-free-handle(lpb) + q38-free-state(record_get(SV, "sts"));
+   let freed = qsr-cache-free() + q38-free-state(arena) +q38s-close(sx) + q38-free-handle(posb) + q38-free-handle(lpb) + q38-free-handle(spb) +q38-free-state(record_get(SV, "sts"));
    let closed = qlz-close(ctx);
    qsr-ended(dir, yielded, why);
   }
@@ -197,7 +198,9 @@ section [form.bml] {
   // one pass over the weights for every row; answers [greedy id, surprise in micro-nats] a row
   def qsr-decode(c, rows) {
    let t0 = host_monotonic_ms();
-   let r = q38m-step-core(c[0], c[1], c[2], c[3], c[4], c[5], map(x => x[1], rows), map(x => x[2], rows), c[6]);
+   // a row that names a temperature draws its token (q38m-sample-msl); every other row keeps the greedy id, and a pass of greedy rows runs no draw kernel at all
+   let sampled = any?(x => x[3] > 0, rows);
+   let r = sampled ? q38m-step-draw(c[0], c[1], c[2], c[3], c[4], c[5], map(x => x[1], rows), map(x => x[2], rows), c[6], c[14], map(x => [x[3], x[3] > 0 ? q38m-sample-key(x[4], x[5]) : 0], rows)) : q38m-step-core(c[0], c[1], c[2], c[3], c[4], c[5], map(x => x[1], rows), map(x => x[2], rows), c[6]);
    let a = record_set(SV, "step_ms", record_get(SV, "step_ms") + (host_monotonic_ms() - t0));
    let b = record_set(SV, "steps", record_get(SV, "steps") + 1);
    map(i => [r[0][i], r[1][i]], range(0, len(rows)));
@@ -289,11 +292,20 @@ section [form.bml] {
   }
   // each finished sequence: its reply file (whole or absent), its ledger row, its work file gone
   def qsr-finish(c, fin) = foldl((n, s) => n + qsr-done(c, s), 0, fin);
+  // every ask the server answers also lands one row in the machine's local-run ledger (receipts/local-run-ledger.jsonl), where the planner's read-time model and the rate
+  // readings look: the ids the lane READ this time (the prompt less what the prefix cache already held, so a cached prompt never reads as a fast prefill) and the ms it took
+  def qsr-local-run(c, s, text) {
+   let status = (String) s[15] == "refused" || (String) s[15] == "server-error" || (String) s[15] == "empty-prompt" || (String) s[15] == "prompt-exceeds-slot" ? "unavailable" : "answered";
+   let result = [status, text, len(s[3]) - s[21], s[17], qlz-file(), 1, 1, status == "answered" ? "" : "serve-" ++ s[15], "", [], ""];
+   // a read of fewer than 16 ids is all fixed cost (the copy of a cached state, the first chunk's launch): no prefill rate is stated for it
+   local-run-record-timed(result, s[19] - s[2], len(s[3]) - s[21] < 16 ? 0 : s[16], svs-decode-ms(s));
+  }
   def qsr-done(c, s) {
    let text = svs-trim-stop(qlz-detok(c[0], svs-gen(s)), s[5]);
    let at = now_unix_ms();
    let a = qsr-put(c[7], c[7] ++ "/reply/" ++ s[0] ++ ".json", svs-reply-row(s, text, at) ++ "\n");
    let b = qsr-append(c[7] ++ "/ledger.jsonl", svs-ledger-row(s, at) ++ "\n");
+   let g = qsr-local-run(c, s, text);
    let d = host_path_remove(c[7] ++ "/work/" ++ s[0] ++ ".json");
    let e = record_set(SV, "served", record_get(SV, "served") + 1);
    let f = record_set(SV, "tokens", record_get(SV, "tokens") + s[17]);

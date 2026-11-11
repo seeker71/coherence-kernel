@@ -3,8 +3,8 @@
 ; The fake model: a sequence's next id is its fed id + 1 (so a prompt ending in id L generates L+1, L+2 ... and the end of turn is any id >= 20); a chunk
 ; of the prefill lane costs 400 ms of a fake clock, a decode step 100 ms, a fork 10 ms. The band reads the order of the events the scheduler asked for.
 ;
-; Expected: 4095
-; Verdict 4095 when every claim lands:
+; Expected: 8191
+; Verdict 8191 when every claim lands:
 ;   1     the spool reading: a well-formed request reads (chat 1 and priority 0 by default, the file's id, never the document's); a typo'd key, malformed JSON, an
 ;         empty request, no prompt and a negative count are refused by name; an envelope and a grammar are refused as envelope-unsupported
 ;   2     admission: with two slots and three requests, two run together, the third waits and is admitted into the slot the first finishing one frees
@@ -22,6 +22,8 @@
 ;   1024  the stop strings: the text ends at the earliest stop string, and the stop string is no part of it
 ;   2048  the prefix cache's seams: the prefill lane's chunks end on the snapshot positions and ask for the state to be kept there; a begin that answers a count of prompt ids the
 ;         cache holds starts the lane from it (no snapshot already passed, cached_ids in the ledger row), a count past the prompt clamps to what the lane reads, anything else is no hit
+;   4096  sampling's seams: temperature_milli and seed read from the spool (a negative temperature refused by name), carried by the sequence into the pass's rows [slot, id, position,
+;         temperature, seed, tokens said] and into the ledger row
 ;
 ; REQUIRES: the built ./fkwu and the body root as the working directory.
 // preludes: form-stdlib/core.fk form-stdlib/json.fk form-stdlib/bml/live.bml form-stdlib/bml/serve-sched.bml
@@ -154,7 +156,7 @@ section [form.bml] {
    let a = sb-reset(8);
    let live = [svs-put(svs-put(svs-put(sb-seq("p", 0, 0, 2, 5, 0, []), 7, 0), 10, 41), 11, 7), svs-put(svs-put(svs-put(sb-seq("q", 0, 0, 2, 5, 0, []), 7, 2), 10, 43), 11, 9)];
    let S = [[], nothing(), live, 0, 0, 4];
-   svs-rows(S) == [[0, 41, 7], [1, 0, 0], [2, 43, 9]];
+   svs-rows(S) == [[0, 41, 7, 0, 0, 0], [1, 0, 0, 0, 0, 0], [2, 43, 9, 0, 0, 0]];
   }
   // claim 128
   def sb-c-limit(ctx) {
@@ -227,10 +229,25 @@ section [form.bml] {
    let r3 = sb-run(svs-submit(svs-new(2), sb-seq("pd", 0, 0, 201, 15, 0, [])), sb-env(5000, 100), 100, []);
    ok0 && ok1 && ok2 && len(sb-events("c")) == 4 && r3[1][0][21] == 0;
   }
+  // claim 4096: sampling's seams. temperature_milli and seed read from the spool (default 0 and 0, a negative temperature and the key `temperature` refused by name); the sequence carries them,
+  // a live row hands the pass [slot, id, position, temperature, seed, tokens said so far] (the step the draw's key mixes), a free row zeros, and the ledger row names the temperature
+  def sb-c-draw(ctx) {
+   let a = svs-parse("d1", "{\"prompt\":\"x\",\"temperature_milli\":700,\"seed\":9}");
+   let b = svs-parse("d2", "{\"prompt\":\"x\"}");
+   let c = svs-parse("d3", "{\"prompt\":\"x\",\"temperature_milli\":-5}");
+   let d = svs-parse("d4", "{\"prompt\":\"x\",\"temperature\":0.7}");
+   let seq = svs-seq(a[1], [1, 2, 3], 0);
+   let live = [svs-put(svs-put(svs-put(svs-put(seq, 7, 1), 10, 41), 11, 7), 17, 3)];
+   let rows = svs-rows([[], nothing(), live, 0, 0, 4]);
+   let row = parse-json("band", svs-ledger-row(svs-put(seq, 6, "done"), 5));
+   (String) a[0] == "ok" && a[1][8] == 700 && a[1][9] == 9 && b[1][8] == 0 && b[1][9] == 0 && (String) c[0] == "refused" && sb-has(c[1], "temperature_milli below zero")
+    && (String) d[0] == "refused" && sb-has(d[1], "unknown key \"temperature\"") && seq[22] == 700 && seq[23] == 9
+    && rows == [[0, 0, 0, 0, 0, 0], [1, 41, 7, 700, 9, 3]] && json-int-value(json-object-get(row, "temperature_milli")) == 700;
+  }
   // claim 1024
   def sb-c-trim(ctx) = (String) svs-trim-stop("alpha END beta STOP gamma", ["STOP", "END"]) == "alpha " && (String) svs-trim-stop("alpha beta", ["STOP"]) == "alpha beta" && (String) svs-trim-stop("abc", [""]) == "abc" && (String) svs-trim-stop("STOPabc", ["STOP"]) == "";
  }
  let ctx = 0;
- let verdict = live-claims("serve-sched-band", ctx, [["parse", 1, 1, sb-c-parse], ["admission", 2, 1, sb-c-admission], ["priority", 4, 1, sb-c-priority], ["interleave", 8, 1, sb-c-interleave], ["alone", 16, 1, sb-c-alone], ["evict", 32, 1, sb-c-evict], ["rows", 64, 1, sb-c-rows], ["limit", 128, 1, sb-c-limit], ["refuse", 256, 1, sb-c-refuse], ["ledger", 512, 1, sb-c-ledger], ["trim", 1024, 1, sb-c-trim], ["prefix", 2048, 1, sb-c-prefix]]);
+ let verdict = live-claims("serve-sched-band", ctx, [["parse", 1, 1, sb-c-parse], ["admission", 2, 1, sb-c-admission], ["priority", 4, 1, sb-c-priority], ["interleave", 8, 1, sb-c-interleave], ["alone", 16, 1, sb-c-alone], ["evict", 32, 1, sb-c-evict], ["rows", 64, 1, sb-c-rows], ["limit", 128, 1, sb-c-limit], ["refuse", 256, 1, sb-c-refuse], ["ledger", 512, 1, sb-c-ledger], ["trim", 1024, 1, sb-c-trim], ["prefix", 2048, 1, sb-c-prefix], ["draw", 4096, 1, sb-c-draw]]);
  verdict;
 }
