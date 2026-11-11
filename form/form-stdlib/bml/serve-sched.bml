@@ -1,0 +1,167 @@
+// serve-sched.bml — the scheduler of the resident serving loop (observe/qwen-serve-run.bml): continuous batching as pure Form, no model.
+//
+// One resident process owns the weights and the KV. Sequences join and leave BETWEEN steps; one weight pass (q38m-step-core, the stream-row
+// kernels) advances every live sequence at once; a new sequence's prompt is read in chunks on the prefill lane (the batched span path into a
+// scratch state, one chunk a tick) so a long prompt never stalls the streams that are decoding, and is forked into its slot of the arena
+// when read. Everything the model does is an injected function (the env below), so a scripted fake can witness admission, chunked-prefill
+// interleaving, eviction, priority, the memory-pressure limit and the spool reading with no GPU (form-stdlib/tests/serve-sched-band.bml).
+//
+// Pressure slows or yields, never truncates: the limit (svs-limit) only lowers how many sequences are ADMITTED at once, never below one, and
+// never cuts a sequence that is running. The prefill lane takes the share of wall time the decoders can spare (svs-due?): while streams are
+// live a prefill chunk runs when the prefill ms spent since this prefill began are at most share% of the decode ms spent, and when nothing
+// decodes the prefill runs at full speed. A reply ends only at the model's end of turn, a stop string the caller named, a count the caller
+// named, or the slot's own end (the positions the server was opened with): that last is named "context-full" in the reply, never silent.
+//
+// A sequence is a list [id, priority, arrive_ms, prompt_ids, max_new, stops, phase, slot, fed, gen_ids_reversed, feed, pos, admit_ms,
+// decode_start_ms, surprise_sum, status, prefill_ms, gen_n, who, end_ms]; the state S is [queue, prefilling, live, prefill_ms, decode_ms,
+// nslots]; the env is [now, limit, begin, chunk, fork, decode, stop-hit, cap, eos?, chunk-size, share-pct].
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/door-options.bml
+section [form.bml] {
+ class ServeSched {
+  // ── the spool request: one JSON object a file, read strictly (door-options) ──
+  // prompt (required), lens (a task text that closes the user turn, the counsel's lens), chat (1 wraps the prompt as a user turn and opens the
+  // assistant's with an empty think block; 0 continues the raw text), max_tokens (0 or absent: until the model ends its turn), stop (strings),
+  // priority (higher first), who (named in the ledger). envelope and grammar are named so they are REFUSED by name: this lane decodes greedily
+  // and has no grammar hook; a caller that needs one runs its own session.
+  def svs-spec() = [["prompt", "str"], ["lens", "str"], ["chat", "int"], ["max_tokens", "int"], ["stop", "strs"], ["priority", "int"], ["who", "str"], ["envelope", "str"], ["grammar", "str"]];
+  def svs-str(doc, key, d) = json-object-has?(doc, key) ? json-string-value(json-object-get(doc, key)) : d;
+  def svs-int(doc, key, d) = json-object-has?(doc, key) ? json-int-value(json-object-get(doc, key)) : d;
+  def svs-strs(doc, key) = json-object-has?(doc, key) ? map(t => json-string-value(t), json-array-elements(json-object-get(doc, key))) : [];
+  // answers ["ok", [id, prompt, lens, chat, max_tokens, stops, priority, who]] or ["refused", why]; the id is the file's, never the document's
+  def svs-parse(fid, text) {
+   let why = dop-refusal("serve-request", text, svs-spec());
+   len(trim(text)) == 0 ? ["refused", "empty request"] : len(why) > 0 ? ["refused", why] : svs-parse-doc(fid, parse-json("serve-request", trim(text)));
+  }
+  def svs-parse-doc(fid, doc) {
+   let prompt = svs-str(doc, "prompt", "");
+   let max = svs-int(doc, "max_tokens", 0);
+   len(svs-str(doc, "envelope", "")) > 0 || len(svs-str(doc, "grammar", "")) > 0 ? ["refused", "envelope-unsupported: this server decodes greedily with no grammar hook; run a session of your own for an envelope"] : len(prompt) == 0 ? ["refused", "no prompt"] : max < 0 ? ["refused", "max_tokens below zero"] : ["ok", [fid, prompt, svs-str(doc, "lens", ""), svs-int(doc, "chat", 1), max, svs-strs(doc, "stop"), svs-int(doc, "priority", 0), svs-str(doc, "who", "caller")]];
+  }
+  def svs-r-prompt(r) = r[1];
+  def svs-r-lens(r) = r[2];
+  def svs-r-chat(r) = r[3];
+  // ── a sequence ──
+  def svs-put(xs, i, v) = append(append(take(i, xs), [v]), xs[i + 1:]);
+  def svs-seq(r, ids, now) = [r[0], r[6], now, ids, r[4], r[5], "queued", -1, 0, [], 0, 0, 0, 0, 0, "", 0, 0, r[7], 0];
+  def svs-id(s) = s[0];
+  def svs-prio(s) = s[1];
+  def svs-ids(s) = s[3];
+  def svs-phase(s) = s[6];
+  def svs-slot(s) = s[7];
+  def svs-gen(s) = reverse(s[9]);
+  def svs-gen-n(s) = s[17];
+  def svs-status(s) = s[15];
+  def svs-finish(s, status, t) = svs-put(svs-put(svs-put(s, 6, "done"), 15, status), 19, t);
+  // ── the state ──
+  def svs-new(nslots) = [[], nothing(), [], 0, 0, nslots];
+  def svs-submit(S, seq) = [append(S[0], [seq]), S[1], S[2], S[3], S[4], S[5]];
+  def svs-queued(S) = len(S[0]);
+  def svs-live(S) = len(S[2]);
+  def svs-prefilling?(S) = !nothing?(S[1]);
+  def svs-active(S) = len(S[2]) + (nothing?(S[1]) ? 0 : 1);
+  def svs-idle?(S) = nil?(S[0]) && nothing?(S[1]) && nil?(S[2]);
+  def svs-used-slots(S) = append(map(s => s[7], S[2]), nothing?(S[1]) ? [] : [S[1][7]]);
+  def svs-first-free(k, n, used) = k >= n ? -1 : any?(u => u == k, used) ? svs-first-free(k + 1, n, used) : k;
+  def svs-free-slot(S) = svs-first-free(0, S[5], svs-used-slots(S));
+  // higher priority first, then the earlier arrival; an exact tie keeps the earlier place in the queue (foldl keeps the first)
+  def svs-before?(a, b) = a[1] > b[1] || (a[1] == b[1] && a[2] < b[2]);
+  def svs-best(q) = foldl((a, b) => svs-before?(b, a) ? b : a, q[0], q[1:]);
+  // ── the pressure limit: how many sequences may be ADMITTED at once ──
+  // avail is the machine's available bytes (negative: unreadable, so no pressure is claimed), slot_bytes what one sequence may take, reserve what the
+  // machine keeps for others, ctl a standing limit a person set (0: none). Never below one: pressure yields, it does not starve a request.
+  def svs-limit(nslots, avail, slot_bytes, reserve, ctl) {
+   let by_mem = avail < 0 || slot_bytes <= 0 ? nslots : avail <= reserve ? 1 : (avail - reserve) / slot_bytes;
+   let n = by_mem < 1 ? 1 : by_mem > nslots ? nslots : by_mem;
+   ctl > 0 && ctl < n ? ctl : n;
+  }
+  // ── the env ──
+  def svs-now(env) { let f = env[0]; f(); }
+  def svs-limit-now(env) { let f = env[1]; f(); }
+  def svs-begin-call(env, s) { let f = env[2]; f(s); }
+  def svs-chunk-call(env, s, ids, pos) { let f = env[3]; f(s, ids, pos); }
+  def svs-fork-call(env, s) { let f = env[4]; f(s); }
+  def svs-decode-call(env, rows) { let f = env[5]; f(rows); }
+  def svs-stop-call(env, s) { let f = env[6]; f(s); }
+  def svs-cap(env) = env[7];
+  def svs-eos-call(env, tok) { let f = env[8]; f(tok); }
+  def svs-chunk-size(env) = env[9];
+  def svs-share(env) = env[10];
+  // ── one tick: admit, one prefill chunk when it is due, one decode step for every live sequence ──
+  // answers [S', the sequences finished this tick (phase done, status set)]
+  def svs-tick(S, env) {
+   let a = svs-admit(S, env);
+   let b = svs-prefill-turn(a[0], env);
+   let c = svs-decode-turn(b[0], env);
+   [c[0], append(append(a[1], b[1]), c[1])];
+  }
+  // a waiting sequence is admitted when the prefill lane is free, a slot is free and the pressure limit allows another; an empty prompt, or one
+  // that does not fit its slot, is finished by name instead of run
+  def svs-admit(S, env) = nil?(S[0]) || !nothing?(S[1]) || svs-active(S) >= svs-limit-now(env) || svs-free-slot(S) < 0 ? [S, []] : svs-admit-best(S, env, svs-best(S[0]));
+  def svs-admit-best(S, env, best) {
+   let rest = filter(s => (String) s[0] != (String) best[0], S[0]);
+   let t = svs-now(env);
+   let n = len(best[3]);
+   n == 0 ? [[rest, S[1], S[2], S[3], S[4], S[5]], [svs-finish(svs-put(best, 12, t), "empty-prompt", t)]] : n + 1 > svs-cap(env) ? [[rest, S[1], S[2], S[3], S[4], S[5]], [svs-finish(svs-put(best, 12, t), "prompt-exceeds-slot", t)]] : svs-admit-run(S, env, rest, best, t);
+  }
+  def svs-admit-run(S, env, rest, best, t) {
+   let seq = svs-put(svs-put(svs-put(best, 6, "prefill"), 7, svs-free-slot(S)), 12, t);
+   let begun = svs-begin-call(env, seq);
+   [[rest, seq, S[2], 0, 0, S[5]], []];
+  }
+  // the prefill lane reads all but the last prompt id (the last is the first decode row's input); a chunk runs when it is due
+  def svs-prefill-turn(S, env) = nothing?(S[1]) ? [S, []] : svs-due?(S, env) ? svs-prefill-run(S, env, S[1]) : [S, []];
+  def svs-due?(S, env) = len(S[1][3]) - 1 - S[1][8] <= 0 || nil?(S[2]) || S[3] * 100 <= S[4] * svs-share(env);
+  def svs-prefill-run(S, env, pf) {
+   let t0 = svs-now(env);
+   let target = len(pf[3]) - 1;
+   let left = target - pf[8];
+   let n = left > svs-chunk-size(env) ? svs-chunk-size(env) : left < 0 ? 0 : left;
+   let ran = n > 0 ? svs-chunk-call(env, pf, take(n, pf[3][pf[8]:]), pf[8]) : 0;
+   let pf1 = svs-put(pf, 8, pf[8] + n);
+   let t1 = svs-now(env);
+   pf1[8] >= target ? svs-join(S, env, pf1) : [[S[0], pf1, S[2], S[3] + (nil?(S[2]) ? 0 : t1 - t0), S[4], S[5]], []];
+  }
+  // the prompt is read: its state is forked into the slot and the sequence joins the decoding ones, its first row the last prompt id
+  def svs-join(S, env, pf) {
+   let forked = svs-fork-call(env, pf);
+   let t = svs-now(env);
+   let seq = svs-put(svs-put(svs-put(svs-put(svs-put(pf, 6, "decode"), 10, pf[3][len(pf[3]) - 1]), 11, len(pf[3]) - 1), 13, t), 16, t - pf[12]);
+   [[S[0], nothing(), append(S[2], [seq]), 0, 0, S[5]], []];
+  }
+  // one pass for every live sequence: row k is the sequence in slot k (a free slot below the highest live one is fed id 0 at position 0 and ignored)
+  def svs-row-of(live, k) {
+   let m = filter(s => s[7] == k, live);
+   nil?(m) ? [k, 0, 0] : [k, m[0][10], m[0][11]];
+  }
+  def svs-rows(S) = map(k => svs-row-of(S[2], k), range(0, foldl((a, s) => s[7] > a ? s[7] : a, 0, S[2]) + 1));
+  def svs-decode-turn(S, env) = nil?(S[2]) ? [S, []] : svs-decode-run(S, env);
+  def svs-decode-run(S, env) {
+   let t0 = svs-now(env);
+   let out = svs-decode-call(env, svs-rows(S));
+   let t1 = svs-now(env);
+   let nxt = map(s => svs-advance(s, out[s[7]], env, t1), S[2]);
+   [[S[0], S[1], filter(s => (String) s[6] != "done", nxt), S[3], S[4] + (t1 - t0), S[5]], filter(s => (String) s[6] == "done", nxt)];
+  }
+  // a sequence takes its row's greedy id: the end of turn ends it (and is no part of its reply); else the id is its reply's next, and it ends at a
+  // stop string, at the count its caller named, or at its slot's last position
+  def svs-advance(s, r, env, t) = svs-eos-call(env, r[0]) ? svs-finish(s, "stop", t) : svs-advance-id(svs-put(svs-put(svs-put(svs-put(svs-put(s, 9, cons(r[0], s[9])), 17, s[17] + 1), 14, s[14] + r[1]), 10, r[0]), 11, s[11] + 1), env, t);
+  def svs-advance-id(s, env, t) = svs-stop-call(env, s) ? svs-finish(s, "stop-string", t) : s[4] > 0 && s[17] >= s[4] ? svs-finish(s, "length", t) : s[11] >= svs-cap(env) ? svs-finish(s, "context-full", t) : s;
+  // ── the reply and the ledger row ──
+  def svs-s(k, v) = json-node-pair(k, json-node-string(v));
+  def svs-n(k, v) = json-node-pair(k, json-node-int(v));
+  def svs-tenths(x10) = (x10 / 10).str() ++ "." ++ (x10 % 10).str();
+  def svs-decode-ms(s) = s[19] - s[13] < 0 ? 0 : s[19] - s[13];
+  // tokens a second in tenths, over the span the sequence decoded (joined to ended)
+  def svs-tok-s10(s) = svs-decode-ms(s) <= 0 ? 0 : s[17] * 10000 / svs-decode-ms(s);
+  def svs-fields(s, at_unix_ms) = [svs-s("id", s[0]), svs-s("who", s[18]), svs-s("status", s[15]), svs-n("priority", s[1]), svs-n("prompt_ids", len(s[3])), svs-n("generated_ids", s[17]), svs-n("wall_ms", s[19] - s[2]), svs-n("queue_ms", s[12] - s[2]), svs-n("prefill_ms", s[16]), svs-n("decode_ms", svs-decode-ms(s)), json-node-pair("decode_tok_s", json-node-float-text(svs-tenths(svs-tok-s10(s)))), svs-n("surprise_micro_nats", s[17] > 0 ? s[14] / s[17] : 0), svs-n("slot", s[7]), svs-n("rent_tokens", 0), svs-n("at_unix_ms", at_unix_ms)];
+  def svs-ledger-row(s, at_unix_ms) = json-emit(json-node-object(svs-fields(s, at_unix_ms)));
+  def svs-reply-row(s, text, at_unix_ms) = json-emit(json-node-object(append(svs-fields(s, at_unix_ms), [svs-s("text", text)])));
+  def svs-refused-row(fid, why, at_unix_ms) = json-emit(json-node-object([svs-s("id", fid), svs-s("status", "refused"), svs-s("reason", why), svs-n("generated_ids", 0), svs-n("rent_tokens", 0), svs-n("at_unix_ms", at_unix_ms), svs-s("text", "")]));
+  // the reply's text ends at the earliest stop string the caller named (the stop string itself is no part of it)
+  def svs-cut-at(text, stops) = foldl((a, st) => len(st) == 0 ? a : (str_find(text, st, 0) >= 0 && (a < 0 || str_find(text, st, 0) < a)) ? str_find(text, st, 0) : a, -1, stops);
+  def svs-trim-stop(text, stops) = svs-cut-at(text, stops) < 0 ? text : substring(text, 0, svs-cut-at(text, stops));
+  // a status line the server keeps for the clients and for a person: [pid, slots, live, queued, prefilling]
+  def svs-status-row(S, pid, start, label, at_unix_ms) = json-emit(json-node-object([svs-n("pid", pid), svs-n("start", start), svs-s("label", label), svs-n("slots", S[5]), svs-n("live", len(S[2])), svs-n("queued", len(S[0])), svs-n("prefilling", nothing?(S[1]) ? 0 : 1), svs-n("at_unix_ms", at_unix_ms)]));
+ }
+ 0;
+}

@@ -1,0 +1,95 @@
+// serve-e2e-run.bml — the physical end-to-end test of the resident server (observe/qwen-serve-run.bml): five requests of different lengths, a 12k-id prompt among them,
+// asked together and then one after another, with the numbers side by side.
+//
+//   echo '{"dir":"/tmp/form-serve","mode":"concurrent"}' | ./fkwu observe/serve-e2e-run.bml
+//   echo '{"dir":"/tmp/form-serve","mode":"serial"}'     | ./fkwu observe/serve-e2e-run.bml
+//
+// The server must stand (observe/qwen-serve-run.bml, slots 4, maxpos 14336 or more). set mixed (default): oneword (priority 2, no count: it ends at the model's end of turn),
+// short (priority 1, 1200 tokens), medium (about 1.4k prompt ids), long (about 4k) and xlong (priority 1, about 12.5k ids, 100 tokens). set decode: four short prompts of `tokens` each
+// (default 400), where the weight pass is shared by four decoding rows and prefill is not the cost. mode concurrent puts every request in the spool at once (a fifth has to wait for a
+// slot: its queue_ms says so); mode serial asks them one at a time, each after the last one's reply. Each run writes <dir>/e2e-[<set>-]<mode>.jsonl; the
+// serial run compares every reply's text with the concurrent run's (greedy decoding and bit-identical rows: the texts must be equal) and says the aggregate tokens a second of each.
+// NOTE (2026-11-11): the Mac's GPU throttles under minutes of sustained load: the same four-row decode ran at 164 ms a step right after a run and 91 ms after 150 s of rest, so a pair of
+// runs is only a fair comparison with the same rest before each. stdin, one JSON line, strict: dir (the spool, default /tmp/form-serve), mode (concurrent | serial, default concurrent),
+// set (mixed | decode), tokens (decode set), sentences (the xlong prompt's sentence count, default 700),
+// wait_ms (end any one wait after this long; 0 waits while the server lives).
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/door-options.bml form-stdlib/bml/serve-sched.bml form-stdlib/bml/serve-client.bml
+section [form.bml] {
+ class ServeE2eRun {
+  def e2e-say(t) = print_str("[e2e] " ++ t ++ "\n");
+  def e2e-spec() = [["dir", "str"], ["mode", "str"], ["set", "str"], ["tokens", "int"], ["sentences", "int"], ["wait_ms", "int"]];
+  // the filler: n numbered sentences, about 18 ids each
+  def e2e-fill(n) = foldl((a, i) => a ++ "The quick brown fox " ++ i.str() ++ " jumps over the lazy dog near the river bank. ", "", range(0, n));
+  // [label, prompt, max_tokens, priority]
+  def e2e-requests(set, n, tok) = (String) set == "decode" ? [
+   ["d1", "Write a long story about a lighthouse keeper who finds a message in a bottle.", tok, 0],
+   ["d2", "Explain in great detail how a bicycle works.", tok, 0],
+   ["d3", "Write a long poem about the sea and the sailors who cross it.", tok, 0],
+   ["d4", "Describe the history of the printing press at length.", tok, 0]
+  ] : [
+   ["oneword", "Reply with the single word: yes", 0, 2],
+   ["short", "Write a long story about a lighthouse keeper who finds a message in a bottle.", 1200, 1],
+   ["medium", e2e-fill(n / 9) ++ "\nQuestion: roughly how many sentences did you just read, and what do they have in common? Answer at length.", 200, 0],
+   ["long", e2e-fill(n / 3) ++ "\nQuestion: roughly how many sentences did you just read, and what do they have in common? Answer at length.", 150, 0],
+   ["xlong", e2e-fill(n) ++ "\nQuestion: roughly how many sentences did you just read, and what do they have in common? Answer at length.", 100, 1]
+  ];
+  def e2e-body(r) = svc-spec-json(r[1], "", 1, r[2], [], r[3], "e2e-" ++ r[0]);
+  def e2e-row(label, doc, client_ms) = json-node-object([svs-s("label", label), svs-s("status", svc-str(doc, "status")), svs-n("prompt_ids", svc-int(doc, "prompt_ids")), svs-n("generated_ids", svc-int(doc, "generated_ids")), svs-n("queue_ms", svc-int(doc, "queue_ms")), svs-n("prefill_ms", svc-int(doc, "prefill_ms")), svs-n("decode_ms", svc-int(doc, "decode_ms")), svs-n("wall_ms", svc-int(doc, "wall_ms")), svs-n("client_ms", client_ms), json-node-pair("decode_tok_s", json-node-float-text(svc-float-text(doc))), svs-s("text", svc-str(doc, "text"))]);
+  def svc-float-text(doc) = json-object-has?(doc, "decode_tok_s") ? json-emit(json-object-get(doc, "decode_tok_s")) : "0";
+  def e2e-say-row(label, doc, client_ms) = e2e-say(label ++ ": " ++ svc-str(doc, "status") ++ " prompt_ids=" ++ svc-int(doc, "prompt_ids").str() ++ " generated_ids=" ++ svc-int(doc, "generated_ids").str() ++ " queue_ms=" ++ svc-int(doc, "queue_ms").str() ++ " prefill_ms=" ++ svc-int(doc, "prefill_ms").str() ++ " decode_tok_s=" ++ svc-float-text(doc) ++ " client_ms=" ++ client_ms.str());
+  def e2e-run() {
+   let o = dop-doc("serve-e2e", stdin-text(), e2e-spec());
+   let dir = svs-str(o, "dir", svc-default-dir());
+   let mode = svs-str(o, "mode", "concurrent");
+   let st = svc-standing(dir);
+   let set = svs-str(o, "set", "mixed");
+   let reqs = e2e-requests(set, svs-int(o, "sentences", 700), svs-int(o, "tokens", 400));
+   let label = (String) set == "mixed" ? mode : set ++ "-" ++ mode;
+   (String) st[0] != "standing" ? e2e-say("no server stands: " ++ st[1]) : (String) mode == "serial" ? e2e-serial(dir, label, reqs, svs-int(o, "wait_ms", 0)) : e2e-concurrent(dir, label, reqs, svs-int(o, "wait_ms", 0));
+  }
+  // all five into the spool at once, then each waited for; the wall is from the first request to the last reply
+  def e2e-concurrent(dir, label, reqs, wait_ms) {
+   let t0 = host_monotonic_ms();
+   let ids = map(r => svc-submit(dir, r[0], e2e-body(r)), reqs);
+   let said = e2e-say("concurrent: " ++ len(reqs).str() ++ " requests in the spool");
+   let docs = map(i => e2e-wait(dir, ids[i], reqs[i], t0, wait_ms), range(0, len(reqs)));
+   e2e-close(dir, label, reqs, docs, host_monotonic_ms() - t0);
+  }
+  def e2e-serial(dir, label, reqs, wait_ms) {
+   let t0 = host_monotonic_ms();
+   let docs = map(r => e2e-wait(dir, svc-submit(dir, r[0], e2e-body(r)), r, host_monotonic_ms(), wait_ms), reqs);
+   e2e-close(dir, label, reqs, docs, host_monotonic_ms() - t0);
+  }
+  def e2e-wait(dir, id, r, t0, wait_ms) {
+   let a = svc-wait(dir, id, wait_ms);
+   let ms = host_monotonic_ms() - t0;
+   (String) a[0] == "answered" ? { let said = e2e-say-row(r[0], a[1], ms); [r[0], a[1], ms]; } : { let said = e2e-say(r[0] ++ ": unserved " ++ a[1]); [r[0], nothing(), ms]; };
+  }
+  def e2e-close(dir, mode, reqs, docs, wall) {
+   let good = filter(d => !nothing?(d[1]), docs);
+   let tokens = foldl((a, d) => a + svc-int(d[1], "generated_ids"), 0, good);
+   let prompts = foldl((a, d) => a + svc-int(d[1], "prompt_ids"), 0, good);
+   let w = write_file(dir ++ "/e2e-" ++ mode ++ ".jsonl", foldl((a, d) => a ++ json-emit(e2e-row(d[0], d[1], d[2])) ++ "\n", "", good));
+   let said = e2e-say(mode ++ ": " ++ len(good).str() ++ " of " ++ len(reqs).str() ++ " answered, wall " ++ wall.str() ++ " ms, " ++ tokens.str() ++ " tokens generated, " ++ prompts.str() ++ " prompt ids: aggregate " ++ e2e-rate(tokens, wall) ++ " generated tok/s, " ++ e2e-rate(tokens + prompts, wall) ++ " ids/s");
+   str_find(mode, "serial", 0) >= 0 ? e2e-compare(dir, mode, good) : 0;
+  }
+  def e2e-rate(n, ms) = ms <= 0 ? "0.0" : svs-tenths(n * 10000 / ms);
+  // the serial replies against the concurrent run's: the same text for the same request (one decode, whichever slot, whichever neighbours)
+  def e2e-prefix(mode) = str_find(mode, "serial", 0) > 0 ? substring(mode, 0, str_find(mode, "serial", 0)) : "";
+  def e2e-compare(dir, mode, good) {
+   let t = read_file(dir ++ "/e2e-" ++ e2e-prefix(mode) ++ "concurrent.jsonl");
+   nothing?(t) ? e2e-say("no concurrent run on file to compare with") : e2e-compare-rows(good, map(l => parse-json("e2e-row", l), filter(l => len(trim(l)) > 0, split-on(t, "\n"))));
+  }
+  def e2e-compare-rows(good, rows) {
+   let results = map(d => e2e-same(d, rows), good);
+   let said = e2e-say("text equal serial vs concurrent: " ++ foldl((a, x) => a ++ x ++ " ", "", results));
+   0;
+  }
+  def e2e-same(d, rows) {
+   let m = filter(r => (String) svc-str(r, "label") == (String) d[0], rows);
+   nil?(m) ? d[0] ++ "=absent" : (String) svc-str(m[0], "text") == (String) svc-str(d[1], "text") ? d[0] ++ "=equal" : d[0] ++ "=DIFFERENT";
+  }
+ }
+ e2e-run();
+}

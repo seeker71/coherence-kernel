@@ -111,6 +111,17 @@ form/form-stdlib/tests/door-options-band -> 1023  (door-options.bml: empty and {
                                             an unknown key (named, with the keys the door has), a key of the wrong kind (a string for an
                                             integer, a float, null, a bool, an object), a key given twice are each refused; the reading alone
                                             and a scratch door that ends in exit 1 and prints `<door>: <why>` before its next statement)
+form/form-stdlib/tests/serve-sched-band  -> 2047  (serve-sched.bml, the scheduler of the resident server observe/qwen-serve-run.bml, against a scripted
+                                            fake step function, no model: the strict spool reading; admission into free slots; priority; chunked
+                                            prefill beside a decoding stream (it decodes 4 steps between two chunks and is never stalled more than a
+                                            chunk), a prompt read alone at full speed; eviction and its four statuses; the rows of a pass; the pressure
+                                            limit; prompts that do not fit; the ledger row; stop strings)
+form/form-stdlib/tests/serve-client-band -> 31    (serve-client.bml over a scratch spool: standing judged by pid and start, a request put in whole and read
+                                            back strictly, a reply taken, a bounded wait, a dead server named, the planner's voice shape)
+observe/qwen-serve-run.bml               the resident server (vLLM's continuous batching, chunked prefill and flash-decoding, native): one fkwu process
+                                            holds the lease and the 27B's weights and KV, serves a spool (default /tmp/form-serve), one weight pass a step for every
+                                            live sequence. Clients: observe/serve-ask-run.bml; the planner (lpr-spoken) and counsel (lcr-go) route through it when
+                                            it stands, else name why and open their own. Physical test: observe/serve-e2e-run.bml
 ./fkwu gate/structural-gate-run.fk       -> structural-gate-v6 [2, 0, 2, 0] then 1: "2 declared carrier(s) and 0 fixture(s) stand; no
                                             other foreign file" (total/unclassified/carrier/fixture). The gate is an ALLOWLIST: Form (.fk
                                             .bml .form .bmf), the C seed (.c .h .m .metal), documents and data (.md .mdc .txt .json .jsonl

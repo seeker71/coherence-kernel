@@ -11,7 +11,7 @@
 // stdin, one JSON line: go (without it only the plan is said), question (required), lenses (a list of 2..8 strings; default three
 // neutral lenses), gen (tokens a lens, default 160). A physical run: it needs the local GPU; another process holding it makes this one wait.
 // preflight-exec: forbidden
-// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/q38-multi.bml form-stdlib/bml/form-cli-code-live.bml form-stdlib/bml/q38-lenses.bml native/metal/qwen35-dense-token-handle.fk native/metal/qwen35-dense-spec.fk
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/q38-multi.bml form-stdlib/bml/form-cli-code-live.bml form-stdlib/bml/q38-lenses.bml form-stdlib/bml/serve-client.bml native/metal/qwen35-dense-token-handle.fk native/metal/qwen35-dense-spec.fk
 section [form.bml] {
  class LocalCounselRun {
   def lcr-say(t) = print_str("[local-counsel] " ++ t ++ "\n");
@@ -34,7 +34,30 @@ section [form.bml] {
    let lenses = lcr-lenses(o);
    len(question) == 0 ? lcr-say("no question: give {\"question\":\"…\"}") : (len(lenses) < 2 || len(lenses) > 8) ? lcr-say("give 2 to 8 lenses") : lcr-int(o, "go", 0) != 1 ? lcr-say("plan: go=1 reads a question of " ++ len(question).str() ++ " bytes through " ++ len(lenses).str() ++ " lenses") : lcr-go(question, lenses, lcr-int(o, "gen", 160));
   }
+  // A resident server that stands (observe/qwen-serve-run.bml) holds the GPU lease and the weights: the lenses are asked of it, one request each, and decode beside every
+  // other sequence it serves. With none standing the reason is named and this process opens a session of its own, as it always did. (Each lens's request reads the whole question
+  // again on the server's prefill lane; a prefix the lenses share is read once only in this process's own session.)
   def lcr-go(question, lenses, gen) {
+   let st = svc-standing(svc-default-dir());
+   (String) st[0] == "standing" ? lcr-served(question, lenses, gen) : lcr-own(question, lenses, gen, "no server stands (" ++ st[1] ++ ")");
+  }
+  def lcr-served(question, lenses, gen) {
+   let dir = svc-default-dir();
+   let ids = map(i => svc-submit(dir, "k" ++ i.str(), svc-spec-json(question, lenses[i], 1, gen, [], 0, "counsel")), range(0, len(lenses)));
+   let got = map(id => len(id) == 0 ? ["unserved", "the spool refused the request file"] : svc-wait(dir, id, 0), ids);
+   let down = filter(g => (String) g[0] != "answered", got);
+   nil?(down) ? lcr-served-say(lenses, map(g => g[1], got)) : lcr-own(question, lenses, gen, "the server did not answer (" ++ down[0][1] ++ ")");
+  }
+  def lcr-served-say(lenses, docs) {
+   let a = lcr-say("served by the resident server: prompt " ++ svc-int(docs[0], "prompt_ids").str() ++ " ids a lens; queue " ++ svc-int(docs[0], "queue_ms").str() ++ " ms, prefill " ++ svc-int(docs[0], "prefill_ms").str() ++ " ms, " ++ svc-int(docs[0], "generated_ids").str() ++ " tokens at " ++ json-emit(json-object-get(docs[0], "decode_tok_s")) ++ " tok/s on lens 0");
+   let b = map(i => lcr-say("lens " ++ i.str() ++ " (" ++ lenses[i] ++ ") surprise " ++ svc-int(docs[i], "surprise_micro_nats").str() ++ " micro-nats a token:\n" ++ svc-str(docs[i], "text")), range(0, len(lenses)));
+   lcr-say("the model was surest of lens " ++ lcr-best(map(d => svc-int(d, "surprise_micro_nats"), docs), 0, 0).str());
+  }
+  def lcr-own(question, lenses, gen, why) {
+   let said = lcr-say(why ++ "; this process opens a session of its own");
+   lcr-go-own(question, lenses, gen);
+  }
+  def lcr-go-own(question, lenses, gen) {
    // The context is sized from what the call will hold: the question's ids, the longest lens, the generation. Opened small to read the ids, and
    // opened again at the size they need when the small one cannot hold them (a prefix past the positions the KV owns overruns the cache and hangs the GPU).
    let ctx0 = qlz-open(4096);

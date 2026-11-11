@@ -1,0 +1,94 @@
+; serve-client-band.bml — the asking side of the resident server (form-stdlib/bml/serve-client.bml) over a scratch spool, with no model and no server: the spool's files are written by the band.
+;
+; Expected: 31
+; Verdict 31 when every claim lands:
+;   1   a server STANDS only when its status file names a live process of the same start; no file, an unreadable file, a dead pid, a pid reused (the start time differs) and a stop file
+;       each answer absent with a reason (a reused pid is named; a stop file reads "stopping")
+;   2   a request is put in req/ whole (renamed from tmp/, which stays empty) and reads back through the server's own strict reader (svs-parse) with its prompt (quotes, a newline, a
+;       multi-byte letter), lens, chat, count, stop strings, priority and who; two submits in one process get two ids
+;   4   a reply that stands in reply/ is taken (answered, the file removed); a wait with nothing and a bound ends by name (wait-ended) and leaves the request in the spool
+;   8   a wait whose server is not standing ends "server-gone" once the 5 s look finds it so, and a reply written as the server's last act is still taken
+;   16  the native voice's shape (svc-voice-of): stop, stop-string and length answer; context-full, refused and server-error are unavailable with the server's word as the reason and the partial text kept;
+;       the ids, the milliseconds and the model name stand where the planner reads them; no server standing answers nothing (the caller's own session asks)
+;
+; REQUIRES: the built ./fkwu and the body root as the working directory.
+// preludes: form-stdlib/core.fk form-stdlib/json.fk form-stdlib/bml/live.bml form-stdlib/bml/serve-sched.bml form-stdlib/bml/serve-client.bml
+section [form.bml] {
+ class ServeClientBand {
+  def scb-fresh() {
+   let root = temp_dir() ++ "/serve-client-band-" ++ now_unix_ms().str();
+   (Comparable) host_dir_mkdir(root) == 1 ? ["serve-client", root, 0] : nothing();
+  }
+  def scb-root(ctx) = ctx[1];
+  def scb-has(s, part) = str_find(s, part, 0) >= 0;
+  def scb-status(pid, start) = "{\"pid\":" ++ pid.str() ++ ",\"start\":" ++ start.str() ++ ",\"label\":\"band\",\"slots\":4,\"live\":0,\"queued\":0,\"prefilling\":0,\"at_unix_ms\":1}";
+  def scb-me() = host_process(host_pid())[5];
+  def scb-dir(ctx, name) {
+   let d = scb-root(ctx) ++ "/" ++ name;
+   let m = host_dir_mkdir(d);
+   d;
+  }
+  def scb-c-standing(ctx) {
+   let d = scb-dir(ctx, "st");
+   let none = svc-standing(d);
+   let w1 = write_file(d ++ "/status.json", "{not json");
+   let garbage = svc-standing(d);
+   let w2 = write_file(d ++ "/status.json", scb-status(2147483000, 5));
+   let dead = svc-standing(d);
+   let w3 = write_file(d ++ "/status.json", scb-status(host_pid(), scb-me() + 1));
+   let reused = svc-standing(d);
+   let w4 = write_file(d ++ "/status.json", scb-status(host_pid(), scb-me()));
+   let live = svc-standing(d);
+   let w5 = write_file(d ++ "/stop", "x");
+   let stopping = svc-standing(d);
+   (String) none[0] == "absent" && scb-has(none[1], "no status file") && (String) garbage[0] == "absent" && (String) dead[0] == "absent" && scb-has(dead[1], "gone")
+    && (String) reused[0] == "absent" && scb-has(reused[1], "reused") && (String) live[0] == "standing" && (String) stopping[0] == "absent" && scb-has(stopping[1], "stopping");
+  }
+  def scb-c-submit(ctx) {
+   let d = scb-dir(ctx, "sub");
+   let text = svc-spec-json("say \"hi\"\nthen é", "be brief", 1, 40, ["END", "X"], 3, "band");
+   let id = svc-submit(d, "a", text);
+   let id2 = svc-submit(d, "b", text);
+   let on = read_file(d ++ "/req/" ++ id ++ ".json");
+   let p = svs-parse(id, nothing?(on) ? "" : on);
+   (String) on == text && len(id) > 0 && (String) id != (String) id2 && len(host_dir_list(d ++ "/tmp") ?? []) == 0
+    && (String) p[0] == "ok" && (String) p[1][1] == "say \"hi\"\nthen é" && (String) p[1][2] == "be brief" && p[1][3] == 1 && p[1][4] == 40 && len(p[1][5]) == 2 && p[1][6] == 3 && (String) p[1][7] == "band";
+  }
+  def scb-c-wait(ctx) {
+   let d = scb-dir(ctx, "wt");
+   let m = host_dir_mkdir(d ++ "/reply");
+   let row = "{\"id\":\"x1\",\"status\":\"stop\",\"generated_ids\":3,\"text\":\"ok\"}\n";
+   let w = write_file(d ++ "/reply/x1.json", row);
+   let got = svc-wait(d, "x1", 0);
+   let again = svc-wait(d, "x1", 200);
+   (String) got[0] == "answered" && (String) svc-str(got[1], "text") == "ok" && svc-int(got[1], "generated_ids") == 3 && file_size(d ++ "/reply/x1.json") < 0
+    && (String) again[0] == "unserved" && scb-has(again[1], "wait-ended");
+  }
+  def scb-c-gone(ctx) {
+   let d = scb-dir(ctx, "gone");
+   let w = write_file(d ++ "/status.json", scb-status(2147483000, 5));
+   let r = svc-wait(d, "nobody", 0);
+   let m = host_dir_mkdir(d ++ "/reply");
+   let w2 = write_file(d ++ "/reply/last.json", "{\"id\":\"last\",\"status\":\"stop\",\"text\":\"late\"}\n");
+   let late = svc-wait(d, "last", 0);
+   (String) r[0] == "unserved" && scb-has(r[1], "server-gone") && (String) late[0] == "answered" && (String) svc-str(late[1], "text") == "late";
+  }
+  def scb-doc(status, extra) = parse-json("band", "{\"id\":\"v\",\"status\":\"" ++ status ++ "\"" ++ extra ++ ",\"prompt_ids\":12,\"generated_ids\":5,\"prefill_ms\":30,\"decode_ms\":400,\"queue_ms\":7,\"text\":\"partial words\"}");
+  def scb-c-voice(ctx) {
+   let a = svc-voice-of(scb-doc("stop", ""));
+   let b = svc-voice-of(scb-doc("stop-string", ""));
+   let c = svc-voice-of(scb-doc("length", ""));
+   let d = svc-voice-of(scb-doc("context-full", ""));
+   let e = svc-voice-of(scb-doc("refused", ",\"reason\":\"no prompt\""));
+   let f = svc-voice-of(scb-doc("server-error", ""));
+   let nobody = svc-voice-at(scb-dir(ctx, "nobody"), "p", 10, "planner");
+   (String) a[0] == "answered" && (String) b[0] == "answered" && (String) c[0] == "answered" && (String) a[1] == "partial words" && a[2] == 12 && a[3] == 5 && a[5] == 1 && a[6] == 1 && a[11] == 30 && a[12] == 400 && a[13] == 7 && scb-has(a[4], "serve:")
+    && (String) d[0] == "unavailable" && (String) d[7] == "serve-context-full" && (String) d[8] == "partial words" && (String) e[0] == "unavailable" && (String) e[7] == "serve-refused:no prompt" && (String) f[7] == "serve-server-error"
+    && nothing?(nobody);
+  }
+ }
+ let ctx = scb-fresh();
+ nothing?(ctx) ? form_error("serve-client band needs a fresh directory") : 0;
+ let verdict = live-claims("serve-client-band", ctx, [["standing", 1, 1, scb-c-standing], ["submit", 2, 1, scb-c-submit], ["wait", 4, 1, scb-c-wait], ["gone", 8, 1, scb-c-gone], ["voice", 16, 1, scb-c-voice]]);
+ verdict;
+}

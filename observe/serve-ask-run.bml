@@ -1,0 +1,35 @@
+// serve-ask-run.bml — ask the resident server (observe/qwen-serve-run.bml) one question: request in, reply out.
+//
+//   echo '{"prompt":"Say hello in five words.","max_tokens":40}' | ./fkwu observe/serve-ask-run.bml
+//
+// stdin, one JSON line, strict: prompt (required), lens (a task text that closes the user turn), chat (1 default: the prompt is a user turn and the assistant
+// opens with an empty think block; 0 continues the raw text), max_tokens (0 or absent: until the model ends its turn), stop (strings), priority (higher first),
+// who (named in the server's ledger), dir (the spool, default /tmp/form-serve), wait_ms (end the wait after this long; 0 or absent waits while the server lives:
+// pressure slows a reply, it never cuts one). stdout, ONE JSON line: the server's reply (id, who, status, prompt_ids, generated_ids, wall_ms, queue_ms, prefill_ms,
+// decode_ms, decode_tok_s, surprise_micro_nats, slot, rent_tokens 0, text), or {"status":"unserved","reason":…} when no server stands (the reason is named; the caller
+// runs a session of its own) or the server ended while the request waited. An envelope or a grammar is refused by name before the spool is touched: the server
+// decodes greedily with no grammar hook. status is stop, stop-string, length (the request's own count) or context-full (the slot's own end), refused, or server-error.
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/door-options.bml form-stdlib/bml/serve-sched.bml form-stdlib/bml/serve-client.bml
+section [form.bml] {
+ class ServeAskRun {
+  def sar-spec() = append(svs-spec(), [["dir", "str"], ["wait_ms", "int"]]);
+  def sar-unserved(why) = print_str(json-emit(json-node-object([svs-s("status", "unserved"), svs-s("reason", why), svs-n("rent_tokens", 0)])) ++ "\n");
+  def sar-run() {
+   let o = dop-doc("serve-ask", stdin-text(), sar-spec());
+   let dir = svs-str(o, "dir", svc-default-dir());
+   let prompt = svs-str(o, "prompt", "");
+   len(svs-str(o, "envelope", "")) > 0 || len(svs-str(o, "grammar", "")) > 0 ? sar-unserved("envelope-unsupported: the server decodes greedily with no grammar hook; run a session of your own for an envelope") : len(prompt) == 0 ? sar-unserved("no prompt") : sar-ask(o, dir, prompt);
+  }
+  def sar-ask(o, dir, prompt) {
+   let st = svc-standing(dir);
+   (String) st[0] != "standing" ? sar-unserved("no server stands: " ++ st[1]) : sar-wait(dir, o, prompt);
+  }
+  def sar-wait(dir, o, prompt) {
+   let id = svc-submit(dir, "c", svc-spec-json(prompt, svs-str(o, "lens", ""), svs-int(o, "chat", 1), svs-int(o, "max_tokens", 0), svs-strs(o, "stop"), svs-int(o, "priority", 0), svs-str(o, "who", "serve-ask")));
+   let r = len(id) == 0 ? ["unserved", "the spool refused the request file"] : svc-wait(dir, id, svs-int(o, "wait_ms", 0));
+   (String) r[0] == "answered" ? print_str(json-emit(r[1]) ++ "\n") : sar-unserved(r[1]);
+  }
+ }
+ sar-run();
+}
