@@ -48,7 +48,7 @@ section [form.bml] {
   def qsr-say(t) = print_str("[serve] " ++ t ++ "\n");
   def qsr-spec() = [["go", "int"], ["dir", "str"], ["rows", "int"], ["blocks", "int"], ["block_positions", "int"], ["maxpos", "int"], ["chunk", "int"], ["share", "int"], ["poll_ms", "int"], ["idle_exit_ms", "int"], ["yield_ear", "int"], ["reserve_gib", "int"], ["limit", "int"], ["span", "int"], ["idle_chunk", "int"], ["spec", "int"], ["spec_floor", "int"], ["spec_nmin", "int"], ["models", "strs"], ["side_blocks", "int"]];
   // what each model keeps of its own: its prefix cache, its limit and pressure readings, its beat and its share of the GPU
-  def qsr-mstate() = record_new(0, "cache", [], "serial", 0, "evict_at", 0, "cache_hits", 0, "cache_ids", 0, "limit", 1, "limit_at", 0, "budget", -1, "budget_at", 0, "beat_at", 0, "beat_say", 0, "beat_key", "", "shed_at", 0, "step_ms", 0, "steps", 0, "ticks", 0, "gpu_ms", 0, "gpu_at", 0);
+  def qsr-mstate() = record_new(0, "cache", [], "serial", 0, "evict_at", 0, "cache_hits", 0, "cache_ids", 0, "limit", 1, "limit_at", 0, "budget", -1, "budget_at", 0, "beat_at", 0, "beat_say", 0, "beat_key", "", "shed_at", 0, "step_ms", 0, "steps", 0, "ticks", 0, "gpu_ms", 0, "gpu_at", 0, "seqs", []);
   // SPECULATION (q38-verify.bml, serve-sched.bml): spec is the columns one weight pass may carry (0 or 1: none; 2 to 8, default 8, at most the rows). A greedy row that finds in its own text what followed the last time its last few ids
   // occurred carries that as drafts, and the pass verifies them (the exact association's arithmetic: every column carries the bits of a one-token decode), accepting the longest run the model repeats and one
   // more id: the same reply, byte for byte, as one id a pass, sooner. A column costs every live row of the pass a part of a token, so a draft takes one only when its likelihood of standing
@@ -651,9 +651,35 @@ section [form.bml] {
    let key = svs-live(S).str() ++ "/" ++ svs-queued(S).str() ++ "/" ++ svb-used(c[15]).str();
    let w = key == record_get(M, "beat_key") ? 0 : qsr-sig("ok", svs-live(S), svs-queued(S), "beat", c[23] ++ " blocks=" ++ svb-used(c[15]).str() ++ "/" ++ svb-capacity(c[15]).str(), 0);
    let k = record_set(M, "beat_key", key);
+   let sq = qsr-seq-signals(c, M, S, now);
    let a = record_set(M, "beat_at", now);
    let said = now - record_get(M, "beat_say") > 10000 && !svs-idle?(S) ? qsr-said-live(c, S, now) : 0;
    1;
+  }
+  // Each live sequence speaks in the frame as it goes, so a stall is a cell on the framebuffer when it begins and not a gap read afterwards: its progress every 64 ids ("ok", the ids said and
+  // its rate), the loop reaction's draw when it leaves the greedy path ("part": the server answered a repeat inline), and a discomfort ("disc", why "slow") when its rate over the last seconds
+  // falls under one id every two seconds while it holds a row, said again no sooner than every 30 s. The frame's watcher (observe/flow-watch-run.bml, slots 0..15) prints the discomforts; a
+  // flow, a person or the rented guidance reacts to the cell, not to a clock. A row is [id, ids said, at ms, drawn 0/1, last slow cell ms].
+  def qsr-seq-signals(c, M, S, now) {
+   let old = record_get(M, "seqs");
+   let rows = map(s => qsr-seq-row(c, old, s, now), S[2]);
+   record_set(M, "seqs", rows);
+  }
+  def qsr-seq-row(c, old, s, now) {
+   let p = tb-first(old, r => (String) r[0] == (String) s[0]);
+   let n = s[17];
+   let drawn = svs-drawn?(s) ? 1 : 0;
+   let dn = nothing?(p) ? 0 : n - p[1];
+   let dt = nothing?(p) ? 0 : now - p[2];
+   let rate = dt <= 0 ? 0 : (dn * 1000) / dt;
+   let was = nothing?(p) ? 0 : p[3];
+   let slowAt = nothing?(p) ? 0 : p[4];
+   let slow = !nothing?(p) && dt >= 4000 && dn * 2000 < dt && n > 0 && now - slowAt > 30000;
+   let e1 = nothing?(p) || n / 64 == p[1] / 64 ? 0 : qsr-sig("ok", n, rate, "dec", fsg-clean(s[18], 0), now - s[12]);
+   let e2 = drawn == 1 && was == 0 ? qsr-sig("part", n, 0, "loop-drawn", fsg-clean(s[18], 0), now - s[12]) : 0;
+   let e3 = drawn == 0 && was == 1 ? qsr-sig("ok", n, 0, "loop-left", fsg-clean(s[18], 0), now - s[12]) : 0;
+   let e4 = slow ? qsr-sig("disc", n, rate, "slow", fsg-clean(s[18], 0), now - s[12]) : 0;
+   [s[0], nothing?(p) || dt >= 4000 ? n : p[1], nothing?(p) || dt >= 4000 ? now : p[2], drawn, slow ? now : slowAt];
   }
   def qsr-said-live(c, S, now) {
    let M = c[22];
