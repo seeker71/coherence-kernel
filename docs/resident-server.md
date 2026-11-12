@@ -56,7 +56,9 @@ decoding at 9.7 tok/s against 15.1 alone (64%; 7.3, 48%, at share 100; about 3.4
 short one's GPU time (22.6 s -> 32.6 s). The mix of a 9293-id prompt first and six of 678 to 3587 ids: the shorts end in 11 to
 126 s (old 77 to 291 s) and the mix ends at the same time (278 s, old 291 s). Aggregate decode at 2, 4 and 8 rows is equal in both
 images. A wider prefill span (`span` 256) read no faster. Readings carry the machine: an outside tenant and the GPU's clocks move
-a lone prefill between 10 and 47 s for the same 1444 ids, so a pair is only fair back to back with equal rest.
+a lone prefill between 10 and 47 s for the same 1444 ids, so a pair is only fair back to back with equal rest. One decoding row
+read 15.0 tok/s (old) and 6.1 (new) in one pair, then 6.6 and 6.5 (old) against 7.9 and 2.9 (new) in a rerun with the GPU at 63 to
+100% before the run began: the old image is as slow under that tenant, so the single-row dip is the machine, not a per-tick cost.
 
 ## Binary limits in the serving path
 
