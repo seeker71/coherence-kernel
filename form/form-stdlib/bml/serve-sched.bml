@@ -32,7 +32,10 @@ section [form.bml] {
   // assistant's with an empty think block; 0 continues the raw text), max_tokens (0 or absent: until the model ends its turn), stop (strings),
   // priority (higher first), who (named in the ledger), spec (0: this request's row never carries drafts even when the server speculates, the paired plain reading; 1, the default, follows the server). envelope and grammar are named so they are REFUSED by name: this lane decodes greedily
   // and has no grammar hook; a caller that needs one runs its own session.
-  def svs-spec() = [["prompt", "str"], ["lens", "str"], ["chat", "int"], ["max_tokens", "int"], ["stop", "strs"], ["priority", "int"], ["who", "str"], ["envelope", "str"], ["grammar", "str"], ["temperature_milli", "int"], ["seed", "int"], ["spec", "int"]];
+  def svs-spec() = [["prompt", "str"], ["lens", "str"], ["chat", "int"], ["max_tokens", "int"], ["stop", "strs"], ["priority", "int"], ["who", "str"], ["envelope", "str"], ["grammar", "str"], ["temperature_milli", "int"], ["seed", "int"], ["spec", "int"], ["model", "str"]];
+  // The model a request is for: its own `model` key (a registry name the server holds), else the registry's first loaded voice for the role its `who` names (svs-role-of). A server that holds one model ignores the choice.
+  def svs-role-of(who) = svs-has?(who, "-fix") || svs-has?(who, "-fmt") || svs-has?(who, "repair") || svs-has?(who, "flow-") ? "candidate" : svs-has?(who, "counsel") ? "counsel" : svs-has?(who, "focus") || svs-has?(who, "lens") ? "lens" : svs-has?(who, "guide") ? "guide" : svs-has?(who, "triage") ? "triage" : svs-has?(who, "planner") ? "plan" : "plan";
+  def svs-has?(t, part) = str_find(t, part, 0) >= 0;
   def svs-str(doc, key, d) = json-object-has?(doc, key) ? json-string-value(json-object-get(doc, key)) : d;
   def svs-int(doc, key, d) = json-object-has?(doc, key) ? json-int-value(json-object-get(doc, key)) : d;
   def svs-strs(doc, key) = json-object-has?(doc, key) ? map(t => json-string-value(t), json-array-elements(json-object-get(doc, key))) : [];
@@ -44,7 +47,7 @@ section [form.bml] {
   def svs-parse-doc(fid, doc) {
    let prompt = svs-str(doc, "prompt", "");
    let max = svs-int(doc, "max_tokens", 0);
-   len(svs-str(doc, "envelope", "")) > 0 || len(svs-str(doc, "grammar", "")) > 0 ? ["refused", "envelope-unsupported: this server decodes greedily with no grammar hook; run a session of your own for an envelope"] : len(prompt) == 0 ? ["refused", "no prompt"] : max < 0 ? ["refused", "max_tokens below zero"] : svs-int(doc, "temperature_milli", 0) < 0 ? ["refused", "temperature_milli below zero"] : ["ok", [fid, prompt, svs-str(doc, "lens", ""), svs-int(doc, "chat", 1), max, svs-strs(doc, "stop"), svs-int(doc, "priority", 0), svs-str(doc, "who", "caller"), svs-int(doc, "temperature_milli", 0), svs-int(doc, "seed", 0), svs-int(doc, "spec", 1)]];
+   len(svs-str(doc, "envelope", "")) > 0 || len(svs-str(doc, "grammar", "")) > 0 ? ["refused", "envelope-unsupported: this server decodes greedily with no grammar hook; run a session of your own for an envelope"] : len(prompt) == 0 ? ["refused", "no prompt"] : max < 0 ? ["refused", "max_tokens below zero"] : svs-int(doc, "temperature_milli", 0) < 0 ? ["refused", "temperature_milli below zero"] : ["ok", [fid, prompt, svs-str(doc, "lens", ""), svs-int(doc, "chat", 1), max, svs-strs(doc, "stop"), svs-int(doc, "priority", 0), svs-str(doc, "who", "caller"), svs-int(doc, "temperature_milli", 0), svs-int(doc, "seed", 0), svs-int(doc, "spec", 1), svs-str(doc, "model", "")]];
   }
   def svs-r-prompt(r) = r[1];
   def svs-r-lens(r) = r[2];
@@ -53,7 +56,7 @@ section [form.bml] {
   def svs-put(xs, i, v) = append(append(take(i, xs), [v]), xs[i + 1:]);
   // fields 20 and 21: the positions at which the prefill lane keeps a snapshot of its state for later requests that share the prefix (the server names them,
   // sorted, each under the last prompt position), and how many prompt ids the prefix cache already held when the sequence began (read from the state, never from the prompt)
-  def svs-seq(r, ids, now) = [r[0], r[6], now, ids, r[4], r[5], "queued", -1, 0, [], 0, 0, 0, 0, 0, "", 0, 0, r[7], 0, [], 0, len(r) > 8 ? r[8] : 0, len(r) > 9 ? r[9] : 0, [], ids, 0, [], 500, 0, 0, len(r) > 10 ? r[10] : 1];
+  def svs-seq(r, ids, now) = [r[0], r[6], now, ids, r[4], r[5], "queued", -1, 0, [], 0, 0, 0, 0, 0, "", 0, 0, r[7], 0, [], 0, len(r) > 8 ? r[8] : 0, len(r) > 9 ? r[9] : 0, [], ids, 0, [], 500, 0, 0, len(r) > 10 ? r[10] : 1, len(r) > 11 ? r[11] : ""];
   // fields 24 to 26: the blocks the sequence holds, in table order (position p is in blocks[p / bsz]); the prompt as it was submitted (a yield requeues the prompt and the reply so far as one list of ids);
   // how many times the sequence gave its blocks back for others
   def svs-blocks(s) = s[24];
@@ -391,7 +394,9 @@ section [form.bml] {
   def svs-decode-ms(s) = s[19] - s[13] < 0 ? 0 : s[19] - s[13];
   // tokens a second in tenths, over the span the sequence decoded (joined to ended)
   def svs-tok-s10(s) = svs-decode-ms(s) <= 0 ? 0 : s[17] * 10000 / svs-decode-ms(s);
-  def svs-fields(s, at_unix_ms) = [svs-s("id", s[0]), svs-s("who", s[18]), svs-s("status", s[15]), svs-n("priority", s[1]), svs-n("prompt_ids", len(s[25])), svs-n("cached_ids", s[21]), svs-n("yields", s[26]), svs-n("drafts_tried", s[29]), svs-n("drafts_accepted", s[30]), svs-n("temperature_milli", s[22]), svs-n("generated_ids", s[17]), svs-n("wall_ms", s[19] - s[2]), svs-n("queue_ms", s[12] - s[2]), svs-n("prefill_ms", s[16]), svs-n("decode_ms", svs-decode-ms(s)), json-node-pair("decode_tok_s", json-node-float-text(svs-tenths(svs-tok-s10(s)))), svs-n("surprise_micro_nats", s[17] > 0 ? s[14] / s[17] : 0), svs-n("slot", s[7]), svs-n("rent_tokens", 0), svs-n("at_unix_ms", at_unix_ms)];
+  def svs-model-field(s) = len(s) > 32 && len(s[32]) > 0 ? [svs-s("model", s[32])] : [];
+  def svs-fields(s, at_unix_ms) = append(svs-model-field(s), svs-fields-core(s, at_unix_ms));
+  def svs-fields-core(s, at_unix_ms) = [svs-s("id", s[0]), svs-s("who", s[18]),svs-s("status", s[15]), svs-n("priority", s[1]), svs-n("prompt_ids", len(s[25])), svs-n("cached_ids", s[21]), svs-n("yields", s[26]), svs-n("drafts_tried", s[29]), svs-n("drafts_accepted", s[30]), svs-n("temperature_milli", s[22]), svs-n("generated_ids", s[17]), svs-n("wall_ms", s[19] - s[2]), svs-n("queue_ms", s[12] - s[2]), svs-n("prefill_ms", s[16]), svs-n("decode_ms", svs-decode-ms(s)), json-node-pair("decode_tok_s", json-node-float-text(svs-tenths(svs-tok-s10(s)))), svs-n("surprise_micro_nats", s[17] > 0 ? s[14] / s[17] : 0), svs-n("slot", s[7]), svs-n("rent_tokens", 0), svs-n("at_unix_ms", at_unix_ms)];
   def svs-ledger-row(s, at_unix_ms) = json-emit(json-node-object(svs-fields(s, at_unix_ms)));
   def svs-reply-row(s, text, at_unix_ms) = json-emit(json-node-object(append(svs-fields(s, at_unix_ms), [svs-s("text", text)])));
   def svs-refused-row(fid, why, at_unix_ms) = json-emit(json-node-object([svs-s("id", fid), svs-s("status", "refused"), svs-s("reason", why), svs-n("generated_ids", 0), svs-n("rent_tokens", 0), svs-n("at_unix_ms", at_unix_ms), svs-s("text", "")]));
