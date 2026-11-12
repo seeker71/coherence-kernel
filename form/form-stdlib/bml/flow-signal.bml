@@ -26,18 +26,40 @@ section [form.bml] {
   // the one-word spelling of a why: no spaces (a reader splits on columns, not on words)
   def fsg-clean(s, i) = i >= len(s) ? "" : (str_byte_at(s, i) <= 32 ? "-" : byte_to_str(str_byte_at(s, i))) ++ fsg-clean(s, i + 1);
   def fsg-word(s) = fsg-pad(fsg-clean(s, 0), 16);
+  // A writer OFFERS: an offer on a name that already stands (a dead flow's frame, a watcher's mapping) maps the same object in place, so every reader sees this writer's frame,
+  // and its write lands. A receive handle is read-only: a write through it is a silent no-op, which once left live flows blind behind the last run's rows. Receive is only the
+  // fallback when the offer is refused, and that is said aloud.
   def fsg-open-handle(name) {
-   let got = shm_receive(name);
-   nothing?(got) ? shm_offer(name, FSGBytes()) : got;
+   let got = shm_offer(name, FSGBytes());
+   nothing?(got) ? fsg-open-fallback(name) : got;
+  }
+  def fsg-open-fallback(name) {
+   let said = print_str("flow-signal: the offer of " ++ name ++ " was refused; this flow's cells will not reach the frame\n");
+   shm_receive(name);
+  }
+  // a frame given whole: a write that did not land (no handle, or the handle answered nothing) is said aloud once per writer
+  def fsg-give(F, key, text) {
+   let h = record_get(F, key);
+   let r = nothing?(h) ? nothing() : shm_write(h, text);
+   nothing?(r) ? fsg-blind(F, key) : r;
+  }
+  def fsg-blind(F, key) {
+   let seen = record_get(F, "blind");
+   nothing?(seen) || seen == 0 ? fsg-blind-say(F, key) : 0;
+  }
+  def fsg-blind-say(F, key) {
+   let a = record_set(F, "blind", 1);
+   let b = print_str("flow-signal: a write to the " ++ key ++ " frame of " ++ record_get(F, "id") ++ " did not land; the frame is blind to this flow\n");
+   0;
   }
   // a writer's state: the frame handle, the bell, the request, the lights, the ring
   // opening a slot writes a FRESH frame (header, picture of this request with no light lit and kind "go", an empty ring): a persisted slot never shows a previous flow
   def fsg-new(slot, request) {
    let F = fsg-state(slot, request);
-   let w = nothing?(record_get(F, "h")) ? 0 : shm_write(record_get(F, "h"), fsg-frame(F));
+   let w = fsg-give(F, "h", fsg-frame(F));
    F;
   }
-  def fsg-state(slot, request) = record_new(0, "h", fsg-open-handle(fsg-name(slot)), "bell", fsg-open-handle(fsg-bell-name()), "id", request, "seq", 0, "rep", 0, "t0", host_monotonic_ms(), "lights", ".....", "ring", [], "stage", "plan", "kind", "go", "why", "begin", "slot", slot);
+  def fsg-state(slot, request) = record_new(0, "h", fsg-open-handle(fsg-name(slot)), "bell", fsg-open-handle(fsg-bell-name()), "id", request, "seq", 0, "rep", 0, "t0", host_monotonic_ms(), "lights", ".....", "ring", [], "stage", "plan", "kind", "go", "why", "begin", "slot", slot, "blind", 0);
   def fsg-stage-index(stage) = stage == "plan" ? 0 : stage == "cand" ? 1 : stage == "appl" ? 2 : stage == "band" ? 3 : stage == "land" ? 4 : -1;
   def fsg-glyph(kind, was) = kind == "go" ? ">" : kind == "ok" ? (was == "R" || was == "~" ? was : "+") : kind == "part" ? "~" : kind == "disc" ? "!" : kind == "fix" ? "R" : was;
   def fsg-light(F, stage, kind) {
@@ -62,8 +84,8 @@ section [form.bml] {
    let line = fsg-cell(F, stage, kind, got, missed, why, ids, ms);
    let ring = append(record_get(F, "ring"), [line]);
    let g = record_set(F, "ring", len(ring) > FSGRing() ? ring[len(ring) - FSGRing():] : ring);
-   let h = nothing?(record_get(F, "h")) ? 0 : shm_write(record_get(F, "h"), fsg-frame(F));
-   let i = nothing?(record_get(F, "bell")) ? 0 : shm_write(record_get(F, "bell"), fsg-pad(record_get(F, "id"), 28) ++ " " ++ fsg-num(n, 6));
+   let h = fsg-give(F, "h", fsg-frame(F));
+   let i = fsg-give(F, "bell", fsg-pad(record_get(F, "id"), 28) ++ " " ++ fsg-num(n, 6));
    let j = kind == "disc" ? fb_record([stage, why, got, missed], "flow-signal:" ++ record_get(F, "id"), n) : 0;
    line;
   }

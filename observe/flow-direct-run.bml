@@ -68,7 +68,11 @@ section [form.bml] {
   def fl-plan-walk(S, id) {
    let t = host_monotonic_ms();
    let a = fl-emit(S, "plan", "go", 0, 0, "planning", id, 0);
-   let rec = cell_run("observe/local-plan-run.bml", 0, 3600000, ["{\"request\":\"" ++ id ++ "\",\"attempts\":1}"]);
+   let first = cell_run("observe/local-plan-run.bml", 0, 3600000, ["{\"request\":\"" ++ id ++ "\",\"attempts\":1}"]);
+   // a cell whose image could not be published (many cells publishing at once) is a backtrack point, not an end: the flow waits its slot's turn and takes the cell once more
+   let again = fl-publication-stop?(first);
+   let nap = again ? fl-seq(fl-emit(S, "plan", "fix", 0, 0, "publication-retry", id, 0), host_sleep_ms([8000 + 5000 * record_get(record_get(S, "F"), "slot")])) : 0;
+   let rec = again ? cell_run("observe/local-plan-run.bml", 0, 3600000, ["{\"request\":\"" ++ id ++ "\",\"attempts\":1}"]) : first;
    let row = fl-row(fl-queue(), "\"request\":\"" ++ id ++ "\"");
    let said = record_set(S, "said", fl-tail(nothing?(rec) ? "" : cs-stdout(rec)));
    !nothing?(row) ? fl-plan-have(S, row, "planned") : fl-plan-refused(S, fl-planner-why(id, rec));
@@ -79,7 +83,17 @@ section [form.bml] {
   }
   def fl-planner-why(id, rec) {
    let led = fl-row(fl-planner-ledger(), "\"request\":\"" ++ id ++ "\"");
-   !nothing?(led) ? svs-str(led, "kind", svs-str(led, "verdict", "refused")) : nothing?(rec) ? "planner-did-not-run" : !nothing?(record_get(rec, "stopped")) ? "planner-stopped" : "planner-said-nothing";
+   !nothing?(led) ? svs-str(led, "kind", svs-str(led, "verdict", "refused")) : nothing?(rec) ? "planner-did-not-run" : !nothing?(record_get(rec, "stopped")) ? "planner-stopped-" ++ fl-slug(fl-head(fl-stop-words(record_get(rec, "stopped")), 56)) : "planner-said-nothing";
+  }
+  def fl-publication-stop?(rec) = !nothing?(rec) && !nothing?(record_get(rec, "stopped")) && str_find(fl-stop-words(record_get(rec, "stopped")), "publication", 0) >= 0;
+  // the stop is a record: its kind and its message are the words
+  def fl-stop-words(st) = (String) value_kind(st) == "record" ? trim(value_str(record_get(st, "kind") ?? "") ++ " " ++ value_str(record_get(st, "message") ?? "")) : trim(value_str(st));
+  // a stop's words as one cause word: letters and digits stay, every other run of bytes becomes one hyphen, so the cause is safe in a JSON row and a frame cell
+  def fl-slug(s) = fl-slug-at(s, 0, "");
+  def fl-slug-at(s, i, acc) {
+   let b = i >= len(s) ? 0 : str_byte_at(s, i);
+   let keep = (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122);
+   i >= len(s) ? acc : fl-slug-at(s, i + 1, keep ? acc ++ byte_to_str(b) : (len(acc) > 0 && substring(acc, len(acc) - 1, len(acc)) != "-" ? acc ++ "-" : acc));
   }
   // a refused plan is partial, not an end: the candidate runs from the request's own words and its files, and the compile is its witness
   def fl-plan-refused(S, why) {
