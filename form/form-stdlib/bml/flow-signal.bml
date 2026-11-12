@@ -1,0 +1,72 @@
+// flow-signal.bml — the flow's signal surface: a frame in process shared memory, not a file.
+//
+// A flow (observe/flow-run.bml: one request, plan -> candidate -> apply -> band -> land) writes what it meets into ONE bounded
+// frame (form-glass-gift-frame: shm_offer / shm_write, a seqlock header the reader never sees torn) and rings ONE shared bell frame.
+// Nothing here grows on disk and nothing here is parsed to be read:
+//   line 1 the header  FL1 <request> seq=<8> rep=<2> ms=<8>      seq is the wake-up word's own counter (the frame's seq word wakes a reader)
+//   line 2 the picture <request> [<five lights>] <stage> <kind> <why> rep ms     THE FRAMEBUFFER: one row a request, fixed width, read with cat
+//   then the ring: the last 48 cells, one fixed-width line each (old cells are overwritten; nature keeps no unbounded log):
+//     <seq 6> <at_unix_ms 13> <stage 5> <kind 4> got=<4> miss=<4> why=<16> ms=<7> <ids 24>
+// The five lights are the stages plan, cand, appl, band, land: "." not reached, "+" ok, "~" partial (passed forward), "!" discomfort,
+// "R" repaired. A kind is ok | part | disc | fix | end.
+// A reader attaches to the frame's seq word (host_sleep_ms over the frame handles: the kernel wakes it on a write; no timer, no tail)
+// or reads the picture at any instant. The slots are fixed names /fgn-flow-00 .. /fgn-flow-15 and /fgn-flow-bell, within the 31-byte bound.
+// Disk gets only the sparse durable fact at a request's end (fsg-end-row), appended by the caller to a ledger the body already keeps.
+// preludes: form-stdlib/core.fk form-stdlib/bml/serve-sched.bml
+section [form.bml] {
+ class FlowSignal {
+  field FSGBytes = 16384;
+  field FSGRing = 48;
+  def fsg-name(slot) = "/fgn-flow-" ++ (slot < 10 ? "0" : "") ++ slot.str();
+  def fsg-bell-name() = "/fgn-flow-bell";
+  def fsg-sp(n) = n <= 0 ? "" : " " ++ fsg-sp(n - 1);
+  def fsg-zero(n) = n <= 0 ? "" : "0" ++ fsg-zero(n - 1);
+  def fsg-pad(s, n) = len(s) >= n ? substring(s, 0, n) : s ++ fsg-sp(n - len(s));
+  def fsg-num(v, w) = len(v.str()) >= w ? v.str() : fsg-zero(w - len(v.str())) ++ v.str();
+  // the one-word spelling of a why: no spaces (a reader splits on columns, not on words)
+  def fsg-clean(s, i) = i >= len(s) ? "" : (str_byte_at(s, i) <= 32 ? "-" : byte_to_str(str_byte_at(s, i))) ++ fsg-clean(s, i + 1);
+  def fsg-word(s) = fsg-pad(fsg-clean(s, 0), 16);
+  def fsg-open-handle(name) {
+   let got = shm_receive(name);
+   nothing?(got) ? shm_offer(name, FSGBytes()) : got;
+  }
+  // a writer's state: the frame handle, the bell, the request, the lights, the ring
+  def fsg-new(slot, request) = record_new(0, "h", fsg-open-handle(fsg-name(slot)), "bell", fsg-open-handle(fsg-bell-name()), "id", request, "seq", 0, "rep", 0, "t0", host_monotonic_ms(), "lights", ".....", "ring", [], "stage", "plan", "kind", "ok", "why", "", "slot", slot);
+  def fsg-stage-index(stage) = stage == "plan" ? 0 : stage == "cand" ? 1 : stage == "appl" ? 2 : stage == "band" ? 3 : stage == "land" ? 4 : -1;
+  def fsg-glyph(kind, was) = kind == "ok" ? (was == "R" || was == "~" ? was : "+") : kind == "part" ? "~" : kind == "disc" ? "!" : kind == "fix" ? "R" : was;
+  def fsg-light(F, stage, kind) {
+   let i = fsg-stage-index(stage);
+   let ls = record_get(F, "lights");
+   i < 0 ? ls : substring(ls, 0, i) ++ fsg-glyph(kind, substring(ls, i, i + 1)) ++ substring(ls, i + 1, 5);
+  }
+  def fsg-cell(F, stage, kind, got, missed, why, ids, ms) = fsg-num(record_get(F, "seq"), 6) ++ " " ++ fsg-num(now_unix_ms(), 13) ++ " " ++ fsg-pad(stage, 5) ++ " " ++ fsg-pad(kind, 4) ++ " got=" ++ fsg-num(got, 4) ++ " miss=" ++ fsg-num(missed, 4) ++ " why=" ++ fsg-word(why) ++ " ms=" ++ fsg-num(ms, 7) ++ " " ++ fsg-pad(ids, 24);
+  def fsg-header(F) = "FL1 " ++ fsg-pad(record_get(F, "id"), 28) ++ " seq=" ++ fsg-num(record_get(F, "seq"), 8) ++ " rep=" ++ fsg-num(record_get(F, "rep"), 2) ++ " ms=" ++ fsg-num(host_monotonic_ms() - record_get(F, "t0"), 8);
+  def fsg-picture(F) = fsg-pad(record_get(F, "id"), 28) ++ " [" ++ record_get(F, "lights") ++ "] " ++ fsg-pad(record_get(F, "stage"), 5) ++ " " ++ fsg-pad(record_get(F, "kind"), 4) ++ " " ++ fsg-word(record_get(F, "why")) ++ " rep=" ++ fsg-num(record_get(F, "rep"), 2) ++ " ms=" ++ fsg-num(host_monotonic_ms() - record_get(F, "t0"), 8);
+  def fsg-join(rows) = nil?(rows) ? "" : rows[0] ++ "\n" ++ fsg-join(rows[1:]);
+  def fsg-frame(F) = fsg-header(F) ++ "\n" ++ fsg-picture(F) ++ "\n" ++ fsg-join(record_get(F, "ring"));
+  // one cell: the lights and the ring move, the frame is given whole, the bell is rung. Answers the cell line.
+  def fsg-emit(F, stage, kind, got, missed, why, ids, ms) {
+   let n = record_get(F, "seq") + 1;
+   let a = record_set(F, "seq", n);
+   let b = record_set(F, "lights", fsg-light(F, stage, kind));
+   let c = record_set(F, "stage", stage);
+   let d = record_set(F, "kind", kind);
+   let e = record_set(F, "why", why);
+   let f = kind == "fix" ? record_set(F, "rep", record_get(F, "rep") + 1) : 0;
+   let line = fsg-cell(F, stage, kind, got, missed, why, ids, ms);
+   let ring = append(record_get(F, "ring"), [line]);
+   let g = record_set(F, "ring", len(ring) > FSGRing() ? ring[len(ring) - FSGRing():] : ring);
+   let h = nothing?(record_get(F, "h")) ? 0 : shm_write(record_get(F, "h"), fsg-frame(F));
+   let i = nothing?(record_get(F, "bell")) ? 0 : shm_write(record_get(F, "bell"), fsg-pad(record_get(F, "id"), 28) ++ " " ++ fsg-num(n, 6));
+   let j = kind == "disc" ? fb_record([stage, why, got, missed], "flow-signal:" ++ record_get(F, "id"), n) : 0;
+   line;
+  }
+  def fsg-release(F) {
+   let a = nothing?(record_get(F, "h")) ? 0 : shm_release(record_get(F, "h"));
+   nothing?(record_get(F, "bell")) ? 0 : shm_release(record_get(F, "bell"));
+  }
+  // the sparse durable fact of a request's end: one JSON row for a ledger the body already keeps
+  def fsg-end-row(request, verdict, cause, got, missed, repairs, ms) = "{\"at_unix_ms\":" ++ now_unix_ms().str() ++ ",\"request\":\"" ++ request ++ "\",\"rung\":\"flow\",\"verdict\":\"" ++ verdict ++ "\",\"kind\":\"" ++ cause ++ "\",\"got\":" ++ got.str() ++ ",\"missed\":" ++ missed.str() ++ ",\"repairs\":" ++ repairs.str() ++ ",\"ms\":" ++ ms.str() ++ ",\"rent_tokens\":0}";
+ }
+ 0;
+}

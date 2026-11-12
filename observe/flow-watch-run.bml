@@ -1,0 +1,65 @@
+// flow-watch-run.bml — the subscription to the flow's signal surface (form-stdlib/bml/flow-signal.bml): shared memory, no polling, no parsing.
+//
+//   echo '{"snapshot":1}' | ./fkwu observe/flow-watch-run.bml     the framebuffer: one picture row per standing flow (line 2 of each frame), then ends
+//   echo '{"all":0}'       | ./fkwu observe/flow-watch-run.bml     attach to the bell and every flow frame, sleep on their seq words, and print each new cell the
+//                                                                  moment a flow gives it (discomfort, repairs, partial passes, ends; all:1 prints every cell)
+// A wake is the kernel's: host_sleep_ms over the frame handles ends when a frame's seq word moves, so a quiet flow costs nothing and a cell costs
+// one wake. idle_ms (default 1800000) ends the watch when no flow has given a cell for that long. stdout: one line a cell, "<slot> <request> <cell>".
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/door-options.bml form-stdlib/bml/serve-sched.bml form-stdlib/bml/flow-signal.bml
+section [form.bml] {
+ class FlowWatch {
+  def fw-spec() = [["slots", "int"], ["all", "int"], ["snapshot", "int"], ["idle_ms", "int"]];
+  def fw-int(o, key, d) = json-object-has?(o, key) ? json-int-value(json-object-get(o, key)) : d;
+  def fw-range(i, n) = i >= n ? [] : cons(i, fw-range(i + 1, n));
+  def fw-handle(i) = shm_receive(fsg-name(i));
+  def fw-text(h) = nothing?(h) ? "" : (shm_read(h) ?? "");
+  def fw-lines(text) = split-on(text, "\n");
+  def fw-cell?(line) = len(line) > 40 && str_byte_at(line, 6) == 32 && str_byte_at(line, 0) >= 48 && str_byte_at(line, 0) <= 57;
+  def fw-cells(text) = filter(l => fw-cell?(l), fw-lines(text));
+  def fw-id(text) = len(fw-lines(text)) > 0 && len(fw-lines(text)[0]) > 32 ? trim(substring(fw-lines(text)[0], 4, 32)) : "";
+  def fw-picture(text) = len(fw-lines(text)) > 1 ? fw-lines(text)[1] : "";
+  def fw-kind(line) = trim(substring(line, 27, 31));
+  def fw-stage(line) = trim(substring(line, 21, 26));
+  def fw-notable?(line, all) = all == 1 || fw-kind(line) != "ok" || fw-stage(line) == "land";
+  // the cells after the last one this watch printed for the slot (every cell when it is not in the ring any more)
+  def fw-after(cells, last) {
+   let at = foldl((acc, c) => (String) c == last ? 1 : acc, 0, cells);
+   at == 0 ? cells : fw-drop-through(cells, last);
+  }
+  def fw-drop-through(cells, last) = nil?(cells) ? [] : (String) cells[0] == last ? cells[1:] : fw-drop-through(cells[1:], last);
+  def fw-say(i, id, cells, all) = foldl((acc, c) => fw-notable?(c, all) ? print_str(fsg-pad(i.str(), 2) ++ " " ++ id ++ " " ++ c ++ "\n") : acc, 0, cells);
+  // one look at every slot: prints what is new and answers the new last-cell of each slot
+  def fw-scan(hs, seen, all) = map(i => fw-scan-slot(i, hs[i], seen[i], all), fw-range(0, len(hs)));
+  def fw-scan-slot(i, h, last, all) {
+   let text = fw-text(h);
+   let cells = fw-cells(text);
+   let fresh = fw-after(cells, last);
+   let said = fw-say(i, fw-id(text), fresh, all);
+   nil?(cells) ? last : cells[len(cells) - 1];
+  }
+  def fw-live(hs) = filter(h => !nothing?(h), hs);
+  def fw-reattach(hs) = map(i => nothing?(hs[i]) ? fw-handle(i) : hs[i], fw-range(0, len(hs)));
+  def fw-snapshot(hs) = foldl((acc, h) => nothing?(h) ? acc : print_str(fw-picture(fw-text(h)) ++ "\n"), 0, hs);
+  def fw-watch(hs, bell, seen, all, idle) {
+   let woke = host_sleep_ms(cons(idle, cons(bell, fw-live(hs))));
+   woke[1] == -1 ? "idle: no flow gave a cell for " ++ idle.str() ++ " ms" : fw-go(fw-reattach(hs), bell, seen, all, idle);
+  }
+  // a rest is armed against the seq words at its entry, so a cell given between the scan and the rest would be slept through:
+  // the words are read before the scan and again after it, and a word that moved sends the watch round again instead of to rest
+  def fw-seqs(hs, bell) = value_str(map(h => nothing?(h) ? 0 : shm_seq(h), cons(bell, hs)));
+  def fw-go(hs, bell, seen, all, idle) {
+   let before = fw-seqs(hs, bell);
+   let now = fw-scan(hs, seen, all);
+   (String) before != (String) fw-seqs(hs, bell) ? fw-go(hs, bell, now, all, idle) : fw-watch(hs, bell, now, all, idle);
+  }
+  def fw-run() {
+   let o = dop-doc("flow-watch", stdin-text(), fw-spec());
+   let n = fw-int(o, "slots", 32);
+   let hs = map(i => fw-handle(i), fw-range(0, n));
+   let bell = fsg-open-handle(fsg-bell-name());
+   fw-int(o, "snapshot", 0) == 1 ? fw-snapshot(hs) : print_str(fw-go(hs, bell, map(i => "", fw-range(0, n)), fw-int(o, "all", 0), fw-int(o, "idle_ms", 1800000)) ++ "\n");
+  }
+ }
+ fw-run();
+}
