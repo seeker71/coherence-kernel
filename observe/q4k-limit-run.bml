@@ -15,7 +15,15 @@ section [form.bml] {
   def ql-copies() = 4;
   def ql-bytes() = ql-rows() * (ql-cols() / 256) * 144;
   def ql-loads-msl() = "kernel void q4k_loads_only" ++ q38dq-sig-msl() ++ "uint ix = (uint)tiisg / 16u; uint tid = (uint)tiisg - ix * 16u; uint c = tid / 4u; uint il = tid - c * 4u; uint qoff = 16u + c * 32u + il * 8u; uint slo = 2u * c; for (uint ib = (uint)sgitg * 2u + ix; ib < nb; ib += nsg * 2u) { device const float* xl = x + ib * 256u + slo * 32u + il * 8u; device const float* xh = xl + 32; packed_float4 la = *(device const packed_float4*)(xl); packed_float4 lc = *(device const packed_float4*)(xl + 4); packed_float4 ha = *(device const packed_float4*)(xh); packed_float4 hc = *(device const packed_float4*)(xh + 4); float xs = ((la.x + lc.x) + (ha.x + hc.x)); for (ushort row = 0u; row < 2u; ++row) { uint r = r0 + (uint)row; if (r >= rows) continue; device const uchar* b = qb + ((ulong)r * (ulong)nb + (ulong)ib) * 144ul; packed_uint4 h = *(device const packed_uint4*)(b); packed_uint2 q = *(device const packed_uint2*)(b + qoff); uint t = ((h.x ^ h.y) ^ (h.z ^ h.w)) ^ (q.x ^ q.y); float part = float(t & 255u) + xs; if (row == 0u) { sumf0 = sumf0 + part; } else { sumf1 = sumf1 + part; } } } " ++ q38dq-epilogue-msl();
-  def ql-msl() = "#include <metal_stdlib>\nusing namespace metal;\n#pragma clang fp contract(off)\n" ++ q38dq-msl() ++ ql-loads-msl();
+  // the same lanes and loads with ONE piece of the arithmetic kept, to see what each costs: scales only (the shift-and-mask decode of the four scales and mins, the nibbles untouched) and nibbles only
+  // (the unpack of the eight nibbles and the sixteen fma against the activations, the scales untouched)
+  def ql-head-msl() = "uint ix = (uint)tiisg / 16u; uint tid = (uint)tiisg - ix * 16u; uint c = tid / 4u; uint il = tid - c * 4u; uint qoff = 16u + c * 32u + il * 8u; uint slo = 2u * c; for (uint ib = (uint)sgitg * 2u + ix; ib < nb; ib += nsg * 2u) { device const float* xl = x + ib * 256u + slo * 32u + il * 8u; device const float* xh = xl + 32; packed_float4 la = *(device const packed_float4*)(xl); packed_float4 lc = *(device const packed_float4*)(xl + 4); packed_float4 ha = *(device const packed_float4*)(xh); packed_float4 hc = *(device const packed_float4*)(xh + 4); float xs = ((la.x + lc.x) + (ha.x + hc.x)); for (ushort row = 0u; row < 2u; ++row) { uint r = r0 + (uint)row; if (r >= rows) continue; device const uchar* b = qb + ((ulong)r * (ulong)nb + (ulong)ib) * 144ul; packed_uint4 h = *(device const packed_uint4*)(b); packed_uint2 q = *(device const packed_uint2*)(b + qoff); float d = float(as_type<half>(ushort(h.x & 65535u))); float dmin = float(as_type<half>(ushort(h.x >> 16u))); ";
+  def ql-tail-msl() = " if (row == 0u) { sumf0 = sumf0 + part; } else { sumf1 = sumf1 + part; } } } ";
+  def ql-scales-msl() = "uint sh0 = (c & 1u) * 16u; uint ya = h.y >> sh0; uint za = h.z >> sh0; uint wa = h.w >> sh0; uint yb = ya >> 8u; uint zb = za >> 8u; uint wb = wa >> 8u; bool hi = c >= 2u; uint scl = hi ? ((wa & 15u) | (((ya >> 6u) & 3u) << 4u)) : (ya & 63u); uint mnl = hi ? (((wa >> 4u) & 15u) | (((za >> 6u) & 3u) << 4u)) : (za & 63u); uint sch = hi ? ((wb & 15u) | (((yb >> 6u) & 3u) << 4u)) : (yb & 63u); uint mnh = hi ? (((wb >> 4u) & 15u) | (((zb >> 6u) & 3u) << 4u)) : (zb & 63u); float gscl = d * float(scl); float gmnl = dmin * float(mnl); float gsch = d * float(sch); float gmnh = dmin * float(mnh); ";
+  def ql-nibbles-msl() = "float4 wl0 = float4(as_type<uchar4>(q.x & 0x0F0F0F0Fu)); float4 wl1 = float4(as_type<uchar4>(q.y & 0x0F0F0F0Fu)); float4 wh0 = float4(as_type<uchar4>((q.x >> 4u) & 0x0F0F0F0Fu)); float4 wh1 = float4(as_type<uchar4>((q.y >> 4u) & 0x0F0F0F0Fu)); float qdl = 0.0f; qdl = metal::fma(wl0.x, la.x, qdl); qdl = metal::fma(wl0.y, la.y, qdl); qdl = metal::fma(wl0.z, la.z, qdl); qdl = metal::fma(wl0.w, la.w, qdl); qdl = metal::fma(wl1.x, lc.x, qdl); qdl = metal::fma(wl1.y, lc.y, qdl); qdl = metal::fma(wl1.z, lc.z, qdl); qdl = metal::fma(wl1.w, lc.w, qdl); float qdh = 0.0f; qdh = metal::fma(wh0.x, ha.x, qdh); qdh = metal::fma(wh0.y, ha.y, qdh); qdh = metal::fma(wh0.z, ha.z, qdh); qdh = metal::fma(wh0.w, ha.w, qdh); qdh = metal::fma(wh1.x, hc.x, qdh); qdh = metal::fma(wh1.y, hc.y, qdh); qdh = metal::fma(wh1.z, hc.z, qdh); qdh = metal::fma(wh1.w, hc.w, qdh); ";
+  def ql-scales-only-msl() = "kernel void q4k_scales_only" ++ q38dq-sig-msl() ++ ql-head-msl() ++ ql-scales-msl() ++ "uint t = q.x ^ q.y; float part = ((gscl + gsch) + (gmnl + gmnh)) + float(t & 255u) + xs;" ++ ql-tail-msl() ++ q38dq-epilogue-msl();
+  def ql-nibbles-only-msl() = "kernel void q4k_nibbles_only" ++ q38dq-sig-msl() ++ ql-head-msl() ++ ql-nibbles-msl() ++ "float part = (qdl + qdh) + xs + d + dmin + float(h.y & 255u);" ++ ql-tail-msl() ++ q38dq-epilogue-msl();
+  def ql-msl() = "#include <metal_stdlib>\nusing namespace metal;\n#pragma clang fp contract(off)\n" ++ q38dq-msl() ++ ql-loads-msl() ++ ql-scales-only-msl() ++ ql-nibbles-only-msl();
   def ql-spec() = [["go", "int"]];
   def ql-bufs(k) = k <= 0 ? [] : cons(metal_buf_alloc(ql-bytes()), ql-bufs(k - 1));
   def ql-rec(pl, w, x, y) = [pl, md-bind16([w, x, y], [ql-rows(), ql-cols()], 256, 0, 1, 0), (ql-rows() + 1) / 2];
@@ -44,7 +52,19 @@ section [form.bml] {
    let a = ql-best(mats, 80, 6, -1);
    let b = ql-best(lods, 80, 6, -1);
    let c = ql-best(reds, 80, 6, -1);
+   let ps = metal_pipeline(ql-msl(), "q4k_scales_only");
+   let pn = metal_pipeline(ql-msl(), "q4k_nibbles_only");
+   let scs = ql-best(map(w => ql-rec(ps, w, x, y), ws), 80, 6, -1);
+   let nbs = ql-best(map(w => ql-rec(pn, w, x, y), ws), 80, 6, -1);
+   let t128 = ql-best(map(w => [pm, md-bind16([w, x, y], [ql-rows(), ql-cols()], 128, 0, 1, 0), (ql-rows() + 1) / 2], ws), 80, 6, -1);
+   let t64 = ql-best(map(w => [pm, md-bind16([w, x, y], [ql-rows(), ql-cols()], 64, 0, 1, 0), (ql-rows() + 1) / 2], ws), 80, 6, -1);
+   let t512 = ql-best(map(w => [pm, md-bind16([w, x, y], [ql-rows(), ql-cols()], 512, 0, 1, 0), (ql-rows() + 1) / 2], ws), 80, 6, -1);
+   let h1 = ql-say("matvec at 64 threads a group", 80, t64);
+   let h2 = ql-say("matvec at 128 threads a group", 80, t128);
+   let h3 = ql-say("matvec at 512 threads a group", 80, t512);
    let d = ql-say("matvec (pipeline 57's text, dequantizing)", 80, a);
+   let f = ql-say("scales only (the shift-and-mask scale and min decode, nothing else)", 80, scs);
+   let g = ql-say("nibbles only (the unpack and the sixteen fma, nothing else)", 80, nbs);
    let e = ql-say("loads only (same loads, one xor of what was loaded)", 80, b);
    ql-say("plain read of the same bytes", 80, c);
   }
