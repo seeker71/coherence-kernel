@@ -1,0 +1,404 @@
+// flow-run.bml — one open request carried through the whole flow in ONE pass over the resident server's spool: plan -> candidate -> apply -> band -> land.
+//
+//   echo '{"request":"frq-080c39296b126850","slot":0}' | ./fkwu observe/flow-run.bml
+//
+// stdin, one JSON line, strict: request (the id in learn/local-requests.jsonl, required), slot (0..13: the signal frame /fgn-flow-NN this flow gives its cells into),
+// dir (the spool, default /tmp/form-serve), land (1: a band-full candidate lands through observe/land-run.bml with main:1; default 0), plan (0: a request the
+// queue does not carry is not planned; default 1), repairs (the micro-repairs a stage may fail before it passes forward, default 2).
+//
+// Offline: every generation is the resident server's (rent_tokens 0). PARTIAL RESULTS PASS FORWARD: a stage that cannot finish says so in a cell and the next
+// stage runs with what stands (a refused plan runs the candidate from the request's own words and reads the compile as its witness), so one run shows many
+// issues, and nothing here refuses to continue: no GPU-minute pre-check, no retry that replays the same plan.
+// What the flow meets is a CELL in shared memory (form-stdlib/bml/flow-signal.bml: the frame and its picture row; observe/flow-watch-run.bml subscribes), never a
+// ledger row per step. The NERVOUS SYSTEM is fl-react: a discomfort cell (compile error, unresolved name, arity miss, stray token, a case that failed by printing its
+// form, an edit whose old text is not there, no edit blocks) is answered where it was felt with the smallest repair for its kind, without ending the flow:
+// a deterministic one where the body knows one (the old text found by trimmed lines; the missing prelude named in the file's header from where the name is
+// defined), else ONE small scoped ask of the local voice through the spool with the compiler's words and the nearby definitions. Each repair is its own cell
+// (kind fix, its ms, the file's length before>after). Two failed micro-repairs pass the stage forward as partial.
+// Disk gets ONE sparse row at the end (receipts/local-plan-ledger.jsonl, rung "flow"), and the edits of a candidate that did not land are put back.
+// stdout: one JSON line, the end: request, verdict (landed | green | partial | ended), cause, got, missed, repairs, ms, rent_tokens 0.
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/door-options.bml form-stdlib/bml/serve-sched.bml form-stdlib/bml/serve-client.bml form-stdlib/bml/flow-signal.bml form-stdlib/bml/cell-said.bml form-stdlib/bml/string-join.bml form-stdlib/spool-bell-transport.fk
+section [form.bml] {
+ class FlowRun {
+  def fl-spec() = [["request", "str"], ["slot", "int"], ["dir", "str"], ["land", "int"], ["plan", "int"], ["repairs", "int"]];
+  def fl-queue() = "learn/native-turn-queue.jsonl";
+  def fl-requests() = "learn/local-requests.jsonl";
+  def fl-planner-ledger() = ".hearth/local-plans/ledger.jsonl";
+  def fl-ledger() = "receipts/local-plan-ledger.jsonl";
+  def fl-band-ms() = 600000;
+  def fl-ask-tokens() = 3200;
+  // ── reading rows and files ──
+  def fl-text(path) = read_file(path) ?? "";
+  def fl-last-line(lines, needle) = foldl((acc, l) => str_find(l, needle, 0) >= 0 ? l : acc, "", lines);
+  def fl-row(path, needle) {
+   let line = fl-last-line(split-on(fl-text(path), "\n"), needle);
+   len(line) == 0 ? nothing() : try parse-json("flow-row", line) catch nothing();
+  }
+  def fl-strs(row, key) = !nothing?(row) && json-object-has?(row, key) ? map(n => json-string-value(n), json-array-elements(json-object-get(row, key))) : [];
+  def fl-cat(parts) = str-join(parts);
+  def fl-head(s, n) = len(s) <= n ? s : substring(s, 0, n);
+  def fl-line(s) = fl-head(trim(s), 24);
+  // ── the flow's state: one record, the signal frame inside it ──
+  def fl-new(o, id) = record_new(0, "F", fsg-new(svs-int(o, "slot", 0), id), "id", id, "dir", svs-str(o, "dir", svc-default-dir()), "land", svs-int(o, "land", 0), "plan", svs-int(o, "plan", 1), "allow", svs-int(o, "repairs", 2), "t0", host_monotonic_ms(),
+   "row", nothing(), "req", nothing(), "goal", "", "paths", [], "band", "", "full", 0, "orig", [], "got", 0, "miss", 0, "fails", 0, "reply", "", "errs", "", "outs", "", "cause", "", "verdict", "ended", "applied", 0, "green", 0, "landed", 0, "said", "");
+  def fl-emit(S, stage, kind, got, missed, why, ids, ms) = fsg-emit(record_get(S, "F"), stage, kind, got, missed, why, ids, ms);
+  def fl-since(t) = host_monotonic_ms() - t;
+  // ── 1. plan ──
+  def fl-plan(S) {
+   let id = record_get(S, "id");
+   let req = fl-row(fl-requests(), "\"id\":\"" ++ id ++ "\"");
+   let z = record_set(S, "req", req);
+   let row = fl-row(fl-queue(), "\"request\":\"" ++ id ++ "\"");
+   nothing?(req) ? fl-plan-gone(S) : !nothing?(row) ? fl-plan-have(S, row, "queued") : record_get(S, "plan") == 0 ? fl-plan-refused(S, "plan-off") : fl-plan-walk(S, id);
+  }
+  def fl-plan-gone(S) {
+   let a = fl-emit(S, "plan", "disc", 0, 1, "no-such-request", record_get(S, "id"), 0);
+   record_set(S, "cause", "no-such-request");
+  }
+  def fl-plan-have(S, row, how) {
+   let a = record_set(S, "row", row);
+   let b = record_set(S, "goal", svs-str(row, "goal", ""));
+   let c = record_set(S, "paths", fl-strs(row, "writable"));
+   let d = record_set(S, "band", svs-str(row, "band", ""));
+   let e = record_set(S, "full", svs-int(row, "full", 0));
+   fl-emit(S, "plan", "ok", 1, 0, how, svs-str(row, "band", ""), 0);
+  }
+  // the planner is a door: it runs here as a cell in this process and asks the standing server through the spool (lpr-served?), so its voice is the server's
+  def fl-plan-walk(S, id) {
+   let t = host_monotonic_ms();
+   let a = fl-emit(S, "start", "ok", 0, 0, "planning", id, 0);
+   let rec = cell_run("observe/local-plan-run.bml", 0, 3600000, ["{\"request\":\"" ++ id ++ "\",\"attempts\":1}"]);
+   let row = fl-row(fl-queue(), "\"request\":\"" ++ id ++ "\"");
+   let said = record_set(S, "said", fl-tail(nothing?(rec) ? "" : cs-stdout(rec)));
+   !nothing?(row) ? fl-plan-have(S, row, "planned") : fl-plan-refused(S, fl-planner-why(id, rec));
+  }
+  def fl-tail(text) {
+   let ls = filter(l => len(trim(l)) > 0, split-on(text, "\n"));
+   nil?(ls) ? "" : trim(ls[len(ls) - 1]);
+  }
+  def fl-planner-why(id, rec) {
+   let led = fl-row(fl-planner-ledger(), "\"request\":\"" ++ id ++ "\"");
+   !nothing?(led) ? svs-str(led, "kind", svs-str(led, "verdict", "refused")) : nothing?(rec) ? "planner-did-not-run" : !nothing?(record_get(rec, "stopped")) ? "planner-stopped" : "planner-said-nothing";
+  }
+  // a refused plan is partial, not an end: the candidate runs from the request's own words and its files, and the compile is its witness
+  def fl-plan-refused(S, why) {
+   let req = record_get(S, "req");
+   let files = filter(p => file_size(p) > 0 && file_size(p) < 400000, fl-strs(req, "files"));
+   let a = record_set(S, "goal", fl-cat([svs-str(req, "title", ""), "\n\n", svs-str(req, "problem", ""), "\n\n", svs-str(req, "needs", "")]));
+   let b = record_set(S, "paths", len(files) > 2 ? take(2, files) : files);
+   let c = record_set(S, "cause", "plan-" ++ why);
+   fl-emit(S, "plan", "part", 0, 1, why, len(record_get(S, "said")) > 0 ? fl-line(record_get(S, "said")) : fl-line(svs-str(req, "title", "")), 0);
+  }
+  // ── 2. candidate: the voice (the server) answers edit blocks ──
+  def fl-def-names(goal, from) {
+   let at = str_find(goal, "def ", from);
+   at < 0 ? [] : fl-def-name-at(goal, at + 4);
+  }
+  def fl-name-end(s, i) = i >= len(s) || str_byte_at(s, i) == 40 || str_byte_at(s, i) == 32 || str_byte_at(s, i) == 10 || str_byte_at(s, i) == 123 || str_byte_at(s, i) == 61 ? i : fl-name-end(s, i + 1);
+  def fl-def-name-at(goal, from) {
+   let e = fl-name-end(goal, from);
+   e > from ? cons(substring(goal, from, e), fl-def-names(goal, e)) : fl-def-names(goal, from + 1);
+  }
+  // a file too big for the prompt is read through the definitions its task names (each from its "def" to the next one) and its head
+  def fl-region(text, name) {
+   let at = str_find(text, "def " ++ name ++ "(", 0);
+   at < 0 ? "" : substring(text, at, fl-region-end(text, at));
+  }
+  def fl-region-end(text, at) {
+   let nx = str_find(text, "\n  def ", at + 8);
+   let cap = at + 3000 < len(text) ? at + 3000 : len(text);
+   nx < 0 || nx > cap ? cap : nx;
+  }
+  def fl-window(text, goal) = len(text) <= 22000 ? text : fl-cat([fl-head(text, 3000), "\n// ... (the file continues; the definitions the task names follow) ...\n", str-join-with(filter(r => len(r) > 0, map(n => fl-region(text, n), fl-def-names(goal, 0))), "\n\n")]);
+  def fl-file-block(path, goal) = fl-cat(["FILE ", path, " (current text):\n", fl-window(fl-text(path), goal), "\n\n"]);
+  def fl-format() = "Answer with edit blocks and nothing else. Each block is exactly:\nFILE: <path>\n<<<<<<< OLD\n<the existing lines to replace, copied exactly, enough lines to be unique>\n=======\n<the new lines>\n>>>>>>> NEW\nKeep every other line of the file as it is. Form is read as written: copy names and arities from the text above, never invent a definition.";
+  def fl-band-line(S) = len(record_get(S, "band")) == 0 ? "No witness band stands; the edit must compile." : "The band " ++ record_get(S, "band") ++ " must read " ++ record_get(S, "full").str() ++ " (every claim true).";
+  def fl-packet(S) = fl-cat(["You are editing Form/BML source in a repository.\n\nTASK:\n", fl-head(record_get(S, "goal"), 6000), "\n\n", fl-cat(map(p => fl-file-block(p, record_get(S, "goal")), record_get(S, "paths"))), fl-band-line(S), "\n\n", fl-format()]);
+  def fl-ask(S, packet, who) {
+   let r = svc-voice-at(record_get(S, "dir"), packet, fl-ask-tokens(), who, 0, 0);
+   nothing?(r) || (String) r[0] != "answered" ? "" : r[1];
+  }
+  def fl-candidate(S) {
+   let t = host_monotonic_ms();
+   len(record_get(S, "paths")) == 0 ? fl-no-files(S) : fl-candidate-ask(S, t);
+  }
+  def fl-no-files(S) {
+   let a = fl-emit(S, "cand", "disc", 0, 1, "no-writable-file", "", 0);
+   record_set(S, "cause", len(record_get(S, "cause")) > 0 ? record_get(S, "cause") : "no-writable-file");
+  }
+  def fl-candidate-ask(S, t) {
+   let text = fl-ask(S, fl-packet(S), "flow-" ++ record_get(S, "id"));
+   let a = record_set(S, "reply", text);
+   len(text) == 0 ? fl-emit(S, "cand", "disc", 0, 1, "no-reply", "", fl-since(t)) : fl-blocks-in(S, text, t);
+  }
+  def fl-blocks-in(S, text, t) {
+   let bs = fl-blocks(text, 0);
+   nil?(bs) ? fl-react-noblocks(S, text, t) : fl-seq(fl-emit(S, "cand", "ok", len(bs), 0, "blocks", record_get(S, "id"), fl-since(t)), fl-apply-all(S, bs));
+  }
+  def fl-seq(first, second) = second;
+  def fl-unused() {
+   0;
+  }
+  // ── the edit blocks ──
+  def fl-clean-path(p) = trim(fl-strip(fl-strip(trim(p), "`"), "*"));
+  def fl-strip(s, ch) = len(s) > 0 && substring(s, 0, 1) == ch ? fl-strip(substring(s, 1, len(s)), ch) : len(s) > 0 && substring(s, len(s) - 1, len(s)) == ch ? fl-strip(substring(s, 0, len(s) - 1), ch) : s;
+  def fl-blocks(t, from) {
+   let a = str_find(t, "FILE:", from);
+   a < 0 ? [] : fl-block-at(t, a);
+  }
+  def fl-block-at(t, a) {
+   let nl = str_find(t, "\n", a);
+   let o = nl < 0 ? -1 : str_find(t, "<<<<<<<", nl);
+   let os = o < 0 ? -1 : str_find(t, "\n", o) + 1;
+   let sep = os < 1 ? -1 : str_find(t, "\n=======", os - 1);
+   let se = sep < 0 ? -1 : str_find(t, "\n", sep + 1) + 1;
+   let e = se < 1 ? -1 : str_find(t, "\n>>>>>>>", se - 1);
+   e < 0 ? fl-blocks(t, a + 5) : cons([fl-clean-path(substring(t, a + 5, nl)), os > sep ? "" : substring(t, os, sep), e >= se ? substring(t, se, e) : ""], fl-blocks(t, e + 1));
+  }
+  def fl-apply-all(S, bs) = foldl((acc, b) => fl-seq(acc, fl-apply(S, b)), 0, bs);
+  def fl-remember(S, path, text) {
+   let known = filter(o => (String) o[0] == path, record_get(S, "orig"));
+   nil?(known) ? record_set(S, "orig", append(record_get(S, "orig"), [[path, text]])) : 0;
+  }
+  def fl-splice(T, at, n, new) = substring(T, 0, at) ++ new ++ substring(T, at + n, len(T));
+  def fl-write(S, path, text) {
+   let a = write_file_text(path, text);
+   record_set(S, "applied", record_get(S, "applied") + 1);
+  }
+  def fl-apply(S, b) {
+   let path = b[0];
+   let T = read_file(path);
+   nothing?(T) ? fl-apply-missing(S, b) : fl-apply-in(S, b, T);
+  }
+  def fl-apply-missing(S, b) {
+   len(b[1]) == 0 && len(b[0]) > 0 ? fl-seq(fl-emit(S, "appl", "ok", 1, 0, "new-file", b[0], 0), fl-new-file(S, b)) : fl-emit(S, "appl", "disc", 0, 1, "no-such-file", b[0], 0);
+  }
+  def fl-new-file(S, b) {
+   let r = fl-remember(S, b[0], "");
+   fl-write(S, b[0], b[2]);
+  }
+  def fl-apply-in(S, b, T) {
+   let at = len(b[1]) == 0 ? -1 : str_find(T, b[1], 0);
+   at >= 0 ? fl-apply-at(S, b, T, at, len(b[1])) : fl-react-oldmiss(S, b, T);
+  }
+  def fl-apply-at(S, b, T, at, n) {
+   let r = fl-remember(S, b[0], T);
+   let w = fl-write(S, b[0], fl-splice(T, at, n, b[2]));
+   fl-emit(S, "appl", "ok", 1, 0, "applied", b[0], 0);
+  }
+  // ── the nervous system: a discomfort cell is answered where it was felt ──
+  // an edit whose old text is not in the file: the deterministic repair finds it by trimmed lines (the voice copied it with other indentation or a changed blank line)
+  def fl-trim-lines(text) = map(l => trim(l), split-on(text, "\n"));
+  def fl-edge-blank(ls) = !nil?(ls) && len(ls[0]) == 0 ? fl-edge-blank(ls[1:]) : ls;
+  def fl-wanted(old) = reverse(fl-edge-blank(reverse(fl-edge-blank(fl-trim-lines(old)))));
+  def fl-match-at(lines, i, want, k) = k >= len(want) ? true : trim(lines[i + k]) == want[k] && fl-match-at(lines, i, want, k + 1);
+  def fl-find-window(lines, want, i) = len(want) == 0 || i + len(want) > len(lines) ? -1 : fl-match-at(lines, i, want, 0) ? i : fl-find-window(lines, want, i + 1);
+  def fl-offset(lines, i) = i <= 0 ? 0 : len(lines[0]) + 1 + fl-offset(lines[1:], i - 1);
+  def fl-span(lines, i, n) = n <= 0 ? 0 : len(lines[i]) + (n > 1 ? 1 : 0) + fl-span(lines, i + 1, n - 1);
+  def fl-react-oldmiss(S, b, T) {
+   let t = host_monotonic_ms();
+   let lines = split-on(T, "\n");
+   let want = fl-wanted(b[1]);
+   let i = fl-find-window(lines, want, 0);
+   let a = fl-emit(S, "appl", "disc", 0, 1, "old-not-found", b[0], 0);
+   i < 0 ? fl-oldmiss-passed(S, b) : fl-oldmiss-fixed(S, b, T, lines, i, len(want), t);
+  }
+  def fl-oldmiss-fixed(S, b, T, lines, i, n, t) {
+   let at = fl-offset(lines, i);
+   let r = fl-remember(S, b[0], T);
+   let w = fl-write(S, b[0], fl-splice(T, at, fl-span(lines, i, n), trim(b[2]) == b[2] ? b[2] : b[2]));
+   fl-emit(S, "appl", "fix", 1, 0, "trimmed-lines", fl-cat([b[0]]), fl-since(t));
+  }
+  def fl-oldmiss-passed(S, b) {
+   let a = record_set(S, "fails", record_get(S, "fails") + 1);
+   let c = record_set(S, "cause", "edit-old-text-not-found");
+   fl-emit(S, "appl", "part", 0, 1, "old-not-found", b[0], 0);
+  }
+  // no edit blocks in the reply: ONE re-ask names the format and shows the voice its own first words
+  def fl-react-noblocks(S, text, t) {
+   let a = fl-emit(S, "cand", "disc", 0, 1, "no-edit-blocks", fl-line(text), fl-since(t));
+   let t2 = host_monotonic_ms();
+   let again = fl-ask(S, fl-cat([fl-packet(S), "\n\nYour last answer had no edit block. It began: ", fl-head(text, 300), "\nAnswer again with the blocks only."]), "flow-" ++ record_get(S, "id") ++ "-fmt");
+   let bs = fl-blocks(again, 0);
+   nil?(bs) ? fl-noblocks-passed(S) : fl-seq(fl-emit(S, "cand", "fix", len(bs), 0, "format-reask", "", fl-since(t2)), fl-apply-all(S, bs));
+  }
+  def fl-noblocks-passed(S) {
+   let c = record_set(S, "cause", "no-edit-blocks");
+   fl-emit(S, "cand", "part", 0, 1, "no-edit-blocks", "", 0);
+  }
+  // ── 3. the band: the witness the plan wrote, else the compile ──
+  // [number-or-nothing, the compiler's and stop's words, what the band printed]
+  def fl-run-band(path) {
+   let rec = cell_run(path, 0, fl-band-ms(), nothing());
+   let ran = !nothing?(rec) && nothing?(record_get(rec, "stopped")) && record_get(rec, "errors") == 0;
+   let v = nothing?(rec) ? nothing() : record_get(rec, "value");
+   [ran && (String) value_kind(v) == "int" ? v : nothing(), cs-stderr(rec), cs-stdout(rec)];
+  }
+  def fl-run-compile(paths) {
+   let rs = map(p => cell_run(p, 0, "check", nothing()), paths);
+   let errs = foldl((acc, r) => acc ++ (nothing?(r) ? "no cell\n" : cs-stderr(r)), "", rs);
+   [len(errs) == 0 ? 1 : nothing(), errs, ""];
+  }
+  def fl-band-read(S) = len(record_get(S, "band")) > 0 && file_size(record_get(S, "band")) > 0 ? fl-run-band(record_get(S, "band")) : fl-run-compile(filter(p => fl-form?(p), record_get(S, "paths")));
+  def fl-form?(p) = str_find(p, ".bml", 0) == len(p) - 4 || str_find(p, ".fk", 0) == len(p) - 3;
+  def fl-band(S) {
+   let t = host_monotonic_ms();
+   record_get(S, "applied") == 0 ? fl-band-skip(S) : fl-band-pass(S, t, 0);
+  }
+  def fl-band-skip(S) {
+   let c = record_set(S, "cause", len(record_get(S, "cause")) > 0 ? record_get(S, "cause") : "nothing-applied");
+   fl-emit(S, "band", "part", 0, 1, "nothing-applied", "", 0);
+  }
+  def fl-band-pass(S, t, tries) {
+   let r = fl-band-read(S);
+   let a = record_set(S, "errs", r[1]);
+   let b = record_set(S, "outs", r[2]);
+   fl-band-judge(S, r, t, tries);
+  }
+  def fl-judge-kind(S, r) = nothing?(r[0]) ? (str_find(r[1], "[unbound-name]", 0) >= 0 ? "unbound-name" : str_find(r[1], "arity", 0) >= 0 || str_find(r[1], "expects", 0) >= 0 ? "arity" : str_find(r[1], "error", 0) >= 0 ? "compile-error" : "stopped") : len(record_get(S, "band")) == 0 ? "ok" : r[0] == record_get(S, "full") ? "ok" : "claims-short";
+  def fl-band-judge(S, r, t, tries) {
+   let kind = fl-judge-kind(S, r);
+   kind == "ok" ? fl-band-green(S, r, t) : fl-band-hurt(S, r, kind, t, tries);
+  }
+  def fl-band-green(S, r, t) {
+   let a = record_set(S, "green", 1);
+   let b = record_set(S, "got", nothing?(r[0]) ? 0 : r[0]);
+   let c = record_set(S, "miss", 0);
+   fl-emit(S, "band", "ok", nothing?(r[0]) ? 0 : r[0], 0, len(record_get(S, "band")) == 0 ? "compiles" : "full", record_get(S, "band"), fl-since(t));
+  }
+  def fl-band-hurt(S, r, kind, t, tries) {
+   let got = nothing?(r[0]) ? 0 : r[0];
+   let miss = nothing?(r[0]) ? record_get(S, "full") : record_get(S, "full") - r[0];
+   let a = record_set(S, "got", got);
+   let b = record_set(S, "miss", miss < 0 ? 0 : miss);
+   let c = fl-emit(S, "band", "disc", got, miss < 0 ? 0 : miss, kind, fl-line(r[1]), fl-since(t));
+   tries >= record_get(S, "allow") ? fl-band-passed(S, kind) : fl-band-repair(S, r, kind, t, tries);
+  }
+  def fl-band-passed(S, kind) {
+   let c = record_set(S, "cause", "band-" ++ kind);
+   fl-emit(S, "band", "part", record_get(S, "got"), record_get(S, "miss"), kind, "", 0);
+  }
+  // the repair of a band's discomfort, then the band is read again from this same stage
+  def fl-band-repair(S, r, kind, t, tries) {
+   let t2 = host_monotonic_ms();
+   let before = fl-edited-len(S);
+   let did = fl-repair(S, r, kind);
+   let c = fl-emit(S, "band", did == 1 ? "fix" : "disc", before, fl-edited-len(S), did == 1 ? fl-fix-name(kind) : "repair-none", "", fl-since(t2));
+   did == 1 ? fl-band-pass(S, t, tries + 1) : fl-band-passed(S, kind);
+  }
+  def fl-fix-name(kind) = kind == "unbound-name" ? "prelude-or-ask" : kind == "claims-short" ? "ask-with-printed" : "ask-with-compiler";
+  def fl-edited-len(S) = foldl((acc, p) => acc + len(fl-text(p)), 0, record_get(S, "paths"));
+  // the repair for a kind: a deterministic one where the body knows one, else one small scoped ask
+  def fl-repair(S, r, kind) = kind == "unbound-name" ? fl-repair-unbound(S, r) : fl-repair-ask(S, r, kind);
+  // the compiler's first words name the file and the name: "fkwu: <path> (lowered text):L:C: error: [unbound-name] 'name' ..."
+  def fl-err-path(errs) {
+   let a = str_find(errs, "fkwu: ", 0);
+   let b = a < 0 ? -1 : str_find(errs, " (", a);
+   a < 0 || b < 0 ? "" : substring(errs, a + 6, b);
+  }
+  def fl-err-line(errs) {
+   let a = str_find(errs, "(lowered text):", 0);
+   let b = a < 0 ? -1 : str_find(errs, ":", a + 15);
+   a < 0 || b < 0 ? 0 : (try str_to_int(substring(errs, a + 15, b)) catch 0);
+  }
+  def fl-err-name(errs) {
+   let a = str_find(errs, "[unbound-name] '", 0);
+   let b = a < 0 ? -1 : str_find(errs, "'", a + 16);
+   a < 0 || b < 0 ? "" : substring(errs, a + 16, b);
+  }
+  // where a name is defined: the body's own directories, read once per repair
+  def fl-roots() = ["form/form-stdlib/bml", "form/form-stdlib", "observe", "gate", "cognition", "control", "learn"];
+  def fl-source?(n) = str_find(n, ".bml", 0) == len(n) - 4 || str_find(n, ".fk", 0) == len(n) - 3;
+  def fl-defines?(path, name) = str_find(fl-text(path), "def " ++ name ++ "(", 0) >= 0 || str_find(fl-text(path), "defn " ++ name ++ " ", 0) >= 0;
+  def fl-find-in(root, name) = foldl((acc, n) => len(acc) > 0 ? acc : fl-source?(n) && fl-defines?(root ++ "/" ++ n, name) ? root ++ "/" ++ n : "", "", fs_list(root) ?? []);
+  def fl-find-def(name) = len(name) == 0 ? "" : foldl((acc, root) => len(acc) > 0 ? acc : fl-find-in(root, name), "", fl-roots());
+  def fl-prelude-rel(p) = str_find(p, "form/", 0) == 0 ? substring(p, 5, len(p)) : p;
+  def fl-has-prelude?(T, rel) = str_find(T, rel, 0) >= 0;
+  def fl-add-prelude(T, rel) {
+   let at = str_find(T, "preludes:", 0);
+   let eol = at < 0 ? -1 : str_find(T, "\n", at);
+   at < 0 || eol < 0 ? "// preludes: " ++ rel ++ "\n" ++ T : substring(T, 0, eol) ++ " " ++ rel ++ substring(T, eol, len(T));
+  }
+  def fl-repair-unbound(S, r) {
+   let name = fl-err-name(r[1]);
+   let where = fl-find-def(name);
+   let target = fl-err-path(r[1]);
+   let T = len(target) == 0 ? "" : fl-text(target);
+   len(where) > 0 && len(T) > 0 && !fl-has-prelude?(T, fl-prelude-rel(where)) && target != where ? fl-prelude-fix(S, target, T, where) : fl-repair-ask(S, r, "unbound-name");
+  }
+  def fl-prelude-fix(S, target, T, where) {
+   let r = fl-remember(S, target, T);
+   let w = fl-write(S, target, fl-add-prelude(T, fl-prelude-rel(where)));
+   1;
+  }
+  // else ONE small scoped ask: the compiler's words, the lines around the place it names, the definition of the name it could not find, what the band printed
+  def fl-around(path, line) {
+   let ls = split-on(fl-text(path), "\n");
+   let from = line > 8 ? line - 9 : 0;
+   let to = line + 8 < len(ls) ? line + 8 : len(ls);
+   len(path) == 0 || line < 1 ? "" : fl-cat(["Lines ", (from + 1).str(), " to ", to.str(), " of ", path, ":\n", str-join-with(take(to - from, drop(from, ls)), "\n"), "\n\n"]);
+  }
+  def fl-def-head(name) {
+   let p = fl-find-def(name);
+   len(p) == 0 ? "" : fl-cat(["Where ", name, " is defined (", p, "):\n", fl-head(fl-region(fl-text(p), name), 900), "\n\n"]);
+  }
+  def fl-scoped-packet(S, r, kind) {
+   let errs = r[1];
+   let path = fl-err-path(errs);
+   fl-cat(["A Form/BML edit was applied and the check is red.\n\nThe ", kind == "claims-short" ? "band read a short number; what it printed:\n" : "compiler said:\n", fl-head(kind == "claims-short" ? r[2] : errs, 1500), "\n\n", fl-around(path, fl-err-line(errs)), fl-def-head(fl-err-name(errs)), fl-cat(map(p => fl-file-block(p, record_get(S, "goal")), record_get(S, "paths"))), "TASK:\n", fl-head(record_get(S, "goal"), 2500), "\n\n", fl-band-line(S), "\nGive the smallest edit that heals the one red thing above.\n", fl-format()]);
+  }
+  def fl-repair-ask(S, r, kind) {
+   let text = fl-ask(S, fl-scoped-packet(S, r, kind), "flow-" ++ record_get(S, "id") ++ "-fix");
+   let bs = len(text) == 0 ? [] : fl-blocks(text, 0);
+   let before = record_get(S, "applied");
+   let done = fl-apply-all(S, bs);
+   record_get(S, "applied") > before ? 1 : 0;
+  }
+  // ── 4. land ──
+  def fl-land(S) = record_get(S, "green") == 1 && record_get(S, "land") == 1 && len(record_get(S, "band")) > 0 ? fl-land-go(S) : fl-land-held(S);
+  def fl-land-held(S) {
+   let why = record_get(S, "green") == 1 ? "land-not-asked" : "not-green";
+   fl-emit(S, "land", record_get(S, "green") == 1 ? "part" : "part", 0, 0, why, "", 0);
+  }
+  def fl-json-str(s) = "\"" ++ fl-esc(s, 0) ++ "\"";
+  def fl-esc(s, i) = i >= len(s) ? "" : (str_byte_at(s, i) == 34 ? "\\\"" : str_byte_at(s, i) == 92 ? "\\\\" : str_byte_at(s, i) == 10 ? "\\n" : byte_to_str(str_byte_at(s, i))) ++ fl-esc(s, i + 1);
+  def fl-land-json(S) {
+   let paths = append(record_get(S, "paths"), [record_get(S, "band")]);
+   fl-cat(["{\"witness\":", fl-json-str("./fkwu " ++ record_get(S, "band")), ",\"paths\":[", str-join-with(map(p => fl-json-str(p), paths), ","), "],\"subject\":", fl-json-str("The flow landed " ++ record_get(S, "id") ++ ": the local voice's candidate over the resident server turned its band full, no rented token"), ",\"body\":", fl-json-str("Plan, candidate, apply, band and land ran in one pass of observe/flow-run.bml; the band read " ++ record_get(S, "full").str() ++ " and the micro-repairs it took are in the flow frame's cells. rent_tokens 0."), ",\"main\":1}"]);
+  }
+  def fl-land-go(S) {
+   let t = host_monotonic_ms();
+   let rec = cell_run("observe/land-run.bml", 0, 1800000, [fl-land-json(S)]);
+   let out = cs-stdout(rec);
+   let ok = !nothing?(rec) && nothing?(record_get(rec, "stopped")) && str_find(out, "landed", 0) >= 0;
+   let a = record_set(S, "landed", ok ? 1 : 0);
+   fl-emit(S, "land", ok ? "ok" : "disc", ok ? 1 : 0, ok ? 0 : 1, ok ? "landed" : "land-refused", fl-line(out), fl-since(t));
+  }
+  // ── the end ──
+  def fl-restore(S) = record_get(S, "landed") == 1 ? 0 : foldl((acc, o) => acc + write_file_text(o[0], o[1]), 0, record_get(S, "orig"));
+  def fl-verdict(S) = record_get(S, "landed") == 1 ? "landed" : record_get(S, "green") == 1 ? "green" : record_get(S, "applied") > 0 ? "partial" : "ended";
+  def fl-cause(S) = record_get(S, "landed") == 1 ? "landed" : record_get(S, "green") == 1 ? "band-full-not-landed" : len(record_get(S, "cause")) > 0 ? record_get(S, "cause") : "unknown";
+  def fl-end(S) {
+   let v = fl-verdict(S);
+   let c = fl-cause(S);
+   let ms = fl-since(record_get(S, "t0"));
+   let rep = record_get(record_get(S, "F"), "rep");
+   let a = fl-emit(S, "end", v == "landed" || v == "green" ? "ok" : v == "partial" ? "part" : "disc", record_get(S, "got"), record_get(S, "miss"), v ++ ":" ++ c, record_get(S, "id"), ms);
+   let b = sbt-append-count(fl-ledger(), fsg-end-row(record_get(S, "id"), v, c, record_get(S, "got"), record_get(S, "miss"), rep, ms) ++ "\n");
+   let r = fl-restore(S);
+   print_str(fl-cat(["{\"request\":\"", record_get(S, "id"), "\",\"verdict\":\"", v, "\",\"cause\":\"", c, "\",\"got\":", record_get(S, "got").str(), ",\"missed\":", record_get(S, "miss").str(), ",\"repairs\":", rep.str(), ",\"ms\":", ms.str(), ",\"rent_tokens\":0}\n"]));
+  }
+  def fl-run() {
+   let o = dop-doc("flow", stdin-text(), fl-spec());
+   let S = fl-new(o, svs-str(o, "request", ""));
+   let a = fl-emit(S, "start", "ok", 0, 0, "begin", record_get(S, "id"), 0);
+   let b = fl-plan(S);
+   let c = fl-candidate(S);
+   let d = fl-band(S);
+   let e = fl-land(S);
+   fl-end(S);
+  }
+ }
+ fl-run();
+}

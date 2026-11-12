@@ -39,7 +39,7 @@
 // preflight-exec: forbidden
 // preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/door-options.bml form-stdlib/bml/q38-multi.bml form-stdlib/bml/form-cli-code-live.bml form-stdlib/bml/q38-lenses.bml form-stdlib/bml/memory-governor.bml form-stdlib/bml/serve-sched.bml form-stdlib/bml/flow-signal.bml form-stdlib/spool-bell-transport.fk native/metal/qwen35-dense-token-handle.fk native/metal/qwen35-dense-spec.fk form-stdlib/bml/ledger.bml form-stdlib/bml/host-fs.bml form-stdlib/bml/coordination.bml form-stdlib/query-lane-resolve.bml form-stdlib/qwen35-artifact-seal-reader.fk form-stdlib/bml/local-run.bml
 section [form.bml] {
- let SV = record_new(0, "cache", [], "serial", 0,"packed", "", "evict_at", 0, "cache_hits", 0, "cache_ids", 0, "sts", [],"limit", 1, "limit_at", 0, "budget", -1, "budget_at", 0, "beat_at", 0, "beat_say", 0, "served", 0, "tokens", 0, "yield", 0, "step_ms", 0, "steps", 0, "ticks", 0, "flow", nothing(), "bell", nothing(), "beat_key", "");
+ let SV = record_new(0, "cache", [], "serial", 0,"packed", "", "evict_at", 0, "cache_hits", 0, "cache_ids", 0, "sts", [],"limit", 1, "limit_at", 0, "budget", -1, "budget_at", 0, "beat_at", 0, "beat_say", 0, "served", 0, "tokens", 0, "yield", 0, "step_ms", 0, "steps", 0, "ticks", 0, "flow", nothing(), "bell", nothing(), "beat_key", "", "shed_at", 0, "dir", "");
  class QwenServeRun {
   def qsr-say(t) = print_str("[serve] " ++ t ++ "\n");
   def qsr-spec() = [["go", "int"], ["dir", "str"], ["rows", "int"], ["blocks", "int"], ["block_positions", "int"], ["maxpos", "int"], ["chunk", "int"], ["share", "int"], ["poll_ms", "int"], ["idle_exit_ms", "int"], ["yield_ear", "int"], ["reserve_gib", "int"], ["limit", "int"]];
@@ -124,6 +124,7 @@ section [form.bml] {
    let a = qsr-say("opened in " ++ (host_monotonic_ms() - t0).str() ++ " ms: " ++ rows.str() ++ " rows, a pool of " ++ blocks.str() ++ " blocks of " ++ q38pg-bsz(bsh).str() ++ " positions (" ++ (blocks * q38pg-bsz(bsh)).str() ++ " in all" ++ (blocks < blocks0 ? ", fewer than the " ++ blocks0.str() ++ " asked: the attention scratch of " ++ maxpos.str() ++ " positions holds no more partials" : "") ++ "), " ++ (qsr-block-bytes(c) / 1048576).str() ++ " MiB a block, spool " ++ dir ++ ", end-of-turn id " ++ eos.str());
    let w = qsr-status(dir, "standing", start, label, svs-new(rows), pool);
    let fl = record_set(SV, "flow", fsg-new(15, "serve"));
+   let dr = record_set(SV, "dir", dir);
    let bl = record_set(SV, "bell", fsg-open-handle("/fgn-serve-bell"));
    let up = qsr-sig("ok", rows, blocks, "standing", "pid=" ++ host_pid().str(), host_monotonic_ms() - t0);
    let why = qsr-loop(c, qsr-env(c), svs-new(rows), 0, host_monotonic_ms());
@@ -321,7 +322,7 @@ section [form.bml] {
    let dir = c[7];
    let counted = record_set(SV, "ticks", record_get(SV, "ticks") + 1);
    let stopping = file_size(dir ++ "/stop") >= 0;
-   let S1 = stopping ? S : qsr-intake(c, S);
+   let S1 = stopping ? S : qsr-shed(qsr-intake(c, S));
    let r = try svs-tick(S1, env) catch nothing();
    nothing?(r) ? qsr-abort(c, S1, "the pass raised (a surprise in the step)") : qsr-after(c, env, r, stopping, idle_since);
   }
@@ -358,10 +359,36 @@ section [form.bml] {
    let moved = host_path_rename(c[7] ++ "/req/" ++ name, c[7] ++ "/work/" ++ name);
    moved != 0 ? S : qsr-read(c, S, id, host_monotonic_ms());
   }
+  // A request's id begins with its client's pid. A client that is gone will never read the reply, so its request is not generated: a crashed flow used to leave
+  // its asks in the queue and the GPU spent minutes on answers no one took. Checked when a request is claimed and, once in two seconds, over the queue.
+  def qsr-owner-gone?(id) {
+   let d = str_find(id, "-", 0);
+   let pid = d < 1 ? 0 : (try str_to_int(substring(id, 0, d)) catch 0);
+   pid > 0 && (String) value_kind(host_process(pid)) != "list";
+  }
+  def qsr-shed(S) {
+   let now = host_monotonic_ms();
+   now - record_get(SV, "shed_at") < 2000 ? S : qsr-shed-go(S, now);
+  }
+  def qsr-shed-go(S, now) {
+   let a = record_set(SV, "shed_at", now);
+   let gone = filter(s => qsr-owner-gone?(s[0]), S[0]);
+   let b = foldl((acc, s) => acc + qsr-orphaned(s[0]), 0, gone);
+   nil?(gone) ? S : cons(filter(s => !qsr-owner-gone?(s[0]), S[0]), S[1:]);
+  }
+  def qsr-orphaned(id) {
+   let d = host_path_remove(record_get(SV, "dir") ++ "/work/" ++ id ++ ".json");
+   let sg = qsr-sig("disc", 0, 1, "owner-gone", id, 0);
+   0;
+  }
   def qsr-read(c, S, id, arrive) {
    let text = read_file(c[7] ++ "/work/" ++ id ++ ".json");
    let p = svs-parse(id, nothing?(text) ? "" : text);
-   (String) p[0] == "ok" ? qsr-take(c, S, id, arrive, p[1]) : qsr-refuse(c, S, id, p[1]);
+   qsr-owner-gone?(id) ? qsr-orphan-claim(c, S, id) : (String) p[0] == "ok" ? qsr-take(c, S, id, arrive, p[1]) : qsr-refuse(c, S, id, p[1]);
+  }
+  def qsr-orphan-claim(c, S, id) {
+   let a = qsr-orphaned(id);
+   S;
   }
   def qsr-refuse(c, S, id, why) {
    let row = svs-refused-row(id, why, now_unix_ms());
