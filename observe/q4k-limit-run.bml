@@ -1,0 +1,54 @@
+// q4k-limit-run.bml — whether the Q4_K decode matvec is limited by its arithmetic or by how it loads.
+//
+//   echo '{"go":1}' | ./fkwu observe/q4k-limit-run.bml
+//
+// Two kernels read the same bytes in the same pattern (the same lanes, the same header, nibble chunk and activation loads, a 5120 x 17408 Q4_K tensor, four copies in turn so no dispatch reads what the one before
+// it read): the decode matvec (q38dq-q4-wide2-msl, pipeline 57's text) and the same kernel with the dequantizing arithmetic replaced by one xor of what was loaded. Each is timed by the device's own busy clock
+// (metal_live word 11, GPUEndTime - GPUStartTime of the round's command buffer). If the loads-only kernel reads near the plain read's 529 GB/s, the matvec's arithmetic is what holds it at 325; if it
+// reads near the matvec's rate, the loads are the limit and the arithmetic is free.
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/door-options.bml form-stdlib/metal-door.fk form-stdlib/bml/qwen38-decode-quant.bml
+section [form.bml] {
+ class Q4kLimit {
+  def ql-rows() = 5120;
+  def ql-cols() = 17408;
+  def ql-copies() = 4;
+  def ql-bytes() = ql-rows() * (ql-cols() / 256) * 144;
+  def ql-loads-msl() = "kernel void q4k_loads_only" ++ q38dq-sig-msl() ++ "uint ix = (uint)tiisg / 16u; uint tid = (uint)tiisg - ix * 16u; uint c = tid / 4u; uint il = tid - c * 4u; uint qoff = 16u + c * 32u + il * 8u; uint slo = 2u * c; for (uint ib = (uint)sgitg * 2u + ix; ib < nb; ib += nsg * 2u) { device const float* xl = x + ib * 256u + slo * 32u + il * 8u; device const float* xh = xl + 32; packed_float4 la = *(device const packed_float4*)(xl); packed_float4 lc = *(device const packed_float4*)(xl + 4); packed_float4 ha = *(device const packed_float4*)(xh); packed_float4 hc = *(device const packed_float4*)(xh + 4); float xs = ((la.x + lc.x) + (ha.x + hc.x)); for (ushort row = 0u; row < 2u; ++row) { uint r = r0 + (uint)row; if (r >= rows) continue; device const uchar* b = qb + ((ulong)r * (ulong)nb + (ulong)ib) * 144ul; packed_uint4 h = *(device const packed_uint4*)(b); packed_uint2 q = *(device const packed_uint2*)(b + qoff); uint t = ((h.x ^ h.y) ^ (h.z ^ h.w)) ^ (q.x ^ q.y); float part = float(t & 255u) + xs; if (row == 0u) { sumf0 = sumf0 + part; } else { sumf1 = sumf1 + part; } } } " ++ q38dq-epilogue-msl();
+  def ql-msl() = "#include <metal_stdlib>\nusing namespace metal;\n#pragma clang fp contract(off)\n" ++ q38dq-msl() ++ ql-loads-msl();
+  def ql-spec() = [["go", "int"]];
+  def ql-bufs(k) = k <= 0 ? [] : cons(metal_buf_alloc(ql-bytes()), ql-bufs(k - 1));
+  def ql-rec(pl, w, x, y) = [pl, md-bind16([w, x, y], [ql-rows(), ql-cols()], 256, 0, 1, 0), (ql-rows() + 1) / 2];
+  def ql-n(recs, n, j) = j >= n ? 1 : { let r = recs[j % len(recs)]; let e = metal_enqueue(r[0], r[1], r[2]); ql-n(recs, n, j + 1); };
+  def ql-busy(recs, n) {
+   let s0 = metal_sync();
+   let b0 = metal_live();
+   let q = ql-n(recs, n, 0);
+   let s1 = metal_sync();
+   let b1 = metal_live();
+   b1[11] - b0[11];
+  }
+  def ql-best(recs, n, k, best) = k <= 0 ? best : { let u = ql-busy(recs, n); ql-best(recs, n, k - 1, best < 0 || u < best ? u : best); };
+  def ql-say(name, n, us) = print_str("[q4k-limit] " ++ name ++ ": " ++ n.str() ++ " dispatches, device busy " ++ us.str() ++ " us = " ++ ((ql-bytes() * n) / (us * 1000)).str() ++ " GB/s (" ++ (us / n).str() ++ " us a dispatch)\n");
+  def ql-main() {
+   let ws = ql-bufs(ql-copies());
+   let x = metal_buf_alloc(ql-cols() * 4);
+   let y = metal_buf_alloc(ql-rows() * 4);
+   let pm = metal_pipeline(ql-msl(), "form_qwen_q4k_decode_f32");
+   let pl = metal_pipeline(ql-msl(), "q4k_loads_only");
+   let pr = metal_pipeline(ql-read-msl(), "ql_read");
+   let mats = map(w => ql-rec(pm, w, x, y), ws);
+   let lods = map(w => ql-rec(pl, w, x, y), ws);
+   let reds = map(w => [pr, md-bind16([w, y], [ql-bytes() / 16], 256, 0, 0, 0), ql-bytes() / 16], ws);
+   let warm = ql-busy(mats, 40);
+   let a = ql-best(mats, 80, 6, -1);
+   let b = ql-best(lods, 80, 6, -1);
+   let c = ql-best(reds, 80, 6, -1);
+   let d = ql-say("matvec (pipeline 57's text, dequantizing)", 80, a);
+   let e = ql-say("loads only (same loads, one xor of what was loaded)", 80, b);
+   ql-say("plain read of the same bytes", 80, c);
+  }
+  def ql-read-msl() = "#include <metal_stdlib>\nusing namespace metal;\nkernel void ql_read(device const uint4* w [[buffer(0)]], device uint* out [[buffer(1)]], constant uint& n [[buffer(2)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; uint4 v = w[i]; uint t = (v.x ^ v.y) ^ (v.z ^ v.w); if (t == 2654435769u) out[0] = i; }";
+ }
+ ql-main();
+}
