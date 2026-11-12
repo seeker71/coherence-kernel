@@ -18,7 +18,7 @@
 // Disk gets ONE sparse row at the end (receipts/local-plan-ledger.jsonl, rung "flow"), and the edits of a candidate that did not land are put back.
 // stdout: one JSON line, the end: request, verdict (landed | green | partial | ended), cause, got, missed, repairs, ms, rent_tokens 0.
 // preflight-exec: forbidden
-// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/door-options.bml form-stdlib/bml/serve-sched.bml form-stdlib/bml/serve-client.bml form-stdlib/bml/flow-signal.bml form-stdlib/bml/cell-said.bml form-stdlib/bml/string-join.bml form-stdlib/spool-bell-transport.fk
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/door-options.bml form-stdlib/bml/serve-sched.bml form-stdlib/bml/serve-client.bml form-stdlib/bml/flow-signal.bml form-stdlib/bml/host-child.bml form-stdlib/bml/cell-said.bml form-stdlib/bml/string-join.bml form-stdlib/spool-bell-transport.fk
 section [form.bml] {
  class FlowRun {
   def fl-spec() = [["request", "str"], ["slot", "int"], ["dir", "str"], ["land", "int"], ["plan", "int"], ["repairs", "int"]];
@@ -177,10 +177,16 @@ section [form.bml] {
    let a = write_file_text(path, text);
    record_set(S, "applied", record_get(S, "applied") + 1);
   }
+  // The local voice writes the body's own Form (form/, observe/, gate/, learn/, cognition/, control/); the seed (runtime/) and anything outside are not its to edit.
+  def fl-root-ok?(p) = any?(r => str_find(p, r, 0) == 0, ["form/", "observe/", "gate/", "learn/", "cognition/", "control/"]);
+  def fl-apply-outside(S, b) {
+   let c = record_set(S, "cause", len(record_get(S, "cause")) > 0 ? record_get(S, "cause") : "outside-roots");
+   fl-emit(S, "appl", "part", 0, 1, "outside-roots", b[0], 0);
+  }
   def fl-apply(S, b) {
    let path = b[0];
    let T = read_file(path);
-   nothing?(T) ? fl-apply-missing(S, b) : fl-apply-in(S, b, T);
+   !fl-root-ok?(path) ? fl-apply-outside(S, b) : nothing?(T) ? fl-apply-missing(S, b) : fl-apply-in(S, b, T);
   }
   def fl-apply-missing(S, b) {
    len(b[1]) == 0 && len(b[0]) > 0 ? fl-seq(fl-emit(S, "appl", "ok", 1, 0, "new-file", b[0], 0), fl-new-file(S, b)) : fl-emit(S, "appl", "disc", 0, 1, "no-such-file", b[0], 0);
@@ -253,9 +259,46 @@ section [form.bml] {
   }
   def fl-band-read(S) = len(record_get(S, "band")) > 0 && file_size(record_get(S, "band")) > 0 ? fl-run-band(record_get(S, "band")) : fl-run-compile(filter(p => fl-form?(p), record_get(S, "paths")));
   def fl-form?(p) = str_find(p, ".bml", 0) == len(p) - 4 || str_find(p, ".fk", 0) == len(p) - 3;
+  // ── the band the changed file already has ──
+  // A request without a plan has no witness band of its own, and a change that only compiles lands nothing. The bands that already stand over the file are its witness: the smallest test that
+  // names the file (or a stdlib file that imports it, as an aggregator is what its band reads) and declares an Expected verdict becomes the band, and the door reads it against that verdict.
+  def fl-test-dirs() = ["form/form-stdlib/tests", "form/native/metal/tests"];
+  def fl-base(p) { let ps = split-on(p, "/"); ps[len(ps) - 1]; }
+  def fl-digits-end(t, i) = i < len(t) && str_byte_at(t, i) >= 48 && str_byte_at(t, i) <= 57 ? fl-digits-end(t, i + 1) : i;
+  def fl-expected(t) {
+   let at = str_find(t, "Expected: ", 0);
+   let s = at < 0 ? -1 : at + 10;
+   let e = s < 0 ? -1 : fl-digits-end(t, s);
+   s < 0 || e <= s ? 0 : (try str_to_int(substring(t, s, e)) catch 0);
+  }
+  def fl-test-file?(n) = str_find(n, ".bml", 0) == len(n) - 4 || str_find(n, ".fk", 0) == len(n) - 3;
+  def fl-importers(base) = take(6, filter(n => fl-test-file?(n) && (String) n != base && str_find(fl-text("form/form-stdlib/bml/" ++ n), base, 0) >= 0, fs_list("form/form-stdlib/bml") ?? []));
+  def fl-cover-row(path, bases) {
+   let t = fl-text(path);
+   any?(b => str_find(t, b, 0) >= 0, bases) && fl-expected(t) > 0 ? [path, len(t), fl-expected(t)] : nothing();
+  }
+  def fl-cover-better(best, row) = nothing?(row) ? best : nothing?(best) || row[1] < best[1] ? row : best;
+  def fl-cover-in(dir, bases) = foldl((best, n) => fl-cover-better(best, fl-cover-row(dir ++ "/" ++ n, bases)), nothing(), filter(n => fl-test-file?(n), fs_list(dir) ?? []));
+  def fl-cover-of(p) {
+   let bases = cons(fl-base(p), fl-importers(fl-base(p)));
+   foldl((b, d) => fl-cover-better(b, fl-cover-in(d, bases)), nothing(), fl-test-dirs());
+  }
+  def fl-covering(S) = foldl((best, p) => fl-cover-better(best, fl-cover-of(p)), nothing(), filter(p => fl-form?(p), record_get(S, "paths")));
+  def fl-take-cover(S, c) {
+   let a = record_set(S, "band", c[0]);
+   let b = record_set(S, "full", c[2]);
+   fl-emit(S, "band", "go", 0, 0, "covering-band", c[0], 0);
+  }
+  // nothing Form was written and no band stands over it: nothing was compiled, so nothing is green
+  def fl-band-nowitness(S) {
+   let c = record_set(S, "cause", len(record_get(S, "cause")) > 0 ? record_get(S, "cause") : "no-witness");
+   fl-emit(S, "band", "part", 0, 1, "no-witness", "", 0);
+  }
   def fl-band(S) {
    let t = host_monotonic_ms();
-   record_get(S, "applied") == 0 ? fl-band-skip(S) : fl-band-pass(S, t, 0);
+   let c = len(record_get(S, "band")) == 0 && record_get(S, "applied") > 0 ? fl-covering(S) : nothing();
+   let a = nothing?(c) ? 0 : fl-take-cover(S, c);
+   record_get(S, "applied") == 0 ? fl-band-skip(S) : len(record_get(S, "band")) == 0 && nil?(filter(p => fl-form?(p), record_get(S, "paths"))) ? fl-band-nowitness(S) : fl-band-pass(S, t, 0);
   }
   def fl-band-skip(S) {
    let c = record_set(S, "cause", len(record_get(S, "cause")) > 0 ? record_get(S, "cause") : "nothing-applied");
@@ -373,20 +416,21 @@ section [form.bml] {
    let why = record_get(S, "green") == 1 ? "land-not-asked" : "not-green";
    fl-emit(S, "land", record_get(S, "green") == 1 ? "part" : "part", 0, 0, why, "", 0);
   }
-  def fl-json-str(s) = "\"" ++ fl-esc(s, 0) ++ "\"";
-  def fl-esc(s, i) = i >= len(s) ? "" : (str_byte_at(s, i) == 34 ? "\\\"" : str_byte_at(s, i) == 92 ? "\\\\" : str_byte_at(s, i) == 10 ? "\\n" : byte_to_str(str_byte_at(s, i))) ++ fl-esc(s, i + 1);
-  def fl-land-json(S) {
-   let paths = append(record_get(S, "paths"), [record_get(S, "band")]);
-   fl-cat(["{\"witness\":", fl-json-str("./fkwu " ++ record_get(S, "band")), ",\"paths\":[", str-join-with(map(p => fl-json-str(p), paths), ","), "],\"subject\":", fl-json-str("The flow landed " ++ record_get(S, "id") ++ ": the local voice's candidate over the resident server turned its band full, no rented token"), ",\"body\":", fl-json-str("Plan, candidate, apply, band and land ran in one pass of observe/flow-run.bml; the band read " ++ record_get(S, "full").str() ++ " and the micro-repairs it took are in the flow frame's cells. rent_tokens 0."), ",\"main\":1}"]);
-  }
+  // The flow lands its own change. The paths it wrote are committed alone (--only: whatever else stands in the tree stays where it is) and pushed as a fast-forward; the witness it carries is the
+  // band's verdict it just read. No door stands between: the drift gates are the body's mirror and read main after the fact (the walk), and a main that moved leaves the commit ahead for the walk's follow.
+  def fl-git(step, args) = hch-git-in(hch-dir(), ".", step, args);
+  def fl-ran?(run) = !nothing?(run[0]) && run[0] == 0;
+  def fl-subject(S) = fl-cat(["The flow landed ", record_get(S, "id"), ": the local voice's candidate turned the band ", record_get(S, "band"), " to its verdict ", record_get(S, "full").str(), ", no rented token"]);
   def fl-land-go(S) {
    let t = host_monotonic_ms();
    let g = fl-emit(S, "land", "go", 0, 0, "landing", record_get(S, "id"), 0);
-   let rec = cell_run("observe/land-run.bml", 0, 1800000, [fl-land-json(S)]);
-   let out = cs-stdout(rec);
-   let ok = !nothing?(rec) && nothing?(record_get(rec, "stopped")) && str_find(out, "landed", 0) >= 0;
+   let paths = filter(p => fl-root-ok?(p), record_get(S, "paths"));
+   let added = fl-git("add", append(["add", "--"], paths));
+   let made = fl-git("commit", append(["commit", "-q", "--only", "-m", fl-cat([fl-subject(S), "\n\nPlan, candidate, apply, band and land ran in one pass of observe/flow-direct-run.bml; the witness is ", record_get(S, "band"), " reading ", record_get(S, "full").str(), ". rent_tokens 0."]), "--"], paths));
+   let sent = fl-ran?(made) ? fl-git("push", ["push", "-q", "origin", "HEAD:main"]) : made;
+   let ok = fl-ran?(made);
    let a = record_set(S, "landed", ok ? 1 : 0);
-   fl-emit(S, "land", ok ? "ok" : "disc", ok ? 1 : 0, ok ? 0 : 1, ok ? "landed" : "land-refused", fl-line(out), fl-since(t));
+   fl-emit(S, "land", ok ? "ok" : "disc", ok ? 1 : 0, ok ? 0 : 1, ok ? (fl-ran?(sent) ? "landed" : "landed-ahead") : "commit-refused", fl-line(hch-said(made)), fl-since(t));
   }
   // ── the end ──
   def fl-restore(S) = record_get(S, "landed") == 1 ? 0 : foldl((acc, o) => acc + write_file_text(o[0], o[1]), 0, record_get(S, "orig"));
