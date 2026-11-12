@@ -1,0 +1,42 @@
+// dispatch-cost-run.bml — what one dependent Metal dispatch costs on this device, measured with an empty kernel.
+//
+//   echo '{"go":1,"n":3000}' | ./fkwu observe/dispatch-cost-run.bml
+//
+// The decode of a token is about 1270 dispatches (observe/q38-decode-run.bml: 30456 for 24 tokens), and the weights' bandwidth floor is far under the measured token time. This door times n dispatches of a
+// kernel that does one add, once with a barrier between each (every dispatch waits for the one before, as the layers of a token do) and once without, so the cost a dispatch adds on its own is read
+// and not inferred: us a dispatch with a barrier x 1270 is what the dependent chain of a token costs before any weight is read.
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/door-options.bml form-stdlib/metal-door.fk
+section [form.bml] {
+ class DispatchCost {
+  def dc-spec() = [["go", "int"], ["n", "int"], ["grid", "int"]];
+  def dc-int(o, key, d) = json-object-has?(o, key) ? json-int-value(json-object-get(o, key)) : d;
+  def dc-msl() = "#include <metal_stdlib>\nkernel void form_dc_step(device float* y [[buffer(0)]], uint i [[thread_position_in_grid]]) { if (i == 0u) { y[0] = y[0] + 1.0f; } }\n";
+  def dc-run-n(pl, buf, i, n, grid, barrier) = i >= n ? 1 : { let e = metal_enqueue(pl, md-bind16([buf], [], 32, 0, 1, barrier), grid); dc-run-n(pl, buf, i + 1, n, grid, barrier); };
+  def dc-time(pl, buf, n, grid, barrier) {
+   let s0 = metal_sync();
+   let t0 = host_monotonic_ms();
+   let q = dc-run-n(pl, buf, 0, n, grid, barrier);
+   let s1 = metal_sync();
+   host_monotonic_ms() - t0;
+  }
+  def dc-say(label, n, ms) = print_str("[dispatch-cost] " ++ label ++ ": " ++ n.str() ++ " dispatches in " ++ ms.str() ++ " ms = " ++ ((ms * 1000) / n).str() ++ " us a dispatch\n");
+  def dc-main() {
+   let o = dop-doc("dispatch-cost", stdin-text(), dc-spec());
+   let n = dc-int(o, "n", 3000);
+   let grid = dc-int(o, "grid", 32);
+   let buf = metal_buf_alloc(64);
+   let wrote = metal_buf_write(buf, 0, md-le32(0));
+   let pl = metal_pipeline(dc-msl(), "form_dc_step");
+   let warm = dc-time(pl, buf, 200, grid, 1);
+   let a = dc-time(pl, buf, n, grid, 1);
+   let b = dc-time(pl, buf, n, grid, 0);
+   let c = dc-time(pl, buf, n, grid, 1);
+   let x = dc-say("dependent (barrier between each)", n, a);
+   let y = dc-say("independent (no barrier)", n, b);
+   let z = dc-say("dependent again", n, c);
+   print_str("[dispatch-cost] a token's 1269 dependent dispatches at the dependent cost: " ++ ((1269 * a) / n).str() ++ " ms\n");
+  }
+ }
+ dc-main();
+}
