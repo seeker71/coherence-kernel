@@ -43,6 +43,21 @@ larger than the whole pool with nothing else to give (`pool-too-small`) or a seq
 ended, by name. No position is a sequence's last: `prompt-exceeds-slot` and `context-full` are gone. The prefix cache's entries are
 copies of blocks taken from the same pool (a prompt's own end is adopted with no copy: the entry becomes an owner of the blocks).
 
+## Scheduling: every prompt is read at once, the shortest first
+
+The prefill lane is not one lane. Every admitted prompt has its own prefill state and table row (row `rows` + its slot); one chunk
+a tick goes to the sequence with the fewest ids left to read less one id per 10 ms it has waited (SRPT with aging, `svs-pick`;
+priority first), and one decode step to every live row. A prompt is admitted whenever a slot is free and the limit allows,
+whatever is being read. The share governor (`share`, default 50) lets a prefill chunk run while the prefill ms since the lane
+began are at most share% of the decode ms; each chunk is waited for (`metal_sync`) so the governor reads its true cost.
+Measured on the 27B (greedy text and surprise byte-equal to the one-lane image in every request): a 3582-id prompt beside a
+32-id/120-token request, the short one's queue 21.6 s -> 0.05 s and wall 30.5 s -> 12.4 s (share 50; 16.5 s at share 100),
+decoding at 9.7 tok/s against 15.1 alone (64%; 7.3, 48%, at share 100; about 3.4 without the sync); the long one pays the
+short one's GPU time (22.6 s -> 32.6 s). The mix of a 9293-id prompt first and six of 678 to 3587 ids: the shorts end in 11 to
+126 s (old 77 to 291 s) and the mix ends at the same time (278 s, old 291 s). Aggregate decode at 2, 4 and 8 rows is equal in both
+images. A wider prefill span (`span` 256) read no faster. Readings carry the machine: an outside tenant and the GPU's clocks move
+a lone prefill between 10 and 47 s for the same 1444 ids, so a pair is only fair back to back with equal rest.
+
 ## Binary limits in the serving path
 
 Named, so none passes for a law of the model: rows (8: `q38s-nt-max`, the widest specialized matvec and the head's logits buffer);
@@ -88,7 +103,8 @@ absent (equal rest before each), against 5.0 tok/s with it passing (0.8 passes/s
 
 ## Where it is going
 
-- Sampling prefill rows in the same pass as decode rows (a true mixed batch); the prefill lane is still one lane.
+- Sampling prefill rows in the same pass as decode rows (a true mixed batch).
+- Prefill at depth: a 64-id chunk costs 0.34 s near position 0 and about 1.1 s near 8000 (the paged span attention is not on the matrix unit).
 - Envelope and grammar on the server (per-row top-k and a grammar object in the loop), so the planner's envelope applies there.
 - Shared blocks (a count of owners a block already has in the pool): a prefix-cache hit copies its blocks into the sequence's;
   sharing the full ones read-only, and copying only the last partial block, would hold one copy of a long head for every
