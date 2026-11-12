@@ -13,12 +13,13 @@
 // goes to the queue with its reply so far, read again when blocks are free (a recompute, never a cut). Only a sequence that alone holds the whole pool and still needs more, or a prompt larger than the
 // whole pool with nothing else to give, is ended, and it is named for what it is ("pool-full", "pool-too-small"), with the numbers in the reply.
 //
-// Pressure slows or yields, never truncates: the budget (svs-budget) only holds back what is ADMITTED, never below one sequence, and never cuts one that is running. The prefill lane takes the share of
-// wall time the decoders can spare (svs-due?): while streams are live a prefill chunk runs when the prefill ms spent since this prefill began are at most share% of the decode ms spent, and when nothing
+// Pressure slows or yields, never truncates: the budget (svs-budget) only holds back what is ADMITTED, never below one sequence, and never cuts one that is running. The prefill lane reads every admitted prompt
+// at once, one chunk a tick, for the sequence with the least left to read (SRPT with aging, svs-pick): a short prompt behind a long one is read first. The lane takes the share of
+// wall time the decoders can spare (svs-due?): while streams are live a prefill chunk runs when the prefill ms spent since the lane began are at most share% of the decode ms spent, and when nothing
 // decodes the prefill runs at full speed. A reply ends only at the model's end of turn, a stop string the caller named, or a count the caller named.
 //
 // A sequence is a list [id, priority, arrive_ms, prompt_ids, max_new, stops, phase, slot, fed, gen_ids_reversed, feed, pos, admit_ms,
-// decode_start_ms, surprise_sum, status, prefill_ms, gen_n, who, end_ms, snapshot_points, cached_ids, temperature_milli, seed, blocks, prompt_ids_as_submitted, yields]; the state S is [queue, prefilling, live,
+// decode_start_ms, surprise_sum, status, prefill_ms, gen_n, who, end_ms, snapshot_points, cached_ids, temperature_milli, seed, blocks, prompt_ids_as_submitted, yields]; the state S is [queue, the list of those being read (prefilling), live,
 // prefill_ms, decode_ms, nrows]; the env is [now, limit, begin, chunk, fork, decode, stop-hit, pool, eos?, chunk-size, share-pct, snap, budget, reclaim]. limit is a standing limit on sequences admitted at once (0 none).
 // begin answers the prompt ids a prefix cache already holds in the state it opened (the lane reads on from there); snap(s, count) keeps the state as it stands after `count` ids; budget answers the blocks
 // the machine lets the pool have in use (negative: no pressure claimed); reclaim(need) lets go the prefix cache's least recently used entries until `need` blocks are free or none is left, and answers the blocks free.
@@ -67,14 +68,15 @@ section [form.bml] {
   def svs-status(s) = s[15];
   def svs-finish(s, status, t) = svs-put(svs-put(svs-put(s, 6, "done"), 15, status), 19, t);
   // ── the state ──
-  def svs-new(nslots) = [[], nothing(), [], 0, 0, nslots];
+  // S[1] is the LIST of the sequences whose prompts are being read (any number, each in a slot of its own, each with a prefill state of its own in the server)
+  def svs-new(nslots) = [[], [], [], 0, 0, nslots];
   def svs-submit(S, seq) = [append(S[0], [seq]), S[1], S[2], S[3], S[4], S[5]];
   def svs-queued(S) = len(S[0]);
   def svs-live(S) = len(S[2]);
-  def svs-prefilling?(S) = !nothing?(S[1]);
-  def svs-active(S) = len(S[2]) + (nothing?(S[1]) ? 0 : 1);
-  def svs-idle?(S) = nil?(S[0]) && nothing?(S[1]) && nil?(S[2]);
-  def svs-used-slots(S) = append(map(s => s[7], S[2]), nothing?(S[1]) ? [] : [S[1][7]]);
+  def svs-prefilling?(S) = !nil?(S[1]);
+  def svs-active(S) = len(S[2]) + len(S[1]);
+  def svs-idle?(S) = nil?(S[0]) && nil?(S[1]) && nil?(S[2]);
+  def svs-used-slots(S) = append(map(s => s[7], S[2]), map(s => s[7], S[1]));
   def svs-first-free(k, n, used) = k >= n ? -1 : any?(u => u == k, used) ? svs-first-free(k + 1, n, used) : k;
   def svs-free-slot(S) = svs-first-free(0, S[5], svs-used-slots(S));
   // higher priority first, then the earlier arrival; an exact tie keeps the earlier place in the queue (foldl keeps the first)
@@ -128,6 +130,8 @@ section [form.bml] {
   def svs-pool(env) = env[7];
   def svs-eos-call(env, tok) { let f = env[8]; f(tok); }
   def svs-chunk-size(env) = env[9];
+  // the chunk a tick reads: env[9] while streams decode (decode latency first: a chunk is short), env[14] (when the env names one) when nothing decodes and the lane may read as wide as the matrix unit takes
+  def svs-chunk-for(S, env) = nil?(S[2]) && len(env) > 14 ? env[14] : env[9];
   def svs-share(env) = env[10];
   def svs-snap-call(env, s, count) { let f = env[11]; f(s, count); }
   def svs-budget-now(env) { let f = env[12]; f(); }
@@ -141,9 +145,9 @@ section [form.bml] {
    let c = svs-decode-turn(b[0], env);
    [c[0], append(append(a[1], b[1]), c[1])];
   }
-  // a waiting sequence is admitted when the prefill lane is free, a slot is free and the pressure limit allows another; an empty prompt, or one
-  // that does not fit its slot, is finished by name instead of run
-  def svs-admit(S, env) = nil?(S[0]) || !nothing?(S[1]) || svs-active(S) >= svs-limit-now(env) || svs-free-slot(S) < 0 ? [S, []] : svs-admit-best(S, env, svs-best(S[0]));
+  // A waiting sequence is admitted when a slot is free and the standing limit allows another; the prefill lane is no gate: any number of prompts are being read at once (each with a state of its own), one
+  // chunk a tick for the one with the least left to read (svs-pick), so a long prompt never holds a short one back. One sequence is admitted a tick. An empty prompt, or one that does not fit, is finished by name instead of run
+  def svs-admit(S, env) = nil?(S[0]) || svs-active(S) >= svs-limit-now(env) || svs-free-slot(S) < 0 ? [S, []] : svs-admit-best(S, env, svs-best(S[0]));
   def svs-admit-best(S, env, best) {
    let rest = filter(s => (String) s[0] != (String) best[0], S[0]);
    let t = svs-now(env);
@@ -169,34 +173,47 @@ section [form.bml] {
    // begin answers how many prompt ids the prefix cache already holds in the state it opened (0 for none): the prefill lane starts there
    let hit = svs-hit-clamp(svs-begin-call(env, seq0), len(best[3]) - 1);
    let seq = svs-put(svs-put(seq0, 8, hit), 21, hit);
-   [[rest, seq, S[2], 0, 0, S[5]], []];
+   // the share governor's tally begins again when the lane was empty (a prefill that begins takes no credit from the decoding that went before it)
+   [[rest, append(S[1], [seq]), S[2], nil?(S[1]) ? 0 : S[3], nil?(S[1]) ? 0 : S[4], S[5]], []];
   }
   def svs-hit-clamp(hit, most) = (String) value_kind(hit) != "int" || hit < 0 ? 0 : hit > most ? most : hit;
   // the first snapshot position past where the lane has read to, or -1
   def svs-next-point(points, fed) = nil?(points) ? -1 : points[0] > fed ? points[0] : svs-next-point(points[1:], fed);
   // the prefill lane reads all but the last prompt id (the last is the first decode row's input); a chunk runs when it is due
-  def svs-prefill-turn(S, env) = nothing?(S[1]) ? [S, []] : svs-due?(S, env) ? svs-prefill-run(S, env, S[1]) : [S, []];
-  def svs-due?(S, env) = len(S[1][3]) - 1 - S[1][8] <= 0 || nil?(S[2]) || S[3] * 100 <= S[4] * svs-share(env);
+  // SRPT with aging: of the sequences being read, the highest priority first, then the one with the fewest ids left to read less one id for every ten ms it has waited since it arrived (a short prompt
+  // finishes fast, a long one is never starved: its wait buys it the lead in the end); an exact tie keeps the earlier place in the list
+  def svs-left(s) = len(s[3]) - 1 - s[8];
+  def svs-score(s, now) = svs-left(s) - (now - s[2]) / 10;
+  def svs-read-before?(a, b, now) = a[1] > b[1] || (a[1] == b[1] && svs-score(a, now) < svs-score(b, now));
+  def svs-pick(pfs, now) = foldl((a, b) => svs-read-before?(b, a, now) ? b : a, pfs[0], pfs[1:]);
+  def svs-prefill-turn(S, env) {
+   let pf = nil?(S[1]) ? nothing() : svs-pick(S[1], svs-now(env));
+   nothing?(pf) ? [S, []] : svs-due?(S, env, pf) ? svs-prefill-run(S, env, pf) : [S, []];
+  }
+  // the chunk is due when the sequence has nothing left to read (its join), nothing decodes, or the prefill ms spent since the lane began are at most share% of the decode ms spent
+  def svs-due?(S, env, pf) = svs-left(pf) <= 0 || nil?(S[2]) || S[3] * 100 <= S[4] * svs-share(env);
+  def svs-replace(xs, id, v) = map(x => (String) x[0] == (String) id ? v : x, xs);
   def svs-prefill-run(S, env, pf) {
    let t0 = svs-now(env);
    let target = len(pf[3]) - 1;
    let left = target - pf[8];
    let point = svs-next-point(pf[20], pf[8]);
    let room = point > 0 && point - pf[8] < left ? point - pf[8] : left;
-   let n = room > svs-chunk-size(env) ? svs-chunk-size(env) : room < 0 ? 0 : room;
+   let wide = svs-chunk-for(S, env);
+   let n = room > wide ? wide : room < 0 ? 0 : room;
    let ran = n > 0 ? svs-chunk-call(env, pf, take(n, pf[3][pf[8]:]), pf[8]) : 0;
    let pf1 = svs-put(pf, 8, pf[8] + n);
    // a chunk that ends on a snapshot position keeps the state as it stands there (a request that shares this prefix reads from it)
    let snapped = n > 0 && pf1[8] == point ? svs-snap-call(env, pf1, point) : 0;
    let t1 = svs-now(env);
-   pf1[8] >= target ? svs-join(S, env, pf1) : [[S[0], pf1, S[2], S[3] + (nil?(S[2]) ? 0 : t1 - t0), S[4], S[5]], []];
+   pf1[8] >= target ? svs-join(S, env, pf1) : [[S[0], svs-replace(S[1], pf[0], pf1), S[2], S[3] + (nil?(S[2]) ? 0 : t1 - t0), S[4], S[5]], []];
   }
   // the prompt is read: its state is forked into the slot and the sequence joins the decoding ones, its first row the last prompt id
   def svs-join(S, env, pf) {
    let forked = svs-fork-call(env, pf);
    let t = svs-now(env);
    let seq = svs-put(svs-put(svs-put(svs-put(svs-put(pf, 6, "decode"), 10, pf[3][len(pf[3]) - 1]), 11, len(pf[3]) - 1), 13, t), 16, t - pf[12]);
-   [[S[0], nothing(), append(S[2], [seq]), 0, 0, S[5]], []];
+   [[S[0], filter(x => (String) x[0] != (String) pf[0], S[1]), append(S[2], [seq]), 0, 0, S[5]], []];
   }
   // one pass for every live sequence: row k is the sequence in slot k (a free slot below the highest live one is fed id 0 at position 0 and ignored, its table row the sink's); a row names the blocks of its sequence
   def svs-row-of(live, k) {
@@ -221,6 +238,23 @@ section [form.bml] {
    let r = svb-release(svs-pool(env), s[24]);
    1;
   }
+  // ── shedding: a sequence whose client is gone, in ANY phase ──
+  // A client that is gone will never read its reply. A sequence it left QUEUED, PREFILLING or DECODING is ended by name ("owner-gone") and gives its blocks back
+  // at once, so a dead client's 100000-id prompt does not hold the one prefill lane for minutes and its blocks do not sit in the pool. gone is a function of the sequence's id.
+  def svs-gone-call(gone, id) { let f = gone; f(id); }
+  def svs-gone?(gone, s) = svs-gone-call(gone, s[0]);
+  def svs-shed(S, env, gone) {
+   let all = append(append(filter(s => svs-gone?(gone, s), S[0]), filter(s => svs-gone?(gone, s), S[1])), filter(s => svs-gone?(gone, s), S[2]));
+   nil?(all) ? [S, []] : svs-shed-end(S, env, gone, all);
+  }
+  // A sequence ended before it was admitted or before it decoded has no admit or decode time of its own: its ledger row reads them as the moment it ended, never as the epoch
+  // (a queued one's queue_ms was -1296705433 and its decode_ms 1296748218 when they stood at zero)
+  def svs-shed-seq(s, t) = svs-finish(svs-put(svs-put(s, 12, s[12] == 0 ? t : s[12]), 13, s[13] == 0 ? t : s[13]), "owner-gone", t);
+  def svs-shed-end(S, env, gone, all) {
+   let t = svs-now(env);
+   let freed = foldl((a, s) => a + svs-give-back(env, s), 0, all);
+   [[filter(s => !svs-gone?(gone, s), S[0]), filter(s => !svs-gone?(gone, s), S[1]), filter(s => !svs-gone?(gone, s), S[2]), S[3], S[4], S[5]], map(s => svs-shed-seq(s, t), all)];
+  }
   // ── growth: a sequence takes the next block when its next position has none ──
   // The sequences that need one are served best first. With the pool empty (the prefix cache's entries let go first) the sequence of the lowest priority gives its blocks back and is queued with its reply so far
   // (svs-yield): it is read again when blocks are free, never cut. A sequence that alone holds the whole pool and needs one more is ended by name (pool-full).
@@ -239,7 +273,7 @@ section [form.bml] {
   }
   def svs-grow-yield(S, env, s, rest, fin) {
    let victim = svs-worst(S[2]);
-   len(S[2]) == 1 && nothing?(S[1]) ? svs-grow-ended(S, env, s, rest, fin) : (String) victim[0] == (String) s[0] ? svs-grow-go(svs-yield(S, env, victim), env, rest, fin) : svs-grow-go(svs-yield(S, env, victim), env, cons(s, filter(x => (String) x[0] != (String) victim[0], rest)), fin);
+   len(S[2]) == 1 && nil?(S[1]) ? svs-grow-ended(S, env, s, rest, fin) : (String) victim[0] == (String) s[0] ? svs-grow-go(svs-yield(S, env, victim), env, rest, fin) : svs-grow-go(svs-yield(S, env, victim), env, cons(s, filter(x => (String) x[0] != (String) victim[0], rest)), fin);
   }
   def svs-grow-ended(S, env, s, rest, fin) {
    let freed = svs-give-back(env, s);
@@ -272,7 +306,7 @@ section [form.bml] {
   def svs-cut-at(text, stops) = foldl((a, st) => len(st) == 0 ? a : (str_find(text, st, 0) >= 0 && (a < 0 || str_find(text, st, 0) < a)) ? str_find(text, st, 0) : a, -1, stops);
   def svs-trim-stop(text, stops) = svs-cut-at(text, stops) < 0 ? text : substring(text, 0, svs-cut-at(text, stops));
   // a status line the server keeps for the clients and for a person: [pid, rows, live, queued, prefilling, the pool's blocks in use, its blocks, positions a block holds]
-  def svs-status-row(S, pid, start, label, at_unix_ms, used, blocks, bsz) = json-emit(json-node-object([svs-n("pid", pid), svs-n("start", start), svs-s("label", label), svs-n("slots", S[5]), svs-n("blocks_used", used), svs-n("blocks", blocks), svs-n("block_positions", bsz), svs-n("live", len(S[2])), svs-n("queued", len(S[0])), svs-n("prefilling", nothing?(S[1]) ? 0 : 1), svs-n("at_unix_ms", at_unix_ms)]));
+  def svs-status-row(S, pid, start, label, at_unix_ms, used, blocks, bsz) = json-emit(json-node-object([svs-n("pid", pid), svs-n("start", start), svs-s("label", label), svs-n("slots", S[5]), svs-n("blocks_used", used), svs-n("blocks", blocks), svs-n("block_positions", bsz), svs-n("live", len(S[2])), svs-n("queued", len(S[0])), svs-n("prefilling", len(S[1])), svs-n("at_unix_ms", at_unix_ms)]));
  }
  0;
 }
