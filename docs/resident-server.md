@@ -60,6 +60,39 @@ a lone prefill between 10 and 47 s for the same 1444 ids, so a pair is only fair
 read 15.0 tok/s (old) and 6.1 (new) in one pair, then 6.6 and 6.5 (old) against 7.9 and 2.9 (new) in a rerun with the GPU at 63 to
 100% before the run began: the old image is as slow under that tenant, so the single-row dip is the machine, not a per-tick cost.
 
+## Speculation: the columns of one weight pass
+
+A decode pass costs about the same for one token column as for several, so a greedy row may carry DRAFTS: ids it proposes after its
+pending token. The pass (`q38v-pass`, `q38-verify.bml`) lays the row out as a segment of consecutive columns `[pending, d1 .. dk]`,
+the table row of each column holding the row's blocks, the two recurrences (conv window, gated delta state) running per segment
+and writing a snapshot after every column but the last. The model's greedy id after each column says how many drafts stand (the
+longest run it repeats) and one more id comes free; a rejected tail is put back by one copy a linear layer from the snapshot after the
+last column that stood, and its K and V are simply overwritten at the next pass (the pool is addressed by position). Everything
+runs in the EXACT association (every column carries the bits of a one-token decode), so a speculating server says the same text as a
+plain one, byte for byte, and as the image before it: measured on four prompts (code, json, prose, a planner ask), alone and four at a
+time, plus a stop string inside an accepted run, a count of 7, a 420-id reply across a block edge and a sampled row beside a drafting
+one: every reply equal. A row with a temperature never drafts.
+
+The drafter is the row's own text (`svs-ng-*`, `serve-sched.bml`): what followed the last time its last 3, 2 ids occurred, up to
+seven ids. The scheduler (`svs-assign`) gives the pass's columns one at a time to the row whose next draft is likeliest to stand (its
+running acceptance to the power of the drafts it already has) while that likelihood is above `spec_floor` (300 per mille) TIMES THE
+LIVE ROWS: a column costs every row that waits on the pass a part of a token (measured about a fifth in this exact association), so
+beside three other decoders only a nearly sure draft takes one, and with more than two rows decoding the server runs the plain pass it
+always ran. A request may say `"spec":0` to keep its own row plain (the paired reading). Options: `spec` (columns a pass may carry, 0
+or 1 off, default 8), `spec_floor`, `spec_nmin`; the ledger row names `drafts_tried` and `drafts_accepted`.
+
+Measured on the 27B, old and new rows alternated in ONE server process (the pair shares the machine's weather; the GPU read 0 to 3%
+utilization before and after; one row alone, 200 ids, back to back): code 21.0 and 20.5 tok/s against 15.3 and 15.0 (1.37x), json
+19.2 and 18.5 against 14.8 and 14.0 (1.30x), prose 14.0 and 11.8 against 13.2 and 9.5 (no draft stood: 9 tried), a planner ask 7.6 and
+8.7 against 7.8 and 8.5 (equal); a 420-id reply 15.7 against 11.9. Four rows at once: equal to plain (11.5 against 11.4 tok/s a row: no
+row drafted). The lane's 4.4x (68.5 against 15.6 tok/s, 6.4 ids a pass) is the DFlash2 drafter on the matrix unit; this host stays at
+the exact association and the row's own text, where a draft stands 50 to 63% of the time on code and json (30% on a planner ask, none on prose) and a pass of about 2.5 columns read 88 ms against 65 to 70 for a one-token pass.
+Two things were measured against it and left out: the matrix unit's arithmetic for the whole server (one token a pass costs 90 ms
+there against 65 ms in the exact decode matvec, so the server read 11.4 tok/s plain and 12.5 and 13.6 on code and json with drafts, unpaired readings of the same hour that read 15 for
+the exact plain pass; the replies of the four prompts were equal to the exact ones, but its near-ties are not the old image's bits), and a column budget that ignored the live rows (four rows with
+drafts read 5.5 to 8.1 tok/s a row against 6.8 to 7.0 without). The drafter's text, the segment kernels and the table rows are the whole
+host; the DFlash2 drafter needs its tapped residuals captured in the batched pass and a drafter context per row, which is the next lever.
+
 ## Binary limits in the serving path
 
 Named, so none passes for a law of the model: rows (8: `q38s-nt-max`, the widest specialized matvec and the head's logits buffer);
@@ -106,6 +139,7 @@ absent (equal rest before each), against 5.0 tok/s with it passing (0.8 passes/s
 ## Where it is going
 
 - Sampling prefill rows in the same pass as decode rows (a true mixed batch).
+- The DFlash2 drafter in the server (capture the five tapped layers' residuals in the prefill's batches and the verify pass, a drafter context per row), and the matrix unit's verify with the exact association's one-token pass kept for rows that do not draft: the 4.4x of the in-process lane needs both.
 - Prefill at depth: a 64-id chunk costs 0.34 s near position 0 and about 1.1 s near 8000 (the paged span attention is not on the matrix unit).
 - Envelope and grammar on the server (per-row top-k and a grammar object in the loop), so the planner's envelope applies there.
 - Shared blocks (a count of owners a block already has in the pool): a prefix-cache hit copies its blocks into the sequence's;

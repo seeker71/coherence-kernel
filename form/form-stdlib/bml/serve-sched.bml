@@ -19,19 +19,20 @@
 // decodes the prefill runs at full speed. A reply ends only at the model's end of turn, a stop string the caller named, or a count the caller named.
 //
 // A sequence is a list [id, priority, arrive_ms, prompt_ids, max_new, stops, phase, slot, fed, gen_ids_reversed, feed, pos, admit_ms,
-// decode_start_ms, surprise_sum, status, prefill_ms, gen_n, who, end_ms, snapshot_points, cached_ids, temperature_milli, seed, blocks, prompt_ids_as_submitted, yields]; the state S is [queue, the list of those being read (prefilling), live,
+// decode_start_ms, surprise_sum, status, prefill_ms, gen_n, who, end_ms, snapshot_points, cached_ids, temperature_milli, seed, blocks, prompt_ids_as_submitted, yields, the drafter's text (svs-ng-new; [] for none),
+// acceptance per mille, drafts tried, drafts accepted, the request's spec flag]; the state S is [queue, the list of those being read (prefilling), live,
 // prefill_ms, decode_ms, nrows]; the env is [now, limit, begin, chunk, fork, decode, stop-hit, pool, eos?, chunk-size, share-pct, snap, budget, reclaim]. limit is a standing limit on sequences admitted at once (0 none).
 // begin answers the prompt ids a prefix cache already holds in the state it opened (the lane reads on from there); snap(s, count) keeps the state as it stands after `count` ids; budget answers the blocks
-// the machine lets the pool have in use (negative: no pressure claimed); reclaim(need) lets go the prefix cache's least recently used entries until `need` blocks are free or none is left, and answers the blocks free.
+// the machine lets the pool have in use (negative: no pressure claimed); a server that speculates adds four more: verify, width, floor, nmin (see "speculation" below); reclaim(need) lets go the prefix cache's least recently used entries until `need` blocks are free or none is left, and answers the blocks free.
 // preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/door-options.bml
 section [form.bml] {
  class ServeSched {
   // ── the spool request: one JSON object a file, read strictly (door-options) ──
   // prompt (required), lens (a task text that closes the user turn, the counsel's lens), chat (1 wraps the prompt as a user turn and opens the
   // assistant's with an empty think block; 0 continues the raw text), max_tokens (0 or absent: until the model ends its turn), stop (strings),
-  // priority (higher first), who (named in the ledger). envelope and grammar are named so they are REFUSED by name: this lane decodes greedily
+  // priority (higher first), who (named in the ledger), spec (0: this request's row never carries drafts even when the server speculates, the paired plain reading; 1, the default, follows the server). envelope and grammar are named so they are REFUSED by name: this lane decodes greedily
   // and has no grammar hook; a caller that needs one runs its own session.
-  def svs-spec() = [["prompt", "str"], ["lens", "str"], ["chat", "int"], ["max_tokens", "int"], ["stop", "strs"], ["priority", "int"], ["who", "str"], ["envelope", "str"], ["grammar", "str"], ["temperature_milli", "int"], ["seed", "int"]];
+  def svs-spec() = [["prompt", "str"], ["lens", "str"], ["chat", "int"], ["max_tokens", "int"], ["stop", "strs"], ["priority", "int"], ["who", "str"], ["envelope", "str"], ["grammar", "str"], ["temperature_milli", "int"], ["seed", "int"], ["spec", "int"]];
   def svs-str(doc, key, d) = json-object-has?(doc, key) ? json-string-value(json-object-get(doc, key)) : d;
   def svs-int(doc, key, d) = json-object-has?(doc, key) ? json-int-value(json-object-get(doc, key)) : d;
   def svs-strs(doc, key) = json-object-has?(doc, key) ? map(t => json-string-value(t), json-array-elements(json-object-get(doc, key))) : [];
@@ -43,7 +44,7 @@ section [form.bml] {
   def svs-parse-doc(fid, doc) {
    let prompt = svs-str(doc, "prompt", "");
    let max = svs-int(doc, "max_tokens", 0);
-   len(svs-str(doc, "envelope", "")) > 0 || len(svs-str(doc, "grammar", "")) > 0 ? ["refused", "envelope-unsupported: this server decodes greedily with no grammar hook; run a session of your own for an envelope"] : len(prompt) == 0 ? ["refused", "no prompt"] : max < 0 ? ["refused", "max_tokens below zero"] : svs-int(doc, "temperature_milli", 0) < 0 ? ["refused", "temperature_milli below zero"] : ["ok", [fid, prompt, svs-str(doc, "lens", ""), svs-int(doc, "chat", 1), max, svs-strs(doc, "stop"), svs-int(doc, "priority", 0), svs-str(doc, "who", "caller"), svs-int(doc, "temperature_milli", 0), svs-int(doc, "seed", 0)]];
+   len(svs-str(doc, "envelope", "")) > 0 || len(svs-str(doc, "grammar", "")) > 0 ? ["refused", "envelope-unsupported: this server decodes greedily with no grammar hook; run a session of your own for an envelope"] : len(prompt) == 0 ? ["refused", "no prompt"] : max < 0 ? ["refused", "max_tokens below zero"] : svs-int(doc, "temperature_milli", 0) < 0 ? ["refused", "temperature_milli below zero"] : ["ok", [fid, prompt, svs-str(doc, "lens", ""), svs-int(doc, "chat", 1), max, svs-strs(doc, "stop"), svs-int(doc, "priority", 0), svs-str(doc, "who", "caller"), svs-int(doc, "temperature_milli", 0), svs-int(doc, "seed", 0), svs-int(doc, "spec", 1)]];
   }
   def svs-r-prompt(r) = r[1];
   def svs-r-lens(r) = r[2];
@@ -52,7 +53,7 @@ section [form.bml] {
   def svs-put(xs, i, v) = append(append(take(i, xs), [v]), xs[i + 1:]);
   // fields 20 and 21: the positions at which the prefill lane keeps a snapshot of its state for later requests that share the prefix (the server names them,
   // sorted, each under the last prompt position), and how many prompt ids the prefix cache already held when the sequence began (read from the state, never from the prompt)
-  def svs-seq(r, ids, now) = [r[0], r[6], now, ids, r[4], r[5], "queued", -1, 0, [], 0, 0, 0, 0, 0, "", 0, 0, r[7], 0, [], 0, len(r) > 8 ? r[8] : 0, len(r) > 9 ? r[9] : 0, [], ids, 0];
+  def svs-seq(r, ids, now) = [r[0], r[6], now, ids, r[4], r[5], "queued", -1, 0, [], 0, 0, 0, 0, 0, "", 0, 0, r[7], 0, [], 0, len(r) > 8 ? r[8] : 0, len(r) > 9 ? r[9] : 0, [], ids, 0, [], 500, 0, 0, len(r) > 10 ? r[10] : 1];
   // fields 24 to 26: the blocks the sequence holds, in table order (position p is in blocks[p / bsz]); the prompt as it was submitted (a yield requeues the prompt and the reply so far as one list of ids);
   // how many times the sequence gave its blocks back for others
   def svs-blocks(s) = s[24];
@@ -212,7 +213,9 @@ section [form.bml] {
   def svs-join(S, env, pf) {
    let forked = svs-fork-call(env, pf);
    let t = svs-now(env);
-   let seq = svs-put(svs-put(svs-put(svs-put(svs-put(pf, 6, "decode"), 10, pf[3][len(pf[3]) - 1]), 11, len(pf[3]) - 1), 13, t), 16, t - pf[12]);
+   let seq0 = svs-put(svs-put(svs-put(svs-put(svs-put(pf, 6, "decode"), 10, pf[3][len(pf[3]) - 1]), 11, len(pf[3]) - 1), 13, t), 16, t - pf[12]);
+   // a greedy sequence of a server that speculates keeps its own history as the drafter's text (a sampled one proposes nothing)
+   let seq = svs-width(env) >= 2 && pf[22] == 0 && pf[31] != 0 ? svs-put(seq0, 27, svs-ng-new(pf[3])) : seq0;
    [[S[0], filter(x => (String) x[0] != (String) pf[0], S[1]), append(S[2], [seq]), 0, 0, S[5]], []];
   }
   // one pass for every live sequence: row k is the sequence in slot k (a free slot below the highest live one is fed id 0 at position 0 and ignored, its table row the sink's); a row names the blocks of its sequence
@@ -226,13 +229,103 @@ section [form.bml] {
   def svs-decode-joined(fin, r) = [r[0], append(fin, r[1])];
   def svs-decode-run(S, env) {
    let t0 = svs-now(env);
-   let out = svs-decode-call(env, svs-rows(S));
+   let ds = svs-drafts(S, env);
+   let out = nil?(ds) ? svs-decode-call(env, svs-rows(S)) : svs-verify-call(env, svs-verify-rows(S, ds));
    let t1 = svs-now(env);
-   let nxt = map(s => svs-advance(s, out[s[7]], env, t1), S[2]);
+   let nxt = nil?(ds) ? map(s => svs-advance-plain(s, out[s[7]], env, t1), S[2]) : map(i => svs-advance-spec(S[2][i], out[i], env, t1), range(0, len(S[2])));
    let done = filter(s => (String) s[6] == "done", nxt);
    let freed = foldl((a, s) => a + svs-give-back(env, s), 0, done);
    [[S[0], S[1], filter(s => (String) s[6] != "done", nxt), S[3], S[4] + (t1 - t0), S[5]], done];
   }
+  // ── speculation: the columns of one weight pass ──
+  // A weight pass costs about the same for one token column as for several, so a decoding row may carry drafts: ids it proposes after its pending token. The pass then carries the row as a SEGMENT of
+  // consecutive columns [pending, d1 .. dk]; the model's greedy id after each column says how many drafts stand (the longest run it repeats) and one more id comes free. A row that proposes nothing is
+  // a segment of one column: the plain decode. The model says exactly what it says one token a pass (the verify path is the decode path's arithmetic, bit for bit), so the reply is the same text, only sooner.
+  // The drafts are the row's own text looked up (what followed the last time its last few ids occurred, "prompt lookup"); the pass's columns go one at a time to the row whose next draft is likeliest to
+  // stand (its recent acceptance to the power of the drafts it already has), while that likelihood is above the floor times the live rows (a column costs every row that waits on the pass a part of a token, so
+  // with four rows decoding only a draft that is nearly sure takes one: measured, speculation beside three other decoders slowed every row). Only greedy rows draft. env[15] verify(rows)
+  // answers a list a row [the ids accepted (the last is the next pending id), their surprises, drafts accepted, drafts tried], env[16] the columns a pass may carry (under 2: no speculation), env[17] the
+  // floor in per mille, env[18] the shortest suffix a lookup may match.
+  def svs-verify-call(env, rows) { let f = env[15]; f(rows); }
+  def svs-width(env) = len(env) > 18 ? env[16] : 0;
+  def svs-floor(env) = env[17];
+  def svs-nmin(env) = env[18];
+  def svs-accept(d, v, j) = j >= len(d) ? j : (d[j] == v[j] ? svs-accept(d, v, j + 1) : j);
+  // a row's acceptance (per mille, a running share) after a pass that tried k drafts and had m stand; a pass that tried none lets it drift back toward 600, so a row that fell under the floor is tried again
+  def svs-rate(rate, m, k) = k <= 0 ? rate + (600 - rate) / 16 : (rate * 7 + 3 * (m * 1000 / k)) / 10;
+  // props: what each row could carry (lists), rates: per mille, lims: the most each may carry, width: columns in the pass. Every row has its column; the rest go one at a time to the row whose next draft is
+  // likeliest (rate^(k+1)), while that is at least floor. Answers the drafts each row carries (a prefix of its proposal).
+  def svs-assign(props, rates, lims, width, floor) {
+   let n = len(props);
+   let lim = map(i => len(props[i]) < lims[i] ? len(props[i]) : lims[i], range(0, n));
+   let ks = svs-assign-go(map(i => 0, range(0, n)), rates, lim, rates, width - n, floor);
+   map(i => take(ks[i], props[i]), range(0, n));
+  }
+  def svs-assign-go(ks, gn, lim, rates, free, floor) {
+   let n = len(ks);
+   let best = foldl((b, i) => ks[i] < lim[i] && (b < 0 || gn[i] > gn[b]) ? i : b, -1, range(0, n));
+   free <= 0 || best < 0 || gn[best] < floor ? ks : svs-assign-go(map(i => i == best ? ks[i] + 1 : ks[i], range(0, n)), map(i => i == best ? gn[i] * rates[i] / 1000 : gn[i], range(0, n)), lim, rates, free - 1, floor);
+  }
+  // the drafts a row's pass carries: [] when no row carries any (the plain decode runs), else a list a live sequence
+  def svs-drafts(S, env) = svs-width(env) < 2 || nil?(S[2]) ? [] : svs-drafts-for(S[2], env, svs-bsz(env));
+  def svs-drafts-for(live, env, bsz) {
+   let w = svs-width(env);
+   let props = map(s => nil?(s[27]) ? [] : svs-ng-propose(s[27], svs-nmin(env), w - 1), live);
+   nil?(filter(p => !nil?(p), props)) ? [] : svs-drafts-kept(svs-assign(props, map(s => s[28], live), map(s => svs-draft-room(s, bsz), live), w, svs-floor(env) * len(live)));
+  }
+  def svs-drafts-kept(ds) = any?(d => !nil?(d), ds) ? ds : [];
+  // the drafts a sequence may carry: its positions take the blocks it holds (no draft past them: the pool grows a sequence one block at a time, as it advances) and its count (max_new) is not passed
+  def svs-draft-room(s, bsz) {
+   let room = len(s[24]) * bsz - 1 - s[11];
+   let left = s[4] > 0 ? s[4] - s[17] - 1 : room;
+   room < left ? room : left;
+  }
+  // the rows of the verify pass: [slot, pending id, position, temperature, seed, tokens said, blocks, drafts] a live sequence, in the order of the live list
+  def svs-verify-rows(S, ds) = map(i => [S[2][i][7], S[2][i][10], S[2][i][11], S[2][i][22], S[2][i][23], S[2][i][17], S[2][i][24], ds[i]], range(0, len(S[2])));
+  // a row that decoded one id in a server that speculates keeps its history (and its acceptance drifts toward the try again)
+  def svs-advance-plain(s, r, env, t) {
+   let s1 = svs-advance(s, r, env, t);
+   (String) s1[6] == "done" || nil?(s1[27]) ? s1 : svs-put(svs-put(s1, 27, svs-ng-grow(s1[27], [r[0]])), 28, svs-rate(s1[28], 0, 0));
+  }
+  // a row after the verify pass: the ids it accepted one after another (the end of turn, a stop string or its count ends it there and the rest are no part of it), its acceptance and tallies, its history
+  def svs-advance-spec(s, res, env, t) {
+   let s1 = svs-advance-many(s, res[0], res[1], env, t);
+   let taken = s1[17] - s[17];
+   let s2 = svs-put(svs-put(svs-put(s1, 28, svs-rate(s[28], res[2], res[3])), 29, s[29] + res[3]), 30, s[30] + res[2]);
+   (String) s2[6] == "done" || nil?(s2[27]) ? s2 : svs-put(s2, 27, svs-ng-grow(s2[27], take(taken, res[0])));
+  }
+  def svs-advance-many(s, ids, lps, env, t) = nil?(ids) || (String) s[6] == "done" ? s : svs-advance-many(svs-advance(s, [ids[0], lps[0]], env, t), ids[1:], lps[1:], env, t);
+  // ── the row's own text as a drafter: what followed the last time its last few ids occurred ──
+  // state: [the ids (the last svs-ng-window or so of the prompt and the reply), an index record: the key of the 1, 2 and 3 ids before a position -> that position (the latest)]. The suffix at the end
+  // is not indexed until the next id arrives, so a lookup finds an EARLIER occurrence, never itself.
+  def svs-ng-window() = 4096;
+  def svs-ng-new(ids) {
+   let h = len(ids) > svs-ng-window() ? drop(len(ids) - svs-ng-window(), ids) : ids;
+   let idx = record_new(0);
+   let a = svs-ng-index(idx, h, 1, len(h));
+   [h, idx];
+  }
+  def svs-ng-key(h, i, n) = n == 1 ? h[i - 1].str() : n == 2 ? h[i - 2].str() ++ "," ++ h[i - 1].str() : h[i - 3].str() ++ "," ++ h[i - 2].str() ++ "," ++ h[i - 1].str();
+  def svs-ng-note(idx, h, i) {
+   let a = i >= 1 ? record_set(idx, svs-ng-key(h, i, 1), i) : 0;
+   let b = i >= 2 ? record_set(idx, svs-ng-key(h, i, 2), i) : 0;
+   let c = i >= 3 ? record_set(idx, svs-ng-key(h, i, 3), i) : 0;
+   0;
+  }
+  def svs-ng-index(idx, h, i, n) = i >= n ? 0 : { let a = svs-ng-note(idx, h, i); svs-ng-index(idx, h, i + 1, n); };
+  def svs-ng-grow(state, ids) {
+   let h = append(state[0], ids);
+   let a = svs-ng-index(state[1], h, len(state[0]), len(h));
+   len(h) > 2 * svs-ng-window() ? svs-ng-new(h) : [h, state[1]];
+  }
+  // up to k ids that followed the longest suffix (3 down to nmin ids) of the text the last time it occurred; [] when none did
+  def svs-ng-propose(state, nmin, k) = svs-ng-try(state, 3, nmin, k);
+  def svs-ng-try(state, n, nmin, k) = n < nmin ? [] : (len(state[0]) <= n ? svs-ng-try(state, n - 1, nmin, k) : svs-ng-at(state, n, nmin, k, svs-ng-find(state, n)));
+  def svs-ng-find(state, n) {
+   let key = svs-ng-key(state[0], len(state[0]), n);
+   record_has(state[1], key) ? record_get(state[1], key) : -1;
+  }
+  def svs-ng-at(state, n, nmin, k, at) = at >= 0 && at < len(state[0]) ? take(k, drop(at, state[0])) : svs-ng-try(state, n - 1, nmin, k);
   // a sequence that ends gives its blocks back (the last owner of a block frees it; a prefix-cache entry that holds one keeps it)
   def svs-give-back(env, s) {
    let r = svb-release(svs-pool(env), s[24]);
@@ -284,7 +377,7 @@ section [form.bml] {
   def svs-yield(S, env, v) {
    let freed = svs-give-back(env, v);
    let ids = append(v[25], svs-gen(v));
-   let v1 = svs-put(svs-put(svs-put(svs-put(svs-put(svs-put(v, 3, ids), 6, "queued"), 7, -1), 8, 0), 24, []), 26, v[26] + 1);
+   let v1 = svs-put(svs-put(svs-put(svs-put(svs-put(svs-put(svs-put(v, 3, ids), 6, "queued"), 7, -1), 8, 0), 24, []), 26, v[26] + 1), 27, []);
    [append(S[0], [v1]), S[1], filter(x => (String) x[0] != (String) v[0], S[2]), S[3], S[4], S[5]];
   }
   // a sequence takes its row's greedy id: the end of turn ends it (and is no part of its reply); else the id is its reply's next, and it ends at a
@@ -298,7 +391,7 @@ section [form.bml] {
   def svs-decode-ms(s) = s[19] - s[13] < 0 ? 0 : s[19] - s[13];
   // tokens a second in tenths, over the span the sequence decoded (joined to ended)
   def svs-tok-s10(s) = svs-decode-ms(s) <= 0 ? 0 : s[17] * 10000 / svs-decode-ms(s);
-  def svs-fields(s, at_unix_ms) = [svs-s("id", s[0]), svs-s("who", s[18]), svs-s("status", s[15]), svs-n("priority", s[1]), svs-n("prompt_ids", len(s[25])), svs-n("cached_ids", s[21]), svs-n("yields", s[26]), svs-n("temperature_milli", s[22]), svs-n("generated_ids", s[17]), svs-n("wall_ms", s[19] - s[2]), svs-n("queue_ms", s[12] - s[2]), svs-n("prefill_ms", s[16]), svs-n("decode_ms", svs-decode-ms(s)), json-node-pair("decode_tok_s", json-node-float-text(svs-tenths(svs-tok-s10(s)))), svs-n("surprise_micro_nats", s[17] > 0 ? s[14] / s[17] : 0), svs-n("slot", s[7]), svs-n("rent_tokens", 0), svs-n("at_unix_ms", at_unix_ms)];
+  def svs-fields(s, at_unix_ms) = [svs-s("id", s[0]), svs-s("who", s[18]), svs-s("status", s[15]), svs-n("priority", s[1]), svs-n("prompt_ids", len(s[25])), svs-n("cached_ids", s[21]), svs-n("yields", s[26]), svs-n("drafts_tried", s[29]), svs-n("drafts_accepted", s[30]), svs-n("temperature_milli", s[22]), svs-n("generated_ids", s[17]), svs-n("wall_ms", s[19] - s[2]), svs-n("queue_ms", s[12] - s[2]), svs-n("prefill_ms", s[16]), svs-n("decode_ms", svs-decode-ms(s)), json-node-pair("decode_tok_s", json-node-float-text(svs-tenths(svs-tok-s10(s)))), svs-n("surprise_micro_nats", s[17] > 0 ? s[14] / s[17] : 0), svs-n("slot", s[7]), svs-n("rent_tokens", 0), svs-n("at_unix_ms", at_unix_ms)];
   def svs-ledger-row(s, at_unix_ms) = json-emit(json-node-object(svs-fields(s, at_unix_ms)));
   def svs-reply-row(s, text, at_unix_ms) = json-emit(json-node-object(append(svs-fields(s, at_unix_ms), [svs-s("text", text)])));
   def svs-refused-row(fid, why, at_unix_ms) = json-emit(json-node-object([svs-s("id", fid), svs-s("status", "refused"), svs-s("reason", why), svs-n("generated_ids", 0), svs-n("rent_tokens", 0), svs-n("at_unix_ms", at_unix_ms), svs-s("text", "")]));

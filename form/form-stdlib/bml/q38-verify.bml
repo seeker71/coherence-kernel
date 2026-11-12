@@ -1,0 +1,164 @@
+// q38-verify.bml — continuous batching with speculation: ONE pass over the weights carries several token columns of each row.
+//
+// The resident server decodes one token a row a weight pass. A pass costs about the same whether it carries one token column or eight
+// (the matrix unit reads each weight once for the whole tile: an 8-column check is 1.46 of one token on this machine), so the other seven
+// columns are free tokens when something proposes them. Here a row proposes up to k drafts (a lookup of its own history, or a drafter);
+// the pass carries every row's [pending token, d1 .. dk] as a SEGMENT of consecutive columns; the verify of column j is the model's
+// greedy token after the row's prefix and d1..dj, so the row accepts the longest run of drafts the model repeats and takes one more
+// token for free. Rejected positions are simply overwritten (the paged KV is addressed by position); the recurrent layers of a row (conv
+// window, gated-delta state) wrote a snapshot after every column of the segment but the last, and a rejected tail is put back by one copy
+// a layer from the snapshot after the last column that stood. A row that proposes nothing is a segment of one column: the plain decode.
+//
+// WHAT THIS FILE ADDS to q38-multi.bml's stream-row pass: the columns of one row share its recurrent state and are sequential, so the two
+// recurrences run per SEGMENT (a thread a state row looping the segment's columns: the arithmetic of q38m-conv-msl / q38m-delta-msl
+// term for term, or the simdgroup-a-row kernel of the matrix-unit check), reading the row's state at slot * stride and writing the
+// snapshots by global column. Everything else is the stream-row pass as it stands: the projections run ntok columns wide, the rope and the
+// attention run a column each at its own position, and the paged KV is addressed through a table ROW A COLUMN: the caller writes the row's
+// block list into the table row of each of its columns, so the existing paged kernels serve a segment unchanged.
+//
+// The answer is the greedy token of the pass's own numerics at every column, whatever else rides in the pass (the projections are batch
+// invariant in the matrix-unit mode and in the exact mode), so a row with drafts says exactly what the same row says alone with none.
+// The resident server (observe/qwen-serve-run.bml, docs/resident-server.md "Speculation") hosts it and is the end-to-end witness: replies with drafts against replies without, byte for byte, in one process. The split attention
+// writes each row's partials at a stride of the attention scratch's positions, so the scratch must be opened wide enough for the rows of a pass (a 512-position scratch overlapped them: the second column read garbage).
+// preludes: form-stdlib/core.fk form-stdlib/gpu-lease.bml native/metal/qwen35-dense-spec.fk form-stdlib/bml/q38-multi.bml
+section [form.bml] {
+ class Q38Verify {
+  // The causal convolution window of the linear layers for nseg segments: one thread a (segment, channel) looping the segment's n columns.
+  // segb holds four words a segment [slot, first column, n, 0]; the row's window is at slot * wstride, column c's input and output at
+  // (first + t) * xstride, and the window after every column but the last is written to snap at (first + t) * snapstride (the spec lane's q38s-conv-snap-msl).
+  def q38v-conv-msl(fname) = "kernel void " ++ fname ++ " (device float* win [[buffer(0)]], device const float* x [[buffer(1)]], device const float* w [[buffer(2)]], device float* y [[buffer(3)]], device float* snap [[buffer(4)]], device const uint* segb [[buffer(5)]], constant uint& nch [[buffer(6)]], constant uint& kw [[buffer(7)]], constant uint& wstride [[buffer(8)]], constant uint& xstride [[buffer(9)]], constant uint& snapstride [[buffer(10)]], constant uint& nseg [[buffer(11)]], uint gid [[thread_position_in_grid]]) { if (gid >= nseg * nch) return; uint sg = gid / nch; uint c = gid - sg * nch; uint slot = segb[sg * 4u]; uint c0 = segb[sg * 4u + 1u]; uint n = segb[sg * 4u + 2u]; device float* wn = win + slot * wstride; uint b = c * kw; for (uint t = 0u; t < n; ++t) { for (uint j = 0u; j + 1u < kw; ++j) { wn[b + j] = wn[b + j + 1u]; } wn[b + kw - 1u] = x[(c0 + t) * xstride + c]; float acc = 0.0f; for (uint j = 0u; j < kw; ++j) { acc = acc + wn[b + j] * w[b + j]; } y[(c0 + t) * xstride + c] = acc; if (t + 1u < n) { for (uint j = 0u; j < kw; ++j) { snap[(c0 + t) * snapstride + b + j] = wn[b + j]; } } } }";
+  // The gated delta rule for nseg segments, a thread a (segment, value head, value dim) looping the segment's columns: the body of
+  // q38m-delta-msl (which the single-token decode runs) term for term, the row's state S at slot * sstride, snapshots by global column.
+  def q38v-delta-msl(fname) = "kernel void " ++ fname ++ " (device float* S [[buffer(0)]], device const float* c [[buffer(1)]], device const float* alpha [[buffer(2)]], device const float* beta [[buffer(3)]], device float* o [[buffer(4)]], device float* snap [[buffer(5)]], device const uint* segb [[buffer(6)]], constant uint& nv [[buffer(7)]], constant uint& dv [[buffer(8)]], constant uint& dk [[buffer(9)]], constant uint& nk [[buffer(10)]], constant float& qscale [[buffer(11)]], constant uint& cstride [[buffer(12)]], constant uint& gstride [[buffer(13)]], constant uint& ostride [[buffer(14)]], constant uint& snapstride [[buffer(15)]], constant uint& sstride [[buffer(16)]], constant uint& nseg [[buffer(17)]], uint gid [[thread_position_in_grid]]) { uint per = nv * dv; if (gid >= nseg * per) return; uint sg = gid / per; uint g = gid - sg * per; uint h = g / dv; uint i = g - h * dv; uint slot = segb[sg * 4u]; uint c0 = segb[sg * 4u + 1u]; uint n = segb[sg * 4u + 2u]; uint kh = h - (h / nk) * nk; uint r = slot * sstride + (h * dv + i) * dk; uint rn = (h * dv + i) * dk; for (uint t = 0u; t < n; ++t) { uint col = c0 + t; device const float* cr = c + col * cstride; device const float* q = cr + kh * dk; device const float* k = cr + nk * dk + kh * dk; float v = cr[2u * nk * dk + h * dv + i]; float al = alpha[col * gstride + h]; float pred = 0.0f; for (uint j = 0u; j < dk; ++j) { float sp = al * S[r + j]; S[r + j] = sp; pred = pred + sp * k[j]; } float err = v - pred; float bw = beta[col * gstride + h] * err; float acc = 0.0f; for (uint j = 0u; j < dk; ++j) { float sn = S[r + j] + bw * k[j]; S[r + j] = sn; acc = acc + sn * (qscale * q[j]); if (t + 1u < n) { snap[col * snapstride + rn + j] = sn; } } o[col * ostride + h * dv + i] = acc; } }";
+  // the same recurrence as the simdgroup-a-state-row kernel of the matrix-unit check (q38s-delta-sg-msl): the row's 128 values live four a lane
+  // in registers across the segment's columns and its two reductions are simd_sums. dk must be 128. A group is four state rows of one segment.
+  def q38v-delta-sg-msl(fname) = "kernel void " ++ fname ++ " (device float* S [[buffer(0)]], device const float* c [[buffer(1)]], device const float* alpha [[buffer(2)]], device const float* beta [[buffer(3)]], device float* o [[buffer(4)]], device float* snap [[buffer(5)]], device const uint* segb [[buffer(6)]], constant uint& nv [[buffer(7)]], constant uint& dv [[buffer(8)]], constant uint& dk [[buffer(9)]], constant uint& nk [[buffer(10)]], constant float& qscale [[buffer(11)]], constant uint& cstride [[buffer(12)]], constant uint& gstride [[buffer(13)]], constant uint& ostride [[buffer(14)]], constant uint& snapstride [[buffer(15)]], constant uint& sstride [[buffer(16)]], constant uint& nseg [[buffer(17)]], uint grp [[threadgroup_position_in_grid]], uint sgi [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) { uint gps = (nv * dv + 3u) / 4u; uint sg = grp / gps; if (sg >= nseg) return; uint row = (grp - sg * gps) * 4u + sgi; if (row >= nv * dv) return; uint slot = segb[sg * 4u]; uint c0 = segb[sg * 4u + 1u]; uint n = segb[sg * 4u + 2u]; uint h = row / dv; uint i = row - h * dv; uint kh = h - (h / nk) * nk; device float4* sp = (device float4*)(S + (ulong)slot * (ulong)sstride + (ulong)row * 128ul) + lane; float4 s = *sp; for (uint t = 0u; t < n; ++t) { uint col = c0 + t; uint co = col * cstride; float4 k4 = float4(((device const packed_float4*)(c + co + nk * 128u + kh * 128u))[lane]); float4 q4 = float4(((device const packed_float4*)(c + co + kh * 128u))[lane]); float v = c[co + 2u * nk * 128u + h * dv + i]; float al = alpha[col * gstride + h]; float bt = beta[col * gstride + h]; float4 sp4 = s * al; float4 pr = sp4 * k4; float pred = metal::simd_sum((pr.x + pr.y) + (pr.z + pr.w)); float err = v - pred; float bw = bt * err; s = sp4 + bw * k4; if (t + 1u < n) { ((device float4*)(snap + (ulong)col * (ulong)snapstride + (ulong)row * 128ul))[lane] = s; } float4 ac = s * (qscale * q4); float accv = metal::simd_sum((ac.x + ac.y) + (ac.z + ac.w)); if (lane == 0u) { o[col * ostride + h * dv + i] = accv; } } *sp = s; }";
+  def q38v-msl() = kth-msl() ++ q38v-conv-msl("form_q38v_conv_seg") ++ q38v-delta-msl("form_q38v_delta_seg") ++ q38v-delta-sg-msl("form_q38v_delta_sg_seg");
+  // the verify handle: [[conv pipeline, delta pipeline, simdgroup delta pipeline], the segment table buffer (four words a segment, at most 8 segments)]
+  def q38v-open(msl) = [[metal_pipeline(msl, "form_q38v_conv_seg"), metal_pipeline(msl, "form_q38v_delta_seg"), metal_pipeline(msl, "form_q38v_delta_sg_seg")], metal_buf_alloc(256)];
+  def q38v-close(vk) = q38-free-handle(vk[1]);
+  def q38v-segbytes(segs) = q38m-uints(foldl((a, s) => append(a, [s[0], s[1], s[2], 0]), [], segs));
+  // a linear-attention layer for ntok columns in nseg segments (q38m-linear with the two recurrences replaced by the segment kernels)
+  def q38v-linear(ps, qs, mp, vk, bs, geo, lay, st, snp, ntok, nseg) {
+   let pitch = qlslc-bs2-output-pitch(geo);
+   let convn = geo[1] * geo[23];
+   let deltan = geo[3] * geo[5] * geo[4];
+   q38-rms-span(ps, bs[33], lay[0], bs[1], geo[0], geo[6], ntok, 1);
+   q38s-mv(ps, qs, lay[5], bs[1], bs[2], ntok, pitch, 1);
+   q38s-mv(ps, qs, lay[7], bs[1], bs[3], ntok, kth-tv-r(lay[7]), 0);
+   q38s-mv(ps, qs, lay[8], bs[1], bs[4], ntok, kth-tv-r(lay[8]), 0);
+   q38s-mv(ps, qs, lay[12], bs[1], bs[7], ntok, kth-tv-r(lay[12]), 0);
+   metal_enqueue(vk[0][0], q38-b16([st[0], bs[2], kth-tv-h(lay[6]), bs[2], snp[0], vk[1]], [geo[1], geo[23], convn, pitch, convn, nseg], 0, 1), geo[1] * nseg);
+   metal_enqueue(ps[8], q38-b16([bs[2]], [qlslc-bs2-allocation-elements(geo, ntok)], 0, 1), qlslc-bs2-allocation-elements(geo, ntok));
+   metal_enqueue(nth(ps, qlslc-l2norm-span-pipeline()), q38-b16([bs[2]], [2 * geo[2], geo[4], geo[6], pitch, ntok], 0, 1), 2 * geo[2] * ntok);
+   metal_enqueue(nth(ps, qlslc-gates-span-pipeline()), q38-b16([bs[3], bs[4], kth-tv-h(lay[9]), kth-tv-h(lay[10]), bs[5], bs[6]], [geo[3], ntok], 0, 1), geo[3] * ntok);
+   q38s-fast?(qs) && geo[4] == 128 ? metal_enqueue(vk[0][2], md-bind16([st[1], bs[2], bs[5], bs[6], bs[8], snp[1], vk[1]], [geo[3], geo[5], geo[4], geo[2], geo[7], pitch, geo[3], geo[3] * geo[5], deltan, deltan, nseg], 128, 0, 1, 1), nseg * ((geo[3] * geo[5] + 3) / 4)) : metal_enqueue(vk[0][1], md-bind16([st[1], bs[2], bs[5], bs[6], bs[8], snp[1], vk[1]], [geo[3], geo[5], geo[4], geo[2], geo[7], pitch, geo[3], geo[3] * geo[5], deltan, deltan, nseg], 256, 0, 0, 1), nseg * geo[3] * geo[5]);
+   metal_enqueue(nth(ps, qlslc-norm-gate-span-pipeline()), q38-b16([bs[8], kth-tv-h(lay[11]), bs[7], bs[9]], [geo[3], geo[5], geo[6], ntok], 0, 1), geo[3] * ntok);
+   q38s-mv-res(ps, qs, lay[13], bs[9], bs[10], bs[33], ntok, kth-tv-r(lay[13]), 1);
+   1;
+  }
+  def q38v-layers(ps, qs, mp, vk, bs, geo, lays, arena, snps, posb, l, nL, ntok, nseg, maxn) {
+   if (l >= nL) then 1 else {
+    let done = kth-full?(l, geo[22]) ? q38m-full(ps, qs, mp, bs, geo, nth(lays, l), nth(arena, l), posb, ntok, maxn) : q38v-linear(ps, qs, mp, vk, bs, geo, nth(lays, l), nth(arena, l), nth(snps, l), ntok, nseg);
+    q38s-ffn-span(ps, qs, bs, geo, nth(lays, l), ntok);
+    let handed = q38-handover-after(l + 1, nL);
+    q38v-layers(ps, qs, mp, vk, bs, geo, lays, arena, snps, posb, l + 1, nL, ntok, nseg, maxn);
+   };
+  }
+  // One pass over the weights for ntok columns: column c feeds ids[c] at poss[c] (a segment's columns consecutive, one table row a column,
+  // written by the caller), the segments [slot, first column, n] say which columns share a row's recurrent state. Answers [the greedy id
+  // after each column, its surprise in micro-nats (0 when lpb is 0)]. draws as in q38m-step-draw (a column that names a temperature draws; spb 0: none).
+  def q38v-step(ctx, qs, mp, vk, arena, sx, posb, ids, poss, segs, lpb, spb, draws) = gpu-lease-turn("qwen multi decode", () => {
+   let ntok = len(ids);
+   let w3 = spb == 0 ? 0 : metal_buf_write(spb, 0, q38m-uints(foldl((a, d) => append(a, d), [], draws)));
+   let bs = ctx[1];
+   let geo = ctx[2];
+   let w1 = metal_buf_write(sx[0], 0, q38m-uints(ids));
+   let w2 = metal_buf_write(posb, 0, q38m-uints(poss));
+   let w4 = metal_buf_write(vk[1], 0, q38v-segbytes(segs));
+   let batch = metal_batch_concurrent();
+   metal_enqueue(qs[q38s-pipe-embed()], md-bind16([kth-tv-h(ctx[4]), sx[0], bs[33]], [geo[0], ntok, 0], 256, 0, 0, 1), geo[0] * ntok);
+   let layers = q38v-layers(ctx[0], qs, mp, vk, bs, geo, ctx[3], arena, sx[9], posb, 0, geo[21], ntok, len(segs), foldl((a, p) => p + 1 > a ? p + 1 : a, 1, poss));
+   let head = q38s-head-check(ctx, qs, sx, ntok);
+   let drawn = spb == 0 ? 0 : metal_enqueue(mp[9], md-bind16([sx[1], sx[4], spb], [geo[19]], 256, 0, 1, 1), ntok);
+   let scored = lpb == 0 ? 0 : metal_enqueue(mp[6], md-bind16([sx[1], lpb], [geo[19]], 256, 0, 1, 1), ntok);
+   let raw = metal_buf_read(sx[4], 0, ntok * 4);
+   let lps = lpb == 0 ? q38m-fill(0, ntok) : q38m-read-ids(metal_buf_read(lpb, 0, ntok * 4), 0, ntok);
+   [q38m-read-ids(raw, 0, ntok), lps];
+  });
+  // ── restoring a rejected tail ──
+  // The recurrent state of a row after the column `col` of the pass (the snapshot written by the pass) copied into the row's slot of the arena:
+  // one copy a linear layer for the window and one for the delta state (q38m-pgcopy-msl's kernel, pp[4]).
+  def q38v-restore-layer(pp, geo, arena, snps, slot, col, l) {
+   let convn = geo[1] * geo[23];
+   let deltan = geo[3] * geo[5] * geo[4];
+   let sn = nth(snps, l);
+   let a = metal_enqueue(pp[4], md-bind16([sn[0], arena[l][0]], [col * convn, slot * convn, convn], 256, 0, 0, 1), convn);
+   metal_enqueue(pp[4], md-bind16([sn[1], arena[l][1]], [col * deltan, slot * deltan, deltan], 256, 0, 0, 1), deltan);
+  }
+  def q38v-restore-row(pp, geo, arena, snps, slot, col, l) {
+   if (l >= geo[21]) then 0 else {
+    let a = kth-full?(l, geo[22]) ? 0 : q38v-restore-layer(pp, geo, arena, snps, slot, col, l);
+    q38v-restore-row(pp, geo, arena, snps, slot, col, l + 1);
+   };
+  }
+  // items: [slot, column] of every row whose tail was rejected
+  def q38v-restore(ctx, pp, arena, sx, items) = len(items) == 0 ? 0 : gpu-lease-turn("qwen spec restore", () => {
+   let batch = metal_batch_concurrent();
+   let a = foldl((acc, it) => acc + q38v-restore-row(pp, ctx[2], arena, sx[9], it[0], it[1], 0), 0, items);
+   metal_sync();
+   1;
+  });
+  // ── one scheduler pass: rows with their drafts in, per-row accepted tokens out ──
+  // A row is [slot, pending id, its position, its block list, drafts, temperature in thousandths, key, forced]; forced 1 says the "drafts" are
+  // known tokens (a prompt being read through the pass): every column stands, nothing is restored. Columns are laid out in row order,
+  // each row's block list is written into the table row of each of its columns (the paged kernels read table row = column), the pass runs, the
+  // longest run of drafts the model repeats is accepted per row, and a row that rejected is restored. The row's state is then the state after
+  // its accepted tokens; its KV past that is overwritten by its next pass. A drafted row never samples: the caller sends a row with a
+  // temperature without drafts.
+  // c = [ctx, qs, mp, vk, arena, sx, posb, lpb, spb, tbl, tstride, pp].
+  // Answers a list a row: [accepted ids (the last is the next pending token), their surprises, drafts accepted, drafts tried]
+  def q38v-pass(c, rows) {
+   let lay = q38v-columns(rows, 0, [], [], [], [], [], c);
+   let ids = lay[0];
+   let poss = lay[1];
+   let segs = lay[2];
+   let draws = lay[3];
+   let sampled = any?(d => d[0] > 0, draws);
+   let out = q38v-step(c[0], c[1], c[2], c[3], c[4], c[5], c[6], ids, poss, segs, c[7], sampled ? c[8] : 0, draws);
+   let res = map(i => q38v-row-result(rows[i], segs[i], out), range(0, len(rows)));
+   let items = filter(it => it[0] >= 0, map(i => res[i][4], range(0, len(rows))));
+   let restored = q38v-restore(c[0], c[11], c[4], c[5], items);
+   map(r => [r[0], r[1], r[2], r[3]], res);
+  }
+  // [ids, poss, segs, draws] of the rows' columns, the table rows written on the way
+  def q38v-columns(rows, col0, ids, poss, segs, draws, blks, c) {
+   if (len(rows) == 0) then [ids, poss, segs, draws] else {
+    let r = rows[0];
+    let n = 1 + len(r[4]);
+    let w = q38v-write-cols(c[9], c[10], col0, n, r[3]);
+    let samp = r[5] > 0 ? [[r[5], r[6]]] : [[0, 0]];
+    q38v-columns(rows[1:], col0 + n, append(ids, cons(r[1], r[4])), append(poss, range(r[2], r[2] + n)), append(segs, [[r[0], col0, n]]), append(draws, append(samp, q38m-fill([0, 0], n - 1))), blks, c);
+   };
+  }
+  def q38v-write-cols(tbl, tstride, col, n, blocks) {
+   if (n <= 0) then 0 else {
+    let w = q38pg-write-table(tbl, tstride, col, blocks);
+    q38v-write-cols(tbl, tstride, col + 1, n - 1, blocks);
+   };
+  }
+  // the leading drafts d the model's own tokens v repeat: draft j is accepted when the model's greedy token after the column before it is that draft
+  def q38v-accept(d, v, j) = j >= len(d) ? j : (d[j] == v[j] ? q38v-accept(d, v, j + 1) : j);
+  // [accepted ids, surprises, accepted drafts, tried, restore item (or [-1, 0])]
+  def q38v-row-result(r, seg, out) {
+   let col0 = seg[1];
+   let k = len(r[4]);
+   let v = take(k + 1, drop(col0, out[0]));
+   let lp = take(k + 1, drop(col0, out[1]));
+   let m = r[7] == 1 ? k : q38v-accept(r[4], v, 0);
+   [take(m + 1, v), take(m + 1, lp), m, k, m < k ? [r[0], col0 + m] : [-1, 0]];
+  }
+  // who gets the columns, what a row proposes and how its acceptance is kept: serve-sched.bml (svs-assign, svs-ng-propose, svs-rate), pure Form with no model
+ }
+ 0;
+}
