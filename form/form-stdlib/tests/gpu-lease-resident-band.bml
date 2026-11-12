@@ -1,0 +1,56 @@
+// RESIDENT and GUEST on the GPU lease (gpu-lease.bml): while a live resident stands, every other process's turn, hold and door is a guest that
+// takes no exclusive lock; the resident registers without holding the lock; a dead or absent resident leaves the lock exclusive as it was.
+// Scratch directories only; no GPU or shared lease is touched. The "other live process" is this process's parent. Expected: 127.
+import form-stdlib/gpu-lease.bml;
+section [form.bml] {
+ class GpuLeaseResidentBand {
+  def glb-bit(ok,bit) = ok ? bit : 0;
+  // a resident record naming `pid` (with its real start time when the process is alive)
+  def glb-plant(lock,pid,start) {
+   let res=gpl-resident-path(lock);
+   let made=host_dir_mkdir(res);
+   write_file(gpl-owner-file(res), gpl-magic() ++ gpl-nl() ++ "planted" ++ gpl-nl() ++ pid.str() ++ gpl-nl() ++ start.str() ++ gpl-nl() ++ "1" ++ gpl-nl() ++ "1" ++ gpl-nl() ++ "planted resident");
+  }
+  def glb-clear(lock) {
+   let res=gpl-resident-path(lock);
+   let a=host_path_remove(gpl-owner-file(res));
+   host_dir_rmdir(res);
+  }
+  def glb-turn(lock,run) = gpu-lease-turn-at(lock,"resident-band",1000,() => true,run);
+ }
+ let root=host_temp_dir() ++ "/gpu-resident-" ++ host_pid().str();
+ let made=host_dir_mkdir(root);
+ let lock=root ++ "/lock";
+ let parent=gpl-parent();
+ let pstart=gpl-int(gpl-start-of(parent));
+ // 1: no resident, the lock is exclusive: a turn holds it while it runs
+ let c1=glb-bit(nothing?(gpl-role(lock)) && glb-turn(lock,() => host_path_exists(lock)) == 1 && host_path_exists(lock) == 0,1);
+ // 2: a live resident that is another process: a turn is a guest, no lock exists while it runs
+ let p=glb-plant(lock,parent,pstart);
+ let role=gpl-role(lock);
+ let c2=glb-bit(role[0] == "guest" && role[2] == parent && glb-turn(lock,() => host_path_exists(lock)) == 0,2);
+ // 3: a hold is the guest answer, an unhold hands it back unchanged and removes nothing
+ let held=gpu-lease-hold-at(lock,"band",1000);
+ let gave=gpu-lease-unhold-at(lock,held);
+ let c4=glb-bit(held[0] == "guest" && gave == held && host_path_exists(lock) == 0,4);
+ // 4: a second resident beside a live one is refused aloud, and takes nothing it does not give back
+ let refused=try [1,gpu-lease-resident-hold-at(lock,"second",1000,() => 1)] catch [0];
+ let c8=glb-bit(refused[0] == 0 && host_path_exists(lock) == 0,8);
+ let cleared=glb-clear(lock);
+ // 5: a resident that is a dead process judges as no resident: the lock is exclusive again
+ let dead=glb-plant(lock,2147483000,1);
+ let c16=glb-bit(nothing?(gpl-role(lock)) && glb-turn(lock,() => host_path_exists(lock)) == 1,16);
+ let cleared2=glb-clear(lock);
+ // 6: this process as the resident: registered while it runs, holding no lock; its own turns take nothing; the registration goes with it
+ let inside=gpu-lease-resident-hold-at(lock,"band resident",1000,() => [gpl-role(lock)[0], host_path_exists(lock), glb-turn(lock,() => host_path_exists(lock)), host_path_exists(gpl-resident-path(lock))]);
+ let c32=glb-bit(inside == ["resident",0,0,1] && host_path_exists(gpl-resident-path(lock)) == 0 && host_path_exists(lock) == 0,32);
+ // 7: the lease door and lend answer a guest without a lock (the lend is a no-op the child does not need)
+ let q=glb-plant(lock,parent,pstart);
+ let guest=gpl-role(lock);
+ let c64=glb-bit(gpu-lease-lend-at(lock,guest) == 0 && gpl-held-or-stop(guest) == guest && gpu-lease-give(lock,guest) == guest,64);
+ let cleared3=glb-clear(lock);
+ let cleanup=host_dir_rmdir(root);
+ let verdict=c1+c2+c4+c8+c16+c32+c64;
+ print(["gpu-resident",verdict]);
+ verdict == 127 ? verdict : form_error("the resident and guest lease did not hold");
+}

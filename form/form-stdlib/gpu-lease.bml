@@ -1,8 +1,9 @@
 //////////////////////////////////////////////////////////////////////
 // gpu-lease.bml — one Metal client at a time, and a lock that knows who holds it.
 //
-// Two Metal clients at once wedge the GPU wait (the process sits in an uninterruptible state at 0% CPU until
-// kill -9). The first guard was a bare directory, `mkdir` to take and `rmdir` to give back. It had no owner: any
+// A resident server and its guests share the device (see RESIDENT and GUEST below: witnessed 2026-11-12, the server decoding four
+// rows while two Metal bands and a LoRA train ran beside it, no wedge); the lock itself stays exclusive between clients when no resident stands.
+// (Once, two unmanaged Metal clients wedged the GPU wait: the process sat in an uninterruptible state at 0% CPU until kill -9.) The first guard was a bare directory, `mkdir` to take and `rmdir` to give back. It had no owner: any
 // client could remove another's lock, a run that died left it standing, and a waiter could not tell a live
 // holder from a dead one. A lease has an owner and can be judged.
 //
@@ -321,17 +322,59 @@ section [form.bml] {
    result;
   };
   // give back what a take answered; a refused take holds nothing and gives back nothing
-   def gpu-lease-give(lock, ans) = ans[0]=="preparing" && len(ans)>2 && record?(ans[2]) ? gpl-claim-abandon(ans[2]) : (Comparable) gpu-lease-held?(ans) == 1 ? gpu-lease-release(lock, gpu-lease-token(ans)) : ["refused", "no-lease"];
+   def gpu-lease-give(lock, ans) = gpl-nogive?(ans) ? ans : ans[0]=="preparing" && len(ans)>2 && record?(ans[2]) ? gpl-claim-abandon(ans[2]) : (Comparable) gpu-lease-held?(ans) == 1 ? gpu-lease-release(lock, gpu-lease-token(ans)) : ["refused", "no-lease"];
   // ---- for a door: take on the one real lock, say so on the door's own stdout in its `name  value` line shape ----
+  // ---- RESIDENT and GUEST: the device is shared, the lease no longer says otherwise while a resident stands ----
+  // A resident server (observe/qwen-serve-run.bml) registers itself in `<lock>.resident` (the same owner record: pid, start time, token) and holds nothing
+  // exclusive: the lock is taken once, to wait out an exclusive client already running and to see that no other resident stands, and given back at once.
+  // While a LIVE resident stands, every hold, turn and door of any other process is a GUEST: ["guest" token pid], no lock taken, nothing to give back. The device
+  // time-slices command buffers of the processes that share it, the weights are one set of page-cache pages, and a guest's own activations, KV and state are
+  // admitted by the memory governor at its own open (memory-governor.bml: a shared mapped key counts once, a guest's own bytes count in full), so two heavy guests
+  // that do not fit are held by that reading, never killed. The resident's own turns answer ["resident" token] and take nothing. A stale or dead resident (its pid gone
+  // or reused) judges as no resident: the lock rules above apply as before, and the next resident writes its record over the old one. With no resident the lock
+  // is exclusive exactly as it was.
+  def gpl-resident-path(lock) = lock ++ ".resident";
+  def gpl-role-of(j) = (String) j[0] != "live" ? nothing() : (j[1][2] == host_pid() ? ["resident", j[1][1]] : ["guest", j[1][1], j[1][2]]);
+  def gpl-role(lock) = gpl-role-of(gpl-judge(gpl-resident-path(lock)));
+  def gpl-nogive?(a) = (String) a[0] == "inherited" || (String) a[0] == "resident" || (String) a[0] == "guest";
+  def gpu-lease-resident-hold(label, run) = gpu-lease-resident-hold-at(gpu-lease-path(), label, gpl-wait-ms(), run);
+  def gpu-lease-resident-hold-at(lock, label, wait-ms, run) {
+   let lease = gpl-held-or-stop(gpu-lease-take(lock, label, wait-ms));
+   let j = gpl-judge(gpl-resident-path(lock));
+   (String) j[0] == "live" && j[1][2] != host_pid() ? gpl-resident-refuse(lock, lease, j[1]) : gpl-resident-stand(lock, label, lease, run);
+  }
+  def gpl-resident-refuse(lock, lease, r) {
+   let gave = gpu-lease-give(lock, lease);
+   form_error("gpu-lease: a resident already stands: pid " ++ r[2].str() ++ " " ++ r[6]);
+  }
+  def gpl-resident-stand(lock, label, lease, run) {
+   let res = gpl-resident-path(lock);
+   let made = host_dir_mkdir(res);
+   let w = gpl-publish(res, gpu-lease-token(lease), label, now_unix_ms());
+   let gave = gpu-lease-give(lock, lease);
+   let said = print_str(gpu-lease-line(["resident", gpu-lease-token(lease)]));
+   (Comparable) w < 0 ? form_error("gpu-lease: the resident record could not be written") : gpl-resident-run(lock, run);
+  }
+  def gpl-resident-run(lock, run) {
+   defer gpl-resident-leave(lock);
+   run();
+  }
+  def gpl-resident-leave(lock) {
+   let res = gpl-resident-path(lock);
+   let a = host_path_remove(gpl-owner-file(res));
+   let b = host_dir_rmdir(res);
+   print_str(gpu-lease-line(["resident-gone"]));
+  }
   def gpu-lease-line(ans) = "lease  " ++ value_str(ans);
   def gpu-lease-door(label) {
-   let ans = gpu-lease-take(gpu-lease-path(), label, gpl-wait-ms());
+   let role = gpl-role(gpu-lease-path());
+   let ans = nothing?(role) ? gpu-lease-take(gpu-lease-path(), label, gpl-wait-ms()) : role;
    let said = print_str(gpu-lease-line(ans));
    ans;
   }
   // for a door whose body is one straight run of lets: a refused take stops the door aloud, before it touches the device
   def gpu-lease-door-held(label) = gpl-held-or-stop(gpu-lease-door(label));
-  def gpl-held-or-stop(ans) = (Comparable) gpu-lease-held?(ans) == 1 ? ans : form_error("gpu-lease: the lease was refused " ++ value_str(ans));
+  def gpl-held-or-stop(ans) = ((Comparable) gpu-lease-held?(ans) == 1 || gpl-nogive?(ans)) ? ans : form_error("gpu-lease: the lease was refused " ++ value_str(ans));
   def gpu-lease-door-end(lease) {
    let ans = gpu-lease-give(gpu-lease-path(), lease);
    let said = print_str(gpu-lease-line(ans));
@@ -343,7 +386,7 @@ section [form.bml] {
   // time. The holder lends before it spawns, and its child's holds and turns inherit the lease (gpl-inheritable?) and give
   // nothing back. Only the holder lends and only its own child inherits; every other process still waits. The lend leaves with
   // the lease: a give or a takeover moves the whole directory.
-  def gpu-lease-lend-at(lock, ans) = (Comparable) gpu-lease-held?(ans) == 1 && (Comparable) gpl-mine?(gpl-read(lock), gpu-lease-token(ans)) == 1 ? write_file(gpl-lent-file(lock), gpu-lease-token(ans)) : -1;
+  def gpu-lease-lend-at(lock, ans) = gpl-nogive?(ans) ? 0 : (Comparable) gpu-lease-held?(ans) == 1 && (Comparable) gpl-mine?(gpl-read(lock), gpu-lease-token(ans)) == 1 ? write_file(gpl-lent-file(lock), gpu-lease-token(ans)) : -1;
   def gpu-lease-lend(ans) = gpu-lease-lend-at(gpu-lease-path(), ans);
   // ---- for a door whose lane takes the lease a turn at a time ----
   // One hold over the door's whole reading: taken, or inherited where this process holds the lease or the door that runs it lent
@@ -408,16 +451,17 @@ section [form.bml] {
   // the end, so the holder that took it does.
   // Waits as long as a take does (gpl-wait-ms); a refusal stops the open aloud, before the device is touched. No line is printed:
   // the open is inside a stage whose output is the stage's.
-  def gpu-lease-hold-at(lock, label, wait-ms) = gpl-hold-judged(lock, label, wait-ms, gpl-read(lock));
+  def gpu-lease-hold-at(lock, label, wait-ms) = gpl-hold-roled(lock, label, wait-ms, gpl-role(lock));
+  def gpl-hold-roled(lock, label, wait-ms, role) = nothing?(role) ? gpl-hold-judged(lock, label, wait-ms, gpl-read(lock)) : role;
   def gpl-inheritable?(r) = (String) r[0] == "rec" && r[3] > 0 && ((r[2] == host_pid() && r[3] == gpl-me-start()) || gpl-lent-here?(r));
   def gpl-hold-judged(lock, label, wait-ms, r) = gpl-inheritable?(r) ? ["inherited", r[1]] : gpl-held-or-stop(gpu-lease-take(lock, label, wait-ms));
   def gpu-lease-hold(label) = gpu-lease-hold-at(gpu-lease-path(), label, gpl-wait-ms());
    def gpu-lease-hold-retaining(label,retain) {
-    let lock=gpu-lease-path();let current=gpl-read(lock);
-    let held=gpl-inheritable?(current) ? ["inherited",current[1]] : gpl-held-or-stop(gpu-lease-take-retaining(lock,label,[gpl-wait-ms(),gpl-poll-ms(),gpl-unowned-ms(),gpl-markers()],retain));
+    let lock=gpu-lease-path();let current=gpl-read(lock);let role=gpl-role(lock);
+    let held=!nothing?(role) ? role : gpl-inheritable?(current) ? ["inherited",current[1]] : gpl-held-or-stop(gpu-lease-take-retaining(lock,label,[gpl-wait-ms(),gpl-poll-ms(),gpl-unowned-ms(),gpl-markers()],retain));
     retain(held);held;
    }
-  def gpu-lease-unhold-at(lock, ans) = (String) ans[0] == "inherited" ? ans : gpu-lease-give(lock, ans);
+  def gpu-lease-unhold-at(lock, ans) = gpl-nogive?(ans) ? ans : gpu-lease-give(lock, ans);
   def gpu-lease-unhold(ans) = gpu-lease-unhold-at(gpu-lease-path(), ans);
   // Work keeps its model/KV owner between turns. Only settled device work
   // hands the shared lease onward; an incomplete drain retains ownership.
@@ -425,12 +469,13 @@ section [form.bml] {
   // without opening a model or changing the machine's real lease.
   def gpu-lease-turn-at(lock,label,wait-ms,settle,run) {
    let current = gpl-read(lock);
-   let lease = gpl-inheritable?(current) ? ["inherited",current[1]] : gpl-held-or-stop(gpu-lease-take-with(lock,label,[wait-ms,10,gpl-unowned-ms(),gpl-markers()]));
+   let role = gpl-role(lock);
+   let lease = !nothing?(role) ? role : gpl-inheritable?(current) ? ["inherited",current[1]] : gpl-held-or-stop(gpu-lease-take-with(lock,label,[wait-ms,10,gpl-unowned-ms(),gpl-markers()]));
    let outcome = try [1,run()] catch [0];
    let drained = settle();
    !drained ? form_error("gpu-lease: operation did not settle; ownership retained") : {
     let released = gpu-lease-unhold-at(lock,lease);
-    !((String) released[0] == "released" || (String) released[0] == "inherited") ? form_error("gpu-lease: release refused " ++ value_str(released)) :
+    !((String) released[0] == "released" || gpl-nogive?(released)) ? form_error("gpu-lease: release refused " ++ value_str(released)) :
     outcome[0] == 1 ? outcome[1] : form_error("gpu-lease: operation raised after ownership was released");
    };
   }

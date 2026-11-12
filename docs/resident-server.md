@@ -148,10 +148,20 @@ absent (equal rest before each), against 5.0 tok/s with it passing (0.8 passes/s
 - More than 8 rows: the specialized matvec widths and the head's logits buffer are 8 wide (`q38s-nt-max`); a wider pass takes the
   batched matmul for its projections and a logits buffer sized by the rows.
 - Swapping a yielded sequence's blocks out instead of reading it again (a yield is a recompute today: the prompt and the reply so far are read again).
-- The planner's repair lane (`lrpr-repair`, repair_turns of coding) opens its own in-process session beside a standing server: the
-  server holds `/tmp/form-gpu.lock`, so that session waits on the lease and the walk stalls (witnessed 2026-11-11: 35 minutes of
-  nanosleep at 20% CPU and 9% GPU until the server released the lease, then the repair ran at once). The repair's coding asks belong
-  on the server's spool like every other planner ask.
+- The planner's repair lane (`lrpr-repair`, repair_turns of coding) opens its own in-process session beside a standing server. It
+  is the server's guest (below) and no longer waits on a lease (2026-11-11 it waited 35 minutes); its coding asks still belong
+  on the server's spool like every other planner ask, because one pass over the weights serves every row at once.
+
+## One resident, any number of guests, any registry model
+
+The server is the machine's RESIDENT on the GPU (`gpu-lease.bml`, `gpu-lease-resident-hold`): it registers in `/tmp/form-gpu.lock.resident`
+and holds no exclusive lock. While it lives, every other Metal client (a LoRA train, a band, an in-process ask, the ear) is a GUEST: its
+hold, turn or door answers `["guest" token pid]`, takes no lock and gives nothing back; the device time-slices the processes' command
+buffers, the weights are the same file-mapped pages, and a guest's own activations, KV and state are admitted by the memory governor at its
+open. With no resident the lock is exclusive as before; a dead resident judges as none. A request naming a registry model the server does
+not hold is parked, the governor is asked, the model is mounted on demand and the request served; when the governor holds the load, the
+least recently used idle on-demand model is let go first (the models named at start are never evicted). A name the registry does not know
+is refused by name.
 
 A walk retires a stale witness band itself (`lpr-retire-stale-band`): a band under `.hearth/local-plans/witnesses/` that no queue row
 carries is a plan that never queued, so it and its compiled sidecars are removed before the first voice opens.
