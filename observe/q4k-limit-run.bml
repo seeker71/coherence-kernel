@@ -23,7 +23,10 @@ section [form.bml] {
   def ql-nibbles-msl() = "float4 wl0 = float4(as_type<uchar4>(q.x & 0x0F0F0F0Fu)); float4 wl1 = float4(as_type<uchar4>(q.y & 0x0F0F0F0Fu)); float4 wh0 = float4(as_type<uchar4>((q.x >> 4u) & 0x0F0F0F0Fu)); float4 wh1 = float4(as_type<uchar4>((q.y >> 4u) & 0x0F0F0F0Fu)); float qdl = 0.0f; qdl = metal::fma(wl0.x, la.x, qdl); qdl = metal::fma(wl0.y, la.y, qdl); qdl = metal::fma(wl0.z, la.z, qdl); qdl = metal::fma(wl0.w, la.w, qdl); qdl = metal::fma(wl1.x, lc.x, qdl); qdl = metal::fma(wl1.y, lc.y, qdl); qdl = metal::fma(wl1.z, lc.z, qdl); qdl = metal::fma(wl1.w, lc.w, qdl); float qdh = 0.0f; qdh = metal::fma(wh0.x, ha.x, qdh); qdh = metal::fma(wh0.y, ha.y, qdh); qdh = metal::fma(wh0.z, ha.z, qdh); qdh = metal::fma(wh0.w, ha.w, qdh); qdh = metal::fma(wh1.x, hc.x, qdh); qdh = metal::fma(wh1.y, hc.y, qdh); qdh = metal::fma(wh1.z, hc.z, qdh); qdh = metal::fma(wh1.w, hc.w, qdh); ";
   def ql-scales-only-msl() = "kernel void q4k_scales_only" ++ q38dq-sig-msl() ++ ql-head-msl() ++ ql-scales-msl() ++ "uint t = q.x ^ q.y; float part = ((gscl + gsch) + (gmnl + gmnh)) + float(t & 255u) + xs;" ++ ql-tail-msl() ++ q38dq-epilogue-msl();
   def ql-nibbles-only-msl() = "kernel void q4k_nibbles_only" ++ q38dq-sig-msl() ++ ql-head-msl() ++ ql-nibbles-msl() ++ "float part = (qdl + qdh) + xs + d + dmin + float(h.y & 255u);" ++ ql-tail-msl() ++ q38dq-epilogue-msl();
-  def ql-msl() = "#include <metal_stdlib>\nusing namespace metal;\n#pragma clang fp contract(off)\n" ++ q38dq-msl() ++ ql-loads-msl() ++ ql-scales-only-msl() ++ ql-nibbles-only-msl();
+  // the full row arithmetic (q38dq_q4_row) once, twice and four times per set of loads (the later copies on activations nudged by a constant so the compiler cannot fold them): if the kernel is bound by its
+  // arithmetic each copy adds its own time; if the loads or their latency bind it, the extra copies hide
+  def ql-alu-msl(copies) = "kernel void q4k_alu_x" ++ copies.str() ++ q38dq-sig-msl() ++ ql-head-msl() ++ "float part = 0.0f; for (uint k = 0u; k < " ++ copies.str() ++ "u; ++k) { float4 e = float4((float)k); float2 p = q38dq_q4_row(uint4(h.x, h.y, h.z, h.w), uint2(q.x, q.y), float4(la) + e, float4(lc) + e, float4(ha) + e, float4(hc) + e, xs, xs, c); part = part + p.x + p.y; }" ++ ql-tail-msl() ++ q38dq-epilogue-msl();
+  def ql-msl() = "#include <metal_stdlib>\nusing namespace metal;\n#pragma clang fp contract(off)\n" ++ q38dq-msl() ++ ql-loads-msl() ++ ql-scales-only-msl() ++ ql-nibbles-only-msl() ++ ql-alu-msl(1) ++ ql-alu-msl(2) ++ ql-alu-msl(4);
   def ql-spec() = [["go", "int"]];
   def ql-bufs(k) = k <= 0 ? [] : cons(metal_buf_alloc(ql-bytes()), ql-bufs(k - 1));
   def ql-rec(pl, w, x, y) = [pl, md-bind16([w, x, y], [ql-rows(), ql-cols()], 256, 0, 1, 0), (ql-rows() + 1) / 2];
@@ -62,6 +65,12 @@ section [form.bml] {
    let h1 = ql-say("matvec at 64 threads a group", 80, t64);
    let h2 = ql-say("matvec at 128 threads a group", 80, t128);
    let h3 = ql-say("matvec at 512 threads a group", 80, t512);
+   let a1 = ql-best(map(w => ql-rec(metal_pipeline(ql-msl(), "q4k_alu_x1"), w, x, y), ws), 80, 6, -1);
+   let a2 = ql-best(map(w => ql-rec(metal_pipeline(ql-msl(), "q4k_alu_x2"), w, x, y), ws), 80, 6, -1);
+   let a4 = ql-best(map(w => ql-rec(metal_pipeline(ql-msl(), "q4k_alu_x4"), w, x, y), ws), 80, 6, -1);
+   let k1 = ql-say("the row arithmetic once per set of loads", 80, a1);
+   let k2 = ql-say("the row arithmetic twice per set of loads", 80, a2);
+   let k4 = ql-say("the row arithmetic four times per set of loads", 80, a4);
    let d = ql-say("matvec (pipeline 57's text, dequantizing)", 80, a);
    let f = ql-say("scales only (the shift-and-mask scale and min decode, nothing else)", 80, scs);
    let g = ql-say("nibbles only (the unpack and the sixteen fma, nothing else)", 80, nbs);
