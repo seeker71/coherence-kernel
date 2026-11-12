@@ -851,6 +851,44 @@ static long long fk_nocopy_bufs = 0;
 // now_unix_ms bracketing of metal_sync): this is what the DEVICE reports about
 // its own busy span, sync-ms is what the HOST clock saw waiting for it.
 static double fk_total_gpu_busy_s = 0.0;
+
+// FK_METAL_TRACE=<path>: a per-kernel GPU clock. Off (the variable absent) this is one getenv and nothing else. On, every dispatch is committed and settled alone right after it is
+// encoded, its GPUEndTime - GPUStartTime is added to the kernel's name (the name its pipeline was made with), and at exit the table is written to <path> as "count<TAB>total us<TAB>name".
+// The serial settle changes the run's timing (no overlap between dispatches, a submission each): the table is what each kernel costs on the device by itself, not the run's wall.
+static NSMutableDictionary *fk_trace_names = nil;   // pipeline slot -> kernel name
+static NSMutableDictionary *fk_trace_us = nil;      // kernel name -> total device us
+static NSMutableDictionary *fk_trace_cnt = nil;     // kernel name -> dispatches
+static int fk_trace_registered = 0;
+static int fk_trace_enabled(void) {
+    static int on = -1;
+    if (on < 0) { on = getenv("FK_METAL_TRACE") != NULL ? 1 : 0; }
+    return on;
+}
+static void fk_trace_dump(void) {
+    const char *path = getenv("FK_METAL_TRACE");
+    if (path == NULL || fk_trace_us == nil) { return; }
+    char perpid[1024];
+    snprintf(perpid, sizeof perpid, "%s.%d", path, (int)getpid());
+    FILE *f = fopen(perpid, "w");
+    if (f == NULL) { return; }
+    for (NSString *name in [fk_trace_us allKeys]) {
+        fprintf(f, "%lld\t%.0f\t%s\n", [fk_trace_cnt[name] longLongValue], [fk_trace_us[name] doubleValue], [name UTF8String]);
+    }
+    fclose(f);
+}
+static void fk_trace_note(long long pslot, double seconds) {
+    if (fk_trace_us == nil) {
+        fk_trace_us = [NSMutableDictionary dictionary];
+        fk_trace_cnt = [NSMutableDictionary dictionary];
+    }
+    if (!fk_trace_registered) { fk_trace_registered = 1; atexit(fk_trace_dump); }
+    NSString *name = fk_trace_names == nil ? nil : fk_trace_names[@(pslot)];
+    if (name == nil) { name = @"(unnamed pipeline)"; }
+    fk_trace_us[name] = @([fk_trace_us[name] doubleValue] + seconds * 1.0e6);
+    fk_trace_cnt[name] = @([fk_trace_cnt[name] longLongValue] + 1);
+}
+long long fk_metal_sync_external(void);
+static long long fk_metal_pipeline_inner(const char *msl, long long msl_len, const char *name, long long name_len);
 static NSString *fk_last_err = nil;
 
 // Concurrent batches are OPT-IN, per batch, and the flag arms only the NEXT batch:
@@ -1326,6 +1364,20 @@ static long long fk_metal_archive_store(long long handle, NSString *path) {
 
 long long fk_metal_pipeline_external(const char *msl, long long msl_len,
                                      const char *name, long long name_len) {
+    long long h = fk_metal_pipeline_inner(msl, msl_len, name, name_len);
+    if (h != 0 && fk_trace_enabled() && name != NULL && name_len > 0 && name_len < 200 &&
+        !(name_len == 17 && memcmp(name, "form_metal_jit_v1", 17) == 0)) {
+        long long s = fk_pipe_slot(h);
+        if (s != 0) {
+            if (fk_trace_names == nil) { fk_trace_names = [NSMutableDictionary dictionary]; }
+            fk_trace_names[@(s)] = [[NSString alloc] initWithBytes:name length:(NSUInteger)name_len encoding:NSUTF8StringEncoding];
+        }
+    }
+    return h;
+}
+
+static long long fk_metal_pipeline_inner(const char *msl, long long msl_len,
+                                         const char *name, long long name_len) {
     @autoreleasepool {
         NSString *err = nil;
         if (!fk_metal_up(&err)) { fk_err(err); return 0; }
@@ -1879,6 +1931,14 @@ long long fk_metal_enqueue_external(long long pipe, const char *binding,
         }
         fk_pending++;
         fk_total_dispatch++;
+        if (fk_trace_enabled()) {
+            // the batch this dispatch joined keeps its mode for the next one (a dispatch with a barrier is legal only in a concurrent batch)
+            int was_concurrent = fk_batch_concurrent;
+            double b0 = fk_total_gpu_busy_s;
+            (void)fk_metal_sync_external();
+            fk_trace_note(pslot, fk_total_gpu_busy_s - b0);
+            fk_next_concurrent = was_concurrent;
+        }
         return 1;   // enqueued. NOT completed, and this door never pretends otherwise.
     }
 }
