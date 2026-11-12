@@ -40,7 +40,7 @@ section [form.bml] {
   def fl-head(s, n) = len(s) <= n ? s : substring(s, 0, n);
   def fl-line(s) = fl-head(trim(s), 24);
   // ── the flow's state: one record, the signal frame inside it ──
-  def fl-new(o, id) = record_new(0, "F", fsg-new(svs-int(o, "slot", 0), id), "id", id, "dir", svs-str(o, "dir", svc-default-dir()), "land", svs-int(o, "land", 0), "plan", svs-int(o, "plan", 1), "allow", svs-int(o, "repairs", 2), "t0", host_monotonic_ms(),
+  def fl-new(o, id) = record_new(0, "F", fsg-new(svs-int(o, "slot", 0), id), "id", id, "dir", svs-str(o, "dir", svc-default-dir()), "land", svs-int(o, "land", 0), "plan", svs-int(o, "plan", 1), "allow", svs-int(o, "repairs", 2), "oldasks", 0, "t0", host_monotonic_ms(),
    "row", nothing(), "req", nothing(), "goal", "", "paths", [], "band", "", "full", 0, "orig", [], "got", 0, "miss", 0, "fails", 0, "reply", "", "errs", "", "outs", "", "cause", "", "verdict", "ended", "applied", 0, "green", 0, "landed", 0, "said", "");
   def fl-emit(S, stage, kind, got, missed, why, ids, ms) = fsg-emit(record_get(S, "F"), stage, kind, got, missed, why, ids, ms);
   def fl-since(t) = host_monotonic_ms() - t;
@@ -219,7 +219,24 @@ section [form.bml] {
    let want = fl-wanted(b[1]);
    let i = fl-find-window(lines, want, 0);
    let a = fl-emit(S, "appl", "disc", 0, 1, "old-not-found", b[0], 0);
-   i < 0 ? fl-oldmiss-passed(S, b) : fl-oldmiss-fixed(S, b, T, lines, i, len(want), t);
+   i < 0 ? (record_get(S, "oldasks") < 1 ? fl-oldmiss-ask(S, b, T) : fl-oldmiss-passed(S, b)) : fl-oldmiss-fixed(S, b, T, lines, i, len(want), t);
+  }
+  // The voice's old text is in no window of the file even by trimmed lines: ONE scoped ask shows it the lines the file really has near where it meant (the line its old text begins with), and the edit it answers is applied.
+  def fl-first-at(lines, first, i) = i >= len(lines) ? -1 : trim(lines[i]) == first ? i : fl-first-at(lines, first, i + 1);
+  def fl-excerpt(T, old) {
+   let lines = split-on(T, "\n");
+   let want = fl-wanted(old);
+   let at = len(want) == 0 ? -1 : fl-first-at(lines, want[0], 0);
+   let from = at > 3 ? at - 3 : 0;
+   let to = at < 0 ? (len(lines) > 24 ? 24 : len(lines)) : (from + len(want) + 10 > len(lines) ? len(lines) : from + len(want) + 10);
+   str-join-with(lines[from:to], "\n");
+  }
+  def fl-oldmiss-ask(S, b, T) {
+   let t = host_monotonic_ms();
+   let a = record_set(S, "oldasks", record_get(S, "oldasks") + 1);
+   let again = fl-ask(S, fl-cat([fl-packet(S), "\n\nThe old text of your edit to ", b[0], " is not in the file. The file reads, near where you meant:\n", fl-excerpt(T, b[1]), "\n\nAnswer that one edit block again, with the old text copied exactly from these lines."]), "flow-" ++ record_get(S, "id") ++ "-old");
+   let bs = fl-blocks(again, 0);
+   nil?(bs) ? fl-oldmiss-passed(S, b) : fl-seq(fl-emit(S, "appl", "fix", len(bs), 0, "old-reask", b[0], fl-since(t)), fl-apply-all(S, bs));
   }
   def fl-oldmiss-fixed(S, b, T, lines, i, n, t) {
    let at = fl-offset(lines, i);
@@ -430,12 +447,14 @@ section [form.bml] {
    let sent = fl-ran?(made) ? fl-git("push", ["push", "-q", "origin", "HEAD:main"]) : made;
    let ok = fl-ran?(made);
    let a = record_set(S, "landed", ok ? 1 : 0);
-   fl-emit(S, "land", ok ? "ok" : "disc", ok ? 1 : 0, ok ? 0 : 1, ok ? (fl-ran?(sent) ? "landed" : "landed-ahead") : "commit-refused", fl-line(hch-said(made)), fl-since(t));
+   let nc = !ok && (str_find(hch-said(made), "nothing to commit", 0) >= 0 || str_find(hch-said(made), "no changes added", 0) >= 0);
+   let b = nc ? record_set(S, "cause", "no-change") : 0;
+   fl-emit(S, "land", ok ? "ok" : "disc", ok ? 1 : 0, ok ? 0 : 1, ok ? (fl-ran?(sent) ? "landed" : "landed-ahead") : nc ? "no-change" : "commit-refused", fl-line(hch-said(made)), fl-since(t));
   }
   // ── the end ──
   def fl-restore(S) = record_get(S, "landed") == 1 ? 0 : foldl((acc, o) => acc + write_file_text(o[0], o[1]), 0, record_get(S, "orig"));
   def fl-verdict(S) = record_get(S, "landed") == 1 ? "landed" : record_get(S, "green") == 1 ? "green" : record_get(S, "applied") > 0 ? "partial" : "ended";
-  def fl-cause(S) = record_get(S, "landed") == 1 ? "landed" : record_get(S, "green") == 1 ? "band-full-not-landed" : len(record_get(S, "cause")) > 0 ? record_get(S, "cause") : "unknown";
+  def fl-cause(S) = record_get(S, "landed") == 1 ? "landed" : record_get(S, "green") == 1 ? (record_get(S, "cause") == "no-change" ? "no-change" : "band-full-not-landed") : len(record_get(S, "cause")) > 0 ? record_get(S, "cause") : "unknown";
   def fl-end(S) {
    let v = fl-verdict(S);
    let c = fl-cause(S);
@@ -460,7 +479,8 @@ section [form.bml] {
   def fl-next-in(lines, anyok, slot) {
    let tri = filter(l => str_find(l, "\"rung\":\"triage\"", 0) >= 0, lines);
    let live = filter(l => str_find(l, "\"verdict\":\"ranked\"", 0) >= 0 && !(any?(m => fl-line-id(m) == fl-line-id(l) && str_find(m, "\"verdict\":\"ranked\"", 0) < 0, tri)), tri);
-   let fresh = filter(l => file_size(fl-claim(fl-line-id(l))) < 0 && !(any?(m => str_find(m, "\"rung\":\"flow\"", 0) >= 0 && fl-line-id(m) == fl-line-id(l), lines)), live);
+   let reqs = fl-text("learn/local-requests.jsonl");
+   let fresh = filter(l => file_size(fl-claim(fl-line-id(l))) < 0 && str_find(reqs, fl-cat(["\"id\":\"", fl-line-id(l), "\""]), 0) >= 0 && !(any?(m => str_find(m, "\"rung\":\"flow\"", 0) >= 0 && fl-line-id(m) == fl-line-id(l), lines)), live);
    let pool = len(fresh) > 0 ? fresh : anyok ? live : [];
    fl-kth(pool, slot);
   }
