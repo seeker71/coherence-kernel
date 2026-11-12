@@ -149,7 +149,9 @@ recipe execution; lower training loss does not yet establish improved answer qua
   or rejected, and most rows still `pending`. A revised reading's note feeds the
   redraft (`repair` in [`observe/prompt-draft-run.bml`](observe/prompt-draft-run.bml)).
   Learning from what we accept and what we change grows from there.
-- **Talking speed.** A draft takes minutes; a conversation asks for seconds.
+- **Talking speed.** A conversation asks the resident server at a priority above a draft, so the spoken turn is
+  admitted first and a draft yields its blocks when the pool is short. A draft asks that same server when one
+  stands, and opens a model of its own only when none does. The decode itself is still the model's time.
 - **The companion's ear.** `from-ear` on [`observe/companion-run.bml`](observe/companion-run.bml)
   reads the ear spool's last closed line and, when a word is present and the resident
   server stands, asks that server and offers the answer to the mouth. It does not open
