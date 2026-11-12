@@ -468,7 +468,7 @@ original lowered tree before publication, preserving nested scope and literal
 bytes. Existing BML is scanned through the BMF cursor and expression grammar;
 surface-only migrations can compare exact recipes before imported type resolution.
 Its contract witness is `form/form-stdlib/tests/form-source-lift-band.bml`
-(35 accepted cases, 3 declined shadowing/binding changes, preserved comparison metadata; 2026-10-01). [Native coding](docs/form-native-coding.md#native-surface-lifting)
+(36 accepted cases, 3 declined shadowing/binding changes, preserved comparison metadata; 2026-11-12). [Native coding](docs/form-native-coding.md#native-surface-lifting)
 describes the callable surface and its scope.
 
 ## The mind and its voice
@@ -1071,7 +1071,7 @@ load. The reading that counts is one taken on a quiet machine.
 `substring(s, start, end)` answers the bytes of `s` from `max(start, 0)` up to `min(end, str_len(s))`;
 `""` when that range is empty or reversed, or when `s` is not a string. `str_find(h, n, from)` answers
 the byte index of the first occurrence of `n` at or after `max(from, 0)`, or -1; an empty needle
-answers `max(from, 0)`; a start past `str_len(h)` answers -1. Both always answer, neither moves an
+answers `max(from, 0)`; a start past `str_len(h)` answers -1. Both answer for strings and int indices; a non-string haystack or needle, or an index that is not an int, stops and attempt recovers it. Neither moves an
 offset to a character start, and both are natives with their recipes kept in `core.fk` as the body's statement of
 what they mean ([`docs/str-find-one-meaning.md`](docs/str-find-one-meaning.md)).
 
@@ -1437,10 +1437,6 @@ What answered red, died, or was not witnessed today, so no one leans on it:
   opens in Terminal, that prints the alternate-screen escape and runs the glass door), and make the bundle's
   executable the same kind of file, which retires the last carrier script but `form-run`.
 
-- `form-source-lift` over a mixed module whose first plain form carries a `; preludes:` header writes the
-  lifted `import` inside the first section, and its own verification compile stops: `the cursor does not
-  read this form.bml section: line 3: import (wanted: topstmt)` (2026-10-01). The five grammar packs it
-  lifted carry their imports above the section by hand; `form-source-lift-band` holds no such case yet.
 - `form-cli-allowance-band` and `native-tensor-lifecycle-band` reach the Metal
   door and were not re-run in the gates pass (it held no GPU). The integrated review's sweep
   (2026-10-01) read form-cli-allowance 2047 and native-tensor-lifecycle 1023 on fkwu.

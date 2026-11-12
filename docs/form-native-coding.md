@@ -1093,8 +1093,8 @@ attributed. Coordinator identity does not measure usage.
 
 Open and close a session with `observe/local-flow-review.bml`. It reads current
 work and ledgers, reports verified local completion separately from green bands
-and unmeasured verification, and follows unresolved work with `split`, `lane`,
-`queue` or `turn`. Throughput remains diagnostic; it does not select the next
+and unmeasured verification, and follows unresolved work with `contract`,
+`guide`, and `landing`, then `split`, `lane`, `queue` or `turn`. Throughput remains diagnostic; it does not select the next
 repair. Local token share does not judge success.
 
 A session's own transcript path goes on stdin to `observe/session-rent-run.bml`.

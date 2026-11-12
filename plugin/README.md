@@ -103,6 +103,22 @@ and prove a connection with the target client. Preserve the read-only
 are separate capability changes with their own evidence. The legacy
 `ai-plugin.json` filename by itself does not establish the new plugin format.
 
+## Publish checklist
+
+Before the hosted text is treated as current, the companion payload in
+`ai-plugin.json` carries the counsel's predicate and the card's moves:
+
+- An absent person's interior is never stated as observed.
+- A claim about them stays on the reported, inferred or imagined lane.
+- The card's moves stay the counsel's: a named cell on disk, the arrival
+  window, the observed-interior refusal, a reported or inferred account of
+  the other beside what was observed of oneself, one lift that lands, and
+  the refusals for two lifts, a fabrication, exposition after the lift, a
+  path on an origin-field companion, and two teachings before the question.
+
+A repository edit does not refresh the hosted copy. Read the published
+instructions back after the editor save.
+
 ## Verification and remaining source seams
 
 Instruction and documentation changes receive JSON, source-diff and realistic

@@ -20,7 +20,7 @@ static int fk_nid_fits(long long p, long long l, long long t, long long i) {
            i >= 0 && (fk_node_id)i <= FK_NID_MASK(FK_NID_INSTANCE_BITS);
 }
 static fk_node_id fk_nid_make(long long p, long long l, long long t, long long i) {
-    if (!fk_nid_fits(p, l, t, i)) { fk_die("fkwu: coordinate is outside the native 64-bit node identity layout"); }
+    if (!fk_nid_fits(p, l, t, i)) { fk_stop("fkwu: coordinate is outside the native 64-bit node identity layout"); }
     if (p == 1 && l == 1 && t == 1) { return ((fk_node_id)i) & ~FK_NID_MODE; }
     return FK_NID_MODE | ((fk_node_id)p << FK_NID_PACKAGE_SHIFT) | ((fk_node_id)l << FK_NID_LEVEL_SHIFT) | ((fk_node_id)t << FK_NID_INSTANCE_BITS) | (fk_node_id)i;
 }

@@ -608,7 +608,7 @@ action.
 
 | Tool | Native profile |
 | --- | --- |
-| `rg` | Line search; `-i -S -F -n -w -v -l -c -q`, `--column`, `--files`, `-e/--regexp`, `-g/--glob`, `-m/--max-count`, `-A/-B/-C`, `--`, and common long aliases. Short boolean flags can be clustered; value flags take a separate argv value. |
+| `rg` | Line search; `-i -S -F -n -w -v -l -c -q -H -I`, `--column`, `--files`, `-e/--regexp`, `-g/--glob`, `-m/--max-count`, `-A/-B/-C`, `--`, `--with-filename`, `--no-filename`, and common long aliases. Short boolean flags can be clustered; value flags take a separate argv value. |
 | `grep` | POSIX/GNU grep over resident documents or held input; the flag table and the pattern dialects follow this table. |
 | `jq` | `.`, object paths and quoted bracket keys, nonnegative array indexes, `[]`, pipes, `//`, `map`, `select`, comparisons, array collection and explicit-key object construction; object-key `has` (string key, including present null/false/zero; array-index `has` is outside this subset); string `contains` (literal substring, string input and argument; collection containment is outside this subset); `keys length type empty sort unique to_entries`; literals and bound variables. Flags `-r -c -e -s -n`, `--arg`, `--argjson` precede the filter. |
 | `read`, `cat` | Read held input or concatenate resident documents selected by identity/path. `read path offset count [lines\|bytes] [sha256]` selects a one-based page; the default unit is lines. Byte pages must preserve UTF-8 boundaries. The optional hash refuses a changed source. |
@@ -620,14 +620,12 @@ action.
 | `tr` | Equal-length literal byte sets or `-d SET`; `\n \r \t \\` escapes. |
 | `cut` | `-d DELIMITER -f N`, one delimiter byte and one field. |
 | `awk` | The body's awk (`form-awk.bml`, above): patterns, ranges, arrays, `printf`, the string functions, and Form's choice (`choice`/`or`, `fail`, `cut`, `stop`, `try`/`catch`, `timeout`, `store()`/`undo()`). No `getline`, output redirection, `system()`, user functions or math beyond `int`, each refused by name. `-P -B -C` are form-find's. |
-| `edit` | `path old new`; exactly one literal occurrence, or no literal occurrence and `old` equals the current document's SHA256. Several literal replacements: `path old1 new1 old2 new2 ...`. Explicit whole-document replacement: `path sha256 digest new`. |
+| `edit` | `path old new`; exactly one literal occurrence. With none, `old` equal to the current document's SHA256 replaces it whole; otherwise form-agent-edit-ladder.bml lands `old` where exactly one place matches at its strictest rung (line-trimmed, whitespace-run, indentation-relative, typographic) and stdout names it (`edited` then `rung=<name>`); two places refuse `edit-ambiguous` with the rung and count; none is `edit-not-found` with `nearest_span` in the guard evidence. Several literal replacements: `path old1 new1 old2 new2 ...`. Explicit whole-document replacement: `path sha256 digest new`. |
 | `write` | `new-path text`, or `new-path` plus held input. Existing documents cannot be overwritten. |
 
 Hash replacement uses the `resident_sha256` supplied by native coding reads or
 guard evidence. In the three-argument form, a literal match takes precedence:
-one match replaces that substring, multiple matches report ambiguity. Only a
-missing literal equal to the complete current document's hash selects whole-document
-replacement. A stale or malformed shorthand leaves the document unchanged.
+one match replaces that substring, multiple matches report ambiguity. Only a missing literal equal to the complete current document's hash selects whole-document replacement; any other missing literal climbs the ladder, and a miss at every rung is `edit-not-found` whose guard evidence carries `nearest_span`, the resident line window closest to `old` in the resident's own bytes and offsets. A stale or malformed shorthand leaves the document unchanged.
 
 For several focused changes, one `edit` can carry multiple old/new pairs for
 the same document. Replacements run in order, so a later pair may address text
@@ -716,8 +714,10 @@ errors. Globs support `*`, `**`, `?`, and leading `!`;
 the last matching glob wins. Basename globs apply at any depth. Paths select
 resident exact names or directory prefixes. There is no host traversal,
 ignore-file loading, file-type registry or binary-file detection. Search output
-follows the filename convention: one explicit file omits its path; directory
-and corpus searches include it. `-H` and `-I` select explicitly.
+follows ripgrep's filename rule: one explicit file, or the held input alone, prints
+no source path; several paths, a directory prefix or the whole resident corpus
+print it. `-H`/`--with-filename` and `-I`/`--no-filename` choose; the last one
+given wins. `-l` and `--files` print paths.
 
 JSON input is a whitespace-separated stream of syntactically admitted values.
 Missing keys become null; incompatible input types error. Object equality is
