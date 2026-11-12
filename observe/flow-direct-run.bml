@@ -2,7 +2,7 @@
 //
 //   echo '{"request":"frq-080c39296b126850","slot":0}' | ./fkwu observe/flow-run.bml
 //
-// stdin, one JSON line, strict: request (the id in learn/local-requests.jsonl, required), slot (0..13: the signal frame /fgn-flow-NN this flow gives its cells into),
+// stdin, one JSON line, strict: request (the id in learn/local-requests.jsonl; absent: the best ranked request the triage pass left in the ledger that no flow has carried), slot (0..13: the signal frame /fgn-flow-NN this flow gives its cells into),
 // dir (the spool, default /tmp/form-serve), land (1: a band-full candidate lands through observe/land-run.bml with main:1; default 0), plan (0: a request the
 // queue does not carry is not planned; default 1), repairs (the micro-repairs a stage may fail before it passes forward, default 2).
 //
@@ -411,9 +411,25 @@ section [form.bml] {
    let r = fl-restore(S);
    print_str(fl-cat(["{\"request\":\"", record_get(S, "id"), "\",\"verdict\":\"", v, "\",\"cause\":\"", c, "\",\"got\":", record_get(S, "got").str(), ",\"missed\":", record_get(S, "miss").str(), ",\"repairs\":", rep.str(), ",\"ms\":", ms.str(), ",\"rent_tokens\":0}\n"]));
   }
+  // No request named: the next is the best ranked row the triage pass (observe/local-plan-run.bml {"triage":1}) left in the ledger, one the flow
+  // has not carried yet (every flowed one only when none is left), so the GPU minutes go to the requests a local voice can land.
+  def fl-after(l, key) {
+   let a = str_find(l, key, 0);
+   a < 0 ? "" : substring(l, a + len(key), len(l));
+  }
+  def fl-line-id(l) { let t = fl-after(l, "\"request\":\""); let e = str_find(t, "\"", 0); e < 0 ? "" : substring(t, 0, e); }
+  def fl-line-got(l) { let t = fl-after(l, "\"got\":"); let e = str_find(t, ",", 0); e < 0 ? 0 : (try str_to_int(substring(t, 0, e)) catch 0); }
+  def fl-next(lines) {
+   let tri = filter(l => str_find(l, "\"rung\":\"triage\"", 0) >= 0, lines);
+   let live = filter(l => str_find(l, "\"verdict\":\"ranked\"", 0) >= 0 && !(any?(m => fl-line-id(m) == fl-line-id(l) && str_find(m, "\"verdict\":\"ranked\"", 0) < 0, tri)), tri);
+   let fresh = filter(l => !(any?(m => str_find(m, "\"rung\":\"flow\"", 0) >= 0 && fl-line-id(m) == fl-line-id(l), lines)), live);
+   let pool = len(fresh) > 0 ? fresh : live;
+   len(pool) == 0 ? "" : fl-line-id(foldl((b, l) => fl-line-got(l) > fl-line-got(b) ? l : b, pool[0], pool));
+  }
   def fl-run() {
    let o = dop-doc("flow", stdin-text(), fl-spec());
-   let S = fl-new(o, svs-str(o, "request", ""));
+   let named = svs-str(o, "request", "");
+   let S = fl-new(o, len(named) > 0 ? named : fl-next(split-on(fl-text(fl-ledger()), "\n")));
    let a = fl-emit(S, "start", "ok", 0, 0, "begin", record_get(S, "id"), 0);
    let b = fl-plan(S);
    let c = fl-candidate(S);

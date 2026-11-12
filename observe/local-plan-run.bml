@@ -18,6 +18,10 @@
 // status moot, and the door writes that witness on the request's row in the requests file: the row reads moot while
 // its fixborn stands, and no later walk takes it. A band over any other definition, or a request with no fixborn,
 // ends gap-closed and the row stays as it was.
+//   {"triage":1}: no model, no GPU: every open request ends by a counted kind or is ranked by landability (lpr-triage below);
+//   the flow door takes its next request from that rank.
+// {"triage":1} opens no model: every open request gets one end from what is readable (lpr-triage below): healed, owned-elsewhere,
+// source-absent, no-writable-file, needs-human (a physical step only), else a landability rank the flow door picks from.
 // A request the queue already carries (a row whose "request" is its id) is planned once: the door says which gap
 // carries it and opens no model. {"queue":"<path>"} reads and lands in another queue (default
 // learn/native-turn-queue.jsonl).
@@ -557,18 +561,205 @@ section [form.bml] {
     }
    }
   }
+  // ── triage: one pass over the whole open set, no model ──
+  // {"triage":1} gives every open request (pending or moved) an end Form reads from the request's own words, the files it cites
+  // and the ledger, in this order: landed (a flow row landed it), healed (flp-healed-reading, the reading above), needs-human (the row
+  // names what Urs alone holds), owned-elsewhere (the row says another group's files or decision hold it), no-writable-file (it
+  // cites no file a voice may write) or source-absent (the files it cites do not stand); the rest are ranked for the model lanes by
+  // landability (lpr-tri-score). Each end is one row of receipts/local-plan-ledger.jsonl in the flow's own row shape (rung "triage",
+  // verdict ended or ranked, kind, got = the score, why); a request whose last triage row already reads the same adds none, and a
+  // healed one is marked parked beside the planner's ledger as lpr-healed marks it. The flow door reads the ranked rows (best first).
+  def lpr-tri-ledger() = "receipts/local-plan-ledger.jsonl";
+  def lpr-tri-owner-words() = ["owner files", "Whoever owns", "owner should", "owner has to", "owner set", "outside the branch", "outside my", "not my", "Not my", "not mine", "not in this group", "I do not own", "belongs to the"];
+  def lpr-tri-human-words() = ["Urs's", "Urs holds", "private world", "person's home"];
+  def lpr-tri-found(text, words) = flp-first(words, w => str_find(text, w, 0) >= 0) ?? "";
+  def lpr-tri-abs?(p) = flp-starts?(p, "/") || flp-starts?(p, "~") || flp-starts?(p, "../");
+  def lpr-tri-made?(p) = flp-starts?(p, "receipts/") || flp-starts?(p, ".hearth/") || flp-ends?(p, ".jsonl");
+  def lpr-tri-writable(files) = filter(f => !lpr-tri-abs?(f) && !lpr-tri-made?(f) && flp-exists?(f) && !flp-is-dir?(f), files);
+  def lpr-tri-absent(files) = filter(f => !lpr-tri-abs?(f) && !lpr-tri-made?(f) && !flp-exists?(f), files);
+  def lpr-tri-lines-of(lines, id) = filter(l => str_find(l, mc-cat(["\"request\":\"", id, "\""]), 0) >= 0, lines);
+  def lpr-tri-count(lines, needle) = foldl((n, l) => str_find(l, needle, 0) >= 0 ? n + 1 : n, 0, lines);
+  def lpr-tri-min(a, b) = a < b ? a : b;
+  def lpr-tri-size-points(bytes) = bytes <= 8000 ? 15 : bytes <= 32000 ? 8 : bytes <= 128000 ? 0 : -10;
+  def lpr-tri-count-points(n) = n == 1 ? 20 : n == 2 ? 10 : n == 3 ? 4 : -6;
+  def lpr-tri-kernel?(f) = flp-starts?(f, "runtime/") || flp-starts?(f, "form/form-kernel-");
+  def lpr-tri-form?(f) = flp-under-roots?(f) && (flp-ends?(f, ".fk") || flp-ends?(f, ".bml")) && !flp-band-like?(f);
+  // what the ledger already knows of this request: a verified plan or a landing leans toward it; a band that read full today (gap-closed)
+  // and refusals that got as far as the reference compile mean the voice reached a compiling band; an unread reply or a stopped planner
+  // and a flow that ended count against it
+  def lpr-tri-history(rows) {
+   let first = lpr-tri-min(lpr-tri-count(rows, "\"verdict\":\"verified\"") * 40, 40);
+   let closed = lpr-tri-min(lpr-tri-count(rows, "\"kind\":\"gap-closed\"") * 12, 24);
+   let reached = lpr-tri-min(lpr-tri-count(rows, "\"kind\":\"reference-") * 2, 8);
+   let unread = lpr-tri-min(lpr-tri-count(rows, "\"kind\":\"voice-unread\"") * 3 + lpr-tri-count(rows, "\"kind\":\"plan-planner-stopped") * 3, 12);
+   let ended = lpr-tri-min(lpr-tri-count(rows, "\"rung\":\"flow\",\"verdict\":\"ended\"") * 6, 18);
+   let partial = lpr-tri-min(lpr-tri-count(rows, "\"rung\":\"flow\",\"verdict\":\"partial\"") * 3, 6);
+   first + closed + reached + partial - unread - ended;
+  }
+  // the score and its reason: files this repo owns and a voice may write (few, Form source over a kernel, small), a needs that names a
+  // definition and stays short, a queue row that already carries a verified gap, and the ledger's history
+  def lpr-tri-score(req, queue, rows) {
+   let files = flp-req-files(req);
+   let own = lpr-tri-writable(files);
+   let bytes = foldl((n, f) => n + file_size(f), 0, own);
+   let needs = flp-text(req, "needs");
+   let carried = !nothing?(flp-request-row(queue, flp-req-id(req)));
+   let parts = [
+    [lpr-tri-count-points(len(own)), mc-cat([(len(own)).str(), " file", len(own) == 1 ? "" : "s"])],
+    [lpr-tri-form?(own[0]) ? 15 : (lpr-tri-kernel?(own[0]) ? -10 : 0), lpr-tri-form?(own[0]) ? "Form source" : (lpr-tri-kernel?(own[0]) ? "kernel source" : "other source")],
+    [lpr-tri-size-points(bytes), mc-cat([(bytes / 1000).str(), " kB"])],
+    [str_find(needs, "def ", 0) >= 0 ? 8 : 0, str_find(needs, "def ", 0) >= 0 ? "names a def" : "no def named"],
+    [len(needs) <= 600 ? 5 : (len(needs) > 1500 ? -5 : 0), mc-cat(["needs ", (len(needs)).str(), " chars"])],
+    [carried ? 25 : 0, carried ? "queue carries its gap" : "not queued"],
+    [lpr-tri-history(rows), mc-cat(["ledger ", (len(rows)).str(), " rows"])],
+    [0 - 4 * len(lpr-tri-absent(files)), len(lpr-tri-absent(files)) == 0 ? "all files stand" : mc-cat([(len(lpr-tri-absent(files))).str(), " cited file absent"])]];
+   let total = foldl((n, p) => n + p[0], 10, parts);
+   [total < 0 ? 0 : total, flp-join(map(p => p[1], parts), ", ")];
+  }
+  // a row is [id, verdict, kind, score, why, first cited file]
+  def lpr-tri-read(req, queue, lines) {
+   let id = flp-req-id(req);
+   let rows = lpr-tri-lines-of(lines, id);
+   let files = flp-req-files(req);
+   let text = mc-cat([flp-text(req, "title"), "\n", flp-text(req, "problem"), "\n", flp-text(req, "needs")]);
+   let human = lpr-tri-found(text, lpr-tri-human-words());
+   let owner = lpr-tri-found(text, lpr-tri-owner-words());
+   let own = lpr-tri-writable(files);
+   let absent = lpr-tri-absent(files);
+   let healed = lpr-tri-count(rows, "\"rung\":\"flow\",\"verdict\":\"landed\"") > 0 ? "" : flp-healed-reading(req);
+   let first = nil?(files) ? "" : files[0];
+   lpr-tri-count(rows, "\"rung\":\"flow\",\"verdict\":\"landed\"") > 0 ? [id, "ended", "landed", 0, "a flow landed it", first] :
+   len(healed) > 0 ? [id, "ended", "healed", 0, healed, first] :
+   len(human) > 0 ? [id, "ended", "needs-human", 0, mc-cat(["the row names what Urs holds: ", human]), first] :
+   len(owner) > 0 ? [id, "ended", "owned-elsewhere", 0, mc-cat(["the row names its owner in its own words: ", owner]), first] :
+   nil?(files) ? [id, "ended", "no-writable-file", 0, "the row cites no file", first] :
+   nil?(own) && !nil?(absent) ? [id, "ended", "source-absent", 0, mc-cat(["none of these stands: ", flp-join(absent, ", ")]), first] :
+   nil?(own) ? [id, "ended", "no-writable-file", 0, mc-cat(["no file a voice may write: ", flp-join(files, ", ")]), first] : {
+    let s = lpr-tri-score(req, queue, rows);
+    [id, "ranked", "landable", s[0], s[1], first];
+   };
+  }
+  def lpr-tri-row-text(r) = json-emit(json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("request", r[0]), fhn-s("rung", "triage"), fhn-s("verdict", r[1]), fhn-s("kind", r[2]), fhn-n("got", r[3]), fhn-n("missed", 0), fhn-n("repairs", 0), fhn-n("ms", 0), fhn-n("rent_tokens", 0), fhn-s("why", r[4])]));
+  // the same end as the request's last triage row is not written again
+  def lpr-tri-last(lines, id) = foldl((acc, l) => str_find(l, mc-cat(["\"request\":\"", id, "\",\"rung\":\"triage\""]), 0) >= 0 ? l : acc, "", lines);
+  def lpr-tri-same?(last, r) = len(last) > 0 && str_find(last, mc-cat(["\"verdict\":\"", r[1], "\",\"kind\":\"", r[2], "\",\"got\":", (r[3]).str(), ","]), 0) >= 0;
+  def lpr-tri-keep(req, r, lines) {
+   let same = lpr-tri-same?(lpr-tri-last(lines, r[0]), r);
+   same ? 0 : {
+    let marked = (String) r[2] == "healed" ? flp-park-mark-at(req, flp-dir() ++ "/ledger.jsonl", mc-cat(["healed ", r[4]])) : "";
+    let kept = fhn-append(lpr-tri-ledger(), lpr-tri-row-text(r) ++ "\n");
+    1;
+   };
+  }
+  def lpr-tri-best(rows, taken) = foldl((b, r) => flp-has?(taken, r[0]) ? b : (nothing?(b) ? r : (r[3] > b[3] ? r : b)), nothing(), rows);
+  def lpr-tri-top(rows, k, taken, acc) {
+   let b = k == 0 ? nothing() : lpr-tri-best(rows, taken);
+   nothing?(b) ? acc : lpr-tri-top(rows, k - 1, append(taken, [b[0]]), append(acc, [b]));
+  }
+  def lpr-tri-kinds() = ["landed", "healed", "needs-human", "owned-elsewhere", "no-writable-file", "source-absent", "landable"];
+  def lpr-tri-of(rows, kind) = filter(r => (String) r[2] == kind, rows);
+  def lpr-triage() {
+   let reqs = filter(r => lpr-pending?(r) && len(flp-req-id(r)) > 0 && !lpr-refuted?(r), flp-queue-rows(flp-requests()));
+   let queue = flp-queue();
+   let lines = split-on(fhn-read(lpr-tri-ledger()), "\n");
+   let rows = map(req => lpr-tri-read(req, queue, lines), reqs);
+   let wrote = foldl((n, i) => n + lpr-tri-keep(reqs[i], rows[i], lines), 0, 0 .. len(rows));
+   let ended = filter(r => (String) r[1] == "ended", rows);
+   let top = lpr-tri-top(filter(r => (String) r[1] == "ranked", rows), 20, [], []);
+   let kinds = flp-join(map(k => mc-cat([k, "=", (len(lpr-tri-of(rows, k))).str()]), lpr-tri-kinds()), " ");
+   print_str(mc-cat(["triage: ", (len(rows)).str(), " requests, ", (len(ended)).str(), " ended by kind ", flp-join(map(k => mc-cat([k, "=", (len(lpr-tri-of(rows, k))).str()]), filter(k => (String) k != "landable", lpr-tri-kinds())), " "), "; ", (len(rows) - len(ended)).str(), " ranked for the model lanes (best ", len(top) == 0 ? "none" : (top[0][3]).str(), "); ", wrote.str(), " rows written to ", lpr-tri-ledger()]));
+   print_str(mc-cat(["[triage:kinds] ", kinds]));
+   print_str(flp-join(map(i => mc-cat(["[triage:rank] ", (i + 1).str(), ". ", top[i][0], " score ", (top[i][3]).str(), " ", top[i][5], ": ", top[i][4]]), 0 .. len(top)), "\n"));
+   nothing();
+  }
+  // ── triage: every open request gets an end with no model ──
+  // {"triage":1} reads each open request (pending or moved) once and gives it ONE end, from what is readable: healed (flp-healed-reading),
+  // owned-elsewhere (the row says another group's owner holds its files), source-absent (no cited file stands in this repo),
+  // no-writable-file (the cited files stand only outside form/ observe/ gate/ learn/, where a model lane writes nothing),
+  // needs-human (only a step that physically needs Urs: a macOS permission dialog), else ranked: a score from the size of the cited
+  // source, the shape of the edit and the request's earlier ledger rows. A row that names consent or configuration is NOT parked:
+  // Urs's consent stands for the loop, so it is ranked like any other. One row per request lands in receipts/local-plan-ledger.jsonl
+  // (rung "triage", the flow row's shape: verdict ended or ranked, kind, got = the score) when its kind or score moved; the flow door
+  // takes its next request from the best ranked row.
+  def lpr-tg-ledger() = "receipts/local-plan-ledger.jsonl";
+  def lpr-tg-owner() = ["owner files", "owner set", "Whoever owns", "owner should", "owner has to", "group's owner"];
+  def lpr-tg-physical() = ["permission dialog", "microphone grant", "Privacy & Security"];
+  def lpr-tg-guess() = ["consent", "private", "configuration", "Urs"];
+  def lpr-tg-hit(text, needles) = flp-first(needles, n => str_find(text, n, 0) >= 0) ?? "";
+  def lpr-tg-min(a, b) = if (a < b) then a else b;
+  def lpr-tg-mine(id, lines) = filter(l => str_find(l, mc-cat(["\"request\":\"", id, "\""]), 0) >= 0 && str_find(l, "\"rung\":\"triage\"", 0) < 0, lines);
+  def lpr-tg-n(mine, needle) = len(filter(l => str_find(l, needle, 0) >= 0, mine));
+  def lpr-tg-ledger-pts(mine) {
+   let closed = lpr-tg-n(mine, "\"kind\":\"gap-closed\"") > 0 ? 25 : 0;
+   let green = (lpr-tg-n(mine, "\"verdict\":\"queued\"") + lpr-tg-n(mine, "\"verdict\":\"landed\"") + lpr-tg-n(mine, "\"verdict\":\"green\"")) > 0 ? 30 : 0;
+   let compiled = lpr-tg-min(15, 3 * lpr-tg-n(mine, "\"kind\":\"reference-compile\""));
+   closed + green + compiled;
+  }
+  def lpr-tg-score(req, ex, mine) {
+   let size = foldl((a, f) => a + file_size(f), 0, ex);
+   let shape = lpr-form-source?(req) ? 30 : (len(ex) == 1 ? 10 : 0);
+   let needs = len(flp-text(req, "needs"));
+   let brief = needs <= 400 ? 15 : (needs <= 900 ? 5 : 0);
+   let moved = lpr-moved?(req) ? 5 : 0;
+   lpr-most(0, 60 + shape + brief + lpr-tg-ledger-pts(mine) - lpr-tg-min(40, size / 2000) - moved);
+  }
+  def lpr-tg-why(req, ex, mine) = mc-cat([lpr-form-source?(req) ? "one form source" : mc-cat([len(ex).str(), " file(s)"]), ", ", (foldl((a, f) => a + file_size(f), 0, ex) / 1000).str(), " kB cited, needs ", len(flp-text(req, "needs")).str(), " chars, ledger +", lpr-tg-ledger-pts(mine).str()]);
+  def lpr-tg-row(req, lines) {
+   let id = flp-req-id(req);
+   let text = mc-cat([flp-text(req, "title"), "\n", flp-text(req, "problem"), "\n", flp-text(req, "needs")]);
+   let files = flp-req-files(req);
+   let ex = filter(f => flp-exists?(f) && !flp-is-dir?(f), files);
+   let writable = filter(f => flp-under-roots?(f), ex);
+   let healed = flp-healed-reading(req);
+   let owner = lpr-tg-hit(text, lpr-tg-owner());
+   let phys = lpr-tg-hit(text, lpr-tg-physical());
+   let mine = lpr-tg-mine(id, lines);
+   let guess = len(lpr-tg-hit(text, lpr-tg-guess())) > 0 ? 1 : 0;
+   if (len(healed) > 0) then [id, "healed", 0, healed, guess]
+   else if (len(owner) > 0) then [id, "owned-elsewhere", 0, mc-cat(["the row names its owner by: ", owner]), guess]
+   else if nil?(ex) then [id, "source-absent", 0, nil?(files) ? "the row cites no file" : mc-cat(["none of ", flp-join(files, ", "), " stands in this repo"]), guess]
+   else if nil?(writable) then [id, "no-writable-file", 0, mc-cat(["the cited files stand only outside form/ observe/ gate/ learn/: ", flp-join(ex, ", ")]), guess]
+   else if (len(phys) > 0) then [id, "needs-human", 0, mc-cat(["a physical step only Urs can do: ", phys]), guess]
+   else { let s = lpr-tg-score(req, writable, mine); [id, "ranked", s, lpr-tg-why(req, writable, mine), guess]; }
+  }
+  def lpr-tg-write(g, lines) {
+   let last = foldl((a, l) => str_find(l, mc-cat(["\"request\":\"", g[0], "\",\"rung\":\"triage\""]), 0) >= 0 ? l : a, "", lines);
+   let same = str_find(last, mc-cat(["\"kind\":\"", g[1], "\",\"got\":", g[2].str(), ","]), 0) >= 0;
+   if same then 0 else { let w = fhn-append(lpr-tg-ledger(), json-emit(json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("request", g[0]), fhn-s("rung", "triage"), fhn-s("verdict", (String) g[1] == "ranked" ? "ranked" : "ended"), fhn-s("kind", g[1]), fhn-n("got", g[2]), fhn-n("missed", 0), fhn-n("repairs", 0), fhn-n("ms", 0), fhn-n("rent_tokens", 0)])) ++ "\n"); 1; };
+  }
+  def lpr-tg-count(rows, k) = len(filter(r => (String) r[1] == k, rows));
+  def lpr-tg-top(rows, k, acc) {
+   let best = foldl((b, r) => (Comparable) r[2] > b[2] ? r : b, rows[0], rows);
+   (nil?(rows) || k == 0) ? acc : lpr-tg-top(filter(r => (String) r[0] != best[0], rows), k - 1, append(acc, [best]));
+  }
+  def lpr-triage() {
+   let rows = filter(r => ((Comparable) len(flp-req-id(r)) > 0) && lpr-pending?(r), flp-queue-rows(flp-requests()));
+   let lines = filter(l => len(l) > 0, split-on(fhn-read(lpr-tg-ledger()), "\n"));
+   let got = map(r => lpr-tg-row(r, lines), rows);
+   let wrote = foldl((a, g) => a + lpr-tg-write(g, lines), 0, got);
+   let ranked = filter(g => (String) g[1] == "ranked", got);
+   let ended = len(got) - len(ranked);
+   let guessed = len(filter(g => g[4] == 1, ranked));
+   let shown = print_str(mc-cat(["triage: ", len(got).str(), " requests, ", ended.str(), " ended by kind (healed=", lpr-tg-count(got, "healed").str(), " owned-elsewhere=", lpr-tg-count(got, "owned-elsewhere").str(), " source-absent=", lpr-tg-count(got, "source-absent").str(), " no-writable-file=", lpr-tg-count(got, "no-writable-file").str(), " needs-human=", lpr-tg-count(got, "needs-human").str(), "), ", len(ranked).str(), " ranked for the model lanes; the old needs-human guess (consent, private world, configuration, Urs) would have parked ", guessed.str(), " of the ranked; ", wrote.str(), " ledger rows written"]));
+   let top = lpr-tg-top(ranked, 20, []);
+   let listed = map(g => print_str(mc-cat(["triage:rank ", g[2].str(), " ", g[0], " ", g[3]])), top);
+   nothing();
+  }
   def lpr-run() {
    let input = cell_input();
    let line = fat-wire-object?(input) ? "" : trim(stdin-text());
    let opts = fat-wire-object?(input) ? input : fcgp-object-line?(line) ? parse-json("local-plan-options", line) : json-node-object([]);
+   fcgp-present?(opts, "triage") ? lpr-triage() : lpr-run-opts(opts);
+  }
+  def lpr-run-opts(opts) {
    let window = ftg-window-until();
    let windowed = ftg-window-at(fcgp-num(opts, "until_ms"));
    defer ftg-window-at(window);
    let queue = lpr-queue(opts);
-   let req = lpr-pick(opts, queue);
+   let req = fcgp-present?(opts, "triage") ? nothing() : lpr-pick(opts, queue);
    let queued = if nothing?(req) then nothing() else flp-request-row(queue, flp-req-id(req));
    let voices = lpr-voices(opts);
-   if fcgp-present?(opts, "ask-gate") then lpr-ask-line(opts) else if fcgp-present?(opts, "two-streams") then lpr-two-streams(opts) else if fcgp-present?(opts, "streams") then lpr-stream-line(opts) else if fcgp-present?(opts, "peers") then lpr-peer-line() else if fcgp-present?(opts, "memory") then lpr-memory-line() else if fcgp-present?(opts, "seat") then lpr-seat-line() else if fcgp-present?(opts, "land") then lpr-land-reply(fcgp-str(opts, "land")) else if fcgp-present?(opts, "metal-steer") then lpr-metal-steer() else if fcgp-present?(opts, "kernel-two") then lpr-kernel-two() else if fcgp-present?(opts, "kernel-text") then lpr-kernel-text(fcgp-str(opts, "kernel-text")) else if fcgp-present?(opts, "kernel") then lpr-kernel-once(lpr-int(opts, "kernel", 19)) else if ((Comparable) lpr-int(opts, "steer", 0) == 1) then lpr-steer-live(opts) else if nothing?(req) then { print_str(mc-cat(["[local-plan] no request to plan in ", lpr-source(opts), ": none stands open, or each reads parked until what it stands on moves"])); nothing(); } else if fcgp-present?(opts,"reply") then lpr-recheck(req,opts,queue) else if (!nothing?(queued)) then { print_str(mc-cat(["[local-plan] request ", flp-req-id(req), " is already queued as ", flp-text(queued, "id"), " in ", queue, "; a request is planned once, and no model opens"])); queued; } else if nil?(voices) then { print_str("[local-plan] no plan voice has its weights on disk"); nothing(); } else if ((Comparable) lpr-int(opts, "dry", 0) == 1) then { lpr-dry(req, voices, queue); nothing(); } else lpr-walks(req, opts, voices, queue);
+   if fcgp-present?(opts, "triage") then lpr-triage() else if fcgp-present?(opts, "ask-gate") then lpr-ask-line(opts) else if fcgp-present?(opts, "two-streams") then lpr-two-streams(opts) else if fcgp-present?(opts, "streams") then lpr-stream-line(opts) else if fcgp-present?(opts, "peers") then lpr-peer-line() else if fcgp-present?(opts, "memory") then lpr-memory-line() else if fcgp-present?(opts, "seat") then lpr-seat-line() else if fcgp-present?(opts, "land") then lpr-land-reply(fcgp-str(opts, "land")) else if fcgp-present?(opts, "metal-steer") then lpr-metal-steer() else if fcgp-present?(opts, "kernel-two") then lpr-kernel-two() else if fcgp-present?(opts, "kernel-text") then lpr-kernel-text(fcgp-str(opts, "kernel-text")) else if fcgp-present?(opts, "kernel") then lpr-kernel-once(lpr-int(opts, "kernel", 19)) else if ((Comparable) lpr-int(opts, "steer", 0) == 1) then lpr-steer-live(opts) else if nothing?(req) then { print_str(mc-cat(["[local-plan] no request to plan in ", lpr-source(opts), ": none stands open, or each reads parked until what it stands on moves"])); nothing(); } else if fcgp-present?(opts,"reply") then lpr-recheck(req,opts,queue) else if (!nothing?(queued)) then { print_str(mc-cat(["[local-plan] request ", flp-req-id(req), " is already queued as ", flp-text(queued, "id"), " in ", queue, "; a request is planned once, and no model opens"])); queued; } else if nil?(voices) then { print_str("[local-plan] no plan voice has its weights on disk"); nothing(); } else if ((Comparable) lpr-int(opts, "dry", 0) == 1) then { lpr-dry(req, voices, queue); nothing(); } else lpr-walks(req, opts, voices, queue);
   }
   def lpr-recheck(req,opts,queue) {
    let ctx=flp-ctx(nothing(),[],0,queue,"",flp-dir() + "/scratch",flp-dir() + "/ledger.jsonl",lpr-int(opts,"deadline_ms",flp-deadline-ms()));
