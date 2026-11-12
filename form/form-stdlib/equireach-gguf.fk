@@ -58,11 +58,26 @@ section [form.bml] {
     // --- metadata KV walk (same value-type sizes and the same O(1) fixed-width array skip) ---
     def egg-vtype-size(t) = (Comparable) t == 0 || ((Comparable) t == 1 || (Comparable) t == 7) ? 1 : (Comparable) t == 2 || (Comparable) t == 3 ? 2 : (Comparable) t == 4 || ((Comparable) t == 5 || (Comparable) t == 6) ? 4 : t==10 || t==11 || t==12 ? 8 : form_error("GGUF fixed-width value type is unavailable");
     def egg-val-next(src, off, t) = (Comparable) t == 8 ? egg-str-next(src, off) : (Comparable) t == 9 ? egg-arr-skip(src, off + 12, egg-u32(src, off), egg-u64(src, off + 4)) : egg-span-end(src,off,egg-vtype-size(t));
-    def egg-arr-skip-var(src, off, et, count) = count<0 || !eqr-span?(src,off,0) || count>len(src) - off ? form_error("GGUF variable array count exceeds its header window") : (Comparable) count == 0 ? off : egg-arr-skip-var(src, egg-val-next(src, off, et), et, count - 1);
+    // A string array (the tokenizer's vocab and merges: ~500k entries) is skipped by one loop that checks the window once per entry and reads
+    // the u64 length unrolled; the generic walk re-asked value_kind and the span of every field of every entry.
+    def egg-skip-strs(src, off, count, n) = (Comparable) count == 0 ? off : off + 8 > n ? form_error("equireach integer span exceeds the available header bytes") : egg-skip-strs-at(src, off, count, n, eqr-at(src, off) + 256 * (eqr-at(src, off + 1) + 256 * (eqr-at(src, off + 2) + 256 * (eqr-at(src, off + 3) + 256 * (eqr-at(src, off + 4) + 256 * (eqr-at(src, off + 5) + 256 * (eqr-at(src, off + 6) + 256 * eqr-at(src, off + 7))))))));
+    def egg-skip-strs-at(src, off, count, n, l) = l > n - off - 8 ? form_error("GGUF field exceeds its available header bytes") : egg-skip-strs(src, off + 8 + l, count - 1, n);
+    def egg-arr-skip-var(src, off, et, count) = count<0 || !eqr-span?(src,off,0) || count>len(src) - off ? form_error("GGUF variable array count exceeds its header window") : (Comparable) et == 8 ? egg-skip-strs(src, off, count, len(src)) : egg-arr-skip-var-each(src, off, et, count);
+    def egg-arr-skip-var-each(src, off, et, count) = (Comparable) count == 0 ? off : egg-arr-skip-var-each(src, egg-val-next(src, off, et), et, count - 1);
     def egg-arr-skip(src, off, et, count) = (Comparable) et == 8 || (Comparable) et == 9 ? egg-arr-skip-var(src, off, et, count) : egg-fixed-end(src,off,count,egg-vtype-size(et));
     def egg-kv-next(src, off) = egg-val-next(src, egg-str-next(src, off) + 4, egg-u32(src, egg-str-next(src, off)));
     def egg-kv-skip(src, off, n) = (Comparable) n == 0 ? off : egg-kv-skip(src, egg-kv-next(src, off), n - 1);
-    def egg-tinfo-start(src) = egg-kv-skip(src, 24, egg-kv-count(src));
+    // Where the tensor table starts is a pure function of the header bytes, and a model open asks for it ~25 times (the data base, the
+    // required size, every suffix of the layer table, every named tensor): each ask was a fresh walk of the whole metadata block, vocab
+    // included (0.4 s each, 8 s in all). The answer is kept once per header, keyed by length and confirmed by str_eq of the retained bytes
+    // (a native compare), so a different header never reads another's answer.
+    let egg-start-memo = record_new(0, "egg-tinfo-start", 0);
+    def egg-tinfo-start(src) = egg-tinfo-start-keyed(src, value_str(len(src)));
+    def egg-tinfo-start-keyed(src, key) = record_has(egg-start-memo, key) && str_eq(record_get(egg-start-memo, key)[0], src) ? record_get(egg-start-memo, key)[1] : egg-tinfo-start-keep(src, key, egg-kv-skip(src, 24, egg-kv-count(src)));
+    def egg-tinfo-start-keep(src, key, at) = {
+        let _kept = record_set(egg-start-memo, key, [src, at]);
+        at;
+    };
     // --- tensor-info walk ---
     def egg-ti-ndims(src, off) = egg-u32(src, egg-str-next(src, off));
     def egg-ti-dim(src, off, k) = egg-u64(src, egg-str-next(src, off) + 4 + k * 8);
