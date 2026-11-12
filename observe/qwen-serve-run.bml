@@ -82,8 +82,9 @@ section [form.bml] {
    // the pool is capacity, not a commitment: its pages are touched only as sequences take blocks, and the machine's pressure (svs-budget) decides how many may be in use. Its default holds 2048 blocks
    // (524288 positions: twice the model's native context), and the attention scratch follows the pool: the split kernels lay one partial per 256 positions of a head's (head dim + 2) floats, so a
    // pool of P positions needs a stride of P * 258 / 512 at the widest head (256); a prompt is never cut by a number chosen before the pool was
-   let blocks = qsr-clamp(qsr-int(o, "blocks", 2048), 2, 1000000);
-   let maxpos = qsr-clamp(qsr-int(o, "maxpos", 0) > 0 ? qsr-int(o, "maxpos", 0) : (blocks * q38pg-bsz(bsh) * 129) / 256 + 256, 256, 4194304);
+   // blocks and maxpos 0 are the machine's to say (qsr-mount-one): the first model's pool takes what the governor reads as spare after its weights and the reserve, and the scratch follows the pool
+   let blocks = qsr-clamp(qsr-int(o, "blocks", 0), 0, 1000000);
+   let maxpos = qsr-clamp(qsr-int(o, "maxpos", 0), 0, 4194304);
    qsr-int(o, "go", 0) != 1 ? qsr-say("plan: go=1 serves " ++ qsr-list(qsr-names(o)) ++ ", up to " ++ rows.str() ++ " rows each, a pool of " ++ blocks.str() ++ " blocks of " ++ q38pg-bsz(bsh).str() ++ " positions for the first (attention scratch for " ++ maxpos.str() ++ ") from the spool " ++ dir ++ " until a file named stop appears there") : qsr-held(o, dir, rows, maxpos, blocks, bsh);
   }
   def qsr-held(o, dir, rows, maxpos, blocks, bsh) {
@@ -137,8 +138,19 @@ section [form.bml] {
   }
   def qsr-mount-one(o, dir, rows, maxpos, blocks0, bsh, start, label, yielded, shared, g, acc) {
    let t0 = host_monotonic_ms();
-   let ctx = q38-open-span(g[1], maxpos, qsr-span(o));
-   len(ctx) == 0 ? qsr-opened-not(acc, g) : append(acc, [qsr-mount(o, dir, rows, maxpos, blocks0, bsh, start, label, yielded, shared, g, ctx, t0)]);
+   let want = qsr-pool-blocks(o, g, blocks0, bsh);
+   let mp = maxpos > 0 ? maxpos : (want * q38pg-bsz(bsh) * 129) / 256 + 256;
+   let ctx = q38-open-span(g[1], mp, qsr-span(o));
+   len(ctx) == 0 ? qsr-opened-not(acc, g) : append(acc, [qsr-mount(o, dir, rows, mp, want, bsh, start, label, yielded, shared, g, ctx, t0)]);
+  }
+  // A pool is memory the process holds (its buffers are resident as the GPU reads them, 64 GiB of blocks read as 71 GiB resident and pushed the machine into swap), so its size is a
+  // reading of the machine, not a constant: asked for (blocks > 0) it is that; otherwise two fifths of what the governor reads as available after this model's weights and the
+  // reserve, at an estimated 32 MiB a block (the Qwen3.8 geometry), at least 64 blocks and at most 2048 (524288 positions, twice the model's native context).
+  def qsr-pool-blocks(o, g, blocks0, bsh) {
+   let vm = mg-sense();
+   let avail = mg-vm-ok?(vm) ? mg-available(vm) : 0;
+   let spare = avail - file_size(g[1]) - qsr-int(o, "reserve_gib", 8) * 1073741824;
+   blocks0 > 0 ? blocks0 : qsr-clamp((spare * 2 / 5) / 33554432, 64, 2048);
   }
   def qsr-opened-not(acc, g) {
    let a = qsr-say("model " ++ g[0] ++ " did not open (file " ++ g[1] ++ ")");
