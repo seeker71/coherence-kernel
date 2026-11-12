@@ -2640,6 +2640,71 @@ static int fk_metal_dyn_default_path(char *out) {
     out[pos] = 0;
     return 1;
 }
+/* The carrier is built where it is first wanted. A checkout that holds fk-metal-carrier.m and no dylib beside it (a fresh worktree), or a dylib older than its source,
+ * compiles it once with the host's cc, an argv and no shell. Each process stages its own file and renames it into place, so two builds at once end with the same
+ * bytes and a reader never sees half a dylib; a failed build leaves what stood and the load says why. */
+static int fk_metal_dyn_stale(const char *dylib, char *src) {
+#if defined(FK_HAVE_STAT_HEADER) && !defined(_WIN32)
+    struct stat a, b;
+    long long n = fk_cstrlen(dylib), i = 0;
+    if (n < 6 || n + 8 >= FK_PATH_CAP) {
+        return 0;
+    }
+    while (i < n - 5) {
+        src[i] = dylib[i];
+        i = i + 1;
+    }
+    src[n - 5] = 'm';
+    src[n - 4] = 0;
+    if (stat(src, &b) != 0) {
+        return 0;
+    }
+    if (stat(dylib, &a) != 0) {
+        return 1;
+    }
+    return b.st_mtime > a.st_mtime ? 1 : 0;
+#else
+    (void)dylib; (void)src;
+    return 0;
+#endif
+}
+static void fk_metal_dyn_build(const char *dylib) {
+#if !defined(_WIN32)
+    char src[FK_PATH_CAP], stage[FK_PATH_CAP], digits[24];
+    long long n = fk_cstrlen(dylib), i = 0, d = 0, pid = (long long)getpid(), v;
+    int st = 0;
+    if (!fk_metal_dyn_stale(dylib, src) || n + 40 >= FK_PATH_CAP) {
+        return;
+    }
+    while (i < n) {
+        stage[i] = dylib[i];
+        i = i + 1;
+    }
+    stage[i++] = '.'; stage[i++] = 'b'; stage[i++] = 'u'; stage[i++] = 'i'; stage[i++] = 'l'; stage[i++] = 'd'; stage[i++] = '.';
+    v = pid;
+    do { digits[d++] = (char)('0' + (v % 10)); v = v / 10; } while (v > 0 && d < 20);
+    while (d > 0) {
+        stage[i++] = digits[--d];
+    }
+    stage[i] = 0;
+    long long child = fork();
+    if (child < 0) {
+        return;
+    }
+    if (child == 0) {
+        char *argv[] = {"cc", "-O2", "-dynamiclib", "-o", stage, src, "-framework", "Metal", "-framework", "Foundation", "-fobjc-arc", 0};
+        execvp("cc", argv);
+        _exit(127);
+    }
+    waitpid((int)child, &st, 0);
+    if (st == 0 && rename(stage, dylib) == 0) {
+        return;
+    }
+    unlink(stage);
+#else
+    (void)dylib;
+#endif
+}
 static int fk_metal_dyn_load(void) {
     char *env;
     char path[FK_PATH_CAP];
@@ -2657,6 +2722,7 @@ static int fk_metal_dyn_load(void) {
     if (!fk_metal_dyn_default_path(path)) {
         return 0;
     }
+    fk_metal_dyn_build(path);
     return fk_metal_dyn_try_path(path);
 }
 static long long fk_metal_status_append(char *out, long long cap, long long off, const char *msg) {
