@@ -21,11 +21,12 @@
 // preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/door-options.bml form-stdlib/bml/serve-sched.bml form-stdlib/bml/serve-client.bml form-stdlib/bml/flow-signal.bml form-stdlib/bml/host-child.bml form-stdlib/bml/cell-said.bml form-stdlib/bml/string-join.bml form-stdlib/spool-bell-transport.fk
 section [form.bml] {
  class FlowRun {
-  def fl-spec() = [["request", "str"], ["slot", "int"], ["dir", "str"], ["land", "int"], ["plan", "int"], ["repairs", "int"], ["loop", "int"], ["counsel", "int"]];
+  def fl-spec() = [["request", "str"], ["slot", "int"], ["dir", "str"], ["land", "int"], ["plan", "int"], ["repairs", "int"], ["loop", "int"], ["counsel", "int"], ["ledger", "str"], ["isolated", "int"]];
   def fl-queue() = "learn/native-turn-queue.jsonl";
   def fl-requests() = "learn/local-requests.jsonl";
   def fl-planner-ledger() = ".hearth/local-plans/ledger.jsonl";
-  def fl-ledger() = "receipts/local-plan-ledger.jsonl";
+  // the ranked rows the flow picks from and the end row it leaves: one file by the path the launcher names (the source tree's), whatever tree the flow works in
+  def fl-ledger-of(o) = svs-str(o, "ledger", "receipts/local-plan-ledger.jsonl");
   def fl-band-ms() = 600000;
   def fl-ask-tokens() = 3200;
   // ── reading rows and files ──
@@ -40,7 +41,7 @@ section [form.bml] {
   def fl-head(s, n) = len(s) <= n ? s : substring(s, 0, n);
   def fl-line(s) = fl-head(trim(s), 24);
   // ── the flow's state: one record, the signal frame inside it ──
-  def fl-new(o, id) = record_new(0, "F", fsg-new(svs-int(o, "slot", 0), id), "id", id, "dir", svs-str(o, "dir", svc-default-dir()), "land", svs-int(o, "land", 0), "plan", svs-int(o, "plan", 1), "allow", svs-int(o, "repairs", 2), "counsel", svs-int(o, "counsel", 0), "oldasks", 0, "t0", host_monotonic_ms(),
+  def fl-new(o, id) = record_new(0, "F", fsg-new(svs-int(o, "slot", 0), id), "id", id, "dir", svs-str(o, "dir", svc-default-dir()), "land", svs-int(o, "land", 0), "plan", svs-int(o, "plan", 1), "allow", svs-int(o, "repairs", 2), "counsel", svs-int(o, "counsel", 0), "isolated", svs-int(o, "isolated", 0), "ledger", fl-ledger-of(o), "oldasks", 0, "t0", host_monotonic_ms(),
    "row", nothing(), "req", nothing(), "goal", "", "paths", [], "band", "", "full", 0, "orig", [], "got", 0, "miss", 0, "fails", 0, "reply", "", "errs", "", "outs", "", "cause", "", "verdict", "ended", "applied", 0, "green", 0, "landed", 0, "said", "");
   def fl-emit(S, stage, kind, got, missed, why, ids, ms) = fsg-emit(record_get(S, "F"), stage, kind, got, missed, why, ids, ms);
   def fl-since(t) = host_monotonic_ms() - t;
@@ -454,13 +455,19 @@ section [form.bml] {
   def fl-git(step, args) = hch-git-in(hch-dir(), ".", step, args);
   def fl-ran?(run) = !nothing?(run[0]) && run[0] == 0;
   def fl-subject(S) = fl-cat(["The flow landed ", record_get(S, "id"), ": the local voice's candidate turned the band ", record_get(S, "band"), " to its verdict ", record_get(S, "full").str(), ", no rented token"]);
+  // In a tree of its own the flow carries its one commit over a main that moved (rebase on the clean tree) and pushes the fast-forward; a rebase that conflicts is undone and the commit stays local, named.
+  def fl-push-rebased() {
+   let a = fl-git("fetch", ["fetch", "-q", "origin", "main"]);
+   let b = fl-git("rebase", ["rebase", "-q", "origin/main"]);
+   fl-ran?(b) ? fl-git("push", ["push", "-q", "origin", "HEAD:main"]) : fl-git("rebase", ["rebase", "--abort"]);
+  }
   def fl-land-go(S) {
    let t = host_monotonic_ms();
    let g = fl-emit(S, "land", "go", 0, 0, "landing", record_get(S, "id"), 0);
    let paths = filter(p => fl-root-ok?(p), record_get(S, "paths"));
    let added = fl-git("add", append(["add", "--"], paths));
    let made = fl-git("commit", append(["commit", "-q", "--only", "-m", fl-cat([fl-subject(S), "\n\nPlan, candidate, apply, band and land ran in one pass of observe/flow-direct-run.bml; the witness is ", record_get(S, "band"), " reading ", record_get(S, "full").str(), ". rent_tokens 0."]), "--"], paths));
-   let sent = fl-ran?(made) ? fl-git("push", ["push", "-q", "origin", "HEAD:main"]) : made;
+   let sent = !fl-ran?(made) ? made : record_get(S, "isolated") == 1 ? fl-push-rebased() : fl-git("push", ["push", "-q", "origin", "HEAD:main"]);
    let ok = fl-ran?(made);
    let a = record_set(S, "landed", ok ? 1 : 0);
    let nc = !ok && (str_find(hch-said(made), "nothing to commit", 0) >= 0 || str_find(hch-said(made), "no changes added", 0) >= 0);
@@ -477,7 +484,7 @@ section [form.bml] {
    let ms = fl-since(record_get(S, "t0"));
    let rep = record_get(record_get(S, "F"), "rep");
    let a = fl-emit(S, "end", v == "landed" || v == "green" ? "ok" : v == "partial" ? "part" : "disc", record_get(S, "got"), record_get(S, "miss"), v ++ ":" ++ c, record_get(S, "id"), ms);
-   let b = sbt-append-count(fl-ledger(), fsg-end-row(record_get(S, "id"), v, c, record_get(S, "got"), record_get(S, "miss"), rep, ms) ++ "\n");
+   let b = sbt-append-count(record_get(S, "ledger"), fsg-end-row(record_get(S, "id"), v, c, record_get(S, "got"), record_get(S, "miss"), rep, ms) ++ "\n");
    let r = fl-restore(S);
    print_str(fl-cat(["{\"request\":\"", record_get(S, "id"), "\",\"verdict\":\"", v, "\",\"cause\":\"", c, "\",\"got\":", record_get(S, "got").str(), ",\"missed\":", record_get(S, "miss").str(), ",\"repairs\":", rep.str(), ",\"ms\":", ms.str(), ",\"rent_tokens\":0}\n"]));
   }
@@ -503,9 +510,18 @@ section [form.bml] {
   def fl-next(lines) = fl-next-in(lines, true, 0);
   // One request through the whole flow in one pass; with loop 1 the flow goes on to the next fresh ranked request itself (nothing outside drives it) and ends when none is left.
   // A request is carried once: its claim is a small untracked file written when the flow takes it, so no git step erases it (the tracked ledger's appends did not survive a landing) and two flows never take the same request.
-  def fl-claim(id) = ".hearth/local-plans/flow-claim-" ++ id;
+  // The claim is shared by every flow whatever tree it works in (a fixed place outside any checkout).
+  def fl-claim(id) = "/tmp/form-flow-claims/" ++ id;
+  // Each flow works in a tree of its own (a git worktree per slot, made by the launcher) and starts every request from main as it stands: nothing a neighbour is editing is ever read or committed,
+  // and nothing is left over from the request before.
+  def fl-sync() {
+   let a = fl-git("fetch", ["fetch", "-q", "origin", "main"]);
+   fl-git("checkout", ["checkout", "-q", "-f", "--detach", "origin/main"]);
+  }
   def fl-one(o, id) {
+   let made = fs-mkdir("/tmp/form-flow-claims");
    let claimed = write_file_text(fl-claim(id), "1\n");
+   let synced = svs-int(o, "isolated", 0) == 1 ? fl-sync() : 0;
    let S = fl-new(o, id);
    let a = fl-emit(S, "start", "ok", 0, 0, "begin", record_get(S, "id"), 0);
    let b = fl-plan(S);
@@ -516,13 +532,13 @@ section [form.bml] {
   }
   def fl-loop(o, id) {
    let done = fl-one(o, id);
-   let nx = svs-int(o, "loop", 0) == 1 ? fl-next-in(split-on(fl-text(fl-ledger()), "\n"), false, svs-int(o, "slot", 0)) : "";
+   let nx = svs-int(o, "loop", 0) == 1 ? fl-next-in(split-on(fl-text(fl-ledger-of(o)), "\n"), false, svs-int(o, "slot", 0)) : "";
    len(nx) > 0 && (String) nx != id ? fl-loop(o, nx) : done;
   }
   def fl-run() {
    let o = dop-doc("flow", stdin-text(), fl-spec());
    let named = svs-str(o, "request", "");
-   fl-loop(o, len(named) > 0 ? named : fl-next-in(split-on(fl-text(fl-ledger()), "\n"), true, svs-int(o, "slot", 0)));
+   fl-loop(o, len(named) > 0 ? named : fl-next-in(split-on(fl-text(fl-ledger-of(o)), "\n"), true, svs-int(o, "slot", 0)));
   }
  }
  fl-run();
