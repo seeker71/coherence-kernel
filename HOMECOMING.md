@@ -150,8 +150,11 @@ recipe execution; lower training loss does not yet establish improved answer qua
   redraft (`repair` in [`observe/prompt-draft-run.bml`](observe/prompt-draft-run.bml)).
   Learning from what we accept and what we change grows from there.
 - **Talking speed.** A draft takes minutes; a conversation asks for seconds.
-- **The companion's ear.** The companion answers a line handed to it; no door
-  calls it yet, so what the ear hears does not reach it.
+- **The companion's ear.** `from-ear` on [`observe/companion-run.bml`](observe/companion-run.bml)
+  reads the ear spool's last closed line and, when a word is present and the resident
+  server stands, asks that server and offers the answer to the mouth. It does not open
+  a second model. A typed line asks the same server when one stands. With no server
+  standing, `from-ear` waits; a typed line still opens the companion's own residence.
 - **The open gaps.** The band-first gaps the lane works are the rows of
   [`learn/native-turn-queue.jsonl`](learn/native-turn-queue.jsonl), each naming
   its band; each attempt's candidate waits under `.hearth/native-turns`, and

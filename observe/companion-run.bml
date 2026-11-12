@@ -8,7 +8,10 @@
 // context; changed context returns to the guidance checkpoint, while changed
 // language opens a fresh owner. Personal turns are
 // supplied by the existing explicit memory packet, not by the checkpoint.
-// A present word opens the residence. An empty line does not. The answer is offered to the mouth as a text file under
+// A present word is what gets an answer. An empty line does not. When the resident server stands, the ask goes there
+// and this door does not open a model. A first line `from-ear` reads the ear spool's last closed line (time, tongue,
+// text) and asks that server; with no server standing it waits, and does not open one. `from-ear-check` reads a
+// fixture and does not ask. The answer is offered to the mouth as a text file under
 // .hearth/companion/mouth/; the vocoder pass reads that file when it is run, and this door does not open the vocoder.
 // The voice is the registry's answer model in the fkwu session (form-stdlib/bml/form-cli-native-voice.bml), with the
 // last six available exchanges of .hearth/companion/conversation.jsonl as context.
@@ -19,13 +22,35 @@
 // ground the person's words actually touch (observe/companion-ground.bml): a teaching, a receipt, a counsel cell,
 // or the miss when nothing carries them. The voice meets the person carrying both.
 // preflight-exec: forbidden
-// preludes: form-stdlib/core.fk observe/companion-packet.bml form-stdlib/bml/form-cli-native-voice.bml form-stdlib/bml/form-cli-heal-native-report.bml form-stdlib/meaning-codes.bml form-stdlib/bml/ledger.bml
+// preludes: form-stdlib/core.fk observe/companion-packet.bml form-stdlib/bml/form-cli-native-voice.bml form-stdlib/bml/form-cli-heal-native-report.bml form-stdlib/meaning-codes.bml form-stdlib/bml/ledger.bml form-stdlib/bml/serve-client.bml
 section [form.bml] {
  blueprint CompanionRow { at_unix_ms: int, lang: string, said: string, answer: string, voice: string }
  class Companion {
   def cp-dir() = ".hearth/companion";
   def cp-log() = ".hearth/companion/conversation.jsonl";
   def cp-mouth() = ".hearth/companion/mouth";
+  def cp-ear-segs() = ".hearth/ear.spool.segments";
+  def cp-tab() = byte_to_str(9);
+  def cp-ear-parts(line) = split-on(line, cp-tab());
+  def cp-ear-closed?(line) {
+   let p = cp-ear-parts(trim(line));
+   (Comparable) len(p) >= 3 && (String) p[0] != "live" && (String) p[0] != "done";
+  }
+  def cp-ear-rest(p, i) = i >= len(p) ? "" : i == len(p) - 1 ? p[i] : p[i] ++ cp-tab() ++ cp-ear-rest(p, i + 1);
+  def cp-ear-pair(line) {
+   let p = cp-ear-parts(trim(line));
+   [p[1], cp-ear-rest(p, 2)];
+  }
+  def cp-ear-last(lines, acc) = nil?(lines) ? acc : cp-ear-closed?(lines[0]) ? cp-ear-last(lines[1:], lines[0]) : cp-ear-last(lines[1:], acc);
+  def cp-ear-of(text) {
+   let line = cp-ear-last(split-on(text, "\n"), "");
+   (Comparable) len(line) == 0 ? ["", ""] : cp-ear-pair(line);
+  }
+  def cp-ear-heard() = cp-ear-of(read_file(cp-ear-segs()) ?? "");
+  def cp-ear-check() {
+   let heard = cp-ear-of("live" ++ cp-tab() ++ "1" ++ cp-tab() ++ "2" ++ cp-tab() ++ "en" ++ cp-tab() ++ "hello there\n9" ++ cp-tab() ++ "en" ++ cp-tab() ++ "I am scared of the change\ndone\n");
+   print([heard[0], heard[1], cp-present?(heard[1]) ? 1 : 0]);
+  }
   def cp-present?(said) = (Comparable) len(trim(said)) > 0;
   def cp-offer(answer) {
    (Comparable) len(answer) == 0 ? 0 : {
@@ -63,17 +88,41 @@ section [form.bml] {
    let line=read_line();
    nothing?(line) ? 0 : { cp-turn(owner,trim(line)); cp-listen(owner); };
   }
+  def cp-kept(said, lang, asked) {
+   let answer = (String) asked[0] == "answered" ? trim(asked[1]) : "";
+   let offered = cp-offer(answer);
+   let told = len(answer) > 0 ? print_str(answer ++ "\n") : 0;
+   let kept = ledger-append(cp-log(), CompanionRow{at_unix_ms: now_unix_ms(), lang: lang, said: said, answer: answer, voice: asked[0]});
+   print_str("[companion] voice=" ++ asked[0] ++ "\n");
+  }
+  def cp-served-ask(said, lang) {
+   let made = fs_mkdir(cp-dir());
+   let tongue = (Comparable) len(lang) == 0 ? "en" : lang;
+   let asked = svc-voice(cp-packet(said, tongue, cp-memory()), 0, "companion");
+   nothing?(asked) ? print_str("[companion] voice=unserved\n") : cp-kept(said, tongue, asked);
+  }
+  def cp-served-lines(said) {
+   let lang0 = cp-line();
+   let lang = (Comparable) len(lang0) == 0 ? "en" : lang0;
+   let voiceFlag = cp-line();
+   (String) voiceFlag == "0" ? cp-kept(said, lang, ["not-asked", ""]) : cp-served-ask(said, lang);
+  }
+  def cp-from-ear() {
+   let heard = cp-ear-heard();
+   !cp-present?(heard[1]) ? print_str("[companion] present=0\n") : (String) svc-standing(svc-default-dir())[0] == "standing" ? cp-served-ask(heard[1], heard[0]) : print_str("[companion] unserved: no server stands\n");
+  }
+  def cp-reside(said) {
+   let owner=fcnv-residence();
+   defer print(["companion-release",fcnv-residence-close(owner)]);
+   cp-turn(owner, said);
+   cp-listen(owner);
+  }
   def cp-open(said) {
-   !cp-present?(said) ? print_str("[companion] present=0\n") : {
-    let owner=fcnv-residence();
-    defer print(["companion-release",fcnv-residence-close(owner)]);
-    cp-turn(owner, said);
-    cp-listen(owner);
-   };
+   !cp-present?(said) ? print_str("[companion] present=0\n") : (String) svc-standing(svc-default-dir())[0] == "standing" ? cp-served-lines(said) : cp-reside(said);
   }
   def cp-run() {
    let first = read_line();
-   nothing?(first) ? 0 : cp-open(trim(first));
+   nothing?(first) ? 0 : (String) trim(first) == "from-ear-check" ? cp-ear-check() : (String) trim(first) == "from-ear" ? cp-from-ear() : cp-open(trim(first));
   }
  }
  cp-run();
