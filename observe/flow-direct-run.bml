@@ -486,7 +486,7 @@ section [form.bml] {
    let ms = fl-since(record_get(S, "t0"));
    let rep = record_get(record_get(S, "F"), "rep");
    let a = fl-emit(S, "end", v == "landed" || v == "green" ? "ok" : v == "partial" ? "part" : "disc", record_get(S, "got"), record_get(S, "miss"), v ++ ":" ++ c, record_get(S, "id"), ms);
-   let b = sbt-append-count(record_get(S, "ledger"), fsg-end-row(record_get(S, "id"), v, c, record_get(S, "got"), record_get(S, "miss"), rep, ms) ++ "\n");
+   let b = sbt-append-count(record_get(S, "ledger"), fl-door-stamp(fsg-end-row(record_get(S, "id"), v, c, record_get(S, "got"), record_get(S, "miss"), rep, ms)) ++ "\n");
    let r = fl-restore(S);
    print_str(fl-cat(["{\"request\":\"", record_get(S, "id"), "\",\"verdict\":\"", v, "\",\"cause\":\"", c, "\",\"got\":", record_get(S, "got").str(), ",\"missed\":", record_get(S, "miss").str(), ",\"repairs\":", rep.str(), ",\"ms\":", ms.str(), ",\"rent_tokens\":0}\n"]));
   }
@@ -505,7 +505,8 @@ section [form.bml] {
    let tri = filter(l => str_find(l, "\"rung\":\"triage\"", 0) >= 0, lines);
    let live = filter(l => str_find(l, "\"verdict\":\"ranked\"", 0) >= 0 && !(any?(m => fl-line-id(m) == fl-line-id(l) && str_find(m, "\"verdict\":\"ranked\"", 0) < 0, tri)), tri);
    let reqs = fl-text("learn/local-requests.jsonl");
-   let fresh = filter(l => file_size(fl-claim(fl-line-id(l))) < 0 && str_find(reqs, fl-cat(["\"id\":\"", fl-line-id(l), "\""]), 0) >= 0 && !(any?(m => str_find(m, "\"rung\":\"flow\"", 0) >= 0 && fl-line-id(m) == fl-line-id(l), lines)), live);
+   let door = fl-door();
+   let fresh = filter(l => str_find(reqs, fl-cat(["\"id\":\"", fl-line-id(l), "\""]), 0) >= 0 && fl-takeable?(lines, fl-line-id(l), door), live);
    let pool = len(fresh) > 0 ? fresh : anyok ? live : [];
    fl-kth(pool, slot);
   }
@@ -514,6 +515,20 @@ section [form.bml] {
   // A request is carried once: its claim is a small untracked file written when the flow takes it, so no git step erases it (the tracked ledger's appends did not survive a landing) and two flows never take the same request.
   // The claim is shared by every flow whatever tree it works in (a fixed place outside any checkout).
   def fl-claim(id) = "/tmp/form-flow-claims/" ++ id;
+  // A request ends in a counted kind, and the flow that ended it is a version of this door (the git blob of observe/flow-direct-run.bml at the tree's head, stamped on the end row as "door" and
+  // written into the claim). When the door improves, a request that ended in a kind the door can heal (the voice's answer applied nothing, its blocks did not match the file, the band did not
+  // compile, the planner stopped) is the next fresh request for the new door and no one has to say so: the loop takes it by itself. A request the current door already ended, or landed, stays ended.
+  def fl-door() = fl-head(trim(hch-said(fl-git("rev-parse", ["rev-parse", "HEAD:observe/flow-direct-run.bml"]))), 12);
+  def fl-healable() = ["nothing-applied", "no-edit-blocks", "edit-old-text-not-found", "band-compile-error", "band-unbound-name", "band-stopped", "plan-planner-stopped", "voice-unread"];
+  def fl-door-stamp(row) = substring(row, 0, len(row) - 1) ++ ",\"door\":\"" ++ fl-door() ++ "\"}";
+  def fl-flow-rows(lines, id) = filter(m => str_find(m, "\"rung\":\"flow\"", 0) >= 0 && fl-line-id(m) == id, lines);
+  def fl-row-kind(m) { let t = fl-after(m, "\"kind\":\""); let e = str_find(t, "\"", 0); e < 0 ? "" : substring(t, 0, e); }
+  def fl-healable?(rows, door) { let last = rows[len(rows) - 1]; len(rows) > 0 && any?(k => k == fl-row-kind(last), fl-healable()) && str_find(last, fl-cat(["\"door\":\"", door]), 0) < 0; }
+  def fl-claim-of-door?(id, door) = file_size(fl-claim(id)) >= 0 && trim(fl-text(fl-claim(id))) == door;
+  def fl-takeable?(lines, id, door) {
+   let rows = fl-flow-rows(lines, id);
+   len(rows) == 0 ? file_size(fl-claim(id)) < 0 : fl-healable?(rows, door) && !fl-claim-of-door?(id, door);
+  }
   // Each flow works in a tree of its own (a git worktree per slot, made by the launcher) and starts every request from main as it stands: nothing a neighbour is editing is ever read or committed,
   // and nothing is left over from the request before.
   def fl-sync() {
@@ -522,7 +537,7 @@ section [form.bml] {
   }
   def fl-one(o, id) {
    let made = fs-mkdir("/tmp/form-flow-claims");
-   let claimed = write_file_text(fl-claim(id), "1\n");
+   let claimed = write_file_text(fl-claim(id), fl-door() ++ "\n");
    let synced = svs-int(o, "isolated", 0) == 1 ? fl-sync() : 0;
    let S = fl-new(o, id);
    let a = fl-emit(S, "start", "ok", 0, 0, "begin", record_get(S, "id"), 0);
