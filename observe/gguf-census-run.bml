@@ -1,0 +1,45 @@
+// gguf-census-run.bml — the bytes of a GGUF file by tensor type, read from its tensor table, never estimated.
+//
+//   echo '{"file":"/Users/me/models/qwen38-27b/Qwen3.8-27B-Q4_K_M.gguf"}' | ./fkwu observe/gguf-census-run.bml
+//
+// One decoded token reads every weight once, so a token's floor is the sum over types of bytes(type) / rate(type): this door gives the bytes, observe/q6k-decode-rate-run.bml the rates, and the two
+// together say where a token's milliseconds go (the share of Q4_K, Q6_K, Q8_0 and F32 bytes in the file) without an assumed share.
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/door-options.bml form-stdlib/equireach.fk form-stdlib/equireach-gguf.fk
+section [form.bml] {
+ class GgufCensus {
+  def gc-spec() = [["file", "str"]];
+  def gc-elems(src, off, k, n, acc) = k >= n ? acc : gc-elems(src, off, k + 1, n, acc * egg-ti-dim(src, off, k));
+  // bytes of n elements of a GGML type: the block size and block bytes of the types a Q4_K_M file holds
+  def gc-bytes(type, n) = type == 12 ? (n / 256) * 144 : type == 14 ? (n / 256) * 210 : type == 8 ? (n / 32) * 34 : type == 0 ? n * 4 : type == 1 ? n * 2 : type == 13 ? (n / 256) * 176 : type == 11 ? (n / 256) * 110 : type == 10 ? (n / 256) * 84 : 0;
+  def gc-slot(type) = type == 12 ? 0 : type == 14 ? 1 : type == 8 ? 2 : type == 0 ? 3 : type == 1 ? 4 : 5;
+  def gc-bump(acc, slot, bytes) = map(i => i == slot ? acc[i] + bytes : acc[i], range(0, 8));
+  def gc-cnt(acc, slot) = map(i => i == slot + 6 - 0 ? acc[i] : acc[i], range(0, 8));
+  def gc-walk(src, off, i, n, acc) {
+   i >= n ? acc : gc-step(src, off, i, n, acc);
+  }
+  def gc-step(src, off, i, n, acc) {
+   let type = egg-ti-type(src, off);
+   let bytes = gc-bytes(type, gc-elems(src, off, 0, egg-ti-ndims(src, off), 1));
+   gc-walk(src, egg-ti-next(src, off), i + 1, n, gc-bump(acc, gc-slot(type), bytes));
+  }
+  def gc-gib(b) = ((b * 100) / 1073741824 / 100).str() ++ "." ++ (((b * 100) / 1073741824) % 100).str() ++ " GiB";
+  def gc-line(name, b, total) = print_str("[gguf-census] " ++ name ++ ": " ++ b.str() ++ " bytes (" ++ gc-gib(b) ++ "), " ++ ((b * 1000) / total / 10).str() ++ "." ++ (((b * 1000) / total) % 10).str() ++ " percent of the tensor bytes\n");
+  def gc-main() {
+   let o = dop-doc("gguf-census", stdin-text(), gc-spec());
+   let path = json-object-has?(o, "file") ? json-string-value(json-object-get(o, "file")) : "";
+   let src = eqr-of-file(path, 0, 40000000);
+   let n = egg-tensor-count(src);
+   let acc = gc-walk(src, egg-tinfo-start(src), 0, n, [0, 0, 0, 0, 0, 0, 0, 0]);
+   let total = acc[0] + acc[1] + acc[2] + acc[3] + acc[4] + acc[5];
+   let a = print_str("[gguf-census] " ++ n.str() ++ " tensors, " ++ total.str() ++ " bytes in all (" ++ gc-gib(total) ++ ")\n");
+   let b = gc-line("Q4_K (type 12)", acc[0], total);
+   let c = gc-line("Q6_K (type 14)", acc[1], total);
+   let d = gc-line("Q8_0 (type 8)", acc[2], total);
+   let e = gc-line("F32 (type 0)", acc[3], total);
+   let f = gc-line("F16 (type 1)", acc[4], total);
+   gc-line("other types", acc[5], total);
+  }
+ }
+ gc-main();
+}
