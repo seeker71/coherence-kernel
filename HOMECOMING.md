@@ -163,6 +163,9 @@ recipe execution; lower training loss does not yet establish improved answer qua
   `./fkwu observe/local-flow-review.bml` reads where each gap stands. A native
   coding turn reads each file's reachability once for that ask
   (`fat-source-providers` in [`form/form-stdlib/bml/form-agent-tools.bml`](form/form-stdlib/bml/form-agent-tools.bml)).
+  An organ event makes the directory it is written into. A window short of the
+  fastest measured option does not start a turn. The planner's repair block
+  stands in the tree and carries the whole candidate.
 - **The grown generation.** The child adapter stands where its ledger row names
   it; the LoRA lane still wears `llama-3.2-3b-voice`, and serving moves by a
   separate, witnessed decision. No schedule runs the lessons doors yet.
