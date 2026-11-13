@@ -10644,7 +10644,8 @@ static long long fk_jit_node(long long x, long long fp) {
                 nn = nn + 1;
                 r = FK_HNEXT(r);
             }
-            if (nn < 1 || nv[0] < 1 || nv[0] > 4095) { return fk_nothing; }
+            /* a fifth element is not the shape: refused by name (nothing), never read short */
+            if (nn < 1 || nv[0] < 1 || nv[0] > 4095 || (r >= 1 && FK_POK(r))) { return fk_nothing; }
             while (nn < 4) { nv[nn] = 0; nn = nn + 1; }
             return fk_smknode(nv[0], nv[1], nv[2], nv[3]) << 1;
         }
