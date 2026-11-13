@@ -32,7 +32,11 @@
 // E4 ONE DOOR          S1 (fgs-answer) by default for an ordinary form-cli enquiry, and the pinned reading: rent at most 10000 with at least
 //                      6 receipts cited by a path that exists. Read from this tree's rent ledger, the last S1 row (door "S1") else the last
 //                      pinned row of the voice walk, which it names. What was offered is read from citation_keys_offered, which
-//                      every walk's row carries beside receipts_in_packet
+//                      every walk's row carries beside receipts_in_packet. E4_support reads the answer the row names: each receipts path
+//                      it cites, then the quoted or bold span that follows that path, against the receipt file. The span's words stand in
+//                      the receipt in that order. A word of four letters or more may be the start of the receipt's word, so a hyphen or a
+//                      trailing inflection is the same word. E4 stays the rent and citation reading. E4_support is holds when every cited
+//                      path has such a span in its file, and names the path when one does not.
 // E5 OBSERVED SHARE    every body-launched provider turn reads kind=observed: the provider rows of the rent and coverage ledgers and the
 //                      review panel's runs this host still holds, against the doors that can launch one. No turn and no door holds; any
 //                      other reading is the wall headless-share
@@ -342,16 +346,88 @@ section [form.bml] {
    let r = ep-e4-row(rows);
    let dflt = ep-s1-default?(root);
    let door = (Comparable) host_path_exists(ep-at(root, ep-s1-door())) == 1;
-   nothing?(r) ? ["unread", "no pinned row in " ++ ep-at(root, "receipts/rent-ledger.jsonl"), ""] : ep-e4-read(r, dflt, door, ep-num(r, "rent_tokens"), ep-num(r, "answer_receipts_existing"));
+   nothing?(r) ? ["unread", "no pinned row in " ++ ep-at(root, "receipts/rent-ledger.jsonl"), ""] : ep-e4-read(root, r, dflt, door, ep-num(r, "rent_tokens"), ep-num(r, "answer_receipts_existing"));
   }
   def ep-e4-lane(r) = (String) ep-str(r, "door") == "S1" ? "through S1" : "through the voice walk, not S1";
-  def ep-e4-read(r, dflt, door, rent, cited) {
+  // the span the sentence attributes to a receipt: whitespace, a hyphen and the markdown marks fold away, and the words are read in order
+  def ep-earlier(a, b) { if ((Comparable) a < 0) then b else if ((Comparable) b < 0) then a else if ((Comparable) a < b) then a else b; }
+  def ep-next-mark(s, i) = ep-earlier(ep-earlier(str_find(s, "receipts/", i), str_find(s, "\"", i)), str_find(s, "**", i));
+  def ep-at-mark?(s, i, mark) = (Comparable) str_find(s, mark, i) == i;
+  def ep-path-byte?(b) = ((Comparable) b >= 48 && (Comparable) b <= 57) || ((Comparable) b >= 65 && (Comparable) b <= 90) || ((Comparable) b >= 97 && (Comparable) b <= 122) || ((Comparable) b == 47) || ((Comparable) b == 95) || ((Comparable) b == 45);
+  def ep-path-dot?(s, i) = ((Comparable) str_byte_at(s, i) == 46) && ((Comparable) i + 1 < len(s)) && ep-path-byte?(str_byte_at(s, i + 1));
+  def ep-path-end(s, i) = ((Comparable) i >= len(s)) || (!ep-path-byte?(str_byte_at(s, i)) && !ep-path-dot?(s, i)) ? i : ep-path-end(s, i + 1);
+  def ep-note-path(paths, p) = (String) p == "" || any?(x => (String) x == p, paths) ? paths : append(paths, [p]);
+  def ep-note-span(pairs, path, span) = (String) path == "" || (Comparable) len(trim(span)) < 4 ? pairs : append(pairs, [[path, span]]);
+  def ep-scan(s, i, path, paths, pairs) {
+   if ((Comparable) i < 0) || ((Comparable) i >= len(s)) then [paths, pairs]
+   else if ep-at-mark?(s, i, "receipts/") then {
+    let end = ep-path-end(s, i);
+    let p = substring(s, i, end);
+    ep-scan(s, ep-next-mark(s, end), p, ep-note-path(paths, p), pairs);
+   } else if ep-at-mark?(s, i, "**") then {
+    let end = str_find(s, "**", i + 2);
+    (Comparable) end < 0 ? ep-scan(s, ep-next-mark(s, i + 2), path, paths, pairs) : ep-scan(s, ep-next-mark(s, end + 2), path, paths, ep-note-span(pairs, path, substring(s, i + 2, end)));
+   } else if ep-at-mark?(s, i, "\"") then {
+    let end = str_find(s, "\"", i + 1);
+    (Comparable) end < 0 ? ep-scan(s, ep-next-mark(s, i + 1), path, paths, pairs) : ep-scan(s, ep-next-mark(s, end + 1), path, paths, ep-note-span(pairs, path, substring(s, i + 1, end)));
+   } else ep-scan(s, ep-next-mark(s, i + 1), path, paths, pairs);
+  }
+  def ep-swap-at(s, at, from, to) = (Comparable) at < 0 ? s : ep-swap(substring(s, 0, at) ++ to ++ substring(s, at + len(from), len(s)), from, to);
+  def ep-swap(s, from, to) = ep-swap-at(s, str_find(s, from, 0), from, to);
+  def ep-flat(s) = ep-swap(ep-swap(ep-swap(ep-swap(ep-swap(ep-swap(s, "\n", " "), "\r", " "), "\t", " "), "-", " "), "*", " "), "`", " ");
+  def ep-skip-spaces(s, i) = ((Comparable) i < len(s)) && ((Comparable) str_byte_at(s, i) == 32) ? ep-skip-spaces(s, i + 1) : i;
+  def ep-word-end(s, i) = ((Comparable) i >= len(s)) || ((Comparable) str_byte_at(s, i) == 32) ? i : ep-word-end(s, i + 1);
+  def ep-words-from(s, i) {
+   let a = ep-skip-spaces(s, i);
+   if (Comparable) a >= len(s) then []
+   else {
+    let b = ep-word-end(s, a);
+    cons(substring(s, a, b), ep-words-from(s, b));
+   };
+  }
+  def ep-word-same?(a, b) = ((String) a == b) || (((Comparable) len(a) >= 4) && ((Comparable) len(b) >= 4) && (ep-starts?(a, b) || ep-starts?(b, a)));
+  def ep-find-word(w, words, i) = (Comparable) i >= len(words) ? -1 : ep-word-same?(w, words[i]) ? i : ep-find-word(w, words, i + 1);
+  def ep-words-hold?(qs, words, i) {
+   if nil?(qs) then true
+   else {
+    let at = ep-find-word(qs[0], words, i);
+    (Comparable) at < 0 ? false : ep-words-hold?(qs[1:], words, at + 1);
+   };
+  }
+  def ep-span-holds?(span, file) = ep-words-hold?(ep-words-from(ep-flat(span), 0), ep-words-from(ep-flat(file), 0), 0);
+  def ep-spans-of(path, pairs) = filter(p => (String) p[0] == path, pairs);
+  def ep-file-of(root, path) {
+   let named = read_file(ep-at(root, path)) ?? "";
+   (String) named != "" ? named : (read_file(path) ?? "");
+  }
+  def ep-path-holds?(root, path, pairs) {
+   let spans = ep-spans-of(path, pairs);
+   let file = ep-file-of(root, path);
+   !nil?(spans) && ((String) file != "") && any?(p => ep-span-holds?(p[1], file), spans);
+  }
+  def ep-unsupported(root, paths, pairs) = filter(p => !ep-path-holds?(root, p, pairs), paths);
+  def ep-answer-text(root, r) {
+   let named = ep-str(r, "answer");
+   let fromRow = (String) named == "" ? "" : (read_file(named) ?? "");
+   (String) fromRow != "" ? fromRow : (read_file(ep-at(root, "receipts/artifacts/2026-11-02-s1-pinned-answer.md")) ?? "");
+  }
+  def ep-e4-support(root, r) {
+   let text = ep-answer-text(root, r);
+   if (String) text == "" then ["unread", "the pinned answer was not read"]
+   else {
+    let found = ep-scan(text, ep-next-mark(text, 0), "", [], []);
+    let missing = ep-unsupported(root, found[0], found[1]);
+    nil?(found[0]) ? ["wall", "the pinned answer cites no receipt path"] : nil?(missing) ? ["holds", len(found[0]).str() ++ " receipt path(s), each span the sentence attributes stands in that receipt"] : ["wall", "wall receipt-unsupported: " ++ missing[0]];
+   };
+  }
+  def ep-e4-read(root, r, dflt, door, rent, cited) {
    let rentOk = !nothing?(rent) && (rent <= ep-max-rent());
    let citedOk = !nothing?(cited) && (cited >= ep-min-cited());
-   let reading = "the pinned reading " ++ ep-str(r, "movement") ++ " " ++ ep-e4-lane(r) ++ ": rent " ++ (rent ?? "unread").str() ++ " <= " ++ ep-max-rent().str() ++ " " ++ (rentOk ? "holds" : "fails") ++ " (the voice is native, so the rented reading may be 0), receipts cited by an existing path " ++ (cited ?? "unread").str() ++ " >= " ++ ep-min-cited().str() ++ " " ++ (citedOk ? "holds" : "fails") ++ ", " ++ ep-e4-offered(r) ++ "; this door counts citations, and whether a receipt supports its sentence stays unread here";
+   let support = ep-e4-support(root, r);
+   let reading = "the pinned reading " ++ ep-str(r, "movement") ++ " " ++ ep-e4-lane(r) ++ ": rent " ++ (rent ?? "unread").str() ++ " <= " ++ ep-max-rent().str() ++ " " ++ (rentOk ? "holds" : "fails") ++ " (the voice is native, so the rented reading may be 0), receipts cited by an existing path " ++ (cited ?? "unread").str() ++ " >= " ++ ep-min-cited().str() ++ " " ++ (citedOk ? "holds" : "fails") ++ ", " ++ ep-e4-offered(r) ++ "; " ++ support[1];
    let whyDefault = dflt ? "" : "wall s1-not-default: an ordinary form-cli enquiry does not reach fgs-answer (" ++ ep-default-file() ++ " must name it and " ++ ep-repl-file() ++ " must name fc-s1-ask)" ++ (door ? ", and S1 stands as its own door, " ++ ep-s1-door() : ", and no door serves S1 since 115fea55e cut it") ++ "; ";
    let whyCited = citedOk ? "" : "wall s1-receipts-cited: the pinned answer cites fewer receipts than the clause needs; ";
-   dflt && rentOk && citedOk ? ["holds", reading, ""] : ["wall", whyDefault ++ whyCited ++ reading, ""];
+   dflt && rentOk && citedOk ? ["holds", whyDefault ++ whyCited ++ reading, "", support[0]] : ["wall", whyDefault ++ whyCited ++ reading, "", support[0]];
   }
   // ── E5: the provider turns the body launched ──
   def ep-launchers() = ["form/form-stdlib/bml/form-cli-grounded-synthesis.bml", "form/form-stdlib/bml/review-panel.bml", "form/form-stdlib/bml/form-cli-heal.bml", "form/form-stdlib/bml/form-cli-response-resource.bml"];
@@ -585,7 +661,10 @@ section [form.bml] {
   }
   def ep-line(r) = ep-prefix() ++ r[0] ++ ": " ++ r[1][0] ++ " — " ++ r[1][1];
   def ep-count(reads, word) = len(filter(r => (String) r[1][0] == word, reads));
-  def ep-pairs-of(r) = [fhn-s(r[0], r[1][0]), fhn-s(r[0] ++ "_reading", lrun-home-free(r[1][1])), fhn-s(r[0] ++ "_value", lrun-home-free(r[1][2]))];
+  def ep-pairs-of(r) {
+   let base = [fhn-s(r[0], r[1][0]), fhn-s(r[0] ++ "_reading", lrun-home-free(r[1][1])), fhn-s(r[0] ++ "_value", lrun-home-free(r[1][2]))];
+   (Comparable) len(r[1]) > 3 ? append(base, [fhn-s(r[0] ++ "_support", r[1][3])]) : base;
+  }
   def ep-row(reads, ctx) = json-node-object(append([fhn-n("at_unix_ms", ep-ctx-now(ctx)), fhn-s("ref", ep-ctx-ref(ctx)), fhn-s("ref_sha", ep-ref-sha(ep-ctx-root(ctx), ep-ctx-ref(ctx))), fhn-n("holds", ep-count(reads, "holds")), fhn-n("walls", ep-count(reads, "wall")), fhn-n("unread", ep-count(reads, "unread"))], foldl((acc, r) => append(acc, ep-pairs-of(r)), [], reads)));
   def ep-summary(reads, path, kept) = ep-prefix() ++ "summary: 6 readings: holds " ++ ep-count(reads, "holds").str() ++ ", walls " ++ ep-count(reads, "wall").str() ++ ", unread " ++ ep-count(reads, "unread").str() ++ "; ledger " ++ ((String) path == "" ? "none" : path ++ " " ++ kept);
   def ep-run(opts) {

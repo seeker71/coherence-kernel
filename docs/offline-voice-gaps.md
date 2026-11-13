@@ -75,7 +75,7 @@ A gap closes on evidence that separates it from noise or from nothing. A LoRA ch
 wider than the earlier children's losses scatter (`spread`); the child itself stands outside that scatter, so a child far better
 than its siblings never widens their noise, and fewer than two siblings read no noise. `self-read` needs a reading the voice generated, `self-heal` a heal that returned a path, `self-rows` voice readings
 that grew inside the window (`moved`, read over the whole ledger), and `exit-E4` a reading of whether each cited receipt supports its
-sentence (`E4_support`), unread until the exit proof writes it. A feature ledger that is absent names its writer (`host-walk-writers.bml`),
+sentence (`E4_support`), written by the exit proof from the span that follows each receipt path. A feature ledger that is absent names its writer (`host-walk-writers.bml`),
 or says no door writes it.
 
 ## Steering
