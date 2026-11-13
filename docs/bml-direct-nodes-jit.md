@@ -15,3 +15,5 @@ Steps, each measured against the planner door's 12.94 s cold and 7.63 s trivial-
 2. The cache keyed on each recipe's content id, not the file text.
 3. Lazy linking: a first call pulls the recipe's node and page; unit top-level lets run on first use, not at load.
 4. A compact integer encoding for what is still written.
+
+What step 1 has to carry (read from `runtime/fkwu-uni.c`): the code node row is appended by `fk_smknode(t0, c1, c2, c3)` (line 23696), and today only the C text parser calls it. The same parser also resolves reserved heads (`defn do let if`, rewrite and op rows), binds names to slots, answers `[shadowed-call]`, checks arity and keeps the hidden-definition and diagnostic tables. A Form producer that builds nodes directly takes over those duties or calls the parser's own resolvers per form, so step 1 is a native that exposes `fk_smknode` plus the resolver calls the grammar templates need, not one native alone.
