@@ -10513,6 +10513,9 @@ static long long fk_jit_bind(long long x) {
  *   ["mint", k, t] the mirror of k whose i-th value child reads frame slot t + i
  *   ["word", k]    the constant word of a string literal (its index is pinned, fk_lit_pin) as four 16-bit halves, low first
  *   ["inline", c]  marks defn c written in place by a page (fk_jit_state 3), so its own time offers it nothing
+ *   ["node", t c1 c2 c3]  one code node row appended, as the parser's fk_smknode appends it: a Form producer builds nodes without
+ *                  the text hop (docs/bml-direct-nodes-jit.md step 1); answers the node id, nothing for a tag outside 1..4095
+ *   ["run", k]     node k walked once in the caller's frame: a built node answers as the text route's does
  * The arms read for the table: record_get 65, record_set 66, record_has 67, record_keys 99, value_eq 80, node_category 92,
  * str_find 30, intern_node 47, intern_trivial_string 46, intern_trivial_int 43, node_children 48, node_value 49, file_size
  * 60, host_file_append_bytes 61, read_file 63, write_file 104 (children 1..n in order); str_concat 27
@@ -10618,14 +10621,35 @@ static long long fk_jit_mirror(long long k, long long t, long long *at) {
     }
     return fk_smknode(201, c1, v2, r3);
 }
-static long long fk_jit_node(long long x) {
+static long long fk_jit_node(long long x, long long fp) {
     if ((x & 1) == 0 || fk_is_str(x) || x == fk_nothing) { return fk_nothing; }
     long long p = x >> 1;
     if (p < 1 || !FK_POK(p) || !fk_is_str(FK_HH(p))) { return fk_nothing; }
     char what[8];
     fk_cstr(FK_HH(p), what, 8);
     long long q = FK_HNEXT(p);
-    if (!(q >= 1 && FK_POK(q)) || (FK_HH(q) & 1) != 0) { return fk_nothing; }
+    if (fk_cstr_eq(what, "node") || !(q >= 1 && FK_POK(q)) || (FK_HH(q) & 1) != 0) {
+        /* ["node" t c1 c2 c3]: one code node row appended by a Form producer, the row the text parser's fk_smknode makes -- BML to
+         * nodes without the text hop. t is a tag (1..4095); c1 c2 c3 are ints (children are node ids this door answered, or
+         * values the tag reads as shape, as the parser builds them), c1 of a tag-24 literal may be a string value, interned
+         * and pinned as the parser pins it. Answers the node id, or nothing when the spec is not that shape. The producer takes
+         * on the parser's duties (reserved heads, slot binding, arity); this door adds a row, it does not resolve names. */
+        if (fk_cstr_eq(what, "node") && q >= 1 && FK_POK(q)) {
+            long long nv[4], nn = 0, r = q;
+            while (nn < 4 && r >= 1 && FK_POK(r)) {
+                long long w = FK_HH(r);
+                if (nn == 1 && nv[0] == 24 && fk_is_str(w)) { nv[nn] = fk_stri(w); }
+                else if ((w & 1) == 0) { nv[nn] = w >> 1; }
+                else { return fk_nothing; }
+                nn = nn + 1;
+                r = FK_HNEXT(r);
+            }
+            if (nn < 1 || nv[0] < 1 || nv[0] > 4095) { return fk_nothing; }
+            while (nn < 4) { nv[nn] = 0; nn = nn + 1; }
+            return fk_smknode(nv[0], nv[1], nv[2], nv[3]) << 1;
+        }
+        return fk_nothing;
+    }
     long long k = FK_HH(q) >> 1;
     if (fk_cstr_eq(what, "inline")) {
         if (k <= 0 || k >= fk_fn_count) { return fk_nothing; }
@@ -10635,6 +10659,8 @@ static long long fk_jit_node(long long x) {
     }
     if (!fk_jit_node_ok(k)) { return fk_nothing; }
     fk_demand_access(k, 1);
+    /* ["run" k]: node k walked once in the caller's frame, so a node a Form producer built answers as the text route's does */
+    if (fk_cstr_eq(what, "run")) { return fk_walk(k, fp); }
     long long kids[16];
     if (fk_cstr_eq(what, "kids")) {
         long long n = fk_jit_kids_of(k, kids, 0, 16), l = 1;
@@ -20474,7 +20500,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         /* mode 56: jit_fn_bind(fn, words) -- a defn's Form page, see fk_jit_bind */
         if ((fm201 >> 1) == 56) { return fk_jit_bind(fx201); }
         /* mode 57: jit_node(spec) -- what the Form JIT may take apart, see fk_jit_node */
-        if ((fm201 >> 1) == 57) { return fk_jit_node(fx201); }
+        if ((fm201 >> 1) == 57) { return fk_jit_node(fx201, fp); }
         /* mode 58: jit_cpu_run([image, buffers, consts]) -- a Form-emitted CPU image over the body's bytes, see fk_jit_cpu_run */
         if ((fm201 >> 1) == 58) { return fk_jit_cpu_run(fx201); }
         /* mode 60: scoped file leases; modes 62-63: a wire number's 8 bytes -- see fk_lease_door, fk_number_bytes */
