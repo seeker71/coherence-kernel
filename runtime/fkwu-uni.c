@@ -10555,27 +10555,31 @@ static long long fk_jit_len_side(long long k) {
     if (fk_jit_node_ok(c1) && fk_jit_node_ok(c2) && fk_node[c2][0] == 22 && fk_node[c1][0] == 1 && fk_jit_node_ok(fk_node[c2][1])) { return 2; }
     return 0;
 }
-/* the value children of k into out (at most cap); answers how many, or -1 when k is not one the page may take apart */
+/* the value children of k into out (at most cap); answers how many, or -1 when k is not one the page may take apart, or when cap is
+ * too small: then fk_jit_over is 1 and the caller grows the buffer and asks again, so no leaf is ever dropped for want of room */
+static long long fk_jit_over;
 static long long fk_jit_kids_of(long long k, long long *out, long long n, long long cap) {
-    if (!fk_jit_node_ok(k) || n >= cap) { return -1; }
+    if (!fk_jit_node_ok(k)) { return -1; }
+    if (n >= cap) { fk_jit_over = 1; return -1; }
     long long t = fk_node[k][0], p = fk_jit_plain_kids(t), c = 1, ls = fk_jit_len_side(k);
     if (ls > 0) { out[n] = fk_node[fk_node[k][ls]][1]; return n + 1; }
     if (t == 27) {
         while (c <= 2) {
             long long ch = fk_node[k][c];
             if (fk_jit_node_ok(ch) && fk_node[ch][0] == 27) { n = fk_jit_kids_of(ch, out, n, cap); if (n < 0) { return -1; } }
-            else { if (n >= cap || !fk_jit_node_ok(ch)) { return -1; } out[n] = ch; n = n + 1; }
+            else { if (!fk_jit_node_ok(ch)) { return -1; } if (n >= cap) { fk_jit_over = 1; return -1; } out[n] = ch; n = n + 1; }
             c = c + 1;
         }
         return n;
     }
     if (p > 0) {
-        while (c <= p) { if (n >= cap || !fk_jit_node_ok(fk_node[k][c])) { return -1; } out[n] = fk_node[k][c]; n = n + 1; c = c + 1; }
+        while (c <= p) { if (!fk_jit_node_ok(fk_node[k][c])) { return -1; } if (n >= cap) { fk_jit_over = 1; return -1; } out[n] = fk_node[k][c]; n = n + 1; c = c + 1; }
         return n;
     }
     if (t == 201) {
         long long m = fk_jit_leaf_mode(k), tl = m < 0 ? 0 : fk_jit_leaf_tail(m), c3 = fk_node[k][3];
-        if (m < 0 || m == 28 || !fk_jit_node_ok(fk_node[k][2]) || n + 4 > cap) { return -1; }
+        if (m < 0 || m == 28 || !fk_jit_node_ok(fk_node[k][2])) { return -1; }
+        if (n + 4 > cap) { fk_jit_over = 1; return -1; }
         out[n] = fk_node[k][2]; n = n + 1;
         if (tl == 0) { return n; }
         if (!fk_jit_cons_ok(c3, tl)) { return -1; }
@@ -10621,68 +10625,162 @@ static long long fk_jit_mirror(long long k, long long t, long long *at) {
     }
     return fk_smknode(201, c1, v2, r3);
 }
-static long long fk_jit_node(long long x, long long fp) {
-    if ((x & 1) == 0 || fk_is_str(x) || x == fk_nothing) { return fk_nothing; }
-    long long p = x >> 1;
-    if (p < 1 || !FK_POK(p) || !fk_is_str(FK_HH(p))) { return fk_nothing; }
-    char what[8];
-    fk_cstr(FK_HH(p), what, 8);
-    long long q = FK_HNEXT(p);
-    if (fk_cstr_eq(what, "node") || !(q >= 1 && FK_POK(q)) || (FK_HH(q) & 1) != 0) {
-        /* ["node" t c1 c2 c3]: one code node row appended by a Form producer, the row the text parser's fk_smknode makes -- BML to
-         * nodes without the text hop. t is a tag (1..4095); c1 c2 c3 are ints (children are node ids this door answered, or
-         * values the tag reads as shape, as the parser builds them), c1 of a tag-24 literal may be a string value, interned
-         * and pinned as the parser pins it. Answers the node id, or nothing when the spec is not that shape. The producer takes
-         * on the parser's duties (reserved heads, slot binding, arity); this door adds a row, it does not resolve names. */
-        if (fk_cstr_eq(what, "node") && q >= 1 && FK_POK(q)) {
-            long long nv[4], nn = 0, r = q;
-            while (nn < 4 && r >= 1 && FK_POK(r)) {
-                long long w = FK_HH(r);
-                if (nn == 1 && nv[0] == 24 && fk_is_str(w)) { nv[nn] = fk_stri(w); }
-                else if ((w & 1) == 0) { nv[nn] = w >> 1; }
-                else { return fk_nothing; }
-                nn = nn + 1;
-                r = FK_HNEXT(r);
-            }
-            /* a fifth element is not the shape: refused by name (nothing), never read short */
-            if (nn < 1 || nv[0] < 1 || nv[0] > 4095 || (r >= 1 && FK_POK(r))) { return fk_nothing; }
-            while (nn < 4) { nv[nn] = 0; nn = nn + 1; }
-            return fk_smknode(nv[0], nv[1], nv[2], nv[3]) << 1;
-        }
-        return fk_nothing;
+/* the cause of jit_node's last refusal (["why"]), 0 after an answer: 1 a word this door does not know (or a spec that is no list
+ * led by a word); 2 a tag outside the walker's 1..255; 3 an extra element; 4 a short spec; 5 a field that is not the int (or
+ * name) the word reads; 6 a node the page may not take apart, or no node; 7 more slots than a frame holds; 8 a name empty or an
+ * arity outside 0..255; 9 an index that is no function (or a body already bound); 10 a name no function was registered under */
+static long long fk_jit_why;
+static long long fk_jit_no(long long why) { fk_jit_why = why; return fk_nothing; }
+/* the value children of k in a buffer that grows until every leaf fits: nothing is dropped for want of room; NULL when k is not one
+ * the page may take apart (the caller frees what it is given) */
+static long long *fk_jit_kids_grow(long long k, long long *n_out) {
+    long long cap = 16;
+    long long *kids = (long long *)malloc((unsigned long)cap * sizeof(long long));
+    while (kids) {
+        fk_jit_over = 0;
+        long long n = fk_jit_kids_of(k, kids, 0, cap);
+        if (n >= 0) { *n_out = n; return kids; }
+        if (!fk_jit_over) { break; }
+        cap = cap * 2;
+        long long *grown = (long long *)realloc(kids, (unsigned long)cap * sizeof(long long));
+        if (!grown) { break; }
+        kids = grown;
     }
+    free(kids);
+    return 0;
+}
+static void fk_srcseg_push(long long off, const char *path, int lowered);
+static long long fk_jit_node(long long x, long long fp) {
+    if ((x & 1) == 0 || fk_is_str(x) || x == fk_nothing) { return fk_jit_no(1); }
+    long long p = x >> 1;
+    if (p < 1 || !FK_POK(p) || !fk_is_str(FK_HH(p))) { return fk_jit_no(1); }
+    /* the word is compared by length and bytes, never copied: a word longer than any this door knows is an unknown word (why 1),
+     * not a process that ends */
+    long long wa = fk_stri(FK_HH(p)), wn = (wa >= 0 && FK_SOK(wa)) ? FK_SLEN(wa) : -1;
+    const char *wb = wn >= 0 ? (const char *)FK_SBYTES(wa) : "";
+#define FK_JW(lit) (wn == (long long)sizeof(lit) - 1 && memcmp(wb, lit, sizeof(lit) - 1) == 0)
+    long long q = FK_HNEXT(p);
+    /* ["why"]: the cause of the last refusal, so a producer backtracks on a reason and not on a bare nothing (the codes are at fk_jit_why) */
+    if (FK_JW("why")) { return fk_jit_why << 1; }
+    fk_jit_why = 0;
+    /* ["node" t c1 c2 c3]: one code node row appended by a Form producer, the row the text parser's fk_smknode makes -- BML to
+     * nodes without the text hop. t is a walker tag (1..255); all four fields are stated: a short spec is refused (why 4), a fifth
+     * element is refused (why 3), neither is padded or read short. c1 c2 c3 are ints (children are node ids this door answered, or
+     * values the tag reads as shape, as the parser builds them); c1 of a tag-24 or tag-50 literal may be a string value, interned
+     * and pinned as the parser pins it. Answers the node id. The producer takes on the parser's duties (reserved heads, slot binding,
+     * arity); this door adds a row, it does not resolve names. */
+    if (FK_JW("node")) {
+        long long nv[4], nn = 0, r = q;
+        while (nn < 4 && r >= 1 && FK_POK(r)) {
+            long long w = FK_HH(r);
+            if (nn == 1 && (nv[0] == 24 || nv[0] == 50) && fk_is_str(w)) { nv[nn] = fk_stri(w); }
+            else if ((w & 1) == 0) { nv[nn] = w >> 1; }
+            else { return fk_jit_no(5); }
+            nn = nn + 1;
+            r = FK_HNEXT(r);
+        }
+        if (r >= 1 && FK_POK(r)) { return fk_jit_no(3); }
+        if (nn < 4) { return fk_jit_no(4); }
+        if (nv[0] < 1 || nv[0] >= FK_OPCODE_ARM_CAP) { return fk_jit_no(2); }
+        return fk_smknode(nv[0], nv[1], nv[2], nv[3]) << 1;
+    }
+    /* ["defn" name arity]: a function born by a producer, registered as the parser's prescan registers one (the name's bytes in
+     * the source text as the image loader puts a symbol, its row in the name table, its arity), so a later call finds it and reads
+     * exactly arity arguments. Answers the function index; ["body" idx node] binds the body. */
+    if (FK_JW("defn")) {
+        long long sv = (q >= 1 && FK_POK(q)) ? FK_HH(q) : 0, r = (q >= 1 && FK_POK(q)) ? FK_HNEXT(q) : 0;
+        long long sa = fk_is_str(sv) ? fk_stri(sv) : -1;
+        if (sa < 0 || !FK_SOK(sa) || !(r >= 1 && FK_POK(r)) || (FK_HH(r) & 1) != 0) { return fk_jit_no(8); }
+        long long n = FK_SLEN(sa), ar = FK_HH(r) >> 1;
+        if (n <= 0 || ar < 0 || ar > 255) { return fk_jit_no(8); }
+        if (FK_HNEXT(r) >= 1 && FK_POK(FK_HNEXT(r))) { return fk_jit_no(3); }
+        fk_srctext_reserve(fk_slen + n + 4);
+        fk_srcseg_push(fk_slen, 0, 0);
+        fk_srctext[fk_slen] = FK_CH_SEMI; fk_slen = fk_slen + 1;
+        fk_srctext[fk_slen] = FK_CH_SPACE; fk_slen = fk_slen + 1;
+        long long start = fk_slen;
+        memcpy(fk_srctext + fk_slen, FK_SBYTES(sa), (unsigned long)n);
+        fk_slen = fk_slen + n;
+        fk_srctext[fk_slen] = FK_CH_LF; fk_slen = fk_slen + 1;
+        fk_srctext[fk_slen] = 0;
+        long long idx = fk_defn_next;
+        fk_defn_next = fk_defn_next + 1;
+        fk_fn_reserve(fk_defn_next);
+        fk_fnsym_s[fk_fntop] = start;
+        fk_fnsym_n[fk_fntop] = n;
+        fk_fnidx[fk_fntop] = idx;
+        fk_live_note_defn(fk_fntop);
+        fk_fntop = fk_fntop + 1;
+        fk_fnar[idx] = ar;
+        fk_fn_cap_reserve(idx + 1);
+        fk_fn_parent_idx[idx] = -1;
+        fk_fn_count = fk_defn_next;
+        return idx << 1;
+    }
+    /* ["lookup" name]: the function index a name was registered under (the latest), nothing when none (why 10); how a producer calls a
+     * function it did not register itself, as the parser's fk_fn_lookup finds one outside every unit span */
+    if (FK_JW("lookup")) {
+        long long sv = (q >= 1 && FK_POK(q)) ? FK_HH(q) : 0;
+        long long sa = fk_is_str(sv) ? fk_stri(sv) : -1;
+        if (sa < 0 || !FK_SOK(sa)) { return fk_jit_no(8); }
+        long long n = FK_SLEN(sa), i = fk_fntop;
+        while (i > 0) {
+            i = i - 1;
+            if (fk_fnsym_n[i] == n && memcmp(fk_srctext + fk_fnsym_s[i], FK_SBYTES(sa), (unsigned long)n) == 0) { return fk_fnidx[i] << 1; }
+        }
+        return fk_jit_no(10);
+    }
+    if (!(q >= 1 && FK_POK(q)) || (FK_HH(q) & 1) != 0) { return fk_jit_no(5); }
     long long k = FK_HH(q) >> 1;
-    if (fk_cstr_eq(what, "inline")) {
-        if (k <= 0 || k >= fk_fn_count) { return fk_nothing; }
+    if (FK_JW("inline")) {
+        if (k <= 0 || k >= fk_fn_count) { return fk_jit_no(9); }
         fk_jit_reserve(k + 1);
         if (fk_jit_state[k] == 0) { fk_jit_state[k] = 3; }
         return 2;
     }
-    if (!fk_jit_node_ok(k)) { return fk_nothing; }
+    /* ["arity" idx]: how many arguments function idx reads, nothing when idx is no function */
+    if (FK_JW("arity")) {
+        if (k <= 0 || k >= fk_fn_count) { return fk_jit_no(9); }
+        return fk_fnar[k] << 1;
+    }
+    /* ["body" idx node]: node is function idx's body (the producer wraps a slot reservation, tag 111, itself); a function's body binds once */
+    if (FK_JW("body")) {
+        long long r = FK_HNEXT(q);
+        long long b = (r >= 1 && FK_POK(r) && (FK_HH(r) & 1) == 0) ? FK_HH(r) >> 1 : -1;
+        if (k <= 0 || k >= fk_fn_count || !fk_jit_node_ok(b) || (fk_fn[k] >= 0 && fk_fn_meta_known[k])) { return fk_jit_no(9); }
+        fk_fn[k] = b; fk_fn_meta_known[k] = 1; fk_fn_unit[k] = 0; fk_prog_note_body(k);
+        return k << 1;
+    }
+    if (!fk_jit_node_ok(k)) { return fk_jit_no(6); }
     fk_demand_access(k, 1);
     /* ["run" k]: node k walked once in the caller's frame, so a node a Form producer built answers as the text route's does */
-    if (fk_cstr_eq(what, "run")) { return fk_walk(k, fp); }
-    long long kids[16];
-    if (fk_cstr_eq(what, "kids")) {
-        long long n = fk_jit_kids_of(k, kids, 0, 16), l = 1;
-        if (n < 0) { return fk_nothing; }
+    if (FK_JW("run")) { return fk_walk(k, fp); }
+    if (FK_JW("kids")) {
+        long long n = 0, l = 1;
+        long long *kids = fk_jit_kids_grow(k, &n);
+        if (!kids) { return fk_jit_no(6); }
         while (n > 0) { n = n - 1; l = fk_cons_val(kids[n] << 1, l); }
+        free(kids);
         return l;
     }
-    if (fk_cstr_eq(what, "mint")) {
-        long long r = FK_HNEXT(q);
-        if (!(r >= 1 && FK_POK(r)) || (FK_HH(r) & 1) != 0 || fk_jit_kids_of(k, kids, 0, 16) < 0) { return fk_nothing; }
+    if (FK_JW("mint")) {
+        long long r = FK_HNEXT(q), n = 0;
+        if (!(r >= 1 && FK_POK(r)) || (FK_HH(r) & 1) != 0) { return fk_jit_no(5); }
+        long long *kids = fk_jit_kids_grow(k, &n);
+        if (!kids) { return fk_jit_no(6); }
+        free(kids);
         long long t = FK_HH(r) >> 1, at = 0;
-        if (t < 0 || t > 4095) { return fk_nothing; }
+        if (t < 0 || t + n > 4095) { return fk_jit_no(7); }
         return fk_jit_mirror(k, t, &at) << 1;
     }
-    if (fk_cstr_eq(what, "word")) {
-        if (fk_node[k][0] != 24) { return fk_nothing; }
+    if (FK_JW("word")) {
+        if (fk_node[k][0] != 24) { return fk_jit_no(6); }
         unsigned long long w = (unsigned long long)fk_strv(fk_node[k][1]);
         return fk_cons_val((long long)(w & 65535) << 1, fk_cons_val((long long)((w >> 16) & 65535) << 1,
                fk_cons_val((long long)((w >> 32) & 65535) << 1, fk_cons_val((long long)((w >> 48) & 65535) << 1, 1))));
     }
-    return fk_nothing;
+    return fk_jit_no(1);
+#undef FK_JW
 }
 /* jit_cpu_run([image, buffers, consts]) (leaf-door mode 58): a Form-emitted AArch64 image run over the body's own bytes,
  * the one door of the CPU organs (the SHA-256 compressor form/native/metal/sha256-arm64-jit.fk writes). The image is born
@@ -23731,7 +23829,7 @@ static long long fk_smknode(long long t0, long long c1, long long c2, long long 
     fk_node[k][1] = c1;
     fk_node[k][2] = c2;
     fk_node[k][3] = c3;
-    if (t0 == 24) { fk_lit_pin(c1); }
+    if (t0 == 24 || t0 == 50) { fk_lit_pin(c1); }   /* the same two tags fk_lit_pin_rows pins, so a built row and a parsed row cannot drift */
     return k;
 }
 static long long fk_smklit(long long v) {
