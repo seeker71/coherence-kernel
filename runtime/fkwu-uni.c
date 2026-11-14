@@ -12507,7 +12507,7 @@ static int fk_f64_push(int kind, int a, int b, double lit, long long ilit) {
 /* the type an admitted node answers: 1 int, 2 float -- every int kind, an if-expression's own type, a call's from its callee's signature */
 static int fk_f64_type_of(int n) {
     int k = fk_f64_prog[n].kind;
-    if ((k >= 7 && k <= 12) || k == 14 || k == 15 || k == 16 || k == 26 || k == 27 || k == 28 || k == 36 || k == 39 || k == 40) { return 1; }
+    if ((k >= 7 && k <= 12) || k == 14 || k == 15 || k == 16 || k == 26 || k == 27 || k == 28 || k == 36 || k == 39 || k == 40 || (k >= 51 && k <= 58)) { return 1; }
     if (k == 17) { return (int)fk_f64_prog[n].lit; }
     if (k == 19) { return ((fk_f64_sig[fk_f64_prog[n].ilit] >> 8) & 1) ? 2 : 1; }
     return 2;
@@ -12555,7 +12555,22 @@ static int fk_f64_kind_fold(long long i, long long arity, const int *types, int 
 /* admit a body node under a per-parameter type signature (types[k]): returns 0 declined, else the node's type -- 1 int,
  * 2 float, 3 string, 4 list, 5 a word of unknown kind, 6 a defn value, 7 a kind code only str_eq's fold takes; appends
  * to fk_f64_prog, *out = its index */
+/* A refusal that names no operation is still a fact about the recipe: the innermost node whose admit answered 0 without a tag is the one the lane has no arm for (the shapes it met and could not take: an
+ * operand of a kind it does not carry, a register or slot run out, a callee not standing). The wrapper records that node's tag the first time it happens in a pulse; the pulse stores it as -(3000+tag),
+ * read by kernel_stat 3000+tag, so the work ranks by what recipes were actually refused for. */
+static long long fk_f64_silent_tag = -1;
+/* the verdict of an admit that answered 0: the operation named, else the innermost node that answered 0 without a name, else -4; a callee not yet standing leaves the defn cold to be asked again */
+static void fk_f64_refuse_now(long long fx) {
+    if (fk_f64_refuse_tag >= 0) { fk_fn_native[fx] = 0 - (1000 + fk_f64_refuse_tag); }
+    else if (!fk_f64_call_not_ready) { fk_fn_native[fx] = fk_f64_silent_tag >= 0 ? 0 - (3000 + fk_f64_silent_tag) : -4; }
+}
+static int fk_f64_admit_in(long long i, long long arity, const int *types, int *out);
 static int fk_f64_admit(long long i, long long arity, const int *types, int *out) {
+    int r = fk_f64_admit_in(i, arity, types, out);
+    if (r == 0 && fk_f64_refuse_tag < 0 && fk_f64_silent_tag < 0 && i >= 0 && i < fk_node_count) { fk_f64_silent_tag = fk_node[i][0]; }
+    return r;
+}
+static int fk_f64_admit_in(long long i, long long arity, const int *types, int *out) {
     int kind_ok = fk_f64_kind_ok; /* this admit alone may take value_kind (the fold's operand, or a parameter standing for it) */
     fk_f64_kind_ok = 0;
     if (i < 0 || i >= fk_node_count || fk_f64_prog_n >= FK_F64_NODE_CAP) { return 0; }
@@ -13080,6 +13095,21 @@ static int fk_f64_admit(long long i, long long arity, const int *types, int *out
         *out = fk_f64_push(op == 4 ? 15 : 9 + op, a, b, 0.0, 0); /* the int lane: exact 64-bit word math, the walker's own; mod is kind 15 */
         return *out < 0 ? 0 : 1;
     }
+    if (t >= 34 && t <= 41) {
+        /* the bit doors (band bor bxor shl_u32 shr_u32 rotr_u32 add_u32 bnot_u32): ints only, a non-int stops in the walker, so a float, string or list operand is no arm here. 34-36 are the full-width AND OR XOR
+         * of the two untagged ints, which agree with the walker's on its tagged ones (a bit door on two 63-bit signed values stays 63-bit signed); 37-41 work on the low 32 bits and answer the 32-bit
+         * result zero-extended (the shift count mod 32). Kinds 51..58 in the order of the tags. */
+        int a = 0, b = 0;
+        int ta = fk_f64_admit(fk_node[i][1], arity, types, &a);
+        if (ta == 0) { return 0; }
+        int tb = 1;
+        if (t != 41) { tb = fk_f64_admit(fk_node[i][2], arity, types, &b); if (tb == 0) { return 0; } }
+        if (!fk_f64_word_resolve(&a, &ta, 1)) { return 0; }
+        if (t != 41 && !fk_f64_word_resolve(&b, &tb, 1)) { return 0; }
+        if (ta != 1 || tb != 1) { fk_f64_refuse_tag = t; return 0; }
+        *out = fk_f64_push(51 + (int)(t - 34), a, t == 41 ? a : b, 0.0, 0);
+        return *out < 0 ? 0 : 1;
+    }
     fk_f64_refuse_tag = t; /* no arm for this operation: the reason, and the work */
     return 0;
 }
@@ -13120,7 +13150,7 @@ static int fk_f64_prog_refs(int n, int k) {
     if (p->kind == 40) { return fk_f64_prog_refs(p->a, k) || fk_f64_prog_refs(p->b, k); }
     if (p->kind == 33) { int j = 0; if (fk_f64_prog_refs(p->s, k)) { return 1; } while (j < p->b) { if (fk_f64_prog_refs(fk_f64_call_args[p->a][j], k)) { return 1; } j = j + 1; } return 0; }
     if (p->kind == 19) { int j = 0; while (j < p->b) { if (fk_f64_prog_refs(fk_f64_call_args[p->a][j], k)) { return 1; } j = j + 1; } return 0; }
-    if (p->kind == 18 || (p->kind >= 3 && p->kind <= 6) || (p->kind >= 9 && p->kind <= 12) || p->kind == 15) { return fk_f64_prog_refs(p->a, k) || fk_f64_prog_refs(p->b, k); }
+    if (p->kind == 18 || (p->kind >= 51 && p->kind <= 58) || (p->kind >= 3 && p->kind <= 6) || (p->kind >= 9 && p->kind <= 12) || p->kind == 15) { return fk_f64_prog_refs(p->a, k) || fk_f64_prog_refs(p->b, k); }
     return 0;
 }
 /* the frame slot a string-valued node rides, or -1: a string parameter or the accumulator (its own slot), a literal, a
@@ -14111,12 +14141,31 @@ static int fk_f64_emit_node(int n, unsigned int *words, long long *wn, int *ntem
         if (!fk_f64_put(words, wn, 0x910003FFU | fr)) { return -1; }                                           /* ADD SP, SP, #frame */
         return sres ? 110 + p->s : (fres ? rd : 100 + rd);
     }
+    if (p->kind == 58) {
+        /* bnot_u32: the low 32 bits complemented, zero-extended (MVN Wd, Wn) */
+        int ru = fk_f64_emit(p->a, words, wn, ntemp, nitemp);
+        if (ru < 100 || *nitemp >= 7) { return -1; }
+        fk_f64_release(ru, ntemp, nitemp);
+        int rdu = 1 + *nitemp; *nitemp = *nitemp + 1;
+        if (!fk_f64_put(words, wn, 0x2A2003E0U | ((unsigned int)(ru - 100) << 16) | (unsigned int)rdu)) { return -1; }
+        return 100 + rdu;
+    }
     int ra = fk_f64_emit(p->a, words, wn, ntemp, nitemp);
     if (ra < 0) { return -1; }
     int rb = fk_f64_emit(p->b, words, wn, ntemp, nitemp);
     if (rb < 0) { return -1; }
     fk_f64_release(rb, ntemp, nitemp);
     fk_f64_release(ra, ntemp, nitemp);
+    if (p->kind >= 51 && p->kind <= 57) {
+        /* the bit doors on two int registers: AND ORR EOR on the 64-bit registers; the u32 doors on their 32-bit halves (LSLV LSRV RORV take the count mod 32 as the walker's & 31 does; ADD Wd), each
+         * result zero-extended by the W form */
+        if (ra < 100 || rb < 100 || *nitemp >= 7) { return -1; }
+        unsigned int xa = (unsigned int)(ra - 100), xb = (unsigned int)(rb - 100);
+        int rd = 1 + *nitemp; *nitemp = *nitemp + 1;
+        static const unsigned int bitops[7] = { 0x8A000000U, 0xAA000000U, 0xCA000000U, 0x1AC02000U, 0x1AC02400U, 0x1AC02C00U, 0x0B000000U };
+        if (!fk_f64_put(words, wn, bitops[p->kind - 51] | (xb << 16) | (xa << 5) | (unsigned int)rd)) { return -1; }
+        return 100 + rd;
+    }
     if (p->kind >= 9 && p->kind <= 12) {
         if (ra < 100 || rb < 100 || *nitemp >= 7) { return -1; }
         unsigned int xa = (unsigned int)(ra - 100), xb = (unsigned int)(rb - 100);
@@ -14233,7 +14282,7 @@ static void fk_f64_pulse_float(long long fx) {
     int top = 0;
     if (fk_f64_admit(body, arity, types, &top) != 2) {
         fk_f64_no_frame = 0;
-        if (fk_f64_refuse_tag >= 0) { fk_fn_native[fx] = 0 - (1000 + fk_f64_refuse_tag); }
+        fk_f64_refuse_now(fx);
         return;
     }
     if (fk_f64_lit_n > 0 || fk_f64_need_scratch || fk_f64_conses) { fk_f64_no_frame = 0; return; } /* this leaf has no prologue for literals and carries no scratch or pairs: the typed leaf's */
@@ -14284,7 +14333,7 @@ static int fk_f64_strings_stay(long long fx, const int *argn, const int *types, 
 static int fk_f64_admit_arg(long long fx, long long node, long long arity, const int *types, int k, int *argn) {
     int at = fk_f64_admit(node, arity, types, &argn[k]);
     if (at == 5 && (types[k] == 1 || types[k] == 4)) { argn[k] = fk_f64_narrow(argn[k], types[k]); if (argn[k] < 0) { return 0; } at = types[k]; }
-    if (at != types[k]) { if (fk_f64_refuse_tag >= 0) { fk_fn_native[fx] = 0 - (1000 + fk_f64_refuse_tag); } return 0; }
+    if (at != types[k]) { fk_f64_refuse_now(fx); return 0; }
     return 1;
 }
 static int fk_f64_admit_call(long long fx, long long call, long long arity, const int *types, int *argn) {
@@ -14582,8 +14631,8 @@ static int fk_f64_admit_substring(long long i, long long arity, const int *types
 static void fk_f64_expr_pulse(long long fx, long long fp, long long n, long long root, long long orig, long long body) {
     long long arity = fk_fnar[fx];
     if (n != arity) { return; }
-    if (arity > 6) { fk_fn_native[fx] = -1; return; } /* the typed lanes ride x10..x15: x16 and x17 are their scratch */
-    fk_f64_refuse_tag = -1; fk_f64_call_n = 0; fk_f64_cur_fx = fx; fk_f64_acc_slot = -1; fk_f64_ovf_n = 0; fk_f64_self_n = 0;
+    if (arity > 6) { fk_fn_native[fx] = -6; return; } /* the typed lanes ride x10..x15: x16 and x17 are their scratch (-6, kernel_stat 904: the arity the register lane does not carry) */
+    fk_f64_refuse_tag = -1; fk_f64_silent_tag = -1; fk_f64_call_n = 0; fk_f64_cur_fx = fx; fk_f64_acc_slot = -1; fk_f64_ovf_n = 0; fk_f64_self_n = 0;
     fk_f64_hidden_mask = 0; fk_f64_lit_n = 0; fk_f64_need_scratch = 0; fk_f64_conses = 0; fk_f64_reads_strword = 0; fk_f64_calls_c = 0; fk_f64_ovf2_n = 0;
     fk_fn_native[fx] = -1;
     int types[8] = {1, 1, 1, 1, 1, 1, 1, 1};
@@ -14625,7 +14674,7 @@ static void fk_f64_expr_pulse(long long fx, long long fp, long long n, long long
         if (slot < arity || slot >= 6) { return; }
         int lv = 0;
         int lt = fk_f64_admit(fk_node[node][2], arity, types, &lv);
-        if (lt == 0) { if (fk_f64_refuse_tag >= 0) { fk_fn_native[fx] = 0 - (1000 + fk_f64_refuse_tag); } return; }
+        if (lt == 0) { fk_f64_refuse_now(fx); return; }
         if (lt == 3) {
             /* a STRING let -- see the loop pass's twin: its value must already ride a slot so the pointer and the length
              * at frame word 9 + s move together; an accumulator (20/21) is mutated in place and is not a let's to bind */
@@ -14639,7 +14688,7 @@ static void fk_f64_expr_pulse(long long fx, long long fp, long long n, long long
     int top = 0;
     int tex = fk_f64_admit_substring(node, arity, types, &top); /* the answer is a substring: a C-call answering a raw interned word */
     if (tex == 0) { tex = fk_f64_admit(node, arity, types, &top); }
-    if (tex == 0) { if (fk_f64_refuse_tag >= 0) { fk_fn_native[fx] = 0 - (1000 + fk_f64_refuse_tag); } else if (!fk_f64_call_not_ready) { fk_fn_native[fx] = -4; } return; } /* -4: refused with no operation named -- the silent returns of the admit, read by kernel_stat 902 */
+    if (tex == 0) { fk_f64_refuse_now(fx); return; } /* a refusal that named no operation: -(3000 + the innermost node tag that answered 0), read by kernel_stat 3000+tag; -4 when none */
     if (tex == 3 && !fk_f64_str_answer(top)) { fk_fn_native[fx] = 0 - (1000 + 27); return; } /* a string answer is a parameter or the accumulator: the door interns it */
     if (fk_f64_self_tag != 0 && (tex != 1 || fk_f64_conses || fk_f64_need_scratch || fk_f64_calls_c)) { fk_fn_native[fx] = 0 - (1000 + fk_f64_self_tag); return; } /* a non-tail self call is csig 0: this recipe must answer an int and neither cons nor build a string */
     if (tex == 2) { sig = sig | (1LL << 8); }
@@ -14651,6 +14700,7 @@ static void fk_f64_expr_pulse(long long fx, long long fp, long long n, long long
     if (fk_f64_conses) { sig = sig | (1LL << 29); } /* this leaf conses: the door reserves a run of pairs */
     if (fk_f64_reads_strword) { sig = sig | (1LL << 31); } /* this leaf reads its string params' words: a caller leaf copies them to frame 24+k */
     if (fk_f64_calls_c) { sig = sig | (1LL << 28); } /* this leaf answers through a C call that may move the string pool: no caller leaf calls it */
+    fk_fn_native[fx] = -5; /* admitted; from here a return without an install is the emitter's refusal (registers, slots or the page ran out), read by kernel_stat 903 */
     unsigned int words[FK_F64_WORD_CAP];
     fk_f64_live_of(types);
     long long wn = 0;
@@ -14781,7 +14831,13 @@ static void fk_f64_reask_open(long long fx, long long fp, long long n) {
     fk_f64_reasked = fk_f64_reasked + 1;
     fk_fn_native[fx] = 0;
 }
+static void fk_f64_loop_pulse_body(long long fx, long long fp, long long n);
 static void fk_f64_loop_pulse_in(long long fx, long long fp, long long n) {
+    fk_f64_loop_pulse_body(fx, fp, n);
+    /* a loop the lane declined at a step that named nothing (-7) is read by the innermost node that answered 0: -(3000+tag), the same table as the expression lane's */
+    if (fx > 0 && fx < fk_fn_capacity && fk_fn_native != 0 && fk_fn_native[fx] == -7 && fk_f64_silent_tag >= 0) { fk_fn_native[fx] = 0 - (3000 + fk_f64_silent_tag); }
+}
+static void fk_f64_loop_pulse_body(long long fx, long long fp, long long n) {
     fk_f64_no_frame = 0; /* the typed leaves and loops carry a frame in x0; the all-float leaf sets this while it admits and emits */
     if (fx <= 0 || fx >= fk_fn_count || fk_fn_native == 0 || fx >= fk_fn_capacity) { return; }
     fk_f64_reask_open(fx, fp, n);
@@ -14792,9 +14848,9 @@ static void fk_f64_loop_pulse_in(long long fx, long long fp, long long n) {
     if (!fk_f64_body_has_self(body, fx, 0)) { fk_f64_expr_pulse(fx, fp, n, root, orig, body); return; } /* no self call: an expression, the typed leaf's */
     long long arity = fk_fnar[fx];
     if (n != arity) { return; } /* a partial frame carries stale slots: no signature to read this time */
-    if (arity > 6) { fk_fn_native[fx] = -1; return; } /* the typed lanes ride x10..x15: x16 and x17 are their scratch */
-    fk_f64_refuse_tag = -1;
-    fk_fn_native[fx] = -1;
+    if (arity > 6) { fk_fn_native[fx] = -6; return; } /* the typed lanes ride x10..x15: x16 and x17 are their scratch (-6, kernel_stat 904: the arity the register lane does not carry) */
+    fk_f64_refuse_tag = -1; fk_f64_silent_tag = -1;
+    fk_fn_native[fx] = -7; /* the loop lane's decline when no step names why (kernel_stat 905) */
     /* the body as a chain of steps ending in the terminal self tail call. At each if the condition is a compare, and the
      * two branches are one of: an exit expression and the self call (the terminal step, kind 2: branch to the exit, fall
      * through to the self call); an exit and the next if (an exit step, kind 0: branch to the exit, lead on); the self
@@ -14929,7 +14985,7 @@ static void fk_f64_loop_pulse_in(long long fx, long long fp, long long n) {
             int r = 0;
             int tr = fk_f64_admit(cond, arity, types, &r);
             if (tr == 5) { r = fk_f64_narrow(r, 1); if (r < 0) { return; } tr = 1; }
-            if (tr != 1) { if (tr == 0 && fk_f64_refuse_tag >= 0) { fk_fn_native[fx] = 0 - (1000 + fk_f64_refuse_tag); } else if (tr != 0) { fk_fn_native[fx] = 0 - (1000 + ct); } return; }
+            if (tr != 1) { if (tr == 0) { fk_f64_refuse_now(fx); } else if (tr != 0) { fk_fn_native[fx] = 0 - (1000 + ct); } return; }
             if (fk_f64_prog[r].kind == 26) { int cm = fk_f64_prog[r].a; ca = fk_f64_prog[cm].a; cb = fk_f64_prog[cm].b; cc = (unsigned int)fk_f64_prog[cm].ilit; }
             else { ca = r; cb = fk_f64_push(7, 0, 0, 0.0, 0); if (cb < 0) { return; } cc = 1U; }
         }
@@ -22629,10 +22685,11 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (ks_k == 67) { return fk_clo_reclaimed << 1; }
         if (ks_k == 68) { return fk_clo_capvals_top << 1; }
         if (ks_k == 69) { return fk_melt_gen << 1; }   /* the melts this kernel has run */
-        if (ks_k >= 900 && ks_k <= 1255) {
-            /* the native column read as a histogram: 900 = defns declined (-1: no body, no arity the lanes carry), 901 = frame slot not a number (-2), 902 = declined with no cause named (-4),
-             * 1000 + tag = defns the crystallizer refused for that node tag (-(1000+tag)): the operation it has no arm for, and so the work */
-            long long want = ks_k == 900 ? -1 : (ks_k == 901 ? -2 : (ks_k == 902 ? -4 : 0 - ks_k));
+        if ((ks_k >= 900 && ks_k <= 1255) || (ks_k >= 3000 && ks_k <= 3255)) {
+            /* the native column read as a histogram: 900 = defns declined (-1: no body, no arity the lanes carry, or a loop shape the loop lane did not take), 901 = frame slot not a number (-2), 902 = declined
+             * with no cause named (-4), 903 = admitted but the emitter ran out (-5), 1000 + tag = defns refused for that node tag (-(1000+tag)): the operation it has no arm for, and so the work,
+             * 3000 + tag = refused with no operation named, the innermost node that answered 0 (-(3000+tag)) */
+            long long want = ks_k == 900 ? -1 : (ks_k == 901 ? -2 : (ks_k == 902 ? -4 : (ks_k == 903 ? -5 : (ks_k == 904 ? -6 : (ks_k == 905 ? -7 : 0 - ks_k)))));
             long long cnt = 0, q = 1;
             if (fk_fn_native != 0) { while (q < fk_fn_count && q < fk_fn_capacity) { if (fk_fn_native[q] == want) { cnt = cnt + 1; } q = q + 1; } }
             return cnt << 1;
