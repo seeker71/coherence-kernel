@@ -2035,8 +2035,12 @@ long long fk_metal_buf_free_external(long long h) {
     @autoreleasepool {
         long long slot = fk_buf_slot(h);
         if (slot == 0) {
-            fk_err([NSString stringWithFormat:@"buf_free: bad handle %lld", h]);
-            return -1;
+            // A handle whose generation is gone was freed already: the buffer the caller wants released is
+            // released. Answering -1 read, through the native wrapper (r < 0 is 0), as a refusal that kept the
+            // owner and stopped the LoRA lift twice (2026-11-14: prefix publication, then the assessment forward
+            // release, handle 1276). The note stays in last_error for whoever audits the double free.
+            fk_err([NSString stringWithFormat:@"buf_free: bad handle %lld (already released)", h]);
+            return 1;
         }
         // The mapping can leave only after every descriptor which named this
         // handle settles. Unrelated resources do not participate in this release.
