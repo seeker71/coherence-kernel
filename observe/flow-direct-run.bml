@@ -18,7 +18,7 @@
 // Disk gets ONE sparse row at the end (receipts/local-plan-ledger.jsonl, rung "flow"), and the edits of a candidate that did not land are put back.
 // stdout: one JSON line, the end: request, verdict (landed | green | partial | ended), cause, got, missed, repairs, ms, rent_tokens 0.
 // preflight-exec: forbidden
-// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/door-options.bml form-stdlib/bml/serve-sched.bml form-stdlib/bml/serve-client.bml form-stdlib/bml/flow-signal.bml form-stdlib/bml/host-child.bml form-stdlib/bml/cell-said.bml form-stdlib/bml/string-join.bml form-stdlib/spool-bell-transport.fk
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/door-options.bml form-stdlib/bml/serve-sched.bml form-stdlib/bml/serve-client.bml form-stdlib/bml/flow-signal.bml form-stdlib/bml/host-child.bml form-stdlib/bml/cell-said.bml form-stdlib/bml/string-join.bml form-stdlib/bml/def-window.bml form-stdlib/spool-bell-transport.fk
 import form-stdlib/gpu-lease.bml;
 section [form.bml] {
  class FlowRun {
@@ -132,61 +132,25 @@ section [form.bml] {
   }
   // a file too big for the prompt is read through the definitions its task names (each from its "def" to the next one) and its head
   // a definition runs from its first word to the next definition's, in either spelling the body writes (BML "def NAME(", Form "(defn NAME ")
-  // The definitions of a file are read by line and indent: a definition line is one whose first word is "def" (BML) or "(defn" (Form), and a definition runs to the next definition line at the same indent or less, so
-  // however a file indents (2, 4 or 8 spaces) a definition is its own text and no more (a fixed two-space marker made every definition of an eight-space file run to the end of it: a packet of 117574 bytes, 2026-11-14).
-  // Each is [line index, indent, name, name and parameters].
-  def fl-lead(l, i) = i < len(l) && (str_byte_at(l, i) == 32 || str_byte_at(l, i) == 9) ? fl-lead(l, i + 1) : i;
-  def fl-sig-of(rest) {
-   let e = str_find(rest, ")", 0);
-   e < 0 ? rest : substring(rest, 0, e + 1);
-  }
-  def fl-def-info(l, idx) {
-   let i = fl-lead(l, 0);
-   let rest = substring(l, i, len(l));
-   let kind = str_find(rest, "def ", 0) == 0 ? 4 : str_find(rest, "(defn ", 0) == 0 ? 6 : 0;
-   kind == 0 ? nothing() : [idx, i, substring(rest, kind, fl-name-end(rest, kind)), fl-sig-of(rest)];
-  }
-  def fl-info-add(x, acc) = nothing?(x) ? acc : cons(x, acc);
-  def fl-rev(xs, acc) = len(xs) == 0 ? acc : fl-rev(xs[1:], cons(xs[0], acc));
-  def fl-def-infos(L) = fl-rev(foldl((acc, i) => fl-info-add(fl-def-info(L[i], i), acc), [], range(0, len(L))), []);
-  def fl-info-named(infos, name) = len(infos) == 0 ? nothing() : infos[0][2] == name ? infos[0] : fl-info-named(infos[1:], name);
-  def fl-info-end(infos, hit, n) = len(infos) == 0 ? n : infos[0][0] > hit[0] && infos[0][1] <= hit[1] ? infos[0][0] : fl-info-end(infos[1:], hit, n);
-  def fl-region-of(L, infos, name) {
-   let hit = fl-info-named(infos, name);
-   nothing?(hit) ? "" : str-join-with(take(fl-info-end(infos, hit, len(L)) - hit[0], L[hit[0]:]), "\n");
-  }
-  // the head of a file is what stands before its first definition: its words about itself, its imports, its section (a structure, not a count of characters)
+  // A file is read through its definitions by structure, never by a count of characters (form-stdlib/bml/def-window.bml, shared with the planner): the head before its first definition, the definitions the task
+  // names whole however long, then every definition's name and parameters.
   def fl-region(text, name) {
    let L = split-on(text, "\n");
-   fl-region-of(L, fl-def-infos(L), name);
+   fdw-region-of(L, fdw-infos(L), name);
   }
-  def fl-header-of(L, infos) = len(infos) == 0 ? str-join-with(L, "\n") : str-join-with(take(infos[0][0], L), "\n");
   // the first paragraph of a text: up to its first blank line
   def fl-first-block(text) {
    let t = trim(text);
    let e = str_find(t, "\n\n", 0);
    e < 0 ? t : substring(t, 0, e);
   }
-  // A file is shown whole while it is small enough that reading it is cheap, and by relevance past that: its head and the definitions the task names (def NAME in the task, and the hyphenated names
-  // it speaks of). Every id of the packet is read by every id the voice says (the KV grows with the context), so a packet of whole 120000-character files decoded at under one id a second
-  // (the server's own slow cell said so, 2024 ids in 2283 s) where a windowed one decodes at five: the window is where the work is, not a cut of it.
   def fl-window-names(goal) = fl-uniq(append(fl-def-names(goal, 0), fl-goal-names(goal)));
-  // No length decides what the voice reads. A task that names definitions the file holds is read through them (the file's head before its first definition, then each named definition whole, however long);
-  // a task that names none is read through the whole file. Measured 2026-11-14 on the resident Q4 voice: whole files made a 13401-id candidate packet (177 s of prefill at 75 ids a second, the 1024 ids
-  // it wrote at 11 a second); the named definitions made 4756 ids for the same request and the same band verdict, in 215 s instead of 465.
-  // The definitions a task is about are the ones it names and the ones the voice names when asked (fl-pick-names, below): `extra` are those.
-  def fl-window-regions(L, infos, goal, extra) = filter(r => len(r) > 0, map(n => fl-region-of(L, infos, n), fl-uniq(append(fl-window-names(goal), extra))));
-  def fl-window(text, goal, extra) {
-   let L = split-on(text, "\n");
-   let infos = fl-def-infos(L);
-   let regions = fl-window-regions(L, infos, goal, extra);
-   len(regions) == 0 ? text : fl-cat([fl-header-of(L, infos), "\n// ... (the file continues; the definitions the task names follow, then every definition's name and parameters) ...\n", str-join-with(regions, "\n\n"), "\n\n// the definitions of this file, name and parameters:\n", str-join-with(map(x => x[3], infos), "\n"), "\n"]);
-  }
-  def fl-sigs-of(text) = map(x => x[3], fl-def-infos(split-on(text, "\n")));
-  def fl-names-held?(text, goal) {
-   let L = split-on(text, "\n");
-   len(fl-window-regions(L, fl-def-infos(L), goal, [])) > 0;
-  }
+  // No length decides what the voice reads. A task that names definitions the file holds is read through them; a task that names none is asked of the voice by name and parameters (fl-pick-names, below), and the
+  // definitions it names are `extra`. Measured 2026-11-14 on the resident Q4 voice: whole files made a 13401-id candidate packet (177 s of prefill at 75 ids a second, the 1024 ids it wrote at 11 a second); the named
+  // definitions made 4756 ids for the same request and the same band verdict, in 215 s instead of 465.
+  def fl-window(text, goal, extra) = fdw-window(text, append(fl-window-names(goal), extra), []);
+  def fl-sigs-of(text) = fdw-sigs-of(text);
+  def fl-names-held?(text, goal) = fdw-held?(text, fl-window-names(goal));
   def fl-file-block(path, goal, extra) = fl-cat(["FILE ", path, " (current text):\n", fl-window(fl-text(path), goal, extra), "\n\n"]);
   // A task that names no definition of a file the flow may write is not answered by showing the whole file (measured 2026-11-14: a request over files of 128019 bytes was a packet of about 43000 ids, a prefill of
   // 15 to 30 minutes at the server's 25 to 50 ids a second). The voice is asked which definitions the task is about, shown each such file's definitions by name and parameters only (that list comes first, so

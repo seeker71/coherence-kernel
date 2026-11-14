@@ -78,6 +78,7 @@ import form-stdlib/bml/parse.bml;
 import form-stdlib/meaning-codes.bml;
 import form-stdlib/bml/form-cli-check-witness.bml;
 import form-stdlib/bml/form-cli-guide-packet.bml;
+import form-stdlib/bml/def-window.bml;
 import form-stdlib/bml/findings-requests.bml;
 import form-stdlib/bml/native-source-inventory.bml;
 import control/choice-lane-core.fk;
@@ -259,19 +260,11 @@ section [form.bml] {
    fb_record(["local-plan-source",path,len(text),len(context),focused],"form-cli-local-plan.bml",0);
    flp-file-text(path,context,flp-where-lines(req,path));
   };
-  // A source past flp-limit() bytes is read through its import header and the lines near the names the task concerns (and the lines its where names),
-  // not whole: one planner packet once held a 1.9 MB file and read for 15 minutes on the single prefill lane, so every other ask waited.
-  def flp-limit() = 24000;
-  def flp-hit-lines(lines, keys) = take(80, foldl((st,l)=>[st[0]+1, any?(k=>len(k)>0 && str_find(l,k,0)>=0, keys) ? append(st[1],[st[0]]) : st[1]], [0,[]], lines)[1]);
-  def flp-bound(text, keys, where) {
-   if (len(text) <= flp-limit()) then text else {
-    let lines=flp-lines(text);
-    let hits=append(flp-hit-lines(lines,keys), map(n => n - 1, where));
-    let kept=foldl((st,l)=>[st[0]+1, st[0]<30 || any?(h => h - 30 <= st[0] && st[0] <= h + 30, hits) ? append(st[1],[l]) : st[1]], [0,[]], lines)[1];
-    let body=flp-join(kept,"\n");
-    mc-cat(["// (the file is long: its header and the lines near the names the task concerns follow)\n", len(body) > flp-limit() ? substring(body,0,flp-limit()) : body]);
-   };
-  }
+  // A source is read through its definitions (form-stdlib/bml/def-window.bml), by structure and never by a count of bytes: the head before its first definition, the definitions the task concerns whole however
+  // long (the names it carries and the definitions that hold the lines its where names), then the name and parameters of every definition. The earlier window cut at 24000 bytes, kept 80 hit lines and thirty lines
+  // around each, and cut the body again at the limit: it dropped the end of a definition and a definition the task needed. One planner packet once held a 1.9 MB file and read for 15 minutes on the single prefill
+  // lane; a file whose definitions the task does not name is asked of the voice by name and parameters (the flow's fl-pick-names), not shown whole.
+  def flp-bound(text, keys, where) = fdw-window(text, keys, where);
   // Selected definitions keep their callers, dependency closure and import header.
   def flp-file-text(path, text, at) = mc-cat(["Source and dependency context for ", path, ":\n", text, "\n\n"]);
   // the line numbers the request's where names in path ("<path>:<n>" or "<basename>:<n>"), three at most
@@ -280,7 +273,7 @@ section [form.bml] {
    let named = if (colon <= 0) then "" else substring(entry, 0, colon);
    if ((Comparable) len(named) == 0) then nothing() else if (((String) named == path) || flp-ends?(path, ("/" ++ named))) then flp-number-at(entry, (colon + 1)) else nothing();
   }
-  def flp-where-lines(req, path) = take(3, filter(n => (!nothing?(n)), map(e => flp-where-line(trim(e), path), flp-strs(req, "where"))));
+  def flp-where-lines(req, path) = filter(n => (!nothing?(n)), map(e => flp-where-line(trim(e), path), flp-strs(req, "where")));
   def flp-files-block(req) = mc-cat(map(p => flp-file-block(req, p), flp-req-files(req)));
   def flp-names(text) = flp-lines(text) |> map(trim) |> filter(line=>flp-starts?(line,"def ")) |> map(line=>trim(flp-cut-at(substring(line,4,len(line)),"(")));
   def flp-source-names(paths) = foldl((names,path)=>append(names,flp-names(fhn-read(path))),[],paths);
@@ -330,9 +323,9 @@ section [form.bml] {
   def flp-callers(req) {
    let paths=flp-req-files(req); let names=flp-focus(req);
    let files=split-on(nsi-text(nsi-git()),byte_to_str(0)) |> filter(path=>flp-starts?(path,"form/form-stdlib/bml/") && flp-ends?(path,".bml") && !flp-has?(paths,path));
-   files |> map(path=>[path,fhn-read(path)]) |> filter(source=>any?(name=>str_find(source[1],name + "(",0)>=0,names)) |> map(source=>[source[0],flp-bound(flp-caller-text(source[1],names), map(n=>n + "(", names), [])]);
+   files |> map(path=>[path,fhn-read(path)]) |> filter(source=>any?(name=>str_find(source[1],name + "(",0)>=0,names)) |> map(source=>[source[0],flp-caller-text(source[1],names)]);
   }
-  def flp-callers-block(req) = mc-cat(take(4, flp-callers(req)) |> map(source=>"Read-only caller definitions and their local dependency closure in " + source[0] + ":\n" + source[1] + "\n\n"));
+  def flp-callers-block(req) = mc-cat(flp-callers(req) |> map(source=>"Read-only caller definitions and their local dependency closure in " + source[0] + ":\n" + source[1] + "\n\n"));
   def flp-queue-lines(path) = if (file_size(path) < 1) then [] else filter(l => (len(trim(l)) > 0), flp-lines(fhn-read(path)));
   def flp-queue-rows(path) = map(l => if fcgp-object-line?(trim(l)) then parse-json("queue-row", trim(l)) else json-node-object([]), flp-queue-lines(path));
   def flp-intro() = "Implement the original task in native BML. Supply the whole changed definitions and behavior cases; Form owns compilation, verification and publication. A candidate must change the requested behavior, preserve its callers, and pass cases that fail on today's implementation and on stubs. Repeating unchanged code cannot implement a change.\nNative literal observations: true=" + true.str() + " (" + value_kind(true) + "), false=" + false.str() + " (" + value_kind(false) + "). Case expectations follow these execution values. JSON boolean nodes have their own node identity; a direct BML literal is the value observed here.";
