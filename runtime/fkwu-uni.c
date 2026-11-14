@@ -438,6 +438,7 @@ extern int proc_pidinfo(int pid, int flavor, unsigned long long arg, void *buffe
 extern int proc_name(int pid, void *buffer, unsigned int buffersize);
 extern int proc_pidpath(int pid, void *buffer, unsigned int buffersize);
 extern int proc_pidfdinfo(int pid, int fd, int flavor, void *buffer, int buffersize); /* host_file_holders: one open vnode's identity */
+extern int proc_pid_rusage(int pid, int flavor, void *buffer); /* kernel_stat 91: this process's physical footprint (what the machine charges it, compressed pages included) */
 struct fk_mach_timebase { unsigned int numer; unsigned int denom; };
 extern int mach_timebase_info(struct fk_mach_timebase *info);
 #endif
@@ -22102,6 +22103,16 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         }
         if (ks_k == 5) {
             return fk_sp << 1;
+        }
+        if (ks_k == 91) {
+            /* this process's physical footprint in bytes, as the machine charges it: RSS is the wrong word here (a process whose pages the compressor holds reads a few GiB resident and tens of GiB charged:
+             * measured 2026-11-14, day-turn 3.1 GiB RSS against a 54 GiB footprint). rusage_info_v2: 16 bytes of uuid, then u64 words user, system, pkg_idle, interrupt, pageins, wired, resident, phys_footprint (word 9). */
+#ifdef __APPLE__
+            unsigned long long ks_ru[64];
+            memset(ks_ru, 0, sizeof(ks_ru));
+            if (proc_pid_rusage((int)getpid(), 2, ks_ru) == 0) { return (long long)ks_ru[9] << 1; }
+#endif
+            return fk_nothing;
         }
         if (ks_k == 51) {
             return fk_smelt_reclaimed << 1;
