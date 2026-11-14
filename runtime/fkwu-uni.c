@@ -32208,6 +32208,22 @@ static long long fk_gc_collect(const char *root) {
         }
         closedir(d);
     }
+    /* the discovery rows (one file each, named by what they read) are kept and let go of the same way */
+    sprintf(dir, "%s/disc", root);
+    d = opendir(dir);
+    if (d) {
+        while ((e = readdir(d)) != 0) {
+            long long n = fk_cstrlen(e->d_name);
+            if (n < 8 || e->d_name[0] == '.' || memcmp(e->d_name + n - 4, ".fkb", 4) != 0) continue;
+            sprintf(path, "%s/%s", dir, e->d_name);
+            if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+            fk_gc_entry *g = fk_gc_add((long long)st.st_mtime);
+            if (!g) break;
+            fk_gc_file(g, path);
+            total += g->bytes;
+        }
+        closedir(d);
+    }
     return total;
 }
 /* sweep the stores down to 85 percent of the budget, oldest use first; answers the bytes freed */

@@ -886,7 +886,7 @@
     ;; The floor admits its observed compiler closure once. Files retain their
     ;; own facts; dependency resolution and absent candidates stay live.
     (let FSC-BML-DISK-CONTEXT (record_new 0))
-    (let FSC-BML-DISK-SCHEMA "fsc-discovery-fnv64-v2")
+    (let FSC-BML-DISK-SCHEMA "fsc-discovery-fnv64-v3")
     (let FSC-BML-PIN-SCHEMA "fsc-compiler-pin-v1")
     ;; Private wire markers are literal categories, not reviewed blueprint names.
     (let FSC-BML-DISK-LIST (intern_trivial_string "fsc-discovery-list-v1"))
@@ -898,7 +898,7 @@
     ;; A held row is (path bytes fingerprint); the fingerprint was derived from
     ;; those bytes when the pin was taken, so admission does not read them again.
     (defn fsc-bml-cache-pin-row (row)
-        (list (head row) (if (gt (len row) 2) (nth row 2) (bml-source-fingerprint (nth row 1)))))
+        (list (fsc-bml-cache-rel (head row)) (if (gt (len row) 2) (nth row 2) (bml-source-fingerprint (nth row 1)))))
     ;; Every key names the compiler by one fingerprint of its pin, taken here once.
     (defn fsc-bml-cache-pin (held)
         (record_set FSC-BML-DISK-CONTEXT "compiler"
@@ -951,8 +951,39 @@
     ;; compiler), and the seal covers the key and the derived facts, so a damaged
     ;; cache reads as a miss.
     (defn fsc-bml-cache-key (path homes)
-        (list FSC-BML-DISK-SCHEMA path (fsc-bml-cache-homes-key homes) (record_get FSC-BML-DISK-CONTEXT "compiler")))
-    (defn fsc-bml-cache-path (path) (str_concat (bml-source-absolute path) ".discovery.fkb"))
+        (list FSC-BML-DISK-SCHEMA (fsc-bml-cache-rel path) (fsc-bml-cache-homes-key homes) (record_get FSC-BML-DISK-CONTEXT "compiler")))
+    ;; A row lives in the user's shared store ($HOME/.cache/fkwu/disc, under the store's disk budget and least-recently-used sweep, runtime/fkwu-uni.c fk_gc_collect), named by what
+    ;; decides its facts: the file's path from its checkout's root, the compiler's pin, the home bindings and the source's length (so two versions of one file that differ in length
+    ;; stand in two slots; the exact bytes are still compared whole). Every checkout, branch and scratch copy of the same bytes under the same compiler finds the same row: a new worktree
+    ;; starts warm. The rows used to sit beside each source file inside each checkout (gitignored), so each checkout parsed every file again once. No HOME: beside the file, as before.
+    (defn fsc-bml-cache-rel (path)
+        (do (let abs (bml-source-absolute path))
+            (let root BML-SOURCE-ROOT)
+            (let rl (str_len root))
+            (if (and (gt rl 0) (and (gt (str_len abs) (add rl 1)) (str_eq (substring abs 0 (add rl 1)) (str_concat root "/"))))
+                (substring abs (add rl 1) (str_len abs))
+                (do (let at (bml-source-repo-prefix abs))
+                    (if (gt at 0) (substring abs at (str_len abs)) abs)))))
+    (defn fsc-bml-cache-store ()
+        (if (record_has FSC-BML-DISK-CONTEXT "store") (record_get FSC-BML-DISK-CONTEXT "store")
+            (do (let home (host_getenv "HOME"))
+                (let dir (if (or (nothing? home) (str_eq home "")) ""
+                    (do (let a (str_concat home "/.cache"))
+                        (let b (str_concat a "/fkwu"))
+                        (let c (str_concat b "/disc"))
+                        (let m1 (host_mkdir_mode a 448))
+                        (let m2 (host_mkdir_mode b 448))
+                        (let m3 (host_mkdir_mode c 448))
+                        (if (eq (host_path_is_dir c) 1) c ""))))
+                (record_set FSC-BML-DISK-CONTEXT "store" dir)
+                dir)))
+    (defn fsc-bml-cache-path (path source homes)
+        (do (let store (fsc-bml-cache-store))
+            (if (str_eq store "") (str_concat (bml-source-absolute path) ".discovery.fkb")
+                (str_concat store
+                    (str_concat "/"
+                        (str_concat (bml-source-fingerprint (fsc-bml-cache-wire (list (fsc-bml-cache-rel path) (fsc-bml-cache-homes-key homes) (record_get FSC-BML-DISK-CONTEXT "compiler"))))
+                            (str_concat "-" (str_concat (int_to_str (str_len source)) ".fkb"))))))))
     (defn fsc-bml-cache-limit (path source)
         (add FSC-BML-DISK-OVERHEAD (mul FSC-BML-DISK-EXPANSION (add (str_len path) (str_len source)))))
     (defn fsc-bml-cache-seal (key derived)
@@ -977,7 +1008,7 @@
                              (str_eq (value_kind (nth derived 3)) "list")))))))
     (defn fsc-bml-cache-read (path source homes)
         (if (record_has FSC-BML-DISK-CONTEXT "compiler")
-            (fsc-bml-cache-row (fsc-bml-cache-path path) (fsc-bml-cache-key path homes) source)
+            (fsc-bml-cache-row (fsc-bml-cache-path path source homes) (fsc-bml-cache-key path homes) source)
             (nothing)))
     ;; One atomic publication for every discovery memo: the row is written
     ;; beside its target, read back by the reader that will serve it, and moved
@@ -997,7 +1028,7 @@
                 (do
                     (let key (fsc-bml-cache-key path homes))
                     (let derived (tail facts))
-                    (fsc-bml-cache-publish (fsc-bml-cache-path path)
+                    (fsc-bml-cache-publish (fsc-bml-cache-path path source homes)
                         (list key source derived (fsc-bml-cache-seal key derived)) key source facts))))
                 (if (nothing? wrote) 0 wrote))))
     ;; The compiler's pin, derived once for each state of its closure. The memo
@@ -1069,9 +1100,9 @@
         (fb_record (intern_node (intern_trivial_string "bml-discovery-cache")
             (list (intern_trivial_string path) (intern_trivial_string action)
                   (intern_trivial_int (sub (host_monotonic_ms) started)))) path 0))
-    (defn fsc-bml-cache-miss (path)
+    (defn fsc-bml-cache-miss (path source homes)
         (if (not (record_has FSC-BML-DISK-CONTEXT "compiler")) "compiler-context-unadmitted"
-            (if (lt (file_size (fsc-bml-cache-path path)) 0) "absent" "changed-or-invalid")))
+            (if (lt (file_size (fsc-bml-cache-path path source homes)) 0) "absent" "changed-or-invalid")))
     (defn fsc-bml-reading-bump (key)
         (record_set FSC-BML-READING-COUNTS key
             (add (if (record_has FSC-BML-READING-COUNTS key) (record_get FSC-BML-READING-COUNTS key) 0) 1)))
@@ -1090,11 +1121,13 @@
         (do (let cached (fsc-bml-cache-read path source homes))
             (if (not (nothing? cached))
                 (do (fsc-bml-reading-bump "reused")
+                    ;; a hit is a use: the store keeps what is used and lets go of what is not (least recently used first)
+                    (let touched (host_utimes (fsc-bml-cache-path path source homes) (now_unix_ms)))
                     (record_set discovery path cached)
                     (fsc-bml-cache-observe path "disk-hit" started)
                     cached)
                 (do
-                    (let cause (fsc-bml-cache-miss path))
+                    (let cause (fsc-bml-cache-miss path source homes))
                     (fsc-bml-reading-bump "read")
                     (let walked (if (and (lt (fsc-find-section-open source 0) 0)
                                           (not (str_eq (substring path (sub (str_len path) 4) (str_len path)) ".bml")))
