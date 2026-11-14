@@ -381,14 +381,20 @@ kernel void nll_attend8(device const float* p [[buffer(0)]],device const float* 
    let dest = nll-map(owner,tmp,0,0 - (n + 3) * 4);
    dest <= 0 ? {nll-release(owner);0;} : nll-prefix-saved-by(path,tmp,h,dest,n,owner);
   }
+  // The carrier refuses a free while work naming the buffer is unsettled, and the native wrapper reads that refusal as 0 (reference: metal_buf_free refusal reads as zero): the free is asked again in rounds,
+  // each after the queue is settled, instead of the first refusal ending the publication (the lift stopped here with 'original owner retained' on 2026-11-14).
+  def nll-free-rounds(owner,dest,rounds) {
+   let ok = record?(owner) ? nll-release(owner) : metal_buf_free(dest)==1;
+   ok || rounds <= 1 ? ok : { let settled = nam-sync(); nll-free-rounds(owner,dest,rounds - 1); };
+  }
   def nll-prefix-saved(path,tmp,h,dest,n) = nll-prefix-saved-by(path,tmp,h,dest,n,nothing());
   def nll-prefix-saved-by(path,tmp,h,dest,n,owner) {
    let copied = nam-run("nam_copy",[h,dest],[n],n,0);
    let done = nam-sync();
    let trailer=nll-prefix-trailer-by(h,n,owner);
    let trailed=metal_buf_write(dest,n*4,trailer)==len(trailer) && metal_buf_read(dest,n*4,len(trailer))==trailer;
-   let freed=record?(owner) ? nll-release(owner) : metal_buf_free(dest)==1;
-   !trailed || !freed ? form_error("native Llama prefix publication incomplete; original owner retained") : {
+   let freed=nll-free-rounds(owner,dest,4);
+   !trailed || !freed ? form_error("native Llama prefix publication incomplete; original owner retained (trailer " ++ (trailed ? "written" : "NOT written or unread") ++ ", free " ++ (freed ? "done" : "REFUSED after four rounds, " ++ (record?(owner) ? mca-owned(owner).str() : "0") ++ " handles still owned, metal_live " ++ metal_live().str()) ++ ")") : {
     let moved=fs-rename(tmp,path);if moved==0 then nll-prefix-note("saved") else 0;moved;
    };
   }
