@@ -12586,7 +12586,11 @@ static void fk_f64_refuse_now(long long fx) {
 static int fk_f64_admit_in(long long i, long long arity, const int *types, int *out);
 static int fk_f64_admit(long long i, long long arity, const int *types, int *out) {
     int r = fk_f64_admit_in(i, arity, types, out);
-    if (r == 0 && fk_f64_refuse_tag < 0 && fk_f64_silent_tag < 0 && i >= 0 && i < fk_node_count) { fk_f64_silent_tag = fk_node[i][0]; }
+    if (r == 0 && fk_f64_refuse_tag < 0 && fk_f64_silent_tag < 0 && i >= 0 && i < fk_node_count) {
+        fk_f64_silent_tag = fk_node[i][0];
+        /* a leaf-door call (tag 201) is named by its mode: 300 + mode (value_kind 304, substring 309, attempt 328, value_str 325 ...) */
+        if (fk_f64_silent_tag == 201) { long long mn = fk_node[i][1]; if (mn >= 0 && mn < fk_node_count && fk_node[mn][0] == 1 && fk_node[mn][1] >= 0 && fk_node[mn][1] < 100) { fk_f64_silent_tag = 300 + fk_node[mn][1]; } }
+    }
     return r;
 }
 static int fk_f64_admit_in(long long i, long long arity, const int *types, int *out) {
@@ -12651,7 +12655,18 @@ static int fk_f64_admit_in(long long i, long long arity, const int *types, int *
         return *out < 0 ? 0 : 1;
     }
     if (t == 201 && !fk_f64_no_frame) {
-        /* substring in the middle of a leaf (the leaf door, mode 9): a C call, see kind 41. Another mode answers as it did before: no arm. */
+        /* the leaf door's modes the leaf takes: mode 4 is value_kind (a reading door on one word, kind 59), mode 9 substring (a C call, see kind 41). Another mode answers as it did before: no arm. */
+        long long mn4 = fk_node[i][1];
+        if (fk_f64_frame_opaque && mn4 >= 0 && mn4 < fk_node_count && fk_node[mn4][0] == 1 && fk_node[mn4][1] == 4) { /* in a frame that carries an opaque word; elsewhere value_kind stays the fold's (bml-value-add's string arm must stay dead over ints) */
+            int oa = 0;
+            int to = fk_f64_admit(fk_node[i][2], arity, types, &oa);
+            if (to == 0) { return 0; }
+            if (to == 1) { *out = fk_f64_push(7, 0, 0, 0.0, fk_value_kind(0)); return *out < 0 ? 0 : 5; } /* an int is known by its type: the word "int" */
+            if (!(to == 4 || to == 5 || to == 6 || (to == 3 && fk_f64_str_slot(oa) >= 0))) { fk_f64_refuse_tag = t; return 0; }
+            if (to == 3) { fk_f64_reads_strword = 1; }
+            *out = fk_f64_push(59, oa, 3, 0.0, to == 3 ? 1 : 0);
+            return *out < 0 ? 0 : 5;
+        }
         int ks = fk_f64_admit_substring_any(i, arity, types, out);
         if (ks != 0) { return ks; }
     }
@@ -12846,6 +12861,8 @@ static int fk_f64_admit_in(long long i, long long arity, const int *types, int *
         if (tt == 0) { return 0; }
         int te = fk_f64_admit(els, arity, types, &b);
         if (te == 0) { return 0; }
+        /* A refusing arm is not compiled as a way out to the walker (tried 2026-11-14: a leaf that leaves for the walker at an arm the lane cannot take is neutral at best on the cold compile, and costs a
+         * failed leaf attempt on every run of an arm that is hot): the arm's own cause is read (kernel_stat 1000+tag, 3000+tag) and becomes an arm. */
         /* (nothing) as one arm takes the other arm's word type (a list or a word): the answer is the raw word either way */
         if (tt == 5 && fk_f64_prog[a].kind == 7 && fk_f64_prog[a].ilit == fk_nothing && (te == 4 || te == 5)) { tt = 5; te = 5; } /* nothing beside a list is a word of unknown kind, not a list: head and tail must check it first */
         else if (te == 5 && fk_f64_prog[b].kind == 7 && fk_f64_prog[b].ilit == fk_nothing && (tt == 4 || tt == 5)) { tt = 5; te = 5; }
@@ -22890,7 +22907,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (ks_k == 67) { return fk_clo_reclaimed << 1; }
         if (ks_k == 68) { return fk_clo_capvals_top << 1; }
         if (ks_k == 69) { return fk_melt_gen << 1; }   /* the melts this kernel has run */
-        if ((ks_k >= 900 && ks_k <= 1255) || (ks_k >= 3000 && ks_k <= 3255)) {
+        if ((ks_k >= 900 && ks_k <= 1255) || (ks_k >= 3000 && ks_k <= 3400)) {
             /* the native column read as a histogram: 900 = defns declined (-1: no body, no arity the lanes carry, or a loop shape the loop lane did not take), 901 = frame slot not a number (-2), 902 = declined
              * with no cause named (-4), 903 = admitted but the emitter ran out (-5), 1000 + tag = defns refused for that node tag (-(1000+tag)): the operation it has no arm for, and so the work,
              * 3000 + tag = refused with no operation named, the innermost node that answered 0 (-(3000+tag)) */
