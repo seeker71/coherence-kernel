@@ -569,6 +569,7 @@ static void **fk_f64_xmem; /* [fx * FK_F64_XINST + s] */
 static long long *fk_f64_xsig;
 /* the parameter-type bits of a signature: which params are float / string / list / defn (an int has none). Two instances of one
  * defn differ here; the door picks the instance whose param bits match the live frame. */
+#define FK_F64_FRAME_WORDS 48 /* the door's frame for a leaf (and the callee frame of a leaf-to-leaf call): see the call-frame layout below */
 #define FK_F64_PARAM_MASK (0xFFULL | (0x3FULL << 10) | (0xFFULL << 16) | (0xFFULL << 48) | (0xFFULL << 56)) /* bits 10..15: a parameter that is a word of no kind a leaf reads by itself (a record, a node, nothing, a closure): the raw word rides the register */
 static long long fk_f64_frame_pbits(long long fp, long long n);
 static long long *fk_f64_sig; /* per-defn leaf signature: -1 the all-float expression leaf; else bit k = param k float, bit 8 = float result, bit 9 = loop,
@@ -11085,7 +11086,7 @@ static long long fk_walk_body(long long i, long long fp) {
                  * goes in its word and its length at word 9 + k (the leaf's bounds check reads it there; word 8 is the
                  * iteration count), the result tags or boxes once on the way out. The pointer is safe for the leaf's
                  * whole run because a leaf never calls out, so nothing can intern a string and move the pool under it. */
-                long long f194[32];
+                long long f194[FK_F64_FRAME_WORDS];
                 long long k194 = 0, nf194 = 0;
                 int ok194 = 1;
                 long long scr194 = (sig194 >> 24) != 0 ? FK_F64_SCRATCH : 0;
@@ -12315,22 +12316,27 @@ FK_PHASED(FK_PHASE_CHILD, long long, fk_host_door, (long long mode, long long x)
 #define FK_F64_NODE_CAP (3 * FK_F64_WORD_CAP) /* a node writes at least one word or is one of at most two leaves beside one that does, so the page fills before this table does */
 #define FK_F64_WORD_CAP 4096 /* a leaf's words: one 16 KB page, the page Apple Silicon maps for any shorter length too */
 #define FK_F64_PAGE_BYTES (FK_F64_WORD_CAP * 4) /* a leaf's MAP_JIT page is mapped and unmapped at the size its words may reach */
-#define FK_F64_CHAIN_CAP 8 /* a loop body's steps before the terminal self call: at each if, one branch exits or continues the loop, the other leads on */
-#define FK_F64_PATCH_CAP 16 /* branches to patch: two unrolled passes of up to FK_F64_CHAIN_CAP steps, each to its exit or continuation block */
+#define FK_F64_CHAIN_CAP 32 /* (was 8) a loop body's steps before the terminal self call: at each if, one branch exits or continues the loop, the other leads on */
+#define FK_F64_PATCH_CAP 64 /* (was 16) branches to patch: two unrolled passes of up to FK_F64_CHAIN_CAP steps, each to its exit or continuation block */
 /* a leaf calling a crystallized leaf: the call arm (kind 19). The callee runs through the door's own frame -- 17 words the
  * caller builds on its stack (args untagged, a string's pointer in its word and its length at 9 + k, word 8 zero), x0 the
  * frame, blr through x16 to the callee's page; the caller spills every register the callee may touch and takes the
  * answer back from x0 or d0. A callee not yet crystallized leaves the caller cold, to be asked again at its next heat. */
 #define FK_F64_CALL_CAP (FK_F64_WORD_CAP / 8) /* a call arm writes more than eight words (the frame, three saves and three loads, the call), so the page fills before this table does */
-#define FK_F64_CALL_FRAME 608 /* the callee's 32 words at 0..255 (17 answer length, 18/19 scratch base and limit, 20/21 their copies, 22/23 the pair run's cursor and limit, 24..29 a string parameter's word at 24+k, 30/31 the pair arrays' bases); then, in words: x0 at 32, x10..x17 at 33, x1..x7 at 41, d0..d7 at 48, d16..d31 at 56, the answer at 72, x8 at 73, x30 at 74 */
-#define FK_F64_CF_X0 32U
-#define FK_F64_CF_X10 33U
-#define FK_F64_CF_X1 41U
-#define FK_F64_CF_D0 48U
-#define FK_F64_CF_D16 56U
-#define FK_F64_CF_ANS 72U
-#define FK_F64_CF_X8 73U
-#define FK_F64_CF_X30 74U
+#define FK_F64_CALL_FRAME 736 /* (was 608 with a 32-word callee frame) the callee's 48 words (32 below: the callee's 32 words at 0..255 (17 answer length, 18/19 scratch base and limit, 20/21 their copies, 22/23 the pair run's cursor and limit, 24..29 a string parameter's word at 24+k, 30/31 the pair arrays' bases); then, in words: x0 at 32, x10..x17 at 33, x1..x7 at 41, d0..d7 at 48, d16..d31 at 56, the answer at 72, x8 at 73, x30 at 74 */
+/* The callee's frame is 48 words: the 32 above, then words 32..47 for the let slots 8..23 that live in the frame's memory (slots 6 and 7 are words 6 and 7, which no parameter holds while the arity is
+ * under 7). The saves follow it. */
+#define FK_F64_NSLOT 24 /* the slots a leaf's body may bind: parameters and lets; 0..5 ride x10..x15, 6..23 the frame's memory (ints and words only: a float or a string needs a register) */
+#define FK_F64_CF_X0 48U
+#define FK_F64_CF_X10 49U
+#define FK_F64_CF_X1 57U
+#define FK_F64_CF_D0 64U
+#define FK_F64_CF_D16 72U
+#define FK_F64_CF_ANS 88U
+#define FK_F64_CF_X8 89U
+#define FK_F64_CF_X30 90U
+/* a memory slot's word in the frame: slots 6 and 7 are words 6 and 7, slots 8.. start at word 32 */
+#define FK_F64_SLOT_WORD(s) ((s) < 8 ? (unsigned int)(s) : 32U + (unsigned int)((s) - 8))
 static long long fk_f64_cur_fx; /* the defn being admitted: a call to it is the self call, the chain walker's, never the call arm's */
 static int fk_f64_call_args[FK_F64_CALL_CAP][8];   /* per call: the admitted argument nodes */
 static int fk_f64_call_strsrc[FK_F64_CALL_CAP][8]; /* per call: the caller's string parameter an argument is, or -1 */
@@ -12676,11 +12682,11 @@ static int fk_f64_admit_in(long long i, long long arity, const int *types, int *
         long long li = fk_node[i][1];
         if (li < 0 || li >= fk_node_count || fk_node[li][0] != 1) { return 0; }
         long long slot = fk_node[li][1];
-        if (slot < arity || slot >= 6 || types[slot] != 0 || fk_f64_env_depth > 0) { fk_f64_refuse_tag = t; return 0; }
+        if (slot < arity || slot >= FK_F64_NSLOT || types[slot] != 0 || fk_f64_env_depth > 0) { fk_f64_refuse_tag = t; return 0; }
         int vv = 0;
         int vt = fk_f64_admit(fk_node[i][2], arity, types, &vv);
         if (vt == 0) { return 0; }
-        if (vt == 3 || vt == 7) { fk_f64_refuse_tag = t; return 0; }
+        if (vt == 3 || vt == 7 || (slot >= 6 && vt == 2)) { fk_f64_refuse_tag = t; return 0; }
         int *mt = (int *)types;
         mt[slot] = vt;
         int rv = 0;
@@ -12749,7 +12755,7 @@ static int fk_f64_admit_in(long long i, long long arity, const int *types, int *
             fk_f64_env_depth = d + 1;
             return r;
         }
-        if (k < 0 || k >= 8 || types[k] == 0) { return 0; } /* a parameter, or a let slot already bound by its step (types 0 = unbound) */
+        if (k < 0 || k >= FK_F64_NSLOT || types[k] == 0) { return 0; } /* a parameter, or a let slot already bound by its step (types 0 = unbound) */
         *out = fk_f64_push(types[k] == 2 ? 2 : 8, (int)k, 0, 0.0, 0);
         return *out < 0 ? 0 : types[k];
     }
@@ -13256,8 +13262,8 @@ static int fk_f64_is_temp(int r) { return (r >= 101 && r <= 107) || (r >= 16 && 
  * those held below the two counters at the call; everything else the callee may take. */
 static void fk_f64_live_of(const int *types) {
     int k = 0;
-    fk_f64_live_x = fk_f64_hidden_mask | fk_f64_nested_x; fk_f64_live_d = fk_f64_nested_d; /* a let inside an if arm binds its slot only there, but a call inside that arm must keep it */
-    while (k < 8) {
+    fk_f64_live_x = fk_f64_hidden_mask | (fk_f64_nested_x & 0x3F); fk_f64_live_d = fk_f64_nested_d & 0x3F; /* a let inside an if arm binds its slot only there, but a call inside that arm must keep it; memory slots (6 and up) live in the frame, which a call does not touch */
+    while (k < 6) {
         if (types[k] == 2) { fk_f64_live_d = fk_f64_live_d | (1 << k); }
         else if (types[k] != 0) { fk_f64_live_x = fk_f64_live_x | (1 << k); }
         k = k + 1;
@@ -13512,7 +13518,16 @@ static int fk_f64_emit(int n, unsigned int *words, long long *wn, int *ntemp, in
 static int fk_f64_emit_node(int n, unsigned int *words, long long *wn, int *ntemp, int *nitemp) {
     fk_f64_node *p = &fk_f64_prog[n];
     if (p->kind == 2) { return p->a; }
-    if (p->kind == 8) { return 110 + p->a; }
+    if (p->kind == 8) {
+        if (p->a >= 6) {
+            /* a let slot that lives in the frame's memory: loaded into a fresh temporary where it is read */
+            if (*nitemp >= 7) { return -1; }
+            int rdm = 1 + *nitemp; *nitemp = *nitemp + 1;
+            if (!fk_f64_put(words, wn, 0xF9400000U | (FK_F64_SLOT_WORD(p->a) << 10) | (unsigned int)rdm)) { return -1; } /* LDR Xd, [X0, #8*word] */
+            return 100 + rdm;
+        }
+        return 110 + p->a;
+    }
     if (p->kind == 22) { return 110 + p->a; } /* a literal: its slot was filled in the prologue */
     if (p->kind == 24 || p->kind == 25 || p->kind == 27 || p->kind == 28 || p->kind == 30) {
         /* over a list word in Xi: head (24) loads fk_hh[p], the empty list's head leaving for the overflow block; tail (25) loads
@@ -13788,7 +13803,8 @@ static int fk_f64_emit_node(int n, unsigned int *words, long long *wn, int *ntem
             if (rv != slot && !fk_f64_put(words, wn, 0x1E604000U | ((unsigned int)rv << 5) | (unsigned int)slot)) { return -1; } /* FMOV Dslot, Dv */
         } else {
             if (rv < 100) { return -1; }
-            if ((unsigned int)(rv - 100) != 10U + (unsigned int)slot && !fk_f64_put(words, wn, 0xAA0003E0U | ((unsigned int)(rv - 100) << 16) | (10U + (unsigned int)slot))) { return -1; } /* MOV X(10+slot), Xv */
+            if (slot >= 6) { if (!fk_f64_put(words, wn, 0xF9000000U | (FK_F64_SLOT_WORD(slot) << 10) | (unsigned int)(rv - 100))) { return -1; } } /* STR Xv, [X0, #8*word]: a memory slot */
+            else if ((unsigned int)(rv - 100) != 10U + (unsigned int)slot && !fk_f64_put(words, wn, 0xAA0003E0U | ((unsigned int)(rv - 100) << 16) | (10U + (unsigned int)slot))) { return -1; } /* MOV X(10+slot), Xv */
         }
         fk_f64_release(rv, ntemp, nitemp);
         return fk_f64_emit(p->b, words, wn, ntemp, nitemp);
@@ -14387,7 +14403,7 @@ static int fk_f64_body_of(long long fx, long long *root_out, long long *orig_out
     if (body >= 0 && body < fk_node_count && fk_node[body][0] == 111) {
         long long li = fk_node[body][1];
         long long slots = (li >= 0 && li < fk_node_count && fk_node[li][0] == 1) ? fk_node[li][1] : -1;
-        if (slots < 0 || slots + 1 > 8) { return 0; } /* the frame's slots, parameters and lets, must fit the eight parameter registers */
+        if (slots < 0 || slots + 1 > FK_F64_NSLOT) { return 0; } /* the frame's slots, parameters and lets: six ride registers, the rest the frame's memory */
         body = fk_node[body][2];
     }
     if (body < 0 || body >= fk_node_count) { return 0; }
@@ -14633,7 +14649,8 @@ static int fk_f64_loop_pass(unsigned int *words, long long *wn, const int *cas, 
                 if (!fk_f64_slot_move(words, wn, r - 110, (int)slot)) { return 0; }
             } else {
                 if (r < 100) { return 0; }
-                if ((unsigned int)(r - 100) != 10U + slot && !fk_f64_put(words, wn, 0xAA0003E0U | ((unsigned int)(r - 100) << 16) | (10U + slot))) { return 0; } /* MOV X(10+slot), Xr */
+                if (slot >= 6U) { if (!fk_f64_put(words, wn, 0xF9000000U | (FK_F64_SLOT_WORD(slot) << 10) | (unsigned int)(r - 100))) { return 0; } } /* STR Xr, [X0, #8*word]: a memory slot */
+                else if ((unsigned int)(r - 100) != 10U + slot && !fk_f64_put(words, wn, 0xAA0003E0U | ((unsigned int)(r - 100) << 16) | (10U + slot))) { return 0; } /* MOV X(10+slot), Xr */
             }
             j = j + 1;
             continue;
@@ -14809,8 +14826,8 @@ static void fk_f64_expr_pulse(long long fx, long long fp, long long n, long long
     fk_f64_refuse_tag = -1; fk_f64_silent_tag = -1; fk_f64_call_n = 0; fk_f64_cur_fx = fx; fk_f64_acc_slot = -1; fk_f64_ovf_n = 0; fk_f64_self_n = 0;
     fk_f64_hidden_mask = 0; fk_f64_lit_n = 0; fk_f64_need_scratch = 0; fk_f64_conses = 0; fk_f64_reads_strword = 0; fk_f64_calls_c = 0; fk_f64_ovf2_n = 0;
     fk_fn_native[fx] = -1;
-    int types[8] = {1, 1, 1, 1, 1, 1, 1, 1};
-    { long long q = arity; while (q < 8) { types[q] = 0; q = q + 1; } }
+    int types[FK_F64_NSLOT] = {1, 1, 1, 1, 1, 1, 1, 1};
+    { long long q = arity; while (q < FK_F64_NSLOT) { types[q] = 0; q = q + 1; } }
     long long sig = 0;
     long long k = 0;
     int allf = 1;
@@ -14846,10 +14863,11 @@ static void fk_f64_expr_pulse(long long fx, long long fp, long long n, long long
         long long li = fk_node[node][1];
         if (li < 0 || li >= fk_node_count || fk_node[li][0] != 1) { return; }
         long long slot = fk_node[li][1];
-        if (slot < arity || slot >= 6) { return; }
+        if (slot < arity || slot >= FK_F64_NSLOT) { return; }
         int lv = 0;
         int lt = fk_f64_admit(fk_node[node][2], arity, types, &lv);
         if (lt == 0) { fk_f64_refuse_now(fx); return; }
+        if (slot >= 6 && (lt == 2 || lt == 3 || lt == 7)) { fk_f64_refuse_tag = 109; fk_f64_refuse_now(fx); return; } /* a float or a string needs a register: only ints and words live in the frame's memory */
         if (lt == 3) {
             /* a STRING let -- see the loop pass's twin: its value must already ride a slot so the pointer and the length
              * at frame word 9 + s move together; an accumulator (20/21) is mutated in place and is not a let's to bind */
@@ -14902,7 +14920,8 @@ static void fk_f64_expr_pulse(long long fx, long long fp, long long n, long long
             if (!fk_f64_slot_move(words, &wn, r - 110, (int)slot)) { return; }
         } else {
             if (r < 100) { return; }
-            if ((unsigned int)(r - 100) != 10U + slot && !fk_f64_put(words, &wn, 0xAA0003E0U | ((unsigned int)(r - 100) << 16) | (10U + slot))) { return; }
+            if (slot >= 6U) { if (!fk_f64_put(words, &wn, 0xF9000000U | (FK_F64_SLOT_WORD(slot) << 10) | (unsigned int)(r - 100))) { return; } } /* a memory slot */
+            else if ((unsigned int)(r - 100) != 10U + slot && !fk_f64_put(words, &wn, 0xAA0003E0U | ((unsigned int)(r - 100) << 16) | (10U + slot))) { return; }
         }
         j = j + 1;
     }
@@ -15046,7 +15065,7 @@ static void fk_f64_loop_pulse_body(long long fx, long long fp, long long n) {
             long long li = fk_node[node][1];
             if (li < 0 || li >= fk_node_count || fk_node[li][0] != 1) { return; }
             long long slot = fk_node[li][1];
-            if (slot < arity || slot >= 6) { return; }
+            if (slot < arity || slot >= FK_F64_NSLOT) { return; }
             conds[nsteps] = -1; exits[nsteps] = -1; selfs[nsteps] = -1; on_true[nsteps] = 0;
             kinds[nsteps] = 3; letvals[nsteps] = fk_node[node][2]; letslots[nsteps] = (int)slot;
             node = fk_node[node][3];
@@ -15082,8 +15101,8 @@ static void fk_f64_loop_pulse_body(long long fx, long long fp, long long n) {
         nsteps = nsteps + 1;
     }
     /* the signature, read off the live frame */
-    int types[8] = {1, 1, 1, 1, 1, 1, 1, 1};
-    { long long q = arity; while (q < 8) { types[q] = 0; q = q + 1; } } /* the slots beyond the parameters are lets, unbound until their step */
+    int types[FK_F64_NSLOT] = {1, 1, 1, 1, 1, 1, 1, 1};
+    { long long q = arity; while (q < FK_F64_NSLOT) { types[q] = 0; q = q + 1; } } /* the slots beyond the parameters are lets, unbound until their step */
     long long sig = 1LL << 9;
     long long k = 0;
     while (k < arity) {
@@ -15113,6 +15132,7 @@ static void fk_f64_loop_pulse_body(long long fx, long long fp, long long n) {
             int lv = 0;
             int lt = fk_f64_admit(letvals[j], arity, types, &lv);
             if (lt == 0) { return; }
+            if (letslots[j] >= 6 && (lt == 2 || lt == 3 || lt == 7)) { fk_f64_refuse_tag = 109; fk_f64_refuse_now(fx); return; } /* a float or a string needs a register: only ints and words live in the frame's memory */
             if (lt == 3) {
                 /* a STRING let: its value must already ride a slot, so its pointer (x(10+s)) and its length (frame word
                  * 9 + s) move together through fk_f64_slot_move -- a plain MOV would carry the pointer and leave the
