@@ -14568,10 +14568,36 @@ static void fk_f64_loop_pulse(long long fx, long long fp, long long n) {
         }
     }
 }
+/* A refusal is a verdict on the evidence it was given, not on the recipe: a defn refused for one parameter shape (a frame word that was
+ * not a number, a type mismatch, a callee not yet standing) is asked once more when its frame wears another shape. Each ask records the
+ * shape it was made on; a latched refusal (anything below -1; -1 is no body or no arity the lanes carry) reopens when the shape differs
+ * from the one refused, at most FK_F64_REASK times for a defn, so a recipe that wears many shapes is not asked forever. */
+#define FK_F64_REASK 4
+#define FK_F64_REFUSED_CAP 4096
+static struct { long long fx, pb, asks; } fk_f64_refused[FK_F64_REFUSED_CAP];
+static long long fk_f64_reasked; /* kernel_stat 92: refusals reopened because the frame wore another shape */
+static void fk_f64_reask_note(long long fx, long long fp, long long n) {
+    if (fp < 0 || n < 1 || n > 8) { return; }
+    long long pb = fk_f64_frame_pbits(fp, n), h = fx & (FK_F64_REFUSED_CAP - 1);
+    if (fk_f64_refused[h].fx != fx) { fk_f64_refused[h].fx = fx; fk_f64_refused[h].asks = 0; }
+    fk_f64_refused[h].pb = pb;
+}
+static void fk_f64_reask_open(long long fx, long long fp, long long n) {
+    if (fp < 0 || n < 1 || n > 8 || fk_fn_native[fx] >= -1) { return; }
+    long long h = fx & (FK_F64_REFUSED_CAP - 1);
+    if (fk_f64_refused[h].fx != fx || fk_f64_refused[h].asks >= FK_F64_REASK) { return; }
+    long long pb = fk_f64_frame_pbits(fp, n);
+    if (pb == fk_f64_refused[h].pb) { return; }
+    fk_f64_refused[h].asks = fk_f64_refused[h].asks + 1;
+    fk_f64_reasked = fk_f64_reasked + 1;
+    fk_fn_native[fx] = 0;
+}
 static void fk_f64_loop_pulse_in(long long fx, long long fp, long long n) {
     fk_f64_no_frame = 0; /* the typed leaves and loops carry a frame in x0; the all-float leaf sets this while it admits and emits */
     if (fx <= 0 || fx >= fk_fn_count || fk_fn_native == 0 || fx >= fk_fn_capacity) { return; }
+    fk_f64_reask_open(fx, fp, n);
     if (fk_fn_native[fx] != 0) { return; }
+    fk_f64_reask_note(fx, fp, n);
     long long root = 0, orig = 0, body = 0;
     if (!fk_f64_body_of(fx, &root, &orig, &body)) { fk_fn_native[fx] = -1; return; }
     if (!fk_f64_body_has_self(body, fx, 0)) { fk_f64_expr_pulse(fx, fp, n, root, orig, body); return; } /* no self call: an expression, the typed leaf's */
@@ -22381,6 +22407,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (ks_k == 67) { return fk_clo_reclaimed << 1; }
         if (ks_k == 68) { return fk_clo_capvals_top << 1; }
         if (ks_k == 69) { return fk_melt_gen << 1; }   /* the melts this kernel has run */
+        if (ks_k == 92) { return fk_f64_reasked << 1; } /* refusals reopened because the frame wore another shape than the one refused */
         if (ks_k == 90) { return fk_seed_state << 1; } /* 1 the version the checkout's seed names, 0 another, 2 no checkout */
         if (ks_k == 74) { return fk_f64_emit_refused << 1; }   /* node levels past 4096 the loop lane's emitter refused instead of running the stack out */
         if (ks_k >= 100 && ks_k < 100 + ks_n) {
