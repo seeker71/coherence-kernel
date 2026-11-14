@@ -12425,6 +12425,7 @@ static long long fk_leaf_record_get(long long rw, long long kw);
 static long long fk_leaf_record_has(long long rw, long long kw);
 static long long fk_leaf_node_eq(long long a, long long b);
 static long long fk_leaf_str_eq(long long wa, long long wb);
+static long long fk_leaf_nth(long long lw, long long idx);
 static long long fk_substring_word(long long sword, long long a, long long b); /* the leaf calls this C native for substring (kind 38 emit); answers a raw interned word */
 static long long fk_f64_ovf_at[FK_F64_OVF_CAP]; /* the B.cond sites that leave for the overflow block: the scratch ran out, the walker answers */
 static long long fk_f64_ovf_n;
@@ -12524,6 +12525,7 @@ static int fk_f64_type_of(int n) {
     int k = fk_f64_prog[n].kind;
     if ((k >= 7 && k <= 12) || k == 14 || k == 15 || k == 16 || k == 26 || k == 27 || k == 28 || k == 36 || k == 39 || k == 40 || k == 61 || (k >= 51 && k <= 58)) { return 1; }
     if (k == 17) { return (int)fk_f64_prog[n].lit; }
+    if (k == 63) { return fk_f64_type_of(fk_f64_prog[n].b); }
     if (k == 19) { return ((fk_f64_sig[fk_f64_prog[n].ilit] >> 8) & 1) ? 2 : 1; }
     return 2;
 }
@@ -12574,6 +12576,7 @@ static int fk_f64_kind_fold(long long i, long long arity, const int *types, int 
  * operand of a kind it does not carry, a register or slot run out, a callee not standing). The wrapper records that node's tag the first time it happens in a pulse; the pulse stores it as -(3000+tag),
  * read by kernel_stat 3000+tag, so the work ranks by what recipes were actually refused for. */
 static long long fk_f64_silent_tag = -1;
+static int fk_f64_nested_x, fk_f64_nested_d; /* the slots a let inside an expression binds (integer-register slots, float slots): live wherever a call spills */
 static int fk_f64_frame_opaque; /* this pulse's frame carries an opaque word (a record, a node, nothing, a closure) in a parameter: nothing? of a parameter is then a question, not a never */
 /* the verdict of an admit that answered 0: the operation named, else the innermost node that answered 0 without a name, else -4; a callee not yet standing leaves the defn cold to be asked again */
 static void fk_f64_refuse_now(long long fx) {
@@ -12618,6 +12621,19 @@ static int fk_f64_admit_in(long long i, long long arity, const int *types, int *
         *out = fk_f64_push(61, a, b, 0.0, sf | (t == 67 ? 0 : (t == 80 ? 1 : 2)));
         return *out < 0 ? 0 : 1;
     }
+    if (t == 23) {
+        /* nth list index: a word beyond the list is nothing, a word that is no list is nothing too (the walker's arm never stops here), so one C call on the list word and the untagged index (kind 62) answers a
+         * word of unknown kind. The list operand is a list or word; the index an int. */
+        int la = 0, ia = 0;
+        int tl = fk_f64_admit(fk_node[i][1], arity, types, &la);
+        if (tl == 0) { return 0; }
+        if (tl != 4 && tl != 5 && tl != 6) { fk_f64_refuse_tag = t; return 0; }
+        int ti = fk_f64_admit(fk_node[i][2], arity, types, &ia);
+        if (ti == 5) { ia = fk_f64_narrow(ia, 1); if (ia < 0) { return 0; } ti = 1; }
+        if (ti != 1) { if (ti != 0) { fk_f64_refuse_tag = t; } return 0; }
+        *out = fk_f64_push(62, la, ia, 0.0, 0);
+        return *out < 0 ? 0 : 5;
+    }
     if (t == 30) {
         /* str_find h needle from: h and needle ride string slots (a parameter or a literal: the door fills frame word 24+slot), from is an int. A C call with the leaf's live registers spilled around it
          * (kind 39); it answers the raw byte index or -1, an int. The call interns nothing, so no pointer a leaf holds goes stale. */
@@ -12638,6 +12654,38 @@ static int fk_f64_admit_in(long long i, long long arity, const int *types, int *
         /* substring in the middle of a leaf (the leaf door, mode 9): a C call, see kind 41. Another mode answers as it did before: no arm. */
         int ks = fk_f64_admit_substring_any(i, arity, types, out);
         if (ks != 0) { return ks; }
+    }
+    if (t == 109) {
+        /* a let inside an expression (an if arm, a do): its value into the slot's own register for the rest of the expression, the slot bound at the value's type while the rest is admitted and unbound after
+         * (the let's scope). Slots beyond the parameters up to 5 (x10..x15); a string value has no slot to ride here and stays the walker's. The slot is live across any call the rest makes (fk_f64_nested_*). */
+        long long li = fk_node[i][1];
+        if (li < 0 || li >= fk_node_count || fk_node[li][0] != 1) { return 0; }
+        long long slot = fk_node[li][1];
+        if (slot < arity || slot >= 6 || types[slot] != 0 || fk_f64_env_depth > 0) { fk_f64_refuse_tag = t; return 0; }
+        int vv = 0;
+        int vt = fk_f64_admit(fk_node[i][2], arity, types, &vv);
+        if (vt == 0) { return 0; }
+        if (vt == 3 || vt == 7) { fk_f64_refuse_tag = t; return 0; }
+        int *mt = (int *)types;
+        mt[slot] = vt;
+        int rv = 0;
+        int rt = fk_f64_admit(fk_node[i][3], arity, types, &rv);
+        mt[slot] = 0;
+        if (rt == 0) { return 0; }
+        if (vt == 2) { fk_f64_nested_d = fk_f64_nested_d | (1 << slot); } else { fk_f64_nested_x = fk_f64_nested_x | (1 << slot); }
+        *out = fk_f64_push(63, vv, rv, 0.0, ((long long)slot << 8) | vt);
+        return *out < 0 ? 0 : rt;
+    }
+    if (t == FK_TAG_CONST_HOLD) {
+        /* the once-hold (a top-level constant: a category, a table, a number): its value is read once and held, so the leaf carries it as the constant it is -- walked here as the walker would at its first
+         * read, then a literal: an int is the untagged int, a word of no kind a leaf reads by itself (a node id, a record, nothing, a closure) the raw word (stable: a record's fields move, its word does not).
+         * A list is a melt root that moves, a string needs a slot and a float a box: those stay the walker's. */
+        long long hw = fk_walk(i, fk_vsp);
+        int ht = fk_f64_word_type(hw);
+        if (ht == 1) { *out = fk_f64_push(7, 0, 0, 0.0, hw >> 1); return *out < 0 ? 0 : 1; }
+        if (ht == 0) { *out = fk_f64_push(7, 0, 0, 0.0, hw); return *out < 0 ? 0 : 5; }
+        fk_f64_refuse_tag = t;
+        return 0;
     }
     if (t == 138) {
         /* (nothing? x): a yes-or-no on the word. An int, a float, a string or a list is never nothing (the leaf knows it by type: a constant 0); a word of unknown kind is compared with the nothing constant. */
@@ -13191,7 +13239,7 @@ static int fk_f64_is_temp(int r) { return (r >= 101 && r <= 107) || (r >= 16 && 
  * those held below the two counters at the call; everything else the callee may take. */
 static void fk_f64_live_of(const int *types) {
     int k = 0;
-    fk_f64_live_x = fk_f64_hidden_mask; fk_f64_live_d = 0;
+    fk_f64_live_x = fk_f64_hidden_mask | fk_f64_nested_x; fk_f64_live_d = fk_f64_nested_d; /* a let inside an if arm binds its slot only there, but a call inside that arm must keep it */
     while (k < 8) {
         if (types[k] == 2) { fk_f64_live_d = fk_f64_live_d | (1 << k); }
         else if (types[k] != 0) { fk_f64_live_x = fk_f64_live_x | (1 << k); }
@@ -13209,7 +13257,8 @@ static int fk_f64_prog_refs(int n, int k) {
     if (p->kind == 13 || p->kind == 24 || p->kind == 25 || p->kind == 26 || p->kind == 27 || p->kind == 28 || p->kind == 30 || p->kind == 34 || p->kind == 36) { return fk_f64_prog_refs(p->a, k); }
     if (p->kind == 32) { return fk_f64_prog_refs(p->a, k) || fk_f64_prog_refs(p->b, k); }
     if (p->kind == 39 || p->kind == 41) { return fk_f64_prog_refs(p->a, k) || fk_f64_prog_refs(p->b, k) || fk_f64_prog_refs((int)p->ilit, k); }
-    if (p->kind == 40 || p->kind == 60 || p->kind == 61) { return fk_f64_prog_refs(p->a, k) || fk_f64_prog_refs(p->b, k); }
+    if (p->kind == 63) { return fk_f64_prog_refs(p->a, k) || fk_f64_prog_refs(p->b, k); }
+    if (p->kind == 40 || p->kind == 60 || p->kind == 61 || p->kind == 62) { return fk_f64_prog_refs(p->a, k) || fk_f64_prog_refs(p->b, k); }
     if (p->kind == 59) { return fk_f64_prog_refs(p->a, k); }
     if (p->kind == 33) { int j = 0; if (fk_f64_prog_refs(p->s, k)) { return 1; } while (j < p->b) { if (fk_f64_prog_refs(fk_f64_call_args[p->a][j], k)) { return 1; } j = j + 1; } return 0; }
     if (p->kind == 19) { int j = 0; while (j < p->b) { if (fk_f64_prog_refs(fk_f64_call_args[p->a][j], k)) { return 1; } j = j + 1; } return 0; }
@@ -13280,7 +13329,7 @@ static int fk_f64_slot_move(unsigned int *words, long long *wn, int from, int to
 static int fk_f64_hidden_alloc(const int *types) {
     int s = 5;
     while (s >= 0) {
-        if (types[s] == 0 && ((fk_f64_hidden_mask >> s) & 1) == 0) { fk_f64_hidden_mask = fk_f64_hidden_mask | (1 << s); return s; }
+        if (types[s] == 0 && ((fk_f64_hidden_mask >> s) & 1) == 0 && ((fk_f64_nested_x >> s) & 1) == 0 && ((fk_f64_nested_d >> s) & 1) == 0) { fk_f64_hidden_mask = fk_f64_hidden_mask | (1 << s); return s; }
         s = s - 1;
     }
     return -1;
@@ -13711,6 +13760,30 @@ static int fk_f64_emit_node(int n, unsigned int *words, long long *wn, int *ntem
         if (rb < 100) { return -1; }
         int aslot[3] = { sh, -1, -1 }, areg[3] = { 0, ra, rb };
         return fk_f64_ccall(words, wn, ntemp, nitemp, (unsigned long long)(fk_size_t)&fk_substring_word_c, 3, aslot, areg, 1);
+    }
+    if (p->kind == 63) {
+        /* a let in an expression: the value into the slot's register (an int, a list or a word moves into x(10+slot); a float into d(slot)), then the rest, whose register answers. The let's own value register is released. */
+        int slot = (int)(p->ilit >> 8), vt = (int)(p->ilit & 255);
+        int rv = fk_f64_emit(p->a, words, wn, ntemp, nitemp);
+        if (rv < 0) { return -1; }
+        if (vt == 2) {
+            if (rv >= 100) { return -1; }
+            if (rv != slot && !fk_f64_put(words, wn, 0x1E604000U | ((unsigned int)rv << 5) | (unsigned int)slot)) { return -1; } /* FMOV Dslot, Dv */
+        } else {
+            if (rv < 100) { return -1; }
+            if ((unsigned int)(rv - 100) != 10U + (unsigned int)slot && !fk_f64_put(words, wn, 0xAA0003E0U | ((unsigned int)(rv - 100) << 16) | (10U + (unsigned int)slot))) { return -1; } /* MOV X(10+slot), Xv */
+        }
+        fk_f64_release(rv, ntemp, nitemp);
+        return fk_f64_emit(p->b, words, wn, ntemp, nitemp);
+    }
+    if (p->kind == 62) {
+        /* nth: the list word and the index, both in registers, one C call (fk_leaf_nth) */
+        int rl = fk_f64_emit(p->a, words, wn, ntemp, nitemp);
+        if (rl < 100) { return -1; }
+        int ri = fk_f64_emit(p->b, words, wn, ntemp, nitemp);
+        if (ri < 100) { return -1; }
+        int aslot[2] = { -1, -1 }, areg[2] = { rl, ri };
+        return fk_f64_ccall(words, wn, ntemp, nitemp, (unsigned long long)(fk_size_t)&fk_leaf_nth, 2, aslot, areg, 0);
     }
     if (p->kind == 59 || p->kind == 60 || p->kind == 61) {
         /* a reading door on raw words (fk_leaf_*): each operand is a string slot's word (frame 24+slot, bit 8/9 of the node's flags) or the register an operand expression answered; one C call through
@@ -14359,7 +14432,7 @@ static void fk_f64_pulse_float(long long fx) {
     long long arity = fk_fnar[fx];
     int types[8] = {2, 2, 2, 2, 2, 2, 2, 2}; /* the expression leaf: every parameter a float, the door holds the rest to the walker */
     { long long q = arity; while (q < 8) { types[q] = 0; q = q + 1; } } /* a let slot is unbound here: this leaf takes no let step */
-    fk_f64_prog_n = 0;
+    fk_f64_prog_n = 0; fk_f64_nested_x = 0; fk_f64_nested_d = 0;
     fk_f64_hidden_mask = 0; fk_f64_lit_n = 0; fk_f64_need_scratch = 0; fk_f64_conses = 0; fk_f64_reads_strword = 0; fk_f64_calls_c = 0; fk_f64_ovf2_n = 0; fk_f64_acc_slot = -1; fk_f64_ovf_n = 0; fk_f64_self_n = 0;
     fk_f64_no_frame = 1;
     int top = 0;
@@ -14749,7 +14822,7 @@ static void fk_f64_expr_pulse(long long fx, long long fp, long long n, long long
     int letn[FK_F64_CHAIN_CAP], letslots[FK_F64_CHAIN_CAP];
     long long nlets = 0;
     long long node = body;
-    fk_f64_prog_n = 0;
+    fk_f64_prog_n = 0; fk_f64_nested_x = 0; fk_f64_nested_d = 0;
     fk_f64_self_tag = 0;
     while (node >= 0 && node < fk_node_count && fk_node[node][0] == 109) {
         if (nlets >= FK_F64_CHAIN_CAP) { return; }
@@ -15012,7 +15085,7 @@ static void fk_f64_loop_pulse_body(long long fx, long long fp, long long n) {
     int cas[FK_F64_CHAIN_CAP], cbs[FK_F64_CHAIN_CAP], exs[FK_F64_CHAIN_CAP], letn[FK_F64_CHAIN_CAP];
     unsigned int ccs[FK_F64_CHAIN_CAP];
     int tex = 0, nex = 0;
-    fk_f64_prog_n = 0;
+    fk_f64_prog_n = 0; fk_f64_nested_x = 0; fk_f64_nested_d = 0;
     fk_f64_call_n = 0; fk_f64_cur_fx = fx; fk_f64_acc_slot = -1; fk_f64_ovf_n = 0; fk_f64_self_n = 0; fk_f64_self_tag = 0; /* a call inside the loop's steps may reach a crystallized leaf; a call to this defn is the self call */
     fk_f64_hidden_mask = 0; fk_f64_lit_n = 0; fk_f64_need_scratch = 0; fk_f64_conses = 0; fk_f64_reads_strword = 0; fk_f64_calls_c = 0; fk_f64_ovf2_n = 0;
     long long j = 0;
@@ -19390,6 +19463,8 @@ static long long fk_leaf_node_value(long long v) {
     return 0;
 }
 static long long fk_leaf_value_kind(long long v) { return fk_value_kind(v); }
+static long long fk_op_nth(long long l, long long w);
+static long long fk_leaf_nth(long long lw, long long idx) { return fk_op_nth(lw, idx << 1); } /* nth: a word that is no list is nothing, never a stop; the index is the leaf's untagged int */
 static long long fk_leaf_record_get(long long rw, long long kw) {
     long long r = fk_ridx(rw), key = fk_stri(kw);
     if (r < 1 || r > fk_rp) { fk_c_moved = 1; return 0; }
