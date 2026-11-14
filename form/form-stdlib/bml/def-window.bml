@@ -1,80 +1,114 @@
-// def-window.bml — a source file read through its definitions, by structure and never by a count of characters.
+// def-window.bml — a source file read through its definitions, by one cursor over its bytes.
 //
-// A voice reading a file needs the definitions a task is about, whole, and the vocabulary of the rest (every definition's name and parameters, so it copies names and arities and invents none). Cutting a file
-// at a byte count loses the end of a definition or a definition the task needs; a window at a fixed indent runs a definition into the rest of the file (measured 2026-11-14: a marker for two spaces of indent made every
-// named definition of an eight-space file run to its end, a packet of 117574 bytes). So the file is read by line and indent: a definition line is one whose first word is "def" (BML) or "(defn" (Form), and a definition
-// runs to the next definition line at the same indent or less.
+// Who it serves: a voice (or a repair) that is shown a file and needs the definitions its task names, whole, and the vocabulary of the rest (every definition's name and parameters, so it copies names and
+// arities and invents none). What it needs is not lines: it is the byte span of a definition and the spans of the others' headings. So the file is walked ONCE by a cursor of byte offsets (str_find hops
+// from newline to newline; nothing is split to a list, nothing is indexed by position, nothing is sliced), a definition is [start offset, indent, name, name and parameters, end offset], and a region is
+// substring(start, end). Measured 2026-11-14 on the kernel's C (33.5k lines, 1.9 MB): the line-list reader took 4000 ms and answered 306 KB for one name; indexing a cons list in a loop is O(n squared).
 //
-// fdw-window(text, names, lines): when none of `names` (and none of the definitions that hold `lines`, 1-based line numbers) is a definition of the file, the whole text; else the file's head before its first definition,
-// each named definition whole, however long, then the name and parameters of every definition. Each info is [line index, indent, name, name and parameters].
+// A definition line is one whose first word is "def" (BML), "(defn" (Form) at its indent, a C function (a line at column 0 that begins a name, holds "(" and closes its head with "{" or ")"), or a markdown
+// heading ("#" at column 0). A definition runs to the next definition line at the same indent or less; a C function and a heading run to the next definition line (a function's closing brace is inside).
+//
+// fdw-window(text, names, lines, whole): the task's names (and the definitions that hold `lines`, 1-based) whole, with the definitions they use, after the file's head, then every definition's name and
+// parameters; a file with no definition line is its whole text while small and else the paragraphs that hold the lines and names the task gives.
 // preflight-exec: forbidden
 // preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/bml/string-join.bml
 section [form.bml] {
  class DefWindow {
-  def fdw-lead(l, i) = i < len(l) && (str_byte_at(l, i) == 32 || str_byte_at(l, i) == 9) ? fdw-lead(l, i + 1) : i;
-  def fdw-name-end(s, i) = i >= len(s) || str_byte_at(s, i) == 40 || str_byte_at(s, i) == 32 || str_byte_at(s, i) == 10 || str_byte_at(s, i) == 123 || str_byte_at(s, i) == 61 ? i : fdw-name-end(s, i + 1);
-  def fdw-sig-of(rest) {
-   let e = str_find(rest, ")", 0);
-   e < 0 ? rest : substring(rest, 0, e + 1);
+  def fdw-name-byte?(b) = (b >= 97 && b <= 122) || (b >= 65 && b <= 90) || (b >= 48 && b <= 57) || b == 95 || b == 45 || b == 63 || b == 33;
+  def fdw-lead(text, p, end) = p < end && (str_byte_at(text, p) == 32 || str_byte_at(text, p) == 9) ? fdw-lead(text, p + 1, end) : p;
+  def fdw-eol(text, p) { let e = str_find(text, "\n", p); e < 0 ? len(text) : e; }
+  def fdw-name-end(text, p, end) = p >= end || !fdw-name-byte?(str_byte_at(text, p)) ? p : fdw-name-end(text, p + 1, end);
+  def fdw-name-start(text, p, floor) = p > floor && fdw-name-byte?(str_byte_at(text, p - 1)) ? fdw-name-start(text, p - 1, floor) : p;
+  def fdw-sig-end(text, p, end) { let e = str_find(text, ")", p); e < 0 || e >= end ? end : e + 1; }
+  def fdw-word?(text, p, word) = (String) substring(text, p, p + len(word)) == word;
+  // the info of the line [ls, le): nothing, or [start, indent, name, sig]
+  def fdw-info(text, ls, le) {
+   let i = fdw-lead(text, ls, le);
+   let ind = i - ls;
+   let c = i < le ? str_byte_at(text, i) : 0;
+   if (i >= le) then nothing()
+   else if (fdw-word?(text, i, "def ")) then [ls, ind, substring(text, i + 4, fdw-name-end(text, i + 4, le)), substring(text, i, fdw-sig-end(text, i, le))]
+   else if (fdw-word?(text, i, "(defn ")) then [ls, ind, substring(text, i + 6, fdw-name-end(text, i + 6, le)), substring(text, i, fdw-sig-end(text, i, le))]
+   else if (ind == 0 && c == 35 && le - ls > 2 && str_byte_at(text, ls + 1) != 105 && str_byte_at(text, ls + 1) != 100) then [ls, 0, substring(text, ls, le), substring(text, ls, le)]
+   else fdw-c-info(text, ls, le, c);
   }
-  def fdw-info(l, idx) {
-   let i = fdw-lead(l, 0);
-   let rest = substring(l, i, len(l));
-   let kind = str_find(rest, "def ", 0) == 0 ? 4 : str_find(rest, "(defn ", 0) == 0 ? 6 : 0;
-   kind == 0 ? nothing() : [idx, i, substring(rest, kind, fdw-name-end(rest, kind)), fdw-sig-of(rest)];
+  // a C function head: column 0, begins a name, holds "(" and the line closes with "{" or ")" (a head split over lines still names its function)
+  def fdw-c-info(text, ls, le, c) {
+   let p = str_find(text, "(", ls);
+   let ok = c != 0 && str_byte_at(text, ls) == c && fdw-name-byte?(c) && p > ls && p < le && (str_byte_at(text, le - 1) == 123 || str_byte_at(text, le - 1) == 41 || str_byte_at(text, le - 1) == 44) && !fdw-word?(text, ls, "if ") && !fdw-word?(text, ls, "while ") && !fdw-word?(text, ls, "for ") && !fdw-word?(text, ls, "switch ") && !fdw-word?(text, ls, "return ") && !fdw-word?(text, ls, "typedef ") && !fdw-word?(text, ls, "else");
+   ok ? [ls, 0, substring(text, fdw-name-start(text, p, ls), p), substring(text, ls, str_byte_at(text, le - 1) == 123 ? le - 1 : le)] : nothing();
   }
-  def fdw-add(x, acc) = nothing?(x) ? acc : cons(x, acc);
+  // one pass: every definition's info, in file order (reversed accumulation, then reversed once)
+  def fdw-scan(text, p, acc) {
+   let n = len(text);
+   let le = fdw-eol(text, p);
+   let x = fdw-info(text, p, le);
+   let acc2 = nothing?(x) ? acc : cons(x, acc);
+   le >= n ? acc2 : fdw-scan(text, le + 1, acc2);
+  }
   def fdw-rev(xs, acc) = len(xs) == 0 ? acc : fdw-rev(xs[1:], cons(xs[0], acc));
-  def fdw-infos(L) = fdw-rev(foldl((acc, i) => fdw-add(fdw-info(L[i], i), acc), [], range(0, len(L))), []);
+  // an info gains its end: the next definition's start at the same indent or less (a C function and a heading: the next definition at all)
+  def fdw-close(infos, n) = len(infos) == 0 ? [] : fdw-closed(infos, n, []);
+  def fdw-closed(infos, n, out) {
+   let x = infos[0];
+   let rest = infos[1:];
+   let e = fdw-end-after(rest, x, n);
+   len(rest) == 0 ? fdw-rev(cons(append(x, [e]), out), []) : fdw-closed(rest, n, cons(append(x, [e]), out));
+  }
+  def fdw-end-after(rest, x, n) = len(rest) == 0 ? n : (rest[0][1] <= x[1] || x[1] == 0 ? rest[0][0] : fdw-end-after(rest[1:], x, n));
+  def fdw-infos(text) = fdw-close(fdw-rev(fdw-scan(text, 0, []), []), len(text));
   def fdw-named(infos, name) = len(infos) == 0 ? nothing() : infos[0][2] == name ? infos[0] : fdw-named(infos[1:], name);
-  def fdw-end(infos, hit, n) = len(infos) == 0 ? n : infos[0][0] > hit[0] && infos[0][1] <= hit[1] ? infos[0][0] : fdw-end(infos[1:], hit, n);
-  def fdw-region-of(L, infos, name) {
-   let hit = fdw-named(infos, name);
-   nothing?(hit) ? "" : str-join-with(take(fdw-end(infos, hit, len(L)) - hit[0], L[hit[0]:]), "\n");
-  }
-  def fdw-header-of(L, infos) = len(infos) == 0 ? str-join-with(L, "\n") : str-join-with(take(infos[0][0], L), "\n");
-  // the definition that holds a 1-based line: the last definition line at or before it
-  def fdw-name-at(infos, line) = foldl((best, x) => x[0] + 1 <= line ? x[2] : best, "", infos);
+  def fdw-region-of(text, infos, name) { let hit = fdw-named(infos, name); nothing?(hit) ? "" : trim-right(substring(text, hit[0], hit[4])); }
+  def fdw-region(text, name) = fdw-region-of(text, fdw-infos(text), name);
+  def fdw-trim-end(s) = len(s) > 0 && (str_byte_at(s, len(s) - 1) == 10 || str_byte_at(s, len(s) - 1) == 32) ? fdw-trim-end(substring(s, 0, len(s) - 1)) : s;
+  def trim-right(s) = fdw-trim-end(s);
+  def fdw-header-of(text, infos) = len(infos) == 0 ? text : substring(text, 0, infos[0][0]);
+  // the 1-based line's byte offset, by hopping newlines (once per named line)
+  def fdw-offset-of-line(text, line) = line <= 1 ? 0 : fdw-hop(text, 0, line - 1);
+  def fdw-hop(text, p, k) { let e = str_find(text, "\n", p); e < 0 ? len(text) : (k <= 1 ? e + 1 : fdw-hop(text, e + 1, k - 1)); }
+  // the definition that holds an offset: the last definition that starts at or before it
+  def fdw-name-at(infos, off) = foldl((best, x) => x[0] <= off && off < x[4] ? x[2] : best, "", infos);
   def fdw-uniq(xs) = foldl((acc, x) => len(x) == 0 || len(filter(y => y == x, acc)) > 0 ? acc : append(acc, [x]), [], xs);
-  def fdw-regions(L, infos, names) = filter(r => len(r) > 0, map(n => fdw-region-of(L, infos, n), fdw-uniq(names)));
-  def fdw-held?(text, names) {
-   let L = split-on(text, "\n");
-   len(fdw-regions(L, fdw-infos(L), names)) > 0;
-  }
-  def fdw-sigs-of(text) = map(x => x[3], fdw-infos(split-on(text, "\n")));
-  // the blank-line-delimited paragraph that holds a 1-based line
-  def fdw-paragraph-at(L, line) = line < 1 || line > len(L) ? "" : fdw-paragraph-of(L, fdw-para-top(L, line - 1), fdw-para-end(L, line - 1));
-  def fdw-paragraph-of(L, top, end) = str-join-with(take(end - top, L[top:]), "\n");
-  def fdw-blank?(l) = len(trim(l)) == 0;
-  def fdw-para-top(L, i) = i <= 0 || i >= len(L) ? 0 : fdw-blank?(L[i - 1]) ? i : fdw-para-top(L, i - 1);
-  def fdw-para-end(L, i) = i >= len(L) || (i > 0 && fdw-blank?(L[i])) ? i : fdw-para-end(L, i + 1);
+  def fdw-regions(text, infos, names) = filter(r => len(r) > 0, map(n => fdw-region-of(text, infos, n), fdw-uniq(names)));
+  def fdw-held?(text, names) = len(fdw-regions(text, fdw-infos(text), names)) > 0;
+  def fdw-sigs-of(text) = map(x => x[3], fdw-infos(text));
   // The definitions a named definition uses are read with it (one level): a name of the file that stands in a named region as a whole word (no name character before it or after it).
-  def fdw-namechar?(c) = len(c) == 1 && str_find("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_?!", c, 0) >= 0;
-  def fdw-word-in?(text, name, from) {
-   let at = str_find(text, name, from);
-   at < 0 ? false : (at == 0 || !fdw-namechar?(substring(text, at - 1, at))) && (at + len(name) >= len(text) || !fdw-namechar?(substring(text, at + len(name), at + len(name) + 1))) ? true : fdw-word-in?(text, name, at + 1);
+  def fdw-word-in?(body, name, from) {
+   let at = str_find(body, name, from);
+   at < 0 ? false : (at == 0 || !fdw-name-byte?(str_byte_at(body, at - 1))) && (at + len(name) >= len(body) || !fdw-name-byte?(str_byte_at(body, at + len(name)))) ? true : fdw-word-in?(body, name, at + 1);
   }
-  def fdw-callees(L, infos, names) {
-   let body = str-join-with(map(n => fdw-region-of(L, infos, n), names), "\n");
-   filter(n => len(n) > 2 && !any?(m => m == n, names) && fdw-word-in?(body, n, 0), fdw-uniq(map(x => x[2], infos)));
+  def fdw-callees(text, infos, names) {
+   let body = str-join-with(map(n => fdw-region-of(text, infos, n), names), "\n");
+   // only a BML/Form definition is read with its helpers (they are short, and the task is about a few): a C function calls dozens, and its callees are known by name and parameters in the list below
+   filter(n => len(n) > 2 && !any?(m => m == n, names) && fdw-word-in?(body, n, 0), fdw-uniq(map(x => x[2], filter(x => fdw-word?(x[3], 0, "def ") || fdw-word?(x[3], 0, "(defn "), infos))));
   }
-  // A file with no definition line to read it by (the kernel's C, a document) is read by the paragraphs that hold the task's names: each name's first lines (the definition of a C function is the first
-  // line that holds its name followed by an opening brace or parameter list, and its uses follow), no paragraph twice. Nothing is dropped for size: the paragraphs are the file's structure.
-  def fdw-named-lines(L, names) = foldl((acc, n) => append(acc, fdw-first-hits(L, n, 0, 0, [])), [], filter(n => len(n) > 2, names));
-  def fdw-first-hits(L, n, i, k, acc) = i >= len(L) || k >= 6 ? acc : str_find(L[i], n, 0) >= 0 ? fdw-first-hits(L, n, i + 1, k + 1, append(acc, [i + 1])) : fdw-first-hits(L, n, i + 1, k, acc);
-  def fdw-dedupe-paras(L, lines) = foldl((acc, n) => any?(m => m >= 0 && fdw-para-top(L, n - 1) == fdw-para-top(L, m - 1), acc) ? acc : append(acc, [n]), [], lines);
-  // No file with definitions is ever shown whole for want of a name: with none named it is its head and every definition's name and parameters. `whole` is 1 for a file the reader may write: a file with
-  // no definitions to read it by is then its whole text; a file it may only read is the paragraphs that hold the lines the task names, or a named omission with its size.
+  // The vocabulary beside the regions: every BML/Form definition by name and parameters (a few hundred bytes each, the file is the task's to copy from), but of a C file only the functions the regions use
+  // (a kernel holds a thousand functions: its name list is 200 KB and the voice needs the names the code in front of it calls, not all the others)
+  def fdw-bml-sig?(x) = fdw-word?(x[3], 0, "def ") || fdw-word?(x[3], 0, "(defn ");
+  def fdw-vocabulary(infos, regions) {
+   let body = str-join-with(regions, "\n");
+   map(x => x[3], filter(x => fdw-bml-sig?(x) || fdw-word-in?(body, x[2], 0), infos));
+  }
+  // A file with no definition line to read it by is read by the paragraphs that hold the task's names and lines: a paragraph is the bytes between blank lines around an offset.
+  def fdw-para-top(text, p) = p <= 1 ? 0 : (str_byte_at(text, p - 1) == 10 && str_byte_at(text, p - 2) == 10 ? p : fdw-para-top(text, p - 1));
+  def fdw-para-end(text, p) { let e = str_find(text, "\n\n", p); e < 0 ? len(text) : e; }
+  def fdw-para-at(text, off) = off < 0 || off > len(text) ? "" : substring(text, fdw-para-top(text, off), fdw-para-end(text, off));
+  def fdw-first-hits(text, n, p, k, acc) { let at = str_find(text, n, p); at < 0 || k >= 6 ? acc : fdw-first-hits(text, n, at + len(n), k + 1, append(acc, [at])); }
+  def fdw-named-offsets(text, names) = foldl((acc, n) => append(acc, fdw-first-hits(text, n, 0, 0, [])), [], filter(n => len(n) > 2, names));
+  def fdw-paras(text, offs) = fdw-dedupe(text, offs, [], []);
+  def fdw-dedupe(text, offs, tops, acc) = len(offs) == 0 ? acc : fdw-dedupe-one(text, offs, fdw-para-top(text, offs[0]), tops, acc);
+  def fdw-dedupe-one(text, offs, t, tops, acc) = any?(x => x == t, tops) ? fdw-dedupe(text, offs[1:], tops, acc) : fdw-dedupe(text, offs[1:], append(tops, [t]), append(acc, [fdw-para-at(text, offs[0])]));
+  // `whole` stays in the signature the callers know; a file with no definition line is shown whole while it is small and structure decides when it is not
   def fdw-window(text, names, lines, whole) {
-   let L = split-on(text, "\n");
-   let infos = fdw-infos(L);
-   let named = fdw-uniq(append(names, map(n => fdw-name-at(infos, n), lines)));
-   let all = append(named, fdw-callees(L, infos, named));
-   let regions = fdw-regions(L, infos, all);
-   len(regions) > 0 ? fdw-header-of(L, infos) ++ "\n// ... (the definitions the task names follow, then every definition's name and parameters) ...\n" ++ str-join-with(regions, "\n\n") ++ "\n\n// the definitions of this file, name and parameters:\n" ++ str-join-with(map(x => x[3], infos), "\n") ++ "\n"
-   : len(infos) > 0 ? fdw-header-of(L, infos) ++ "\n// (the task names none of this file's definitions: the file is shown by its definitions' names and parameters)\n" ++ str-join-with(map(x => x[3], infos), "\n") ++ "\n"
-   : len(L) <= 1500 ? text
-   : len(lines) + len(names) > 0 ? "// (a file with no definitions this reader can name: the paragraphs that hold the lines and the names the task names follow; an edit block copies its old text from here)\n" ++ str-join-with(map(n => fdw-paragraph-at(L, n), fdw-dedupe-paras(L, append(lines, fdw-named-lines(L, names)))), "\n\n") ++ "\n"
+   let infos = fdw-infos(text);
+   let lineoffs = map(n => fdw-offset-of-line(text, n), lines);
+   let named = fdw-uniq(append(names, map(o => fdw-name-at(infos, o), lineoffs)));
+   let all = append(named, fdw-callees(text, infos, named));
+   let regions = fdw-regions(text, infos, all);
+   len(regions) > 0 ? fdw-header-of(text, infos) ++ "\n// ... (the definitions the task names follow, then the definitions of the file by name and parameters) ...\n" ++ str-join-with(regions, "\n\n") ++ "\n\n// the definitions of this file, name and parameters:\n" ++ str-join-with(fdw-vocabulary(infos, regions), "\n") ++ "\n"
+   : len(infos) > 0 ? fdw-header-of(text, infos) ++ "\n// (the task names none of this file's definitions: the file is shown by its definitions' names and parameters)\n" ++ str-join-with(map(x => x[3], infos), "\n") ++ "\n"
+   : len(text) <= 60000 ? text
+   : len(lineoffs) + len(names) > 0 ? "// (a file with no definitions this reader can name: the paragraphs that hold the lines and the names the task names follow; an edit block copies its old text from here)\n" ++ str-join-with(fdw-paras(text, append(lineoffs, fdw-named-offsets(text, names))), "\n\n") ++ "\n"
    : "// (a file of " ++ len(text).str() ++ " bytes with no definitions this reader can name, and no line named by the task: not shown here)\n";
   }
  }

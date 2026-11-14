@@ -12407,6 +12407,7 @@ static long long fk_f64_frame_pbits(long long fp, long long n) {
     return b;
 }
 static int fk_f64_mov64(unsigned int *words, long long *wn, unsigned int xd, unsigned long long bits);
+static long long fk_str_find_words(long long hw, long long nw, long long from); /* the leaf calls this C native for str_find (kind 39 emit); answers the raw byte index or -1 */
 static long long fk_substring_word(long long sword, long long a, long long b); /* the leaf calls this C native for substring (kind 38 emit); answers a raw interned word */
 static long long fk_f64_ovf_at[FK_F64_OVF_CAP]; /* the B.cond sites that leave for the overflow block: the scratch ran out, the walker answers */
 static long long fk_f64_ovf_n;
@@ -12504,7 +12505,7 @@ static int fk_f64_push(int kind, int a, int b, double lit, long long ilit) {
 /* the type an admitted node answers: 1 int, 2 float -- every int kind, an if-expression's own type, a call's from its callee's signature */
 static int fk_f64_type_of(int n) {
     int k = fk_f64_prog[n].kind;
-    if ((k >= 7 && k <= 12) || k == 14 || k == 15 || k == 16 || k == 26 || k == 27 || k == 28 || k == 36) { return 1; }
+    if ((k >= 7 && k <= 12) || k == 14 || k == 15 || k == 16 || k == 26 || k == 27 || k == 28 || k == 36 || k == 39) { return 1; }
     if (k == 17) { return (int)fk_f64_prog[n].lit; }
     if (k == 19) { return ((fk_f64_sig[fk_f64_prog[n].ilit] >> 8) & 1) ? 2 : 1; }
     return 2;
@@ -12560,6 +12561,28 @@ static int fk_f64_admit(long long i, long long arity, const int *types, int *out
     if (t == 1) {
         *out = fk_f64_push(7, 0, 0, 0.0, fk_node[i][1]); /* exact 64-bit; SCVTF rounds it the way (double)v does when a float meets it */
         return *out < 0 ? 0 : 1;
+    }
+    if (t == 30) {
+        /* str_find h needle from: h and needle ride string slots (a parameter or a literal: the door fills frame word 24+slot), from is an int. A C call with the leaf's live registers spilled around it
+         * (kind 39); it answers the raw byte index or -1, an int. The call interns nothing, so no pointer a leaf holds goes stale. */
+        int hp = 0, np = 0, fq = 0;
+        int th = fk_f64_admit(fk_node[i][1], arity, types, &hp);
+        if (th != 3) { if (th != 0) { fk_f64_refuse_tag = t; } return 0; }
+        int tn = fk_f64_admit(fk_node[i][2], arity, types, &np);
+        if (tn != 3) { if (tn != 0) { fk_f64_refuse_tag = t; } return 0; }
+        if (fk_f64_str_slot(hp) < 0 || fk_f64_str_slot(np) < 0) { fk_f64_refuse_tag = t; return 0; }
+        int tf = fk_f64_admit(fk_node[i][3], arity, types, &fq);
+        if (tf == 5) { fq = fk_f64_narrow(fq, 1); if (fq < 0) { return 0; } tf = 1; }
+        if (tf != 1) { if (tf != 0) { fk_f64_refuse_tag = t; } return 0; }
+        fk_f64_reads_strword = 1;
+        *out = fk_f64_push(39, hp, fq, 0.0, np);
+        return *out < 0 ? 0 : 1;
+    }
+    if (t == 137) {
+        /* (nothing): the word itself, loaded as the 64-bit constant it is and answered raw (the door returns a word-typed answer untouched). A recipe that answers nothing on one branch and a list or a
+         * word on the other is the commonest shape in the body's own readers (every cursor, lookup and index): the if arm below lets the constant take the other arm's word type. */
+        *out = fk_f64_push(7, 0, 0, 0.0, fk_nothing);
+        return *out < 0 ? 0 : 5;
     }
     if (t == 53) {
         long long lc = fk_node[i][1];
@@ -12698,8 +12721,13 @@ static int fk_f64_admit(long long i, long long arity, const int *types, int *out
         if (tt == 0) { return 0; }
         int te = fk_f64_admit(els, arity, types, &b);
         if (te == 0) { return 0; }
-        if (!fk_f64_word_resolve(&a, &tt, te)) { return 0; } /* a head as one arm: a float where the other arm is a float, else an int */
-        if (!fk_f64_word_resolve(&b, &te, tt)) { return 0; }
+        /* (nothing) as one arm takes the other arm's word type (a list or a word): the answer is the raw word either way */
+        if (tt == 5 && fk_f64_prog[a].kind == 7 && fk_f64_prog[a].ilit == fk_nothing && (te == 4 || te == 5)) { tt = te; }
+        else if (te == 5 && fk_f64_prog[b].kind == 7 && fk_f64_prog[b].ilit == fk_nothing && (tt == 4 || tt == 5)) { te = tt; }
+        else {
+            if (!fk_f64_word_resolve(&a, &tt, te)) { return 0; } /* a head as one arm: a float where the other arm is a float, else an int */
+            if (!fk_f64_word_resolve(&b, &te, tt)) { return 0; }
+        }
         if (te != tt) { return 0; }
         int rs = -1;
         if (tt == 3) {
@@ -13073,6 +13101,7 @@ static int fk_f64_prog_refs(int n, int k) {
     if (p->kind == 17) { return fk_f64_prog_refs(p->a, k) || fk_f64_prog_refs(p->b, k) || fk_f64_prog_refs((int)p->ilit, k); }
     if (p->kind == 13 || p->kind == 24 || p->kind == 25 || p->kind == 26 || p->kind == 27 || p->kind == 28 || p->kind == 30 || p->kind == 34 || p->kind == 36) { return fk_f64_prog_refs(p->a, k); }
     if (p->kind == 32) { return fk_f64_prog_refs(p->a, k) || fk_f64_prog_refs(p->b, k); }
+    if (p->kind == 39) { return fk_f64_prog_refs(p->a, k) || fk_f64_prog_refs(p->b, k) || fk_f64_prog_refs((int)p->ilit, k); }
     if (p->kind == 33) { int j = 0; if (fk_f64_prog_refs(p->s, k)) { return 1; } while (j < p->b) { if (fk_f64_prog_refs(fk_f64_call_args[p->a][j], k)) { return 1; } j = j + 1; } return 0; }
     if (p->kind == 19) { int j = 0; while (j < p->b) { if (fk_f64_prog_refs(fk_f64_call_args[p->a][j], k)) { return 1; } j = j + 1; } return 0; }
     if (p->kind == 18 || (p->kind >= 3 && p->kind <= 6) || (p->kind >= 9 && p->kind <= 12) || p->kind == 15) { return fk_f64_prog_refs(p->a, k) || fk_f64_prog_refs(p->b, k); }
@@ -13480,6 +13509,56 @@ static int fk_f64_emit_node(int n, unsigned int *words, long long *wn, int *ntem
         if (!fk_f64_put(words, wn, 0x37C80069U)) { return -1; }                                              /* TBNZ X9, #25, +3: a list answer, as it is */
         if (!fk_f64_put(words, wn, 0x37D80049U)) { return -1; }                                              /* TBNZ X9, #27, +2: a word answer, as it is */
         if (!fk_f64_put(words, wn, 0xD37FF800U | (xd << 5) | xd)) { return -1; }                             /* LSL Xd, Xd, #1: an int answer tagged */
+        if (!fk_f64_put(words, wn, 0x910003FFU | fr)) { return -1; }                                         /* ADD SP, SP, #frame */
+        return 100 + rd;
+    }
+    if (p->kind == 39) {
+        /* str_find as a C call in any position: the from index first (it may itself spill), then the leaf's live registers saved on a frame the way a call to another leaf saves them, the two strings' interned
+         * words (frame words 24+slot, read through X0 which still holds the leaf's frame) and the index moved into X0..X2 through scratch words 0..2 of that frame so no source register is read after it is
+         * overwritten, the call, the registers back, and the answer (a raw int: -1 or the byte index) into a fresh temporary. Nothing in fk_str_find_words interns, so no byte pointer the leaf holds goes stale. */
+        int sh = fk_f64_str_slot(p->a), sn = fk_f64_str_slot((int)p->ilit);
+        if (sh < 0 || sn < 0) { return -1; }
+        int rf = fk_f64_emit(p->b, words, wn, ntemp, nitemp);
+        if (rf < 100) { return -1; }
+        unsigned int fr = (unsigned int)FK_F64_CALL_FRAME << 10;
+        if (!fk_f64_put(words, wn, 0xD10003FFU | fr)) { return -1; }                                            /* SUB SP, SP, #frame */
+        if (!fk_f64_put(words, wn, 0xF9000000U | (FK_F64_CF_X0 << 10) | (31U << 5) | 0U)) { return -1; }    /* STR X0 */
+        if (!fk_f64_put(words, wn, 0xF9000000U | (FK_F64_CF_X8 << 10) | (31U << 5) | 8U)) { return -1; }    /* STR X8 */
+        if (!fk_f64_put(words, wn, 0xF9000000U | (FK_F64_CF_X30 << 10) | (31U << 5) | 30U)) { return -1; }  /* STR X30 */
+        unsigned int j = 0;
+        while (j < 8) { if (((fk_f64_live_x >> j) & 1) && !fk_f64_put(words, wn, 0xF9000000U | ((FK_F64_CF_X10 + j) << 10) | (31U << 5) | (10U + j))) { return -1; } j = j + 1; }
+        j = 0;
+        while (j < (unsigned int)*nitemp) { if (!fk_f64_put(words, wn, 0xF9000000U | ((FK_F64_CF_X1 + j) << 10) | (31U << 5) | (1U + j))) { return -1; } j = j + 1; }
+        j = 0;
+        while (j < 8) { if (((fk_f64_live_d >> j) & 1) && !fk_f64_put(words, wn, 0xFD000000U | ((FK_F64_CF_D0 + j) << 10) | (31U << 5) | j)) { return -1; } j = j + 1; }
+        j = 0;
+        while (j < (unsigned int)*ntemp) { if (!fk_f64_put(words, wn, 0xFD000000U | ((FK_F64_CF_D16 + j) << 10) | (31U << 5) | (16U + j))) { return -1; } j = j + 1; }
+        if (!fk_f64_put(words, wn, 0xF9400009U | ((24U + (unsigned int)sh) << 10))) { return -1; }           /* LDR X9, [X0, #8*(24+sh)]: the haystack's word */
+        if (!fk_f64_put(words, wn, 0xF9000000U | (0U << 10) | (31U << 5) | 9U)) { return -1; }              /* STR X9, [SP, #0] */
+        if (!fk_f64_put(words, wn, 0xF9400009U | ((24U + (unsigned int)sn) << 10))) { return -1; }           /* LDR X9, [X0, #8*(24+sn)]: the needle's word */
+        if (!fk_f64_put(words, wn, 0xF9000000U | (1U << 10) | (31U << 5) | 9U)) { return -1; }              /* STR X9, [SP, #8] */
+        if (!fk_f64_put(words, wn, 0xF9000000U | (2U << 10) | (31U << 5) | (unsigned int)(rf - 100))) { return -1; } /* STR Xf, [SP, #16]: from */
+        if (!fk_f64_put(words, wn, 0xF9400000U | (0U << 10) | (31U << 5) | 0U)) { return -1; }              /* LDR X0, [SP, #0] */
+        if (!fk_f64_put(words, wn, 0xF9400000U | (1U << 10) | (31U << 5) | 1U)) { return -1; }              /* LDR X1, [SP, #8] */
+        if (!fk_f64_put(words, wn, 0xF9400000U | (2U << 10) | (31U << 5) | 2U)) { return -1; }              /* LDR X2, [SP, #16] */
+        if (!fk_f64_mov64(words, wn, 16U, (unsigned long long)(fk_size_t)&fk_str_find_words)) { return -1; }
+        if (!fk_f64_put(words, wn, 0xD63F0200U)) { return -1; }                                              /* BLR X16 */
+        if (!fk_f64_put(words, wn, 0xF9000000U | (FK_F64_CF_ANS << 10) | (31U << 5) | 0U)) { return -1; }  /* the answer, kept on the frame while the registers return */
+        if (!fk_f64_put(words, wn, 0xF9400000U | (FK_F64_CF_X0 << 10) | (31U << 5) | 0U)) { return -1; }   /* LDR X0 */
+        if (!fk_f64_put(words, wn, 0xF9400000U | (FK_F64_CF_X8 << 10) | (31U << 5) | 8U)) { return -1; }   /* LDR X8 */
+        if (!fk_f64_put(words, wn, 0xF9400000U | (FK_F64_CF_X30 << 10) | (31U << 5) | 30U)) { return -1; } /* LDR X30 */
+        j = 0;
+        while (j < 8) { if (((fk_f64_live_x >> j) & 1) && !fk_f64_put(words, wn, 0xF9400000U | ((FK_F64_CF_X10 + j) << 10) | (31U << 5) | (10U + j))) { return -1; } j = j + 1; }
+        j = 0;
+        while (j < (unsigned int)*nitemp) { if (!fk_f64_put(words, wn, 0xF9400000U | ((FK_F64_CF_X1 + j) << 10) | (31U << 5) | (1U + j))) { return -1; } j = j + 1; }
+        j = 0;
+        while (j < 8) { if (((fk_f64_live_d >> j) & 1) && !fk_f64_put(words, wn, 0xFD400000U | ((FK_F64_CF_D0 + j) << 10) | (31U << 5) | j)) { return -1; } j = j + 1; }
+        j = 0;
+        while (j < (unsigned int)*ntemp) { if (!fk_f64_put(words, wn, 0xFD400000U | ((FK_F64_CF_D16 + j) << 10) | (31U << 5) | (16U + j))) { return -1; } j = j + 1; }
+        fk_f64_release(rf, ntemp, nitemp);
+        if (*nitemp >= 7) { return -1; }
+        int rd = 1 + *nitemp; *nitemp = *nitemp + 1;
+        if (!fk_f64_put(words, wn, 0xF9400000U | (FK_F64_CF_ANS << 10) | (31U << 5) | (unsigned int)rd)) { return -1; } /* LDR Xd, [SP, #answer] */
         if (!fk_f64_put(words, wn, 0x910003FFU | fr)) { return -1; }                                         /* ADD SP, SP, #frame */
         return 100 + rd;
     }
@@ -19006,6 +19085,32 @@ static void fk_pv_word_inline(long long v) {
  * to `b`, clamped to [0,len], "" when the range is empty/reversed or `sword` is not a string, then interned. THE ONE
  * MEANING OF THE CUT lives here so the mode-9 walker arm and the JIT leaf's substring call share exactly one body.
  * `a`/`b` are already untagged. FK_SBYTES(ss) is re-read each iteration because fk_store_grow moves fk_sb. */
+/* str_find as a C call for the typed leaf (kind 39): the walker's one meaning (t == 30 in fk_walk), on two interned string words and a raw byte index, answering the raw byte index or -1.
+ * from < 0 reads as 0; from past the haystack, or a needle longer than what is left, answers -1; the empty needle answers from. Nothing here walks, interns or grows: the pool cannot move. */
+static long long fk_str_find_words(long long hw, long long nw, long long from) {
+    long long sa = fk_stri(hw), sb = fk_stri(nw);
+    if (sa < 0 || !FK_SOK(sa) || sb < 0 || !FK_SOK(sb)) { return -1; }
+    if (from < 0) { from = 0; }
+    long long hl = FK_SLEN(sa);
+    if (from > hl) { return -1; }
+    long long ln = FK_SLEN(sb);
+    if (ln == 0) { return from; }
+    long long lim = hl - ln;
+    if (from > lim) { return -1; }
+    const char *hb = FK_SBYTES(sa);
+    const char *nb = FK_SBYTES(sb);
+    char b0 = nb[0];
+    long long pos = from;
+    while (pos <= lim) {
+        if (hb[pos] == b0) {
+            long long j = 1;
+            while (j < ln && hb[pos + j] == nb[j]) { j = j + 1; }
+            if (j == ln) { return pos; }
+        }
+        pos = pos + 1;
+    }
+    return -1;
+}
 static long long fk_substring_word(long long sword, long long a, long long b) {
     long long ss = fk_stri(sword);
     if (ss < 0 || !FK_SOK(ss)) { return fk_strv(fk_sintern(fk_sbp, 0)); }
@@ -22407,6 +22512,14 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (ks_k == 67) { return fk_clo_reclaimed << 1; }
         if (ks_k == 68) { return fk_clo_capvals_top << 1; }
         if (ks_k == 69) { return fk_melt_gen << 1; }   /* the melts this kernel has run */
+        if (ks_k >= 900 && ks_k <= 1255) {
+            /* the native column read as a histogram: 900 = defns declined (-1: no body, no arity the lanes carry), 901 = frame slot not a number (-2), 902 = declined with no cause named (-4),
+             * 1000 + tag = defns the crystallizer refused for that node tag (-(1000+tag)): the operation it has no arm for, and so the work */
+            long long want = ks_k == 900 ? -1 : (ks_k == 901 ? -2 : (ks_k == 902 ? -4 : 0 - ks_k));
+            long long cnt = 0, q = 1;
+            if (fk_fn_native != 0) { while (q < fk_fn_count && q < fk_fn_capacity) { if (fk_fn_native[q] == want) { cnt = cnt + 1; } q = q + 1; } }
+            return cnt << 1;
+        }
         if (ks_k == 92) { return fk_f64_reasked << 1; } /* refusals reopened because the frame wore another shape than the one refused */
         if (ks_k == 90) { return fk_seed_state << 1; } /* 1 the version the checkout's seed names, 0 another, 2 no checkout */
         if (ks_k == 74) { return fk_f64_emit_refused << 1; }   /* node levels past 4096 the loop lane's emitter refused instead of running the stack out */
