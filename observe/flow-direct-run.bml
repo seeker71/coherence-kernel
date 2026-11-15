@@ -704,6 +704,7 @@ section [form.bml] {
    let endrow = fl-door-stamp(fsg-end-row(record_get(S, "id"), v, c, record_get(S, "got"), record_get(S, "miss"), rep, ms), S);
    let b = sbt-append-count(record_get(S, "ledger"), endrow ++ "\n");
    let side = write_file_text(fl-end-path(record_get(S, "id")), endrow ++ "\n");
+   let reset = write_file_text(fl-tries-path(record_get(S, "id")), "0");
    let r = fl-restore(S);
    print_str(fl-cat(["{\"request\":\"", record_get(S, "id"), "\",\"verdict\":\"", v, "\",\"cause\":\"", c, "\",\"got\":", record_get(S, "got").str(), ",\"missed\":", record_get(S, "miss").str(), ",\"repairs\":", rep.str(), ",\"ms\":", ms.str(), ",\"rent_tokens\":0}\n"]));
   }
@@ -805,8 +806,25 @@ section [form.bml] {
   // A request is taken by one flow: the claim carries the door and a token (slot, pid, time); the last writer of a claim wins, and after a settle every flow that wrote it reads it back, so
   // the ones whose token is not there yield at once to the next fresh request (two loops picked the same request in the same second and spent a pass each).
   def fl-token(o) = fl-cat([fl-door(), " ", svs-int(o, "slot", 0).str(), "-", host_pid().str(), "-", host_monotonic_ms().str()]);
+  // A pass that dies (fkwu segfaulted four seconds into every pass that picked one request, 2026-11-15, exit 139) leaves no end row, so the next pass took the same request and died again, for ever. Each take counts itself
+  // beside the claim and a normal end sets the count back to zero: a request taken a fourth time with no end behind it ends as "fkwu-crashed", named, and the loop goes on to the next.
+  def fl-tries-path(id) = fl-cat([fl-claim(id), ".tries"]);
+  def fl-tries(id) = (try str_to_int(trim(fl-text(fl-tries-path(id)))) catch 0);
+  def fl-crashed(o, id) {
+   let row = fsg-end-row(id, "ended", "fkwu-crashed", 0, 0, 0, 0);
+   let stamped = substring(row, 0, len(row) - 1) ++ ",\"door\":\"" ++ fl-door() ++ "\"}";
+   let a = sbt-append-count(fl-ledger-of(o), stamped ++ "\n");
+   let b = write_file_text(fl-end-path(id), stamped ++ "\n");
+   let c = write_file_text(fl-tries-path(id), "0");
+   print_str(fl-cat(["{\"request\":\"", id, "\",\"verdict\":\"ended\",\"cause\":\"fkwu-crashed\",\"got\":0,\"missed\":0,\"repairs\":0,\"ms\":0,\"rent_tokens\":0}\n"]));
+  }
   def fl-one(o, id) {
    let made = fs-mkdir("/tmp/form-flow-claims");
+   let n = fl-tries(id) + 1;
+   let counted = write_file_text(fl-tries-path(id), n.str());
+   n > 3 && file_size(fl-end-path(id)) < 0 ? fl-crashed(o, id) : fl-one-claimed(o, id);
+  }
+  def fl-one-claimed(o, id) {
    let tok = fl-token(o);
    let claimed = write_file_text(fl-claim(id), tok ++ "\n");
    let settle = host_sleep_ms(300);
