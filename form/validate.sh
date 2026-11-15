@@ -9,4 +9,10 @@
 #
 # The band form/form-stdlib/tests/validate-text-band.bml must read 1 (every claim true).
 
+# The closing frontier-word command, `grep -r ... .` from the root, blocks forever.
+# A kept legs directory still holds FIFOs, because fk_release_fifos opens each FIFO
+# to unblock waiters but leaves it in place, and a recursive grep that opens a FIFO
+# with no writer waits.
+# Add `-D skip` to the closing command, or have the sweep remove FIFOs from a legs
+# directory it keeps as evidence.
 exit 0
