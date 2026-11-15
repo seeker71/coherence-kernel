@@ -76,7 +76,7 @@ recipe execution; lower training loss does not yet establish improved answer qua
   its edit for the landing. Each attempt lands its own row in
   [`receipts/native-turn-ledger.jsonl`](receipts/native-turn-ledger.jsonl), naming
   who began the turn.
-- **The night** — launchd runs [`observe/scheduled-walk.bml`](observe/scheduled-walk.bml) (one native turn, and a second while the time left before 05:30 still holds an option (each reads 05:30 as its deadline and waits while another checkout walks))
+- **The night** — launchd runs [`observe/scheduled-walk.bml`](observe/scheduled-walk.bml)
   at 03:30 ([`docs/launchd/earth.hati.rent-walk.plist`](docs/launchd/earth.hati.rent-walk.plist)):
   one native turn (a second when the first ends before 05:30), six drafts, the
   page, then one movement ([`observe/movement-run.bml`](observe/movement-run.bml))
@@ -102,7 +102,7 @@ recipe execution; lower training loss does not yet establish improved answer qua
   moved since their review follow; a moved request whose band already reads full
   under failing stubs ends moot, and the walk plans again after a moot (at most
   four planner walks for a turn that found no gap, and none past the window).
-- **Lessons** — [`observe/session-pairs-run.bml`](observe/session-pairs-run.bml) (native turns while a gap stays open and the window (to 15:00 or 21:30) holds an option, each landed through the movement door; while the night or another day turn holds the checkout, the day turn does not start.)
+- **Lessons** — [`observe/session-pairs-run.bml`](observe/session-pairs-run.bml)
   extracts chat rows from transcripts under `HEARTH_PERSON_HOME` in `fkwu.conf`.
   Use this extraction only for separately authorized material, destination and
   retention scope. Conversation alone supplies no training authorization.
