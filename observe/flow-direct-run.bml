@@ -34,7 +34,9 @@ section [form.bml] {
   // attractor, then, if it persists, an end named adapted-repeat that delivers what was said; serve-sched.bml svs-loop-react)
   def fl-ask-tokens(packet) = 0;
   // ── reading rows and files ──
-  def fl-text(path) = read_file(path) ?? "";
+  // A path that is a stretch of the compiler's words (a newline, or longer than any path the body holds) names no file: handed to the host door it overran fk_cstr and ended the whole flow pass (2026-11-15)
+  def fl-path?(p) = len(p) > 0 && len(p) < 512 && str_find(p, "\n", 0) < 0;
+  def fl-text(path) = fl-path?(path) ? (read_file(path) ?? "") : "";
   def fl-last-line(lines, needle) = foldl((acc, l) => str_find(l, needle, 0) >= 0 ? l : acc, "", lines);
   def fl-row(path, needle) {
    let line = fl-last-line(split-on(fl-text(path), "\n"), needle);
@@ -46,7 +48,7 @@ section [form.bml] {
   def fl-line(s) = fl-head(trim(s), 24);
   // ── the flow's state: one record, the signal frame inside it ──
   def fl-new(o, id) = record_new(0, "F", fsg-new(svs-int(o, "slot", 0), id), "id", id, "dir", svs-str(o, "dir", svc-default-dir()), "land", svs-int(o, "land", 0), "plan", svs-int(o, "plan", 1), "allow", svs-int(o, "repairs", 0), "seen", [], "names", [], "counsel", svs-int(o, "counsel", 0), "isolated", svs-int(o, "isolated", 0), "ledger", fl-ledger-of(o), "oldasks", 0, "oasks", 0, "t0", host_monotonic_ms(),
-   "row", nothing(), "req", nothing(), "goal", "", "paths", [], "band", "", "full", 0, "orig", [], "got", 0, "miss", 0, "fails", 0, "reply", "", "errs", "", "outs", "", "cause", "", "verdict", "ended", "applied", 0, "green", 0, "landed", 0, "said", "");
+   "row", nothing(), "req", nothing(), "goal", "", "paths", [], "band", "", "full", 0, "orig", [], "got", 0, "miss", 0, "fails", 0, "reply", "", "ask0", "", "thread", "", "errs", "", "outs", "", "cause", "", "verdict", "ended", "applied", 0, "green", 0, "landed", 0, "said", "");
   def fl-emit(S, stage, kind, got, missed, why, ids, ms) = fsg-emit(record_get(S, "F"), stage, kind, got, missed, why, ids, ms);
   def fl-since(t) = host_monotonic_ms() - t;
   // ── 1. plan ──
@@ -172,9 +174,12 @@ section [form.bml] {
   // The files come first and the task after them: the server keeps the ids of a prefix it has read (its prefix cache), so a file read once is not read again by the next request that shows it the same way (a
   // task first would make every packet differ from its first id). The window of a file depends on the task's named definitions, so a task that names the same definitions shares the whole prefix.
   def fl-packet(S) = fl-cat(["You are editing Form/BML source in a repository.\n\n", fl-cat(map(p => fl-file-block(p, record_get(S, "goal"), record_get(S, "names")), record_get(S, "paths"))), "TASK:\n", record_get(S, "goal"), "\n\n", fl-band-line(S), "\n\nYou may edit only these files: ", str-join-with(record_get(S, "paths"), ", "), ".\n\n", fl-format()]);
+  // The one number that says why a wait is long: the GiB the host's compressor holds (host_vm_stat word 17 pages of word 0 bytes). A voice that decodes 12 tokens a second calm decoded 2 while this read 42 (2026-11-15):
+  // the frame's got count carries it on every ask's "go" cell, so a reader sees a paging host the moment the ask begins, with no model and no text.
+  def fl-stored-gib() { let vm = host_vm_stat(); (String) value_kind(vm) == "list" && len(vm) >= 18 ? vm[17] * vm[0] / 1073741824 : 0; }
   // a stage that asks the server gives a "go" cell first, naming the ask and how many prompt ids it is (a third of the bytes), so a long wait is not silence in the frame
   def fl-ask(S, packet, who) {
-   let g = fl-emit(S, str_find(who, "-fix", 0) >= 0 ? "band" : "cand", "go", 0, 0, "ask-" ++ fl-head(who, 11), "ids~" ++ (len(packet) / 3).str(), 0);
+   let g = fl-emit(S, str_find(who, "-fix", 0) >= 0 ? "band" : "cand", "go", fl-stored-gib(), 0, "ask-" ++ fl-head(who, 11), "ids~" ++ (len(packet) / 3).str(), 0);
    let opening = fl-opening-for(S, who);
    let r = len(opening) > 0 ? svc-voice-opened(record_get(S, "dir"), packet, opening, fl-ask-tokens(packet), who, 0, 0) : svc-voice-at(record_get(S, "dir"), packet, fl-ask-tokens(packet), who, 0, 0);
    nothing?(r) || (String) r[0] != "answered" ? "" : opening ++ r[1];
@@ -263,7 +268,9 @@ section [form.bml] {
   }
   def fl-candidate-ask(S, t) {
    let picked = record_set(S, "names", fl-pick-names(S));
-   let text = fl-ask(S, fl-cat([fl-packet(S), fl-hint(S), fl-prior(S)]), "flow-" ++ record_get(S, "id"));
+   let packet = fl-cat([fl-packet(S), fl-hint(S), fl-prior(S)]);
+   let kept = record_set(S, "ask0", packet);
+   let text = fl-ask(S, packet, "flow-" ++ record_get(S, "id"));
    let a = record_set(S, "reply", text);
    len(text) == 0 ? fl-emit(S, "cand", "disc", 0, 1, "no-reply", "", fl-since(t)) : fl-blocks-in(S, text, t);
   }
@@ -303,7 +310,7 @@ section [form.bml] {
   }
   // The local voice writes the body's own Form (form/, observe/, gate/, learn/, cognition/, control/); the seed (runtime/) and anything outside are not its to edit.
   // A band and a gate are the witness, never the candidate: the voice does not write the tests that judge it.
-  def fl-root-ok?(p) = any?(r => str_find(p, r, 0) == 0, ["form/", "observe/", "learn/", "gate/", "cognition/", "control/", "docs/", "runtime/", "teachings/", "axioms/", "presence/", "surface/", "gpu/", "model/", "ingest/", "plugin/", "grammars/", "bootstrap/", "flatten/", "AGENTS.md", "CURRENT_FLOOR.md", "MANIFEST.md", "HOMECOMING.md", "NORTH_STAR.md", "README.md", "WELCOME.md", "BOOTSTRAP.md"]);
+  def fl-root-ok?(p) = fl-path?(p) && any?(r => str_find(p, r, 0) == 0, ["form/", "observe/", "learn/", "gate/", "cognition/", "control/", "docs/", "runtime/", "teachings/", "axioms/", "presence/", "surface/", "gpu/", "model/", "ingest/", "plugin/", "grammars/", "bootstrap/", "flatten/", "AGENTS.md", "CURRENT_FLOOR.md", "MANIFEST.md", "HOMECOMING.md", "NORTH_STAR.md", "README.md", "WELCOME.md", "BOOTSTRAP.md"]);
   // An edit to a path the flow may not write is answered inline: the packet names the files it may edit, and the voice that wrote elsewhere (a gate, a band, a notes file) is told which file it
   // wrote to and asked once for the edit block again on the file that holds the code. It had cost a whole pass (300 s) to be refused at the end; the refusal is a counted end only when the ask does not help.
   def fl-apply-outside(S, b) {
@@ -501,12 +508,14 @@ section [form.bml] {
    let a = record_set(S, "got", got);
    let b = record_set(S, "miss", miss < 0 ? 0 : miss);
    let c = fl-emit(S, "band", "disc", got, miss < 0 ? 0 : miss, kind, fl-line(r[1]), fl-since(t));
-   fl-repair-ends?(S, kind, got, tries) ? fl-band-passed(S, kind) : fl-band-repair(S, r, kind, t, tries);
+   fl-repair-ends?(S, kind, got, tries, r[1]) ? fl-band-passed(S, kind) : fl-band-repair(S, r, kind, t, tries);
   }
   // A band that is still hurt is repaired again until a repair teaches nothing: the reading (its kind, the claims it held, the files' length) is one this request has read before, so the voice is going round, not
   // forward. A caller that names a number of repairs (repairs > 0 in the request) keeps its own number; none named, the repeated reading is the end.
-  def fl-repair-ends?(S, kind, got, tries) {
-   let sig = fl-cat([kind, ":", got.str(), ":", fl-edited-len(S).str()]);
+  // The reading is the kind, the claims held and the compiler's own first words: a repair that changes the file and leaves the compiler saying the same thing has taught nothing (the file's length changed with every repair, so a
+  // reading keyed on it never repeated: a pass spent 30 minutes and five repairs of ~5 minutes each on one red claim, 2026-11-15)
+  def fl-repair-ends?(S, kind, got, tries, errs) {
+   let sig = fl-cat([kind, ":", got.str(), ":", fl-head(errs, 120)]);
    let seen = record_get(S, "seen");
    let noted = record_set(S, "seen", cons(sig, seen));
    (record_get(S, "allow") > 0 && tries >= record_get(S, "allow")) || any?(x => (String) x == sig, seen);
@@ -531,7 +540,7 @@ section [form.bml] {
   def fl-err-path(errs) {
    let a = str_find(errs, "fkwu: ", 0);
    let b = a < 0 ? -1 : str_find(errs, " (", a);
-   a < 0 || b < 0 ? "" : substring(errs, a + 6, b);
+   a < 0 || b < 0 || !fl-path?(substring(errs, a + 6, b)) ? "" : substring(errs, a + 6, b);
   }
   def fl-err-line(errs) {
    let a = str_find(errs, "(lowered text):", 0);
@@ -579,13 +588,21 @@ section [form.bml] {
    let p = fl-find-def(name);
    len(p) == 0 ? "" : fl-cat(["Where ", name, " is defined (", p, "):\n", fl-region(fl-text(p), name), "\n\n"]);
   }
+  // The repair continues the first ask: its packet is the prefix the server already holds (cached_ids 5586 of 5587), so only the voice's answer and the compiler's words are new. Measured 2026-11-15 on the server's ledger:
+  // a repair packet that began afresh was 9098 ids with cached_ids 0, and a cold prefill runs near 20 ids a second, so one repair waited over seven minutes in prefill while the frame showed "go".
+  def fl-continued-packet(S, r, kind, path) {
+   let errs = fl-head(r[1], 1800);
+   fl-cat([record_get(S, "ask0"), "\n\nYour answer was applied:\n", fl-head(record_get(S, "reply"), 1500), record_get(S, "thread"), "\n\nThe check is still red. ", kind == "claims-short" ? "The band read a short number; what it printed:\n" : "The compiler said:\n", kind == "claims-short" ? fl-head(r[2], 1800) : errs, "\n\n", fl-around(path, fl-err-line(r[1])), "Give the smallest edit that heals the one red thing above, in the same block format."]);
+  }
   def fl-scoped-packet(S, r, kind) {
    let errs = r[1];
    let path = fl-err-path(errs);
-   fl-cat(["A Form/BML edit was applied and the check is red.\n\nThe ", kind == "claims-short" ? "band read a short number; what it printed:\n" : "compiler said:\n", (kind == "claims-short" ? r[2] : errs), "\n\n", fl-around(path, fl-err-line(errs)), fl-def-head(fl-err-name(errs)), fl-cat(map(p => fl-file-block(p, record_get(S, "goal"), record_get(S, "names")), record_get(S, "paths"))), "TASK:\n", fl-head(record_get(S, "goal"), 2500), "\n\n", fl-band-line(S), "\nGive the smallest edit that heals the one red thing above.\n", fl-format()]);
+   len(record_get(S, "ask0")) > 0 ? fl-continued-packet(S, r, kind, path) : fl-cat(["A Form/BML edit was applied and the check is red.\n\nThe ", kind == "claims-short" ? "band read a short number; what it printed:\n" : "compiler said:\n", (kind == "claims-short" ? r[2] : errs), "\n\n", fl-around(path, fl-err-line(errs)), fl-def-head(fl-err-name(errs)), fl-cat(map(p => fl-file-block(p, record_get(S, "goal"), record_get(S, "names")), record_get(S, "paths"))), "TASK:\n", fl-head(record_get(S, "goal"), 2500), "\n\n", fl-band-line(S), "\nGive the smallest edit that heals the one red thing above.\n", fl-format()]);
   }
   def fl-repair-ask(S, r, kind) {
    let text = fl-ask(S, fl-scoped-packet(S, r, kind), "flow-" ++ record_get(S, "id") ++ "-fix");
+   // each repair joins the thread the next one continues: the same packet at temperature zero is the same answer, so a repair that does not heal and is asked again unchanged only repeats itself (five asks of ~220 s each, 2026-11-15)
+   let kept = record_set(S, "thread", fl-cat([record_get(S, "thread"), "\n\nYour repair, applied:\n", fl-head(text, 800)]));
    let bs = len(text) == 0 ? [] : fl-blocks(text, 0);
    let before = record_get(S, "applied");
    let done = fl-apply-all(S, bs);
@@ -632,6 +649,7 @@ section [form.bml] {
    let ms = fl-since(record_get(S, "t0"));
    let rep = record_get(record_get(S, "F"), "rep");
    let a = fl-emit(S, "end", v == "landed" || v == "green" ? "ok" : v == "partial" ? "part" : "disc", record_get(S, "got"), record_get(S, "miss"), v ++ ":" ++ c, record_get(S, "id"), ms);
+   let kept = fl-saw-keep(S);
    let b = sbt-append-count(record_get(S, "ledger"), fl-door-stamp(fsg-end-row(record_get(S, "id"), v, c, record_get(S, "got"), record_get(S, "miss"), rep, ms), S) ++ "\n");
    let r = fl-restore(S);
    print_str(fl-cat(["{\"request\":\"", record_get(S, "id"), "\",\"verdict\":\"", v, "\",\"cause\":\"", c, "\",\"got\":", record_get(S, "got").str(), ",\"missed\":", record_get(S, "miss").str(), ",\"repairs\":", rep.str(), ",\"ms\":", ms.str(), ",\"rent_tokens\":0}\n"]));
@@ -650,7 +668,14 @@ section [form.bml] {
   def fl-kth(pool, k) = len(pool) == 0 ? "" : k <= 0 || len(pool) == 1 ? fl-line-id(fl-best(pool)) : fl-kth(filter(l => fl-line-id(l) != fl-line-id(fl-best(pool)), pool), k - 1);
   // One small git answer a request (a hash or nothing): the whole subject list of 800 commits overran the host door's string buffer and every pass of a loop failed with fk_cstr (2026-11-15)
   def fl-landed-in-git?(id) = len(id) > 0 && len(trim(hch-said(fl-git("log", ["log", "-1", "--format=%h", "--fixed-strings", fl-cat(["--grep=The flow landed ", id])])))) > 0;
-  def fl-next-in(lines, anyok, slot) {
+  // Who the git question serves: the one request the flow is about to carry. It is asked of that request alone (one small answer), and a request the commits say landed leaves the choice and the choice is made again:
+  // asked of every live request it was ~100 child processes and ~20 s before any work began (measured 2026-11-15).
+  def fl-next-in(lines, anyok, slot) = fl-next-skip(lines, anyok, slot, []);
+  def fl-next-skip(lines, anyok, slot, skip) {
+   let id = fl-next-pick(lines, anyok, slot, skip);
+   len(id) > 0 && fl-landed-in-git?(id) ? fl-next-skip(lines, anyok, slot, cons(id, skip)) : id;
+  }
+  def fl-next-pick(lines, anyok, slot, skip) {
    let tri = filter(l => str_find(l, "\"rung\":\"triage\"", 0) >= 0, lines);
    // A request is live when its LATEST triage row is ranked: an older row that ended it (owned-elsewhere, no-writable-file, source-absent: kinds triage no longer ends anything by) does not hold it back
    // once triage has ranked it again. Read by the old rule, 60 of 136 ranked requests were never offered and one partial request was carried five passes in a row.
@@ -659,7 +684,7 @@ section [form.bml] {
    // A request a flow already landed (or found already satisfied) is done, under any door: taking "any live row" when no fresh one is left re-landed the same request six times in a loop (2026-11-14,
    // frq-b92a022b37c3e92b), and a request landed under another door's hash was still "fresh" and was carried again as no-change (frq-18a217c14066768a). Done requests leave the live set before anything is chosen.
    // The ledger row is sparse (written when a flow's kind or score moved), so a landing can leave none: the commit subjects are the other record, "The flow landed <id>", read once here
-   let notdone = filter(l => !fl-landed-in-git?(fl-line-id(l)) && !any?(r => str_find(r, "\"verdict\":\"landed\"", 0) >= 0 || str_find(r, "\"kind\":\"no-change\"", 0) >= 0, fl-flow-rows(lines, fl-line-id(l))), live);
+   let notdone = filter(l => !any?(s => (String) s == fl-line-id(l), skip) && !any?(r => str_find(r, "\"verdict\":\"landed\"", 0) >= 0 || str_find(r, "\"kind\":\"no-change\"", 0) >= 0, fl-flow-rows(lines, fl-line-id(l))), live);
    let fresh = filter(l => fl-takeable?(lines, fl-line-id(l), door), notdone);
    // A request no flow has carried goes before one that already ended partial: frq-67ea33f0b543fa03 ended band-compile-error and same-again four passes in a row while 130 requests had never been tried
    let untouched = filter(l => len(fl-flow-rows(lines, fl-line-id(l))) == 0, fresh);
@@ -679,20 +704,18 @@ section [form.bml] {
   // What an attempt saw is carried, never repeated blind: the end row keeps the head of the voice's last answer (saw), and the next attempt of the same request is told how the last one ended and
   // how its answer began, so it answers differently. When an attempt ends in the same kind the last one did (the voice words its answers differently each time, so the kind is the signal, not the words), the loop has learnt nothing by trying again: the
   // request ends as "same-again", a disc cell names it, and it is no longer healable by a door's change: it is the rented guidance's, seen through the signal frame.
-  // a text that sits inside a JSON string of a ledger row: the five characters that would break the row become a point (one pass each over the text, no recursion a character deep)
-  def fl-swap(s, ch) = str-join-with(split-on(s, ch), ".");
-  def fl-safe(s) = fl-swap(fl-swap(fl-swap(fl-swap(fl-swap(s, "\n"), "\r"), "\t"), "\""), "\\");
-  def fl-saw(S) = fl-safe(fl-first-block(record_get(S, "reply") ?? ""));
-  def fl-door-stamp(row, S) = substring(row, 0, len(row) - 1) ++ ",\"door\":\"" ++ fl-door() ++ "\",\"saw\":\"" ++ fl-saw(S) ++ "\"}";
+  // The voice's words are kept as they came, in a file beside the claim: nothing escapes them into a JSON row (five passes over the text) and nothing scans them back out of one. The ledger row carries the door only.
+  def fl-saw-path(id) = fl-cat([fl-claim(id), ".saw"]);
+  def fl-saw-keep(S) = write_file_text(fl-saw-path(record_get(S, "id")), fl-head(fl-first-block(record_get(S, "reply") ?? ""), 400));
+  def fl-door-stamp(row, S) = substring(row, 0, len(row) - 1) ++ ",\"door\":\"" ++ fl-door() ++ "\"}";
   def fl-last-flow-row(S) { let rows = fl-flow-rows(split-on(fl-text(record_get(S, "ledger")), "\n"), record_get(S, "id")); len(rows) == 0 ? "" : rows[len(rows) - 1]; }
   def fl-again?(S, kind) {
    let last = fl-last-flow-row(S);
    len(last) > 0 && fl-row-kind(last) == kind;
   }
-  def fl-saw-of(row) { let t = fl-after(row, "\"saw\":\""); let e = str_find(t, "\"", 0); e < 0 ? t : substring(t, 0, e); }
   def fl-prior(S) {
    let last = fl-last-flow-row(S);
-   len(last) == 0 ? "" : fl-cat(["\n\nA previous attempt of this request ended as ", fl-row-kind(last), "; its answer began: ", fl-saw-of(last), "\nDo not answer the same way; read the file text above again and answer differently."]);
+   len(last) == 0 ? "" : fl-cat(["\n\nA previous attempt of this request ended as ", fl-row-kind(last), "; its answer began: ", fl-text(fl-saw-path(record_get(S, "id"))), "\nDo not answer the same way; read the file text above again and answer differently."]);
   }
   def fl-flow-rows(lines, id) = filter(m => str_find(m, "\"rung\":\"flow\"", 0) >= 0 && fl-line-id(m) == id, lines);
   def fl-row-kind(m) { let t = fl-after(m, "\"kind\":\""); let e = str_find(t, "\"", 0); e < 0 ? "" : substring(t, 0, e); }

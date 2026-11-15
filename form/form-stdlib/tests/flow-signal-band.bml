@@ -1,23 +1,25 @@
-; flow-signal-band.bml — the flow's signal surface is a frame in shared memory: cells are fixed width, the picture is the lights, the ring is bounded, a second reader sees what the writer gave.
+; flow-signal-band.bml — the flow's signal surface is one small frame in shared memory holding one packed integer: the picture is the lights, the frame never grows, a second reader unpacks what the writer gave.
 ;
-; Expected: 31
-; Verdict 31 when every claim lands:
-;   1   a cell is fixed width (107 columns) and names its stage, kind and why
-;   2   the picture row shows the lights: plan ok then cand discomfort reads "+!..."
-;   4   sixty cells leave a ring of 48 (old cells are overwritten) and the header counts all sixty
-;   8   a second handle on the same name reads the writer's frame, header and picture included
+; Expected: 63
+; Verdict 63 when every claim lands:
+;   1   a frame is one short line of five words (request, state, t0, tlast, why) under 100 bytes, and its why has no space
+;   2   the lights: plan ok then cand discomfort reads "+!..."
+;   4   sixty cells leave one frame of the same short size (nothing grows) and the state still carries the last cell
+;   8   a second handle on the same name reads the writer's frame, request and lights included
 ;   16  a fix cell lights its stage "R" and counts a repair
+;   32  pack and unpack round-trip, and a count past its bits saturates instead of spilling into its neighbour
 ; preflight-exec: forbidden
 // preludes: form-stdlib/core.fk form-stdlib/bml/live.bml form-stdlib/bml/serve-sched.bml form-stdlib/bml/flow-signal.bml
 section [form.bml] {
  class FlowSignalBand {
   def fsb-slot() = 28;
-  def fsb-lines(F) = split-on(fsg-frame(F), "\n");
-  def fsb-emit-n(F, n) = n <= 0 ? 0 : fsg-emit(F, "band", "ok", n, 0, "tick", "id-" ++ n.str(), n) == "" ? 0 : fsb-emit-n(F, n - 1);
+  def fsb-words(F) = split-on(fsg-frame(F), " ");
+  def fsb-state(F) = str_to_int(fsb-words(F)[1]);
+  def fsb-emit-n(F, n) = n <= 0 ? 0 : len(fsg-emit(F, "band", "ok", n, 0, "tick", "id-" ++ n.str(), n)) == 0 ? 0 : fsb-emit-n(F, n - 1);
   def fsb-c-width(ctx) {
    let F = fsg-new(fsb-slot(), "band-request");
    let line = fsg-emit(F, "plan", "ok", 3, 1, "named why here", "frq-abc", 42);
-   let r = len(line) == 107 && str_find(line, "plan ", 0) == 21 && str_find(line, "ok   ", 0) == 27 && str_find(line, "named-why-here", 0) > 0;
+   let r = len(line) < 100 && len(split-on(line, " ")) == 5 && str_find(line, "named-why-here", 0) > 0 && str_find(line, "band-request ", 0) == 0;
    let z = fsg-release(F);
    r;
   }
@@ -25,15 +27,16 @@ section [form.bml] {
    let F = fsg-new(fsb-slot(), "band-request");
    let a = fsg-emit(F, "plan", "ok", 1, 0, "go", "", 1);
    let b = fsg-emit(F, "cand", "disc", 0, 1, "unbound-name", "", 2);
-   let r = str_find(fsg-picture(F), "[+!...]", 0) > 0;
+   let r = fsg-glyph-line(fsg-unpack(fsb-state(F))[0]) == "+!...";
    let z = fsg-release(F);
    r;
   }
   def fsb-c-ring(ctx) {
    let F = fsg-new(fsb-slot(), "band-request");
+   let before = len(fsg-frame(F));
    let a = fsb-emit-n(F, 60);
-   let cells = filter(l => len(l) == 107, fsb-lines(F));
-   let r = len(cells) == 48 && str_find(fsg-header(F), "seq=00000060", 0) > 0;
+   let u = fsg-unpack(fsb-state(F));
+   let r = len(fsg-frame(F)) < before + 40 && u[4] == 1 && u[2] == 1;
    let z = fsg-release(F);
    r;
   }
@@ -42,7 +45,8 @@ section [form.bml] {
    let a = fsg-emit(F, "plan", "ok", 2, 0, "go", "", 1);
    let h = shm_receive(fsg-name(fsb-slot()));
    let seen = nothing?(h) ? "" : (shm_read(h) ?? "");
-   let r = str_find(seen, "FL1 band-request", 0) == 0 && str_find(seen, "[+....]", 0) > 0;
+   let w = split-on(seen, " ");
+   let r = len(w) == 5 && w[0] == "band-request" && fsg-glyph-line(fsg-unpack(str_to_int(w[1]))[0]) == "+....";
    let z = fsg-release(F);
    r;
   }
@@ -50,10 +54,15 @@ section [form.bml] {
    let F = fsg-new(fsb-slot(), "band-request");
    let a = fsg-emit(F, "band", "disc", 0, 1, "compile-error", "", 1);
    let b = fsg-emit(F, "band", "fix", 1, 0, "arity", "", 2);
-   let r = str_find(fsg-picture(F), "[...R.]", 0) > 0 && str_find(fsg-picture(F), "rep=01", 0) > 0;
+   let u = fsg-unpack(fsb-state(F));
+   let r = fsg-glyph-line(u[0]) == "...R." && u[3] == 1;
    let z = fsg-release(F);
    r;
   }
+  def fsb-c-pack(ctx) {
+   let u = fsg-unpack(fsg-pack(fsg-p8(0) * 2 + fsg-p8(4) * 5, "land", "disc", 7, 5000, 300));
+   fsg-glyph-line(u[0]) == "+...R" && fsg-name-at(fsg-stages(), u[1]) == "land" && fsg-name-at(fsg-kinds(), u[2]) == "disc" && u[3] == 7 && u[4] == 4095 && u[5] == 255;
+  }
  }
- live-claims("flow-signal-band", 0, [["width", 1, 1, fsb-c-width], ["lights", 2, 1, fsb-c-lights], ["ring", 4, 1, fsb-c-ring], ["reader", 8, 1, fsb-c-reader], ["fix", 16, 1, fsb-c-fix]]);
+ live-claims("flow-signal-band", 0, [["width", 1, 1, fsb-c-width], ["lights", 2, 1, fsb-c-lights], ["ring", 4, 1, fsb-c-ring], ["reader", 8, 1, fsb-c-reader], ["fix", 16, 1, fsb-c-fix], ["pack", 32, 1, fsb-c-pack]]);
 }

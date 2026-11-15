@@ -1,6 +1,6 @@
-// flow-watch-run.bml — the subscription to the flow's signal surface (form-stdlib/bml/flow-signal.bml): shared memory, no polling, no parsing.
+// flow-watch-run.bml — the subscription to the flow's signal surface (form-stdlib/bml/flow-signal.bml): shared memory, no polling, one packed integer to unpack.
 //
-//   echo '{"snapshot":1}' | ./fkwu observe/flow-watch-run.bml     the framebuffer: one picture row per standing flow (line 2 of each frame), then ends
+//   echo '{"snapshot":1}' | ./fkwu observe/flow-watch-run.bml     the framebuffer: one picture row per standing flow (lights, stage, counts, run and quiet time), then ends
 //   echo '{"all":0}'       | ./fkwu observe/flow-watch-run.bml     attach to the bell and every flow frame, sleep on their seq words, and print each new cell the
 //                                                                  moment a flow gives it (discomfort, repairs, partial passes, ends; all:1 prints every cell)
 // A wake is the kernel's: host_sleep_ms over the frame handles ends when a frame's seq word moves, so a quiet flow costs nothing and a cell costs
@@ -14,33 +14,31 @@ section [form.bml] {
   def fw-range(i, n) = i >= n ? [] : cons(i, fw-range(i + 1, n));
   def fw-handle(i) = shm_receive(fsg-name(i));
   def fw-text(h) = nothing?(h) ? "" : (shm_read(h) ?? "");
-  def fw-lines(text) = split-on(text, "\n");
-  def fw-cell?(line) = len(line) > 40 && str_byte_at(line, 6) == 32 && str_byte_at(line, 0) >= 48 && str_byte_at(line, 0) <= 57;
-  def fw-cells(text) = filter(l => fw-cell?(l), fw-lines(text));
-  def fw-id(text) = len(fw-lines(text)) > 0 && len(fw-lines(text)[0]) > 32 ? trim(substring(fw-lines(text)[0], 4, 32)) : "";
-  def fw-picture(text) = len(fw-lines(text)) > 1 ? fw-lines(text)[1] : "";
-  def fw-kind(line) = trim(substring(line, 27, 31));
-  def fw-stage(line) = trim(substring(line, 21, 26));
-  def fw-notable?(line, all) = all == 1 || fw-kind(line) != "ok" || fw-stage(line) == "land" || fw-stage(line) == "end";
-  // the cells after the last one this watch printed for the slot (every cell when it is not in the ring any more)
-  def fw-after(cells, last) {
-   let at = foldl((acc, c) => (String) c == last ? 1 : acc, 0, cells);
-   at == 0 ? cells : fw-drop-through(cells, last);
+  // A frame is five words, "<request> <state> <t0> <tlast> <why>" (flow-signal.bml): the state is one integer, unpacked by division. A frame of any other shape (an older frame, a slot nobody wrote) names no flow.
+  def fw-words(text) = split-on(trim(text), " ");
+  def fw-flow?(w) = len(w) == 5;
+  def fw-ms(v) = v < 1000 ? v.str() ++ "ms" : v < 120000 ? (v / 1000).str() ++ "s" : (v / 60000).str() ++ "m";
+  // what a reader shows of a frame: the lights, the stage and kind, the repairs and counts, how long the flow has run, and how long it has been quiet (both read from the host's clock now, so a flow that stopped giving cells shows a quiet that grows)
+  def fw-view(i, w) {
+   let u = fsg-unpack(str_to_int(w[1]));
+   let now = host_monotonic_ms();
+   fsg-pad(i.str(), 2) ++ " " ++ fsg-pad(w[0], 28) ++ " [" ++ fsg-glyph-line(u[0]) ++ "] " ++ fsg-pad(fsg-name-at(fsg-stages(), u[1]), 5) ++ " " ++ fsg-pad(fsg-name-at(fsg-kinds(), u[2]), 4) ++ " " ++ fsg-pad(w[4], 16) ++ " rep=" ++ u[3].str() ++ " got=" ++ u[4].str() ++ " miss=" ++ u[5].str() ++ " run=" ++ fw-ms(now - str_to_int(w[2])) ++ " quiet=" ++ fw-ms(now - str_to_int(w[3]));
   }
-  def fw-drop-through(cells, last) = nil?(cells) ? [] : (String) cells[0] == last ? cells[1:] : fw-drop-through(cells[1:], last);
-  def fw-say(i, id, cells, all) = foldl((acc, c) => fw-notable?(c, all) ? print_str(fsg-pad(i.str(), 2) ++ " " ++ id ++ " " ++ c ++ "\n") : acc, 0, cells);
-  // one look at every slot: prints what is new and answers the new last-cell of each slot
+  def fw-notable?(w, all) {
+   let u = fsg-unpack(str_to_int(w[1]));
+   all == 1 || u[2] != 1 || u[1] == 4 || u[1] == 5;
+  }
+  // one look at every slot: prints a frame that moved since the last look (when it is notable) and answers the frame it saw
   def fw-scan(hs, seen, all) = map(i => fw-scan-slot(i, hs[i], seen[i], all), fw-range(0, len(hs)));
   def fw-scan-slot(i, h, last, all) {
    let text = fw-text(h);
-   let cells = fw-cells(text);
-   let fresh = fw-after(cells, last);
-   let said = fw-say(i, fw-id(text), fresh, all);
-   nil?(cells) ? last : cells[len(cells) - 1];
+   let w = fw-words(text);
+   let said = text != last && fw-flow?(w) && fw-notable?(w, all) ? print_str(fw-view(i, w) ++ "\n") : 0;
+   text;
   }
   def fw-live(hs) = filter(h => !nothing?(h), hs);
   def fw-reattach(hs) = map(i => nothing?(hs[i]) ? fw-handle(i) : hs[i], fw-range(0, len(hs)));
-  def fw-snapshot(hs) = foldl((acc, h) => nothing?(h) ? acc : print_str(fw-picture(fw-text(h)) ++ "\n"), 0, hs);
+  def fw-snapshot(hs) = foldl((acc, i) => fw-flow?(fw-words(fw-text(hs[i]))) ? print_str(fw-view(i, fw-words(fw-text(hs[i]))) ++ "\n") : acc, 0, fw-range(0, len(hs)));
   // A flow that starts after this watch did offers its frame afresh, and a handle taken before holds the old object, so the rest is bounded: a wake is the kernel's
   // (a seq word moved), and a rest that ran out re-attaches every slot to the frame that stands now. idle is [the idle_ms asked, what is left of it]; a scan that saw a new cell gives it back.
   def fw-rest-ms() = 2000;
