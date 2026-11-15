@@ -46,6 +46,7 @@ intern_node_at …`) is released, so fkwu runs the body's own meaning. `bp` is t
 name whose native and BML meanings differ (law 10).
 
 ### Laws the core pins
+The cons law: a pair keeps its tail word, list readers (print, value_str, len, nth) end at it, and tail, value_eq and eq see the word. Go and Rust read the pair as [h] on every reader; TS stops on cons onto a non-list.
 
 1. Integers are 63-bit two's complement, `[-2^62, 2^62)`, and in a
    defn the JIT has taken as in one it has not.
