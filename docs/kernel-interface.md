@@ -158,13 +158,8 @@ and answers `need=<organ> <wane>ms/s <finding> <stage> <key>`, or `need=none`.
 `form/form-stdlib/tests/stage-vitality-band.bml` witnesses the fold and
 `form/form-stdlib/tests/fb-bus-band.fk` the ring.
 
-The coding lane is the first flow that speaks on the ring: `fcacs-stage-open` and
-`fcacs-stage-close` (`form/form-stdlib/bml/form-cli-code-session.bml`, over `float_leaf`
-29 and 30) open and close `code.prefill`, and `form-cli-code-swerve.bml` opens and
-closes `code.decode`, `code.tool` and `code.check`, so the door lists `code` among its
-organs once the lane has run. Coverage counts only the pids alive when the door reads,
-and a lane between turns reads `need=none`. The glass view of the findings
-(`stv-glass-row`, `stv-rows`) has no caller outside `stage-vitality.bml`.
+The coding lane (c1a12fcd8) speaks on the ring: it opens and closes stages on /fg-bus1,
+specifically `code.prefill`, `code.decode`, `code.tool`, and `code.check`.
 
 `observe/body-vitals-live.fk` is a different watch: it folds each glass surface's
 stamps into that surface's own rhythm and publishes the `vitals` frame.
