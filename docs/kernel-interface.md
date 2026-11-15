@@ -143,14 +143,14 @@ stage key phase depth link dur outcome amount body digest`. Phase 1 opens, 2 clo
 closes unwound and 4 says the stage died; a close's link is its open.
 
 **The fold.** `form/form-stdlib/bml/stage-vitality.bml` folds the rows without calling a
-door. Each stage key learns its own bound (its p95, then the stage's, from a log2
-histogram), and the fold finds seven kinds: **overstay** (an open past its bound),
-**stall**, **died**, **lockstep** (one stage and key open in several pids of one body),
-**contention** (the same across bodies), **retread** (the same close again with nothing
-differing between) and **loop** (a period repeated whole in one pid). Each finding's
-stake, in microseconds of body time, accrues to its organ (the stage name's prefix
-before `.`). An organ's wane is that stake per second over the window, and the highest
-wane is the body's need.
+door. The coding lane's stages are the first flow that speaks on the ring. Each stage key
+learns its own bound (its p95, then the stage's, from a log2 histogram), and the fold
+finds seven kinds: **overstay** (an open past its bound), **stall**, **died**,
+**lockstep** (one stage and key open in several pids of one body), **contention** (the
+same across bodies), **retread** (the same close again with nothing differing between)
+and **loop** (a period repeated whole in one pid). Each finding's stake, in microseconds
+of body time, accrues to its organ (the stage name's prefix before `.`). An organ's wane
+is that stake per second over the window, and the highest wane is the body's need.
 
 **The door.** `./fkwu observe/fb-findings-run.bml </dev/null` prints the bus reading,
 the ranked findings, the organs by wane and the coverage (pids that spoke / pids alive),
