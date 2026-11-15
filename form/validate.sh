@@ -13,8 +13,10 @@
 # A kept legs directory still holds FIFOs, because fk_release_fifos opens each FIFO
 # to unblock waiters but leaves it in place, and a recursive grep that opens a FIFO
 # with no writer waits.
-# Add `-D skip` to the closing command, or have the sweep remove FIFOs from a legs
-# directory it keeps as evidence.
+# After the open-and-close in fk_release_fifos, `rm -f` each fifo, and record the
+# removed names in a `fifos` file in the leg dir so the evidence keeps them.
+# Alternatively, give the four-way legs short private TMPDIRs outside the repo, as
+# run_fkwu_lane already does since 806e75202.
 
 # Sibling leg deadlines: no sibling leg has a deadline, so the sweep's wall time is
 # bounded only by its slowest walker. The new enumeration put heavy bands into the
