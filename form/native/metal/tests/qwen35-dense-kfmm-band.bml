@@ -1,0 +1,118 @@
+// qwen35-dense-kfmm-band.bml — the K-quant fragment matmuls (qwen35-dense-mm.fk q38k-*, Q4_K type 12 and Q6_K type 14) on device-filled synthetic tensors
+// (real Metal dispatch, no model file). They dequantize a lane's weights into the matrix fragments and reassociate every sum, so they are the verify
+// path's arithmetic, not the exact stream kernels' bits (form_q38s_q4k_mc / form_q38s_q6k_mc). What the check needs of them, at 2, 3 and 8 tokens,
+// on odd row counts (a tile's last rows fall past the end) and several superblocks (the K slices walk uneven units):
+//   1   BOUNDED: every output of every shape is within 1e-4 of the largest value of the exact stream kernel's column on the same activations
+//       (the largest deviation seen, over that largest value, is printed)
+//   2   BATCH INVARIANT: column t of an 8-token pass is the very bits of the 1-token pass on token t
+//   4   the residual epilogue is the add the lane runs as its own dispatch: y = res + W x, byte for byte
+//   8   the pipelines compile: the spec list is q38s-mode-slot() pipelines, then the numerics mode and the tuning; the K-quant types take the matrix unit
+// Verdict 15
+// REQUIRES: a live Metal device
+// preflight-exec: forbidden
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk native/metal/qwen35-dense-spec.fk form-stdlib/f16-decode.fk form-stdlib/lora-adapter.bml
+section [form.bml] {
+ class Q38KfmmBand {
+  def qkb-say(s) = print_str("[q38-kfmm-band] " ++ s);
+  def qkb-pat(n, seed, i) = i >= n ? "" : (md-le32(md-f32-bits(((((i * 17) + seed) % 257) - 128) * 1.0 / 128.0)) ++ qkb-pat(n, seed, i + 1));
+  def qkb-f(bytes, i) = ln-f32-decode(ln-u32-le(bytes, i * 4));
+  def qkb-abs(x) = x < 0.0 ? 0.0 - x : x;
+  def qkb-absmax(bytes, i, n, m) = i >= n ? m : qkb-absmax(bytes, i + 1, n, qkb-abs(qkb-f(bytes, i)) > m ? qkb-abs(qkb-f(bytes, i)) : m);
+  def qkb-maxdiff(a, b, i, n, m) = i >= n ? m : qkb-maxdiff(a, b, i + 1, n, qkb-abs(qkb-f(a, i) - qkb-f(b, i)) > m ? qkb-abs(qkb-f(a, i) - qkb-f(b, i)) : m);
+  def qkb-col(bytes, t, rows) = substring(bytes, t * rows * 4, (t + 1) * rows * 4);
+  def qkb-max(a, b) = a > b ? a : b;
+  // the fragment kernel (ty ts sgr sl fz) over ntok tokens: the output rows (pitch rows) as bytes; res (bytes) feeds a fz = 1 shape
+  def qkb-run(qs, ty, v, wh, rows, cols, xbytes, ntok, resbytes) {
+   let pipe = qs[q38s-kmm-base() + q38k-slot(ty, v[0], v[1], v[2], v[3])];
+   let x = metal_buf_alloc(len(xbytes));
+   let y = metal_buf_alloc(rows * 8 * 4);
+   let w1 = metal_buf_write(x, 0, xbytes);
+   let w2 = metal_buf_write(y, 0, v[3] % 2 == 1 ? resbytes : qkb-pat(rows * 8, 99, 0));
+   metal_batch_concurrent();
+   let e = v[3] % 2 == 1 ? metal_enqueue(pipe, md-bind16([wh, x, y, y], [rows, cols, ntok, rows], 32 * v[1] * v[2], 0, 1, 1), q38f-groups(rows, v[0], v[1])) : metal_enqueue(pipe, md-bind16([wh, x, y], [rows, cols, ntok, rows], 32 * v[1] * v[2], 0, 1, 1), q38f-groups(rows, v[0], v[1]));
+   let out = metal_buf_read(y, 0, rows * ntok * 4);
+   let f = metal_buf_free(x) + metal_buf_free(y);
+   e > 0 ? out : "";
+  }
+  // the exact stream kernel at ntok columns (the rented decode bits): rows * ntok floats
+  def qkb-ref(qs, ty, wh, rows, cols, xbytes, ntok) {
+   let x = metal_buf_alloc(len(xbytes));
+   let y = metal_buf_alloc(rows * 8 * 4);
+   let w1 = metal_buf_write(x, 0, xbytes);
+   metal_batch_concurrent();
+   let e = metal_enqueue(qs[q38s-kq-index(ty, ntok)], md-bind16([wh, x, y], [rows, cols, rows], 256, 0, 1, 1), ty == 14 ? (rows + 3) / 4 : (rows + 1) / 2);
+   let out = metal_buf_read(y, 0, rows * ntok * 4);
+   let f = metal_buf_free(x) + metal_buf_free(y);
+   e > 0 ? out : "";
+  }
+  // [bounded ratio (max diff / max value), invariant 1/0] for one shape at ntok tokens
+  def qkb-tokens(qs, ty, v, wh, rows, cols, xbytes, ntok, t, acc) = t >= ntok ? acc : {
+   let full = qkb-run(qs, ty, v, wh, rows, cols, xbytes, ntok, "");
+   let one = qkb-run(qs, ty, v, wh, rows, cols, substring(xbytes, t * cols * 4, (t + 1) * cols * 4), 1, "");
+   let ref = qkb-ref(qs, ty, wh, rows, cols, xbytes, ntok);
+   let good = len(full) == rows * ntok * 4 && len(ref) == rows * ntok * 4 ? 1 : 0;
+   let ratio = good == 1 ? qkb-maxdiff(qkb-col(full, t, rows), qkb-col(ref, t, rows), 0, rows, 0.0) / qkb-absmax(qkb-col(ref, t, rows), 0, rows, 0.000001) : 1000.0;
+   let inv = ((String) qkb-col(full, t, rows) == (String) one) ? 1 : 0;
+   qkb-tokens(qs, ty, v, wh, rows, cols, xbytes, ntok, t + 1, [qkb-max(acc[0], ratio), acc[1] * inv]);
+  };
+  def qkb-shapes(qs, ty, vs, wh, rows, cols, xbytes, acc) = len(vs) == 0 ? acc : {
+   let v = vs[0];
+   let a = v[3] % 2 == 1 ? [0.0, 1] : qkb-tokens(qs, ty, v, wh, rows, cols, xbytes, 8, 0, [0.0, 1]);
+   let b = v[3] % 2 == 1 ? [0.0, 1] : qkb-tokens(qs, ty, v, wh, rows, cols, xbytes, 3, 0, [0.0, 1]);
+   let c = v[3] % 2 == 1 ? [0.0, 1] : qkb-tokens(qs, ty, v, wh, rows, cols, xbytes, 2, 0, [0.0, 1]);
+   qkb-shapes(qs, ty, vs[1:], wh, rows, cols, xbytes, [qkb-max(acc[0], qkb-max(a[0], qkb-max(b[0], c[0]))), acc[1] * a[1] * b[1] * c[1]]);
+  };
+  def qkb-resid-one(ps, qs, ty, v, wh, rows, cols, xbytes, resbytes) {
+   let fused = qkb-run(qs, ty, v, wh, rows, cols, xbytes, 8, resbytes);
+   let plain = qkb-run(qs, ty, [v[0], v[1], v[2], v[3] - 1], wh, rows, cols, xbytes, 8, "");
+   let a = metal_buf_alloc(rows * 8 * 4);
+   let b = metal_buf_alloc(rows * 8 * 4);
+   let w1 = metal_buf_write(a, 0, resbytes);
+   let w2 = metal_buf_write(b, 0, plain);
+   metal_batch_concurrent();
+   let e = metal_enqueue(ps[19], q38-b16([a, b, a], [rows * 8], 0, 1), rows * 8);
+   let expected = metal_buf_read(a, 0, rows * 8 * 4);
+   let f = metal_buf_free(a) + metal_buf_free(b);
+   len(fused) == rows * 8 * 4 && (String) fused == (String) expected ? 1 : 0;
+  }
+  def qkb-resid(ps, qs, ty, vs, wh, rows, cols, xbytes, resbytes, ok) = len(vs) == 0 ? ok : qkb-resid(ps, qs, ty, vs[1:], wh, rows, cols, xbytes, resbytes, vs[0][3] % 2 == 1 ? ok * qkb-resid-one(ps, qs, ty, vs[0], wh, rows, cols, xbytes, resbytes) : ok);
+  // one type over a row count and a salt/d class: [ratio, invariant, residual]
+  def qkb-type(ps, qs, pfill, ty, rows, cols, salt, dcls) {
+   let wh = metal_buf_alloc(rows * (cols / 256) * q38dq-fill-stride(ty));
+   let filled = q38dq-fill(pfill, ty, wh, rows, cols, salt, dcls);
+   let s0 = metal_sync();
+   let xbytes = qkb-pat(8 * cols, 5, 0);
+   let r = qkb-shapes(qs, ty, q38k-prod(), wh, rows, cols, xbytes, [0.0, 1]);
+   let res = qkb-resid(ps, qs, ty, q38k-prod(), wh, rows, cols, xbytes, qkb-pat(rows * 8, 21, 0), 1);
+   let freed = metal_buf_free(wh);
+   qkb-say("type " ++ ty.str() ++ " rows " ++ rows.str() ++ " cols " ++ cols.str() ++ " salt " ++ salt.str() ++ " dcls " ++ dcls.str() ++ ": max diff/max " ++ r[0].str() ++ ", invariant " ++ r[1].str() ++ ", residual " ++ res.str());
+   filled > 0 ? [r[0], r[1], res] : [1000.0, 0, 0];
+  }
+  def qkb-fold(a, b) = [qkb-max(a[0], b[0]), a[1] * b[1], a[2] * b[2]];
+  def qkb-band(ps, qs) {
+   let pfill = metal_pipeline(q38dq-fill-msl(), "q38dq_fill");
+   let a = qkb-type(ps, qs, pfill, 12, 21, 1280, 3, 0);
+   let b = qkb-type(ps, qs, pfill, 12, 5, 2048, 7, 1);
+   let c = qkb-type(ps, qs, pfill, 14, 21, 1280, 3, 0);
+   let d = qkb-type(ps, qs, pfill, 14, 5, 2048, 7, 1);
+   let e = qkb-type(ps, qs, pfill, 12, 130, 1280, 11, 0);
+   let f = qkb-type(ps, qs, pfill, 14, 130, 1280, 11, 0);
+   let all = qkb-fold(qkb-fold(qkb-fold(a, b), qkb-fold(c, d)), qkb-fold(e, f));
+   let bounded = pfill > 0 && all[0] <= 0.0001 ? 1 : 0;
+   qkb-say("worst max diff/max " ++ all[0].str());
+   bounded + 2 * all[1] + 4 * all[2];
+  }
+  def qkb-main() {
+   let msl = q38-msl();
+   let ps = q38-pipes(msl);
+   let qs = q38s-pipes(q38s-msl());
+   let pipesOk = (len(ps) >= q38sp-index() + 4 && len(qs) == q38s-mode-slot() + 2 && q38s-pipes-ok?(qs)) ? 1 : 0;
+   qkb-say("spec pipelines " ++ len(qs).str() ++ ", ok " ++ pipesOk.str());
+   let fr = pipesOk == 1 ? qkb-band(ps, qs) : 0;
+   let verdict = fr + pipesOk * 8;
+   qkb-say("verdict " ++ verdict.str());
+   verdict;
+  }
+ }
+ qkb-main();
+}
