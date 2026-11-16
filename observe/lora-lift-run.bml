@@ -116,10 +116,21 @@ section [form.bml] {
    nld-tokens(prepared);
   }
   // ---- the negatives: the trainer's assessment set (a JSON array), scored before and after, read back token-weighted
-  def ll-negatives-file(data, negs) {
-   let file = data ++ "/negatives.json";
-   let w = write_file_text(file, "[" ++ ll-join-with(negs, ",") ++ "]");
+  def ll-assess-file(data, name, rows) {
+   let file = data ++ "/" ++ name ++ ".json";
+   let w = write_file_text(file, "[" ++ ll-join-with(rows, ",") ++ "]");
    file;
+  }
+  def ll-negatives-file(data, negs) = ll-assess-file(data, "negatives", negs);
+  // ---- the held-out row that failed: with no negatives named, the held-out rows are the assessment set, so the trainer scores each one before and after; the row whose loss rose most is named
+  def ll-row-losses(out, phase) {
+   let path = out ++ "/assessment-" ++ phase ++ ".json";
+   file_size(path) < 1 ? [] : map(r => ll-real-of(r, "loss"), json-array-elements(parse-json("lift-assessment", fhn-read(path))));
+  }
+  def ll-worst-go(b, a, i, bestI, bestD) = nil?(b) || nil?(a) ? [bestI, bestD] : (a[0] - b[0] > bestD ? ll-worst-go(b[1:], a[1:], i + 1, i, a[0] - b[0]) : ll-worst-go(b[1:], a[1:], i + 1, bestI, bestD));
+  def ll-failed-pairs(valid, out) {
+   let w = ll-worst-go(ll-row-losses(out, "before"), ll-row-losses(out, "after"), 0, -1, 0.0 - 1000000.0);
+   w[0] < 0 ? [] : [fhn-s("worst_row", ll-id(valid[w[0]])), fhn-n("worst_row_delta_milli", ll-milli(w[1]))];
   }
   def ll-request(model, data, out, steps, batch, lr, negFile) {
    let request = ntr-request(model, ll-parent(), data, out, steps, batch, lr, 1, 8);
@@ -191,7 +202,7 @@ section [form.bml] {
    let negTokens = nil?(negs) ? 0 : ll-tokens(t, "negatives", negs);
    let wt = write_file_text(data ++ "/train.jsonl", ll-join(train));
    let wv = write_file_text(data ++ "/valid.jsonl", ll-join(valid));
-   let negFile = nil?(negs) ? "" : ll-negatives-file(data, negs);
+   let negFile = nil?(negs) ? ll-assess-file(data, "valid-assess", valid) : ll-negatives-file(data, negs);
    let out = ll-root() ++ "/out-" ++ now_unix_ms().str();
    let request = ll-request(model, data, out, steps, batch, lr, negFile);
    let started = now_unix_ms();
@@ -202,7 +213,8 @@ section [form.bml] {
    let rejBefore = nil?(negs) ? -1.0 : ll-assessed(out, "before");
    let rejAfter = nil?(negs) ? -1.0 : ll-assessed(out, "after");
    let child = nag-resolve(out);
-   let row = ll-row-from(child, data, rowsPath, validPath, train, valid, trainTokens, validTokens, steps, batch, before, after, ll-negative-pairs(negPath, negs, negTokens, rejBefore, rejAfter), need, now_unix_ms() - started);
+   let failed = nil?(negs) ? ll-failed-pairs(valid, out) : [];
+   let row = ll-row-from(child, data, rowsPath, validPath, train, valid, trainTokens, validTokens, steps, batch, before, after, append(ll-negative-pairs(negPath, negs, negTokens, rejBefore, rejAfter), failed), need, now_unix_ms() - started);
    let appended = fhn-append(ledger, lrun-row-line(row) ++ "\n");
    let shown = print_str("[lift] " ++ json-emit(row) ++ "\n");
    print_str("[lift] judged on " ++ validPath ++ ": better " ++ ll-better(before, after).str() ++ " parent_loss_milli " ++ ll-milli(before).str() ++ " child_loss_milli " ++ ll-milli(after).str() ++ " train_rows " ++ len(train).str() ++ " valid_rows " ++ len(valid).str() ++ " wall_ms " ++ (now_unix_ms() - started).str() ++ " child " ++ child ++ "\n");
