@@ -224,6 +224,19 @@ section [form.bml] {
   def qsr-cache-has?(M, packed, n) = any?(e => e[1] == n && e[0] == qsr-key(packed, n), record_get(M, "cache"));
   // an entry is told by its serial (e[4]), never by comparing states
   def qsr-cache-touch(M, e) = record_set(M, "cache", map(x => x[4] == e[4] ? [x[0], x[1], x[2], host_monotonic_ms(), x[4], x[5]] : x, record_get(M, "cache")));
+  // an entry also holds a copy of the recurrent state (about 151 MiB for the 27B): the blocks charge the pool, these bytes charge the cache. The cache keeps at most cache_gib (default 6) of them; the least
+  // recently used entry goes first, after every add, so a long flow's cache stays where it began instead of growing with the machine's free memory (a server's footprint went 25 GB to 61 GB in 15 h)
+  def qsr-linear-bytes-go(l, geo) = l >= geo[21] ? 0 : (kth-full?(l, geo[22]) ? 0 : geo[1] * geo[23] * 4 + geo[3] * geo[5] * geo[4] * 4) + qsr-linear-bytes-go(l + 1, geo);
+  def qsr-entry-cap(c) {
+   let each = qsr-linear-bytes-go(0, c[0][2]);
+   let room = qsr-int(c[10], "cache_gib", 6) * 1073741824;
+   each <= 0 || room / each < 1 ? 1 : room / each;
+  }
+  def qsr-trim(c) = len(record_get(c[22], "cache")) > qsr-entry-cap(c) ? qsr-trim-one(c) : 0;
+  def qsr-trim-one(c) {
+   let r = qsr-release-lru(c, "the cache holds its " ++ qsr-int(c[10], "cache_gib", 6).str() ++ " GiB of recurrent state");
+   qsr-trim(c);
+  }
   def qsr-cache-add(M, packed, n, lin, blocks) {
    let serial = record_get(M, "serial") + 1;
    let a = record_set(M, "serial", serial);
@@ -296,6 +309,7 @@ section [form.bml] {
     metal_sync();
    });
    qsr-cache-add(c[22], packed, count, lin, blocks);
+   let held = qsr-trim(c);
    count;
   }
   // the least recently used entry is released when the machine's available bytes fall under a few blocks plus the reserve (one entry a reading, read at most every 2 s)
@@ -330,7 +344,8 @@ section [form.bml] {
   def qsr-adopt-keep(c, s, packed, sts) {
    let blocks = take(svb-blocks-for(q38pg-bsz(c[19]), s[8]), s[24]);
    let a = svb-retain(c[15], blocks);
-   qsr-cache-add(c[22], packed, s[8], sts, blocks);
+   let added = qsr-cache-add(c[22], packed, s[8], sts, blocks);
+   qsr-trim(c);
   }
   // A chunk is waited for before the scheduler reads the clock: submitted and left in flight, its GPU time was billed to the decode step that followed, so the share governor (prefill ms against decode ms)
   // saw no prefill time and ran a chunk every tick. Read at its true cost, a prefill takes the share it was given.
