@@ -561,6 +561,8 @@ prints, including unresolved candidates and unread files.
 
 ## The hearth — the serving floor that outlives sessions
 
+**One 27B on the device, shared (measured 2026-11-16).** The Mac has one GPU, and the machine's one Qwen3.8-27B serves through the resident (`observe/qwen-serve-run.bml`, spool at `/tmp/form-serve`, `svc-submit`/`svc-wait` in `form/form-stdlib/bml/serve-client.bml`). A second process that opens its own copy of the same model and decodes beside it makes both slow: with that sibling paused, the same 80-token ask decoded at 4.9 tok/s against 0.8, and prefill took 189 ms against 2960. Before a local lane opens a model, read whether a resident stands (`svc-holds?`) and ask it; a lane that must hold its own session yields the device while the resident has work (`gpu-lease-turn` does for a guest, up to 400 ms a turn). When decode is slow, read who holds the device first: `ioreg -c IOAccelerator -r -l | grep IOUserClientCreator` and `ioreg -r -d 1 -c IOAccelerator | grep "Device Utilization"`.
+
 One resident form-cli process serves sessions and cells as clients. The interface lives
 executable in `form/form-stdlib/hearth.bml` (band: `form/form-stdlib/tests/hearth-band.fk`, 32767): stable paths under
 `.hearth/` (task spool, reply spool, bell, board), one model admission per lifetime, born
