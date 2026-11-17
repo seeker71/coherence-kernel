@@ -2559,6 +2559,12 @@ static void *fk_metal_dyn_sym(void *h, const char *name) {
     }
     return p;
 }
+static void fk_metal_dyn_clear(void) {
+    fk_metal_gpu_util_p = 0; fk_metal_disk_stat_p = 0; fk_metal_live_p = 0; fk_metal_matvec_fixture_p = 0; fk_metal_matvec_f32_p = 0;
+    fk_metal_pipeline_p = 0; fk_metal_buf_alloc_p = 0; fk_metal_buf_from_file_p = 0; fk_metal_buf_write_p = 0; fk_metal_buf_fill_p = 0;
+    fk_metal_enqueue_p = 0; fk_metal_sync_p = 0; fk_metal_buf_read_p = 0; fk_metal_status_p = 0; fk_metal_batch_concurrent_p = 0;
+    fk_metal_buf_free_p = 0; fk_metal_submit_p = 0; fk_metal_fence_wait_p = 0; fk_metal_deadline_p = 0;
+}
 static int fk_metal_dyn_try_path(const char *path) {
     void *h;
     if (path == 0 || path[0] == 0) {
@@ -2595,6 +2601,8 @@ static int fk_metal_dyn_try_path(const char *path) {
         fk_metal_status_p == 0 || fk_metal_batch_concurrent_p == 0 ||
         fk_metal_buf_free_p == 0 || fk_metal_submit_p == 0 ||
         fk_metal_fence_wait_p == 0 || fk_metal_deadline_p == 0) {
+        /* a carrier that lacks a required symbol is refused whole: the pointers it did resolve point into the image dlclose unmaps, so they are cleared, never left to be called */
+        fk_metal_dyn_clear();
         dlclose(h);
         return 0;
     }
