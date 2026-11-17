@@ -20,6 +20,20 @@ the planner's voice (`lpr-spoken` through `svc-voice`) and the counsel door (`lc
   a sequence alone is never held) and the pool's short blocks are made by releasing prefix-cache entries least recently
   used first; nothing a running sequence holds is cut.
 
+## The first forward is paid at open
+
+A model's first forward costs seconds more than its steady one: the device wires the mapped weights at the first command buffer that
+names them, and the prefill, decode and verify pipelines run for the first time. Measured on the Q4_K_M file with the machine loaded
+(load average 8 to 17): a first ask read its 21-id prompt in 5.9 s where the next distinct prompt took 1.9 s. Reading one byte of each
+16 KiB page of every mapped tensor from the host (1,009,645 pages, 3.3 s) or preading the whole file into a scratch buffer (1.6 s)
+did not remove it (a 1-position forward after either still cost 1.7 to 4.5 s against 0.17 to 0.5 s the second time): the residual is
+the device's own first use of the buffers, not the page cache, and only a forward over the real weights pays it.
+The door therefore runs a warm-up once a model opens and before the status says it stands (`qsr-warm`, option `warm`, default 1):
+one prefill chunk of `span` ids on a scratch state, one 1-position decode pass and, when the server speculates, one verify pass,
+all on the sink block, with the step counters put back. The first real ask then meets the steady cost (prefill 1.9 s against 1.9 to
+2.0 s steady in the same run); the cost moved to the open (a warm-up of 4.0 to 5.9 s) where no one waits. `warm 0` skips it.
+A running server takes this only at its next start: the door does not change under a standing process.
+
 ## Paged KV
 
 The K and V of every full-attention layer are one pool of blocks (`blocks` of `block_positions`, default 512 of 256; fewer
