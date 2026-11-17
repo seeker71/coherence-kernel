@@ -41,8 +41,8 @@ add_u32 bnot_u32 method_define method_has method_invoke recipe_to_bytes
 bytes_to_recipe`) stays native until a warm BML home matches it; then it becomes one
 `home-index.txt` row. Everything else lives in a Form or BML home that fkwu links by
 name. A native that shadows a home (`char_at ord int_to_str str_to_int sum abs range
-intern_node_at …`) is released, so fkwu runs the body's own meaning. `bp` is the one
-name whose native and BML meanings differ (law 10).
+intern_node_at …`) is released, so fkwu runs the body's own meaning. `bp` stays native
+and answers its argument (law 10); its coordinates are `fol-bp`'s.
 
 ### Laws the core pins
 The cons law: a pair keeps its tail word, list readers (print, value_str, len, nth) end at it, and tail, value_eq and eq see the word.
@@ -60,9 +60,11 @@ The cons law: a pair keeps its tail word, list readers (print, value_str, len, n
 8. `str_byte_at` out of range answers `-1`; `str_find` on a non-string stops; an
    index that is not an int stops (`str_find`, `str_byte_at`, `substring`, `nth`).
 9. A value renders one way everywhere (`value_str`), records included.
-10. `bp` has one meaning: the BML resolution in `form-ontology-bp.fk`.
+10. `bp` has one meaning: it answers the category name it is given, a string, and an
+    unknown name answers itself. The name's coordinates are `fol-bp`'s, in
+    `form-ontology-bp.fk`, under a name no primitive shadows.
 
-`form/form-stdlib/tests/kernel-laws-band.fk` asks laws 1–9 of fkwu, each row
+`form/form-stdlib/tests/kernel-laws-band.fk` asks laws 1–10 of fkwu, each row
 under `attempt`, prelude-free; its head names every bit and pins the full verdict. Read with
 `./fkwu form/form-stdlib/tests/kernel-laws-band.fk`. The drift gates'
 `kernel-laws` row (`gate/drift-gates.bml`) reads fkwu's answer at every landing that
@@ -77,7 +79,7 @@ moves a kernel:
 | 7 | on the band's rows | 8192–65536 |
 | 8 | pinned | 131072, 262144, 524288 |
 | 9 | `value_str` and `print` give `<record>` for a record and `<closure>` for a closure | 1073741824 |
-| 10 | open: fkwu's tag 45 answers its own argument, a string, while the BML resolution in `form-ontology-bp.fk` answers a NodeID and stops on an unknown name; no arm runs the BML `bp` | — |
+| 10 | on fkwu: tag 45 answers its own argument, a string, and an unknown name answers itself; `fol-bp` resolves the coordinates, and no Form `bp` stands beside the native | 8589934592 |
 
 The band also pins `fs_list` and `host_dir_list` (a path that is no directory answers
 `nothing`, an empty directory `[]`), `record_has` of a record, `record_get` and
@@ -176,12 +178,12 @@ stamps into that surface's own rhythm and publishes the `vitals` frame.
 3. The stage ring, its phases, the vitality fold and its text door. *(stand)* The
    coding lane speaks on the ring *(stands)*; the other flows and the glass view of the
    findings are open.
-4. Release natives that shadow homes or have no caller *(stands, except
-   `bp`)*; one op table generates every name list.
+4. Release natives that shadow homes or have no caller *(stands; `bp` is native by law
+   10)*; one op table generates every name list.
 5. The host door table; migrate callers family by family; release the off-table
    names. Every door call timed and counted per verb on the live page (calls,
    nothings, bytes in and out, open handles, a log2 *dwell* histogram of time spent in
    the world) is not built yet.
-6. One law band, `kernel-laws-band.fk`, pinning laws 1–9, laws 1, 2 and 6
-   hot as cold. *(stands)* Law 10 is open: `bp` runs the BML resolution. The rows the
-   band's head names as not pinned each come to one meaning.
+6. One law band, `kernel-laws-band.fk`, pinning laws 1–10, laws 1, 2 and 6
+   hot as cold. *(stands)* The rows the band's head names as not pinned each come to
+   one meaning.
