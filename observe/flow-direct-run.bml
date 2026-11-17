@@ -48,7 +48,7 @@ section [form.bml] {
   def fl-line(s) = fl-head(trim(s), 24);
   // ── the flow's state: one record, the signal frame inside it ──
   def fl-new(o, id) = record_new(0, "F", fsg-new(svs-int(o, "slot", 0), id), "id", id, "dir", svs-str(o, "dir", svc-default-dir()), "land", svs-int(o, "land", 0), "plan", svs-int(o, "plan", fl-arm(id)), "allow", svs-int(o, "repairs", 5), "seen", [], "names", [], "counsel", svs-int(o, "counsel", 0), "isolated", svs-int(o, "isolated", 0), "ledger", fl-ledger-of(o), "oldasks", 0, "oasks", 0, "t0", host_monotonic_ms(),
-   "row", nothing(), "req", nothing(), "goal", "", "paths", [], "band", "", "full", 0, "orig", [], "got", 0, "miss", 0, "fails", 0, "reply", "", "ask0", "", "thread", "", "errs", "", "outs", "", "cause", "", "verdict", "ended", "applied", 0, "green", 0, "landed", 0, "said", "");
+   "row", nothing(), "req", nothing(), "goal", "", "paths", [], "band", "", "full", 0, "orig", [], "got", 0, "miss", 0, "fails", 0, "reply", "", "ask0", "", "thread", "", "errs", "", "outs", "", "cause", "", "verdict", "ended", "applied", 0, "green", 0, "landed", 0, "said", "", "mf", []);
   def fl-emit(S, stage, kind, got, missed, why, ids, ms) = fsg-emit(record_get(S, "F"), stage, kind, got, missed, why, ids, ms);
   def fl-since(t) = host_monotonic_ms() - t;
   // ── 1. plan ──
@@ -124,6 +124,46 @@ section [form.bml] {
    let b = record_set(S, "paths", files);
    let c = record_set(S, "cause", (String) why == "plan-off" ? "" : "plan-" ++ why);
    fl-emit(S, "plan", "part", 0, 1, why, len(record_get(S, "said")) > 0 ? fl-line(record_get(S, "said")) : fl-line(svs-str(req, "title", "")), 0);
+  }
+  // ── 1b. the manifest (form-stdlib/bml/flow-signal.bml fsg-mf-*) ──
+  // A request that names no definitions ended in three refusals (no-change, no-behavioural-witness, band-unbound-name): the voice had no small thing to build, so it built nothing, built what no band called, or called what it
+  // had invented. Its plan, when it carries no "Definition manifest:" line, gets one here: one short ask reads the request's own words for the definitions to add or change, each with its signature and one fixture call with the
+  // value the words give. The rows go to the candidate in its goal, become the witness band after the edit (fl-manifest-band: one claim per fixture, written by the flow, so no name is the voice's to invent), and answer an unbound name.
+  def fl-mf-source(S) = filter(p => fl-form?(p) && !fl-band-file?(p), record_get(S, "paths"));
+  def fl-mf-sigs(S) = fl-cat(map(p => fl-cat(["FILE ", p, " defines (name and parameters):\n", str-join-with(take(60, fl-sigs-of(fl-text(p))), "\n"), "\n\n"]), fl-mf-source(S)));
+  def fl-mf-packet(S) = fl-cat([fl-mf-sigs(S), "REQUEST:\n", record_get(S, "goal"), "\n\nFrom the request's own words only, list the definitions to add or change (one to four), one to a line, exactly:\nname(param, param) :: name(literal, literal) == literal\nThe call uses short literal arguments (numbers, \"strings\", [lists]) and the value after == is the one the request's words give; a definition whose value the request does not give is left out. Answer with the lines only."]);
+  def fl-manifest(S) = str_find(record_get(S, "goal"), "Definition manifest:", 0) >= 0 || nil?(fl-mf-source(S)) ? 0 : fl-manifest-read(S, host_monotonic_ms());
+  def fl-manifest-read(S, t) {
+   let g = fl-emit(S, "cand", "go", 0, 0, "manifest", record_get(S, "id"), 0);
+   let rows = fsg-mf-rows(fl-ask(S, fl-mf-packet(S), "repair-manifest-" ++ record_get(S, "id")));
+   let a = record_set(S, "mf", rows);
+   let b = record_set(S, "goal", record_get(S, "goal") ++ fsg-mf-block(rows));
+   fl-emit(S, "cand", nil?(rows) ? "disc" : "ok", len(rows), nil?(rows) ? 1 : 0, nil?(rows) ? "manifest-none" : "manifest", fl-head(fsg-mf-join(map(r => r[0], rows), ","), 40), fl-since(t));
+  }
+  // the band beside the edited file: its tests directory when it has one. Its preludes are the edited files and what they load.
+  def fl-mf-band-path(S) {
+   let p = fl-mf-source(S)[0];
+   let dir = fl-parent-of(p);
+   let base = fl-base(p);
+   fl-cat([nothing?(fs_list(fl-cat([dir, "/tests"]))) ? dir : fl-cat([dir, "/tests"]), "/", substring(base, 0, str_find(base, ".", 0)), "-manifest-band.bml"]);
+  }
+  def fl-preludes-of(p) {
+   let T = fl-text(p);
+   let at = str_find(T, "preludes:", 0);
+   let eol = at < 0 ? -1 : str_find(T, "\n", at);
+   at < 0 || eol < 0 ? [] : filter(w => fl-ends?(w, ".fk") || fl-ends?(w, ".bml"), split-on(substring(T, at + 9, eol), " "));
+  }
+  def fl-mf-preludes(S) = str-join-with(fl-uniq(filter(w => w != "form-stdlib/core.fk" && w != "form-stdlib/bml/live.bml", foldl((acc, p) => append(append(acc, fl-preludes-of(p)), [fl-prelude-rel(p)]), [], fl-mf-source(S)))), " ");
+  def fl-manifest-band(S) {
+   let rows = record_get(S, "mf");
+   nil?(rows) || len(record_get(S, "band")) > 0 || nil?(fl-mf-source(S)) ? 0 : fl-manifest-band-write(S, rows, fl-mf-band-path(S));
+  }
+  def fl-manifest-band-write(S, rows, path) {
+   let r = fl-remember(S, path, fl-text(path));
+   let w = write_file_text(path, fsg-mf-band(fl-base(path), fl-mf-preludes(S), rows));
+   let a = record_set(S, "paths", append(record_get(S, "paths"), [path]));
+   let b = record_set(S, "band", path);
+   record_set(S, "full", fsg-mf-full(rows));
   }
   // ── 2. candidate: the voice (the server) answers edit blocks ──
   // The files a request lists were true when it was written; a definition moves. The names the request speaks of (hyphenated words: hw-conflicted?, hw-sync) are looked up where they are
@@ -460,6 +500,7 @@ section [form.bml] {
   }
   def fl-band(S) {
    let t = host_monotonic_ms();
+   let w = record_get(S, "applied") == 0 ? 0 : fl-manifest-band(S);
    record_get(S, "applied") == 0 ? fl-band-skip(S) : len(record_get(S, "band")) == 0 && nil?(filter(p => fl-form?(p), record_get(S, "paths"))) ? fl-band-nowitness(S) : fl-band-pass(S, t, 0);
   }
   def fl-band-skip(S) {
@@ -542,7 +583,7 @@ section [form.bml] {
   def fl-stem-sigs(S, name) = take(40, filter(s => str_find(s, fl-stem(name), 0) == 0, foldl((acc, p) => append(acc, fl-sigs-of(fl-text(p))), [], record_get(S, "paths"))));
   def fl-name-note(S, name) {
    let p = len(name) == 0 ? "" : fl-find-def(name);
-   len(name) == 0 ? "" : len(p) > 0 ? fl-def-head(name) : fl-cat([name, " is defined nowhere in the body. The names that stand with its stem:\n", str-join-with(fl-stem-sigs(S, name), "\n"), "\nCall only names that stand, or write the definition in the file you edit.\n\n"]);
+   len(name) == 0 ? "" : len(p) > 0 ? fl-def-head(name) : fl-cat([name, " is defined nowhere in the body. ", fsg-mf-note(record_get(S, "mf"), name), "The names that stand with its stem:\n", str-join-with(fl-stem-sigs(S, name), "\n"), "\nCall only names that stand, or write the definition in the file you edit.\n\n"]);
   }
   // where a name is defined: the body's own directories, read once per repair
   def fl-roots() = ["form/form-stdlib/bml", "form/form-stdlib", "observe", "gate", "cognition", "control", "learn"];
@@ -656,7 +697,12 @@ section [form.bml] {
    fl-emit(S, "land", ok ? "ok" : "disc", ok ? 1 : 0, ok ? 0 : 1, ok ? (fl-ran?(sent) ? "landed" : "landed-ahead") : nc ? "no-change" : "commit-refused", fl-line(hch-said(made)), fl-since(t));
   }
   // ── the end ──
-  def fl-restore(S) = record_get(S, "landed") == 1 ? 0 : foldl((acc, o) => acc + write_file_text(o[0], o[1]), 0, record_get(S, "orig"));
+  // a file the pass made (its orig text empty) goes with it when it does not land: git removes it while it is untracked, so a band the flow wrote is not left blank in the tree
+  def fl-restore(S) {
+   let a = record_get(S, "landed") == 1 ? 0 : foldl((acc, o) => acc + write_file_text(o[0], o[1]), 0, record_get(S, "orig"));
+   let b = record_get(S, "landed") == 1 ? 0 : foldl((acc, o) => len(o[1]) == 0 ? acc + (fl-ran?(fl-git("clean", ["clean", "-fq", "--", o[0]])) ? 1 : 0) : acc, 0, record_get(S, "orig"));
+   a;
+  }
   def fl-verdict(S) = record_get(S, "landed") == 1 ? "landed" : record_get(S, "green") == 1 ? "green" : record_get(S, "applied") > 0 ? "partial" : "ended";
   // A green pass keeps the cause the land step already named. Folding every unlanded green pass into band-full-not-landed hid a pass that was never asked to land, and that kind is not carried again, so the request stopped short of its landing.
   def fl-cause(S) = record_get(S, "landed") == 1 ? "landed" : record_get(S, "green") == 1 ? (len(record_get(S, "cause")) > 0 ? record_get(S, "cause") : "band-full-not-landed") : len(record_get(S, "cause")) > 0 ? record_get(S, "cause") : "unknown";
@@ -809,6 +855,7 @@ section [form.bml] {
    let S = fl-new(o, id);
    let a = fl-emit(S, "start", "ok", 0, 0, "begin", record_get(S, "id"), 0);
    let b = fl-plan(S);
+   let m = fl-manifest(S);
    let c = fl-candidate(S);
    let d = fl-band(S);
    let e = fl-land(S);
