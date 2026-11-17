@@ -1027,7 +1027,7 @@ static char fk_stop_frame_unit[FK_STOP_FRAMES][160];
 static int fk_stop_frames_n;
 static long long fk_stop_frames_depth;
 static void fk_fatal_frames_take(void);
-static void fk_fatal_row(const char *name, int sig, unsigned long long addr);
+static void fk_fatal_row(const char *name, int sig, unsigned long long addr, unsigned long long pc, unsigned long long lr);
 static void fk_depth_said(long long used);
 static char fk_depth_msg[1024];
 static long long *fk_fn_fbox;
@@ -10280,6 +10280,7 @@ struct fk_jit_cx {
 static struct fk_jit_cx fk_jit_cx;
 #define FK_JIT_HEAT 4096
 static void **fk_jit_page;           /* per defn: its page, or 0 */
+static size_t *fk_jit_span;          /* per defn: the bytes its page was mapped at (the fatal-signal organ names the page a fault ran in) */
 /* per defn: 0 offerable, 1 offered (a page bound or the cell declined), 2 waiting in the line, 3 written in place of
  * its calls by a page (jit_node ["inline", c]): its own time is its callers' pages' time, so it is offered by heat only */
 static unsigned char *fk_jit_state;
@@ -10303,7 +10304,10 @@ static void fk_jit_reserve(long long need) {
     while (next < need) { next = next * 2; }
     void **pg = (void **)realloc(fk_jit_page, (size_t)next * sizeof(void *));
     unsigned char *st = (unsigned char *)realloc(fk_jit_state, (size_t)next);
-    if (pg == 0 || st == 0) { fk_die("fk_jit_reserve: out of memory growing the page table"); }
+    size_t *sp = (size_t *)realloc(fk_jit_span, (size_t)next * sizeof(size_t));
+    if (pg == 0 || st == 0 || sp == 0) { fk_die("fk_jit_reserve: out of memory growing the page table"); }
+    memset(sp + fk_jit_cap, 0, (size_t)(next - fk_jit_cap) * sizeof(size_t));
+    fk_jit_span = sp;
     memset(pg + fk_jit_cap, 0, (size_t)(next - fk_jit_cap) * sizeof(void *));
     memset(st + fk_jit_cap, 0, (size_t)(next - fk_jit_cap));
     fk_jit_page = pg;
@@ -10490,6 +10494,7 @@ static long long fk_jit_bind(long long x) {
     fk_page_write(mem, words, (size_t)n * 4);
     free(words);
     fk_jit_page[c] = mem;
+    fk_jit_span[c] = span;
     if (fk_jit_cx.vs == 0) {
         long long (*ops[FK_JIT_OPS])(long long, long long) = {
             fk_op_head, fk_op_tail, fk_op_len, fk_op_str_len, fk_op_str_eq, fk_op_byte_at, fk_op_cons,
@@ -13491,7 +13496,13 @@ static int fk_f64_ccall(unsigned int *words, long long *wn, int *ntemp, int *nit
     if (check_moved) {
         if (!fk_f64_mov64(words, wn, 16U, (unsigned long long)(fk_size_t)&fk_c_moved)) { return -1; }
         if (!fk_f64_put(words, wn, 0xF9400209U)) { return -1; }                                              /* LDR X9, [X16]: moved? */
-        if (!fk_f64_put(words, wn, 0xB4000069U)) { return -1; }                                              /* CBZ X9, +3: not moved, go on */
+        if (!fk_f64_put(words, wn, 0xB40000C9U)) { return -1; }                                              /* CBZ X9, +6: not moved, go on */
+        /* the leaving block's own frame words, back before it leaves: the C native's return left its answer in X0 and its own value in
+         * X8 and X30, and the overflow block writes the status through X0 (the leaf's frame), the iteration count from X8, and returns
+         * through X30 (observe/door-link-health-run.bml died here, SIGSEGV at the C native's answer used as the frame, 2026-11-17) */
+        if (!fk_f64_put(words, wn, 0xF9400000U | (FK_F64_CF_X0 << 10) | (31U << 5) | 0U)) { return -1; }   /* LDR X0 */
+        if (!fk_f64_put(words, wn, 0xF9400000U | (FK_F64_CF_X8 << 10) | (31U << 5) | 8U)) { return -1; }   /* LDR X8 */
+        if (!fk_f64_put(words, wn, 0xF9400000U | (FK_F64_CF_X30 << 10) | (31U << 5) | 30U)) { return -1; } /* LDR X30 */
         if (!fk_f64_put(words, wn, 0x910003FFU | fr)) { return -1; }                                         /* ADD SP, SP, #frame */
         fk_f64_ovf_at[fk_f64_ovf_n] = *wn; fk_f64_ovf_n = fk_f64_ovf_n + 1;
         if (!fk_f64_put(words, wn, 0x5400000EU)) { return -1; }                                              /* B.AL overflow -- patched: the pool moved, the walker answers */
@@ -15393,7 +15404,7 @@ static void fk_depth_wall(long long used) {
         fk_stop(fk_depth_msg);
     }
     printf("fkwu: %s. The wall is honest, the silent crash was not.\n", fk_depth_msg);
-    fk_fatal_row("STACK-DEPTH", 0, (unsigned long long)(fk_size_t)&fk_sp_here);
+    fk_fatal_row("STACK-DEPTH", 0, (unsigned long long)(fk_size_t)&fk_sp_here, 0, 0);
     fk_die("eval-depth wall");
 }
 /* THE ONE MEANING of head, tail, len, str_len, str_eq, str_byte_at and cons over words already walked: the walker's
@@ -18156,7 +18167,55 @@ static void fk_fatal_observed(const char *name, unsigned long long addr) {
     fk_fatal_lit(" at 0x");
     fk_fatal_hex(addr);
 }
-static void fk_fatal_row(const char *name, int sig, unsigned long long addr) {
+/* the page a fault ran in: the faulting pc against every page the body has born (a defn's Form page with the span it was mapped at,
+ * a crystallized leaf's page and its extra instances), answering the owner's table, the defn, the page's start and its span. A
+ * page written in place of its calls or tail-called runs under its caller's frame name in the walker's chain, so this is the
+ * only reading that names the page itself. Reads tables only: no allocation, no stdio. */
+static int fk_fatal_jit_find(unsigned long long pc, const char **kind, long long *fn, unsigned long long *start, unsigned long long *span) {
+    long long k;
+    if (pc == 0) { return 0; }
+    for (k = 0; k < fk_jit_cap && fk_jit_page != 0 && fk_jit_span != 0; k = k + 1) {
+        unsigned long long s = (unsigned long long)(fk_size_t)fk_jit_page[k];
+        if (s != 0 && pc >= s && pc < s + (unsigned long long)fk_jit_span[k]) { *kind = "form-page"; *fn = k; *start = s; *span = (unsigned long long)fk_jit_span[k]; return 1; }
+    }
+    for (k = 0; k < fk_f64_cap && fk_f64_mem != 0; k = k + 1) {
+        unsigned long long s = (unsigned long long)(fk_size_t)fk_f64_mem[k];
+        if (s != 0 && pc >= s && pc < s + (unsigned long long)FK_F64_PAGE_BYTES) { *kind = "f64-leaf"; *fn = k; *start = s; *span = (unsigned long long)FK_F64_PAGE_BYTES; return 1; }
+        if (fk_f64_xmem != 0) {
+            long long e;
+            for (e = 0; e < FK_F64_XINST; e = e + 1) {
+                s = (unsigned long long)(fk_size_t)fk_f64_xmem[k * FK_F64_XINST + e];
+                if (s != 0 && pc >= s && pc < s + (unsigned long long)FK_F64_PAGE_BYTES) { *kind = "f64-leaf-instance"; *fn = k; *start = s; *span = (unsigned long long)FK_F64_PAGE_BYTES; return 1; }
+            }
+        }
+    }
+    return 0;
+}
+static void fk_fatal_jit(unsigned long long pc, unsigned long long lr) {
+    const char *kind = "";
+    long long fn = 0;
+    unsigned long long start = 0, span = 0;
+    if (pc == 0) { return; }
+    fk_fatal_lit(",\"pc\":\"0x"); fk_fatal_hex(pc);
+    fk_fatal_lit("\",\"lr\":\"0x"); fk_fatal_hex(lr);
+    fk_fatal_lit("\"");
+    if (fk_fatal_jit_find(pc, &kind, &fn, &start, &span)) {
+        const char *nm, *un;
+        long long nl;
+        char nb[96];
+        fk_fatal_fn_info(fn, &nm, &nl, &un);
+        fk_fatal_cpy(nb, 96, nm, nl);
+        fk_fatal_lit(",\"jit\":{\"kind\":\""); fk_fatal_lit(kind);
+        fk_fatal_lit("\",\"fn\":"); fk_fatal_int(fn);
+        fk_fatal_lit(",\"name\":"); fk_fatal_str(nb);
+        fk_fatal_lit(",\"unit\":"); fk_fatal_str(un);
+        fk_fatal_lit(",\"page\":\"0x"); fk_fatal_hex(start);
+        fk_fatal_lit("\",\"span\":"); fk_fatal_int((long long)span);
+        fk_fatal_lit(",\"off\":"); fk_fatal_int((long long)(pc - start));
+        fk_fatal_lit("}");
+    }
+}
+static void fk_fatal_row(const char *name, int sig, unsigned long long addr, unsigned long long pc, unsigned long long lr) {
     long long at = fk_now_ms();
     long long pid = (long long)getpid();
     long long rss = 0;
@@ -18193,7 +18252,9 @@ static void fk_fatal_row(const char *name, int sig, unsigned long long addr) {
     fk_fatal_int(sig);
     fk_fatal_lit(",\"name\":\""); fk_fatal_lit(name);
     fk_fatal_lit("\",\"addr\":\"0x"); fk_fatal_hex(addr);
-    fk_fatal_lit("\",\"resident_bytes\":"); fk_fatal_int(rss);
+    fk_fatal_lit("\"");
+    fk_fatal_jit(pc, lr);
+    fk_fatal_lit(",\"resident_bytes\":"); fk_fatal_int(rss);
     fk_fatal_lit(",\"pid\":"); fk_fatal_int(pid);
     fk_fatal_lit(",\"cell\":");
     fk_fatal_str(fk_cellrun_n > 0 && fk_cellrun_n <= 8 ? fk_cellrun_paths[fk_cellrun_n - 1] : (fk_cell_root_path != 0 ? fk_cell_root_path : fk_src_root_path));
@@ -18258,10 +18319,18 @@ static void fk_fatal_row(const char *name, int sig, unsigned long long addr) {
 static void fk_fatal_handler(int sig, siginfo_t *si, void *uc) {
     const char *nm = sig == SIGSEGV ? "SIGSEGV" : sig == SIGBUS ? "SIGBUS" : sig == SIGILL ? "SIGILL" : sig == SIGFPE ? "SIGFPE" : "SIGABRT";
     unsigned long long addr = si != 0 ? (unsigned long long)(fk_size_t)si->si_addr : 0;
+    unsigned long long pc = 0, lr = 0;
+#if defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
+    if (uc != 0 && ((ucontext_t *)uc)->uc_mcontext != 0) {
+        pc = (unsigned long long)((ucontext_t *)uc)->uc_mcontext->__ss.__pc;
+        lr = (unsigned long long)((ucontext_t *)uc)->uc_mcontext->__ss.__lr;
+    }
+#else
     (void)uc;
+#endif
     if (fk_fatal_busy) { signal(sig, SIG_DFL); raise(sig); return; }
     fk_fatal_busy = 1;
-    fk_fatal_row(nm, sig, addr);
+    fk_fatal_row(nm, sig, addr, pc, lr);
     signal(sig, SIG_DFL);   /* the default action back, then the signal again: the exit status stays the operating system's word */
     raise(sig);
 }
@@ -18318,10 +18387,28 @@ __attribute__((noinline)) static void fk_test_fault_now(void) {
     else if (fk_cstr_eq(fk_test_fault_word, "ill")) { raise(SIGILL); }
     else if (fk_cstr_eq(fk_test_fault_word, "fpe")) { raise(SIGFPE); }
     else if (fk_cstr_eq(fk_test_fault_word, "abort")) { abort(); }
+#if defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
+    else if (fk_cstr_eq(fk_test_fault_word, "jit")) {
+        /* a page of a defn that faults inside itself (MOVZ X0, #16; STR X0, [X0]; RET): the row must name the page, its defn and the offset */
+        long long c = fk_fn_count > 1 ? fk_fn_count - 1 : 0;
+        static const unsigned int words[3] = { 0xD2800200U, 0xF9000000U, 0xD65F03C0U };
+        fk_jit_reserve(c + 1);
+        while (c > 0 && fk_jit_page[c] != 0) { c = c - 1; }
+        {
+            long long span = getpagesize();
+            void *mem = fk_page_alloc((size_t)span);
+            if (mem == 0) { return; }
+            fk_page_write(mem, words, sizeof(words));
+            fk_jit_page[c] = mem;
+            fk_jit_span[c] = (size_t)span;
+            ((long long (*)(void))mem)();
+        }
+    }
+#endif
     else if (fk_cstr_eq(fk_test_fault_word, "cstack")) { fk_test_recurse(1); }
 }
 #else
-static void fk_fatal_row(const char *name, int sig, unsigned long long addr) { (void)name; (void)sig; (void)addr; }
+static void fk_fatal_row(const char *name, int sig, unsigned long long addr, unsigned long long pc, unsigned long long lr) { (void)name; (void)sig; (void)addr; (void)pc; (void)lr; }
 #endif
 /* ---- reading another kernel's store: its columns mapped read-only, every word read where it lives ----
  * A foreign word travels in this process as a plain int (cell_ref / cell_field answer it, cell_value

@@ -105,7 +105,7 @@ name across a file and its prelude closure: the later arity wins") needed no ren
 ### A stack that ends is a stop; a signal that ends the process is a row
 
 A cell shares its process, so what ends a process ends every cell in it. Two layers answer, in this order (runtime/fkwu-uni.c, "THE
-FATAL-SIGNAL ORGAN"; `form/form-stdlib/tests/fatal-signal-band.fk` reads 16383):
+FATAL-SIGNAL ORGAN"; `form/form-stdlib/tests/fatal-signal-band.fk` reads 32767):
 
 - **The stack is a stop.** The walker measures real stack use at every step (`fk_depth_wall`, the wall at the run thread's reserve less 2 MB) and the
   source collector counts its own depth (`fk_src_collect_dep`: at most 2048 nested preludes, and the same stack wall). Past either, the walker
