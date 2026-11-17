@@ -8,7 +8,17 @@ section [form.bml] {
   // Q4_K and Q6_K hold slots 52/53 under their kernel names; their tile decodes its weights one sub-block
   // a K step (qmb-q4k-mma / qmb-q6k-mma) and answers the per-weight attestant (qmb-quant-mma) byte for byte.
   def q38pq-k-mma-msl() = qmb-q4k-mma("form_q4k_matmul_mma_f32") + qmb-q6k-mma("form_q6k_matmul_mma_f32");
-  def q38pq-msl() = qml-msl-splits() + q38pq-f32-helpers() + qmb-batch-msl-n("form_qwen_f32_matmul_batch","q38f32","4","1") + qmb-q80-batch-tg() + qmb-q80-mma() + q38pq-k-mma-msl();
+  // The K-quant wide tiles (qmk-msl: 64 rows x 64 or 32 tokens, 128 threads) answer the 32 x 32 tile's bytes word for word (the lab's kq lane) and
+  // run it 1.3 to 1.7 times faster at 64 tokens; they are four pipelines appended after the table's last (72..75: Q4_K 64, Q4_K 32, Q6_K 64, Q6_K 32 tokens).
+  def q38pq-wide-msl() = qmk-msl(12, 64) + qmk-msl(12, 32) + qmk-msl(14, 64) + qmk-msl(14, 32);
+  def q38pq-wide-base() = 72;
+  def q38pq-wide-index(type, tt) = q38pq-wide-base() + (type == 14 ? 2 : 0) + (tt == 32 ? 1 : 0);
+  def q38pq-wide-pipes(msl) = [metal_pipeline(msl, qmk-name(12, 64)), metal_pipeline(msl, qmk-name(12, 32)), metal_pipeline(msl, qmk-name(14, 64)), metal_pipeline(msl, qmk-name(14, 32))];
+  // the tokens a tile covers for a K-quant matrix of `rows` rows over `ntok` tokens: 64 where its groups still fill the GPU (the Q8_0 rule, q38-t64-use?),
+  // 32 from 32 tokens up, 0 (the 32 x 32 tile) below
+  // A table that stops short of the wide pipelines (take(q38pq-wide-base(), ps): the bench's baseline arm) runs the 32 x 32 tile.
+  def q38pq-wide-tt(ps, rows, ntok) = len(ps) < q38pq-wide-base() + 4 ? 0 : ((ntok >= 64 && qmk-groups(rows, ntok, 64) >= 160) ? 64 : (ntok >= 32 ? 32 : 0));
+  def q38pq-msl() = qml-msl-splits() + q38pq-f32-helpers() + qmb-batch-msl-n("form_qwen_f32_matmul_batch","q38f32","4","1") + qmb-q80-batch-tg() + qmb-q80-mma() + q38pq-k-mma-msl() + q38pq-wide-msl();
   def q38pq-k-mma-index(type) = type==12 || type==14 ? q38pq-index(type) : -1;
   // A K-quant row is whole 256-weight superblocks by format, and the tile strides a row by cols / 256 of them, so a
   // view whose cols is not a multiple of 256 would read its neighbour's superblocks: q38-mv-batch-y refuses it aloud

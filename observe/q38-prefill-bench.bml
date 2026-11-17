@@ -2,7 +2,8 @@
 // the wall and on the device's busy counter, then the minimum, lower quartile and median. The minimum is what the lane does with the GPU to itself.
 //
 //   echo '{"go":1,"span":64,"runs":10}' | ./fkwu observe/q38-prefill-bench.bml
-// stdin, one JSON line, all optional: go, span (64), runs (10), prompt (a chat prompt: its ids replace the synthetic ones).
+// stdin, one JSON line, all optional: go, span (64), runs (10), prompt (a chat prompt: its ids replace the synthetic ones), file (a model path), ab (1: A/B
+// the K-quant wide tiles against the 32 x 32 tile, interleaved in this process, with the ids compared).
 // preflight-exec: forbidden
 // preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/json.fk form-stdlib/bml/stdin-source.bml form-stdlib/bml/memory-governor.bml form-stdlib/form-cli-model-session.fk
 section [form.bml] {
@@ -72,7 +73,28 @@ section [form.bml] {
    let c = qpb-report("device busy", qpb-col(rs, 2), len(ids));
    qpb-gauge("after");
   }
-  def qpb-open(path, want, runs, prompt) {
+  // "ab":1 — the wide K-quant tiles against the 32 x 32 tile in ONE process: the second arm is the same context with its pipeline table cut short of the wide
+  // pipelines (q38pq-wide-tt), the rounds alternate which arm runs first, so a neighbour's load on the GPU lands on both. The ids of the two arms are compared.
+  def qpb-ab-go(ctxA, ctxB, ids, r, n, accA, accB) = r >= n ? [accA, accB] : {
+   let first = r % 2 == 0;
+   let one = qpb-run-once(first ? ctxA : ctxB, ids);
+   let two = qpb-run-once(first ? ctxB : ctxA, ids);
+   qpb-ab-go(ctxA, ctxB, ids, r + 1, n, cons(first ? one : two, accA), cons(first ? two : one, accB));
+  };
+  def qpb-measure-ab(ctx, ids, runs) {
+   let ctxA = cons(take(q38pq-wide-base(), ctx[0]), ctx[1:]);
+   let g0 = qpb-gauge("before");
+   let wa = qpb-run-once(ctxA, ids);
+   let wb = qpb-run-once(ctx, ids);
+   let said = print_str("[q38-bench] A/B " ++ len(ids).str() ++ " positions: winner of the 32x32 tile " ++ wa[0].str() ++ ", of the wide tiles " ++ wb[0].str() ++ ((Comparable) wa[0] == wb[0] ? " (the same id)" : " (DIFFER)"));
+   let ab = qpb-ab-go(ctxA, ctx, ids, 0, runs, [], []);
+   let r1 = qpb-report("32x32 tile, wall", qpb-col(ab[0], 1), len(ids));
+   let r2 = qpb-report("wide tiles,  wall", qpb-col(ab[1], 1), len(ids));
+   let r3 = qpb-report("32x32 tile, device busy", qpb-col(ab[0], 2), len(ids));
+   let r4 = qpb-report("wide tiles,  device busy", qpb-col(ab[1], 2), len(ids));
+   qpb-gauge("after");
+  }
+  def qpb-open(path, want, runs, prompt, ab) {
    let src = fcmg-src(path);
    let ids = (String) prompt == "" ? qpb-ids(want, 0) : q35-chat-ids(src, prompt);
    let span = len(ids);
@@ -87,7 +109,7 @@ section [form.bml] {
      let unleased = mg-release();
      print_str("[q38-bench] the context did not open");
     } : {
-     let measured = qpb-measure(ctx, ids, runs);
+     let measured = (Comparable) ab == 1 ? qpb-measure-ab(ctx, ids, runs) : qpb-measure(ctx, ids, runs);
      let closed = q38-close(ctx, []);
      let unleased = mg-release();
      print_str("[q38-bench] released");
@@ -96,7 +118,7 @@ section [form.bml] {
   }
   def qpb-run() {
    let opts = qpb-opts();
-   (Comparable) qpb-int(opts, "go", 0) == 1 ? qpb-open(qpb-text(opts, "file", qpb-file()), qpb-int(opts, "span", 64), qpb-int(opts, "runs", 10), qpb-text(opts, "prompt", "")) : print_str("[q38-bench] plan: {\"go\":1} opens the model and times the batched span prefill");
+   (Comparable) qpb-int(opts, "go", 0) == 1 ? qpb-open(qpb-text(opts, "file", qpb-file()), qpb-int(opts, "span", 64), qpb-int(opts, "runs", 10), qpb-text(opts, "prompt", ""), qpb-int(opts, "ab", 0)) : print_str("[q38-bench] plan: {\"go\":1} opens the model and times the batched span prefill");
   }
  }
  qpb-run();

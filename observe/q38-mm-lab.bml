@@ -162,7 +162,7 @@ section [form.bml] {
   };
   // the K-quant prefill tile Form emits, on synthetic weights: the per-weight attestant (qmb-quant-mma) and the lane's tile (qmb-q4k-mma /
   // qmb-q6k-mma, the kernels of pipelines 52/53) in one unit with the lane's helper spine and its fp-contract pragma
-  def lab-kq-unit(type) = "#include <metal_stdlib>\n#pragma clang fp contract(off)\n" ++ q6m-msl-int() ++ q6m-msl-f16() ++ q4m-msl-helpers() ++ qml-msl-splits() ++ (type == 12 ? qmb-quant-mma("lab_kq_wi", "q4k", "144", "256") ++ qmb-q4k-mma("lab_kq_step") : qmb-quant-mma("lab_kq_wi", "q6k", "210", "256") ++ qmb-q6k-mma("lab_kq_step"));
+  def lab-kq-unit(type) = "#include <metal_stdlib>\n#pragma clang fp contract(off)\n" ++ q6m-msl-int() ++ q6m-msl-f16() ++ q4m-msl-helpers() ++ qml-msl-splits() ++ (type == 12 ? qmb-quant-mma("lab_kq_wi", "q4k", "144", "256") ++ qmb-q4k-mma("lab_kq_step") : qmb-quant-mma("lab_kq_wi", "q6k", "210", "256") ++ qmb-q6k-mma("lab_kq_step")) ++ qmk-msl(type, 64) ++ qmk-msl(type, 32);
   // the first word where two outputs of n words differ, by halves; -1 when every word agrees
   def lab-first-diff(a, b, lo, hi) = str_eq(substring(a, lo * 4, hi * 4), substring(b, lo * 4, hi * 4)) ? -1 : (hi - lo <= 1 ? lo : {
    let left = lab-first-diff(a, b, lo, (lo + hi) / 2);
@@ -176,12 +176,14 @@ section [form.bml] {
    let x = metal_buf_alloc(ntok * cols * 4);
    let ya = metal_buf_alloc(rows * ntok * 4);
    let yb = metal_buf_alloc(rows * ntok * 4);
+   let yc = metal_buf_alloc(rows * ntok * 4);
+   let yd = metal_buf_alloc(rows * ntok * 4);
    let e1 = metal_enqueue(metal_pipeline(usrc, type == 12 ? "lab_fill_q4k" : "lab_fill_q6k"), md-bind16([qb], [nblk], 256, 0, 0, 0), nblk);
    let e2 = metal_enqueue(metal_pipeline(usrc, "lab_fill_f32"), md-bind16([x], [ntok * cols], 256, 0, 0, 0), ntok * cols);
    let s = metal_sync();
    let flop = 2 * rows * cols * ntok;
    let groups = ((ntok + 31) / 32) * ((rows + 31) / 32);
-   let cs = [["attestant qmb-quant-mma", metal_pipeline(src, "lab_kq_wi"), [qb, x, ya], [rows, cols, ntok, rows], 256, 0, groups, 1], ["tile qmb-" ++ (type == 12 ? "q4k" : "q6k") ++ "-mma", metal_pipeline(src, "lab_kq_step"), [qb, x, yb], [rows, cols, ntok, rows], 256, 0, groups, 1]];
+   let cs = [["attestant qmb-quant-mma", metal_pipeline(src, "lab_kq_wi"), [qb, x, ya], [rows, cols, ntok, rows], 256, 0, groups, 1], ["tile qmb-" ++ (type == 12 ? "q4k" : "q6k") ++ "-mma", metal_pipeline(src, "lab_kq_step"), [qb, x, yb], [rows, cols, ntok, rows], 256, 0, groups, 1], ["wide 64x64 qmk-msl", metal_pipeline(src, qmk-name(type, 64)), [qb, x, yc], [rows, cols, ntok, rows], 128, 0, qmk-groups(rows, ntok, 64), 1], ["wide 64x32 qmk-msl", metal_pipeline(src, qmk-name(type, 32)), [qb, x, yd], [rows, cols, ntok, rows], 128, 0, qmk-groups(rows, ntok, 32), 1]];
    let said = print_str("[q38-mm-lab] kq type " ++ type.str() ++ ": " ++ rows.str() ++ " x " ++ cols.str() ++ " x " ++ ntok.str() ++ " tokens, " ++ (flop / 1000000).str() ++ " MFLOP, " ++ groups.str() ++ " groups, pipelines " ++ cs[0][1].str() ++ " and " ++ cs[1][1].str() ++ ", fills " ++ e1.str() ++ " " ++ e2.str());
    // once each (the warm round), then the two outputs word for word
    let once = lab-round-list(cs, 1);
@@ -189,11 +191,16 @@ section [form.bml] {
    let b = metal_buf_read(yb, 0, rows * ntok * 4);
    let at = lab-first-diff(a, b, 0, rows * ntok);
    let same = print_str("[q38-mm-lab] kq bytes over " ++ (rows * ntok).str() ++ " words: first differing word " ++ at.str() ++ (at >= 0 ? " (attestant " ++ ln-u32-le(a, at * 4).str() ++ ", tile " ++ ln-u32-le(b, at * 4).str() ++ ")" : ", every word equal"));
+   let c = metal_buf_read(yc, 0, rows * ntok * 4);
+   let d = metal_buf_read(yd, 0, rows * ntok * 4);
+   let atc = lab-first-diff(b, c, 0, rows * ntok);
+   let atd = lab-first-diff(b, d, 0, rows * ntok);
+   let samec = print_str("[q38-mm-lab] kq wide tiles against the tile, first differing word: 64x64 " ++ atc.str() ++ ", 64x32 " ++ atd.str() ++ " (-1: every word equal)");
    let g0 = lab-gauge("before");
    let rs = lab-rounds(cs, k, rounds, []);
    let g1 = lab-gauge("after");
    let rep = lab-report(cs, rs, 0, flop);
-   let freed = metal_buf_free(qb) + metal_buf_free(x) + metal_buf_free(ya) + metal_buf_free(yb);
+   let freed = metal_buf_free(qb) + metal_buf_free(x) + metal_buf_free(ya) + metal_buf_free(yb) + metal_buf_free(yc) + metal_buf_free(yd);
    1;
   }
   // the gated-delta recurrence of one linear-attention layer, at the model's shape (48 value heads of 128, 16 key heads of 128)
