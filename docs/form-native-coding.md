@@ -895,7 +895,9 @@ Each stage below is a BML organ with its own band; none of the bands opens a mod
   caller check meets a witness before any model opens. A check no candidate could meet (a dialect the tool
   does not speak, a read-only document it would have to change) is refused at rung 0 with reason
   `caller-check-unmeetable`, zero generated IDs and the blocking check named; a check the original fails but a
-  candidate could meet reads open and is never refused. `form-cli-check-witness-band` 1023.
+  candidate could meet reads open and is never refused. The refused check is the result's `blocking_check`
+  pair (`expected`, `actual`, `shape_only`), and every lane result carries `blocking_check`, null when the
+  delivered documents block on nothing. `form-cli-check-witness-band` 1023.
 - **The edit ladder** (the `edit` tool in `form-agent-tools.bml`): an old text that drifted (a whitespace run,
   for one) lands where exactly one place matches and names its rung; two places are refused; a miss carries
   the nearest resident line window. `form-agent-edit-ladder-band` 8191.

@@ -16958,6 +16958,8 @@ static long long fk_intern_composite(long long cat47, long long kids47) {
 static long long fk_make_nodeid(long long p91, long long l91, long long ty91, long long in91) {
         /* Validate and generate the native identity before claiming storage. */
         fk_node_id id91 = fk_nid_make(p91, l91, ty91, in91);
+        /* the 1.1.1 coordinate is the trivial int leaf itself: the word intern_trivial_int answers for that value, so a node rebuilt from its own coordinates is the node */
+        if (p91 == 1 && l91 == 1 && ty91 == 1) { return fk_intern_int_node(in91 * 2); }
         long long h91 = fk_nodeid_key(p91, l91, ty91, in91);
         if (fk_field_on) { return fk_field_intern_node(3, 0, 0, 0, id91, h91); }
         if (fk_np + 1 >= fk_node_cap) {

@@ -39,7 +39,7 @@ executable), and no Form door calls sed, awk, perl or python: the band sweep (`.
 the verdict manifest say in process (`observe/band-head.bml`, band `observe/tests/band-head-band`, 2047), so
 `{"list":1}` names every workload (410 on 2026-10-04) with each one's staging, pin and row in about a second (the shell took 4 s,
 2026-10-04: the same columns, line for line). `hearth.bml`, `rumi-glass.bml` and `observe/hearth-glass-live.fk` read the
-`ps` listing in Form (`hearth-band`, 131071) and `source-of.fk` reads grep's rows in Form
+`ps` listing in Form (`hearth-band`, 16777215) and `source-of.fk` reads grep's rows in Form
 (`source-of-band`, 15). A child that must end by a deadline is begun through `host-child.bml` (`hch-by`,
 `hch-stop`); a bell's offer is `observe/channel-offer-run.bml` (`observe/tests/channel-offer-band`, 127; its request is
 emitted by `cc-offer-json` with the body's JSON emitter and read strictly).
@@ -492,7 +492,7 @@ form-cli-peer-direct-answer-action-band    -> 8191
 form-cli-peer-stream-ingress-band          -> 2097151
 form-cli-peer-contribution-turnwheel-band  -> 33554431
 observed-auto-learning-band                -> 32767
-hearth-band                                -> 131071
+hearth-band                                -> 16777215
 receipt-texture-band                       -> 16383
 lora-backward-band 511 · lora-adapter-band 31 · symbol-voice-band 63
 ```

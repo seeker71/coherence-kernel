@@ -55,9 +55,11 @@ route is `docs/native-jit-routing.md`), the host-OS surface, the Form→asm lowe
 
 **Core recipes in BML.** Core recipes move out of the C seed into BML and reach each platform through the JIT; the
 seed lowers into its Form organs, and its size (`wc -l runtime/fkwu-uni.c`) is the reading of that walk
-(`form/form-stdlib/release-ledger.bml`, family R13). The native op surface is one manifest,
-`form/form-stdlib/native-op-manifest.fk`; `flatten/` generates `runtime/fkwu-optable.h` from its rows, and
-`./fkwu gate/op-manifest.bml` reads the manifest, the table and the seed in agreement. The
+(`form/form-stdlib/release-ledger.bml`, family R13). form-cli's op surface is
+`form/form-stdlib/native-op-manifest.fk` (its `flt-ops` in `form-stdlib/form-flatten.fk` is written from it by
+`observe/native-op-emitter-run.fk`); fkwu's table is `flatten/form-flatten.fk`, generated into
+`runtime/fkwu-optable.h`; `./fkwu gate/op-manifest.bml` holds the two to one arity and tag per name, and names the
+three byte carriers form-cli keeps on tags fkwu binds to other ops. The
 native form-cli is built, regenerated, installed and proven by one Form door (`gate/form-cli-build-run.bml`,
 `form/form-stdlib/bml/form-cli-build.bml`); `cc` on the seed is the one external tool.
 
