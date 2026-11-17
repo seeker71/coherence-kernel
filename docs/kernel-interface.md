@@ -63,8 +63,8 @@ The cons law: a pair keeps its tail word, list readers (print, value_str, len, n
 10. `bp` has one meaning: the BML resolution in `form-ontology-bp.fk`.
 
 `form/form-stdlib/tests/kernel-laws-band.fk` asks laws 1–9 of fkwu, each row
-under `attempt`, prelude-free; its head names every bit. Read with
-`./fkwu form/form-stdlib/tests/kernel-laws-band.fk` (`2147483647`). The drift gates'
+under `attempt`, prelude-free; its head names every bit and pins the full verdict. Read with
+`./fkwu form/form-stdlib/tests/kernel-laws-band.fk`. The drift gates'
 `kernel-laws` row (`gate/drift-gates.bml`) reads fkwu's answer at every landing that
 moves a kernel:
 

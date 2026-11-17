@@ -16960,6 +16960,8 @@ static long long fk_make_nodeid(long long p91, long long l91, long long ty91, lo
         fk_node_id id91 = fk_nid_make(p91, l91, ty91, in91);
         /* the 1.1.1 coordinate is the trivial int leaf itself: the word intern_trivial_int answers for that value, so a node rebuilt from its own coordinates is the node */
         if (p91 == 1 && l91 == 1 && ty91 == 1) { return fk_intern_int_node(in91 * 2); }
+        /* and the 1.1.3 coordinate with inst 0 or 1 is the trivial bool leaf, so eq and node_eq read one cell there too */
+        if (p91 == 1 && l91 == 1 && ty91 == 3 && (in91 == 0 || in91 == 1)) { return fk_intern_bool_node(in91); }
         long long h91 = fk_nodeid_key(p91, l91, ty91, in91);
         if (fk_field_on) { return fk_field_intern_node(3, 0, 0, 0, id91, h91); }
         if (fk_np + 1 >= fk_node_cap) {

@@ -76,7 +76,7 @@ shrinks as its lanes lower into Form organs (`release-ledger.bml` R13, stones R5
 ## Body-wide witnesses
 
 ```text
-./fkwu gate/drift-gates-run.bml          -> drift-gates pass=<fold> full=<mask> refused=0 (15 rows, each one cell_run call in this process; a row whose
+./fkwu gate/drift-gates-run.bml          -> drift-gates pass=<fold> full=<mask> refused=0 (its first line names the rows that guard the moved paths; each row is one cell_run call in this process; a row whose
                                             ground did not move since origin/main sits out and leaves the fold; band `gate/tests/drift-gates-band`, 262143)
 ./fkwu gate/band-sweep-run.bml           -> every band the body keeps (`{"list":1}` counts the workloads), one line each in order, then the summary;
                                             the exit is an error when a workload failed, a gate refused or the tree moved while it ran.
@@ -166,10 +166,10 @@ observe/tests/review-panel-band          -> 127  (observe/review-panel-run.bml, 
                                             the band, a closed or missing door is skipped with its row, a door name the table does not hold
                                             (`env` stands on PATH and would have printed the environment as its answer) and a request that
                                             does not read are refused by name with exit 1)
-./fkwu observe/door-link-health-run.bml  -> docs=41 claims=924 broken=0 (each broken claim named on its own line; 2026-10-04)
-                                            then prelude-reach missing=0 untracked=0 shadow=0
-                                            (every name a cell loads reaches one tracked file)
-./fkwu observe/band-truth-run.bml        -> bands=384 readable=207 unreadable=177 absent=0 seen=1 flaws=0, exit 0
+./fkwu observe/door-link-health-run.bml  -> its first line names docs, claims and broken (each broken claim on its own line; 0 is whole)
+                                            then prelude-reach lines, tokens, homes, missing, untracked and shadow
+                                            (every name a cell loads reaches one tracked file); the counts are the tree's, read by the command
+./fkwu observe/band-truth-run.bml        -> bands, readable and unreadable counts (read by the command), absent=0 seen=1 flaws=0, exit 0
                                             (each band's declared full read against the most its claims sum to, and
                                             the queue and manifest copies of a full against the head pin, with no
                                             band run, in about 0.3 s; a decimal or count fold that stands on purpose
@@ -248,9 +248,9 @@ form/form-stdlib/tests/command-words-band -> 2147483647  (form/form-stdlib/bml/c
                                             file that runs sed inside, a runner such as uv run python, a pipe from a producer that is no
                                             literal (cat f | bash), the substitutions in an unquoted heredoc body, or a wrapper its list lacks;
                                             a reading nests at most 256 levels and then answers <too-deep>)
-./fkwu observe/belief-stamps.bml         -> 70065000  (field stamped*10^6 + owed*10^3 + laws; 2026-10-01)
+./fkwu observe/belief-stamps.bml         -> one number (field stamped*10^6 + owed*10^3 + laws), read by the command
 observe/tests/belief-rewitness-band      -> 63
-./fkwu form/form-stdlib/release-ledger.bml -> open=17 moving=0, then 17000000 (2026-10-04)
+./fkwu form/form-stdlib/release-ledger.bml -> open=<n> moving=<m>, then n*10^6 (the ledger's own header says how its rows read)
 learn/tests/homecoming-distillation-corpus-band -> 131071
 form-stdlib/tests/self-distill-band -> 255  (the voice's own frontier row, judged and refused by name, a blind second read of its why, in learn/distillation-native-candidates.jsonl apart from the rented rows)
 form-stdlib/tests/self-review-band -> 511  (the wrong line of e06d7217e and cf090e073 and its repair, replayed through the voice door and graded on what the line computes; the register's self-review reads that row, and the reason stays a person's to read)
@@ -421,9 +421,9 @@ lapse. The release ledger's open rows are the body's named work, each with its w
 A unit lowers by what it carries: any file with a `section [` block — `form.bml`, `form.lift`,
 `form.action`, `form.route`, the `*.bmf` grammar dialects — travels through `bml-floor-compile`
 whatever its extension, as a prelude or as the main file, and fkwu keeps the `.lowfk`/`.fkb` cache
-beside it. Of 594 tracked `.bml` files, 528 carry a `section [form.bml]` block and three carry
-`section [form.lift]` (`git ls-files '*.bml' | xargs command grep -a -l '^section \[form.bml\]' | wc -l`,
-read on the tree that carries this line, 2026-10-02; the counts grow with each new unit). `true` and `false` are literals in the
+beside it. Which tracked `.bml` files carry a `section [form.bml]` block is read by
+`git ls-files '*.bml' | xargs command grep -a -l '^section \[form.bml\]' | wc -l` (the count grows with each new unit,
+so it is read by the command, not written here). `true` and `false` are literals in the
 dialect, and a nested `defn` is a registered function (the two nested-defn bands below).
 
 A unit the floor refused is not asked again while its bytes stand and this process writes no source, and
@@ -437,12 +437,13 @@ refusals all come through it. It reads a section whole, with direct backtracking
 the compiler's own constructors, so a def lowers to the very node its flat Form spelling builds:
 
 ```text
-./fkwu observe/bml-cursor-coverage-run.bml -> files=1443 sections=1088 read=1088 stops=0 refused=0
+echo '. 16' | ./fkwu observe/bml-cursor-coverage-run.bml
+                                           -> files=<f> sections=<s> read=<s> stops=0 refused=0
                                               (read = sections: every `^section [form.bml|route|action]` line in
                                               the `.bml` and `.fk` files under the root, outside .git, .hearth,
                                               .claude, .cache, node_modules, target and dist; the counts grow
-                                              with each new unit; read on the tree that carries this line,
-                                              2026-10-02, in 152 s)
+                                              with each new unit, so the command reads them; `read` equals
+                                              `sections` when the cursor reads every one)
                                               a section it refuses is named by line, word and wanted rule
 form-bml-cursor-full-band 105
 ```
@@ -767,8 +768,8 @@ tensors the driver cannot run it maps nothing and writes a refusal row. (At stag
 Q8_0 dense tensors, the Q8_0 `output.weight`, the Q2_K down experts and the ds4 order-match units; stage 4 below closes the first three and
 turns the fourth into a printed note.) The lease's belief that only touched pages wire is derived, not witnessed:
 if whole expert stacks wire, the set is about 85 GB, above the 82.46 GB cap, and the window's wirespan probe is the witness. The doors, as they read after this change:
-`./fkwu observe/door-link-health-run.bml </dev/null` -> docs=39 claims=831 broken=0 (prelude-reach missing=0 untracked=0 shadow=0),
-`./fkwu observe/band-truth-run.bml </dev/null` -> bands=356 readable=178 unreadable=178 absent=0 seen=1 flaws=0 (the five stage-3 bands are read: 351 -> 356, 173 -> 178).
+`./fkwu observe/door-link-health-run.bml </dev/null` -> broken=0 (prelude-reach missing=0 untracked=0 shadow=0),
+`./fkwu observe/band-truth-run.bml </dev/null` -> absent=0 seen=1 flaws=0 (the five stage-3 bands are read; the band and readable counts are the command's).
 
 Driver stage 4 (read 2026-10-03 WITA 04:36 to 04:44, each band alone after the 03:30 walk had released the GPU, memory room before each run, every
 exit 0; each band's planted defects dropped its reading and were restored): the IQ2XXS file's tensor types run in the driver. `form/form-stdlib/dsv4-fixture-gguf.fk`
