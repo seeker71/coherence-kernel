@@ -33,9 +33,8 @@ generates `runtime/fkwu-optable.h` and the reserved-head list,
 | records | `record_new record_get record_set record_has record_keys record? record_blueprint` |
 | nodes | `make_nodeid intern_trivial_int intern_trivial_string intern_trivial_bool intern_node node_children node_value node_category node_type node_inst node_pkg node_level` |
 
-The inst of a 1.1.2/1.1.7 leaf is kernel-local; `eq` and `value_eq` meet by content; `value_str` renders such a leaf by value. For wide ints, the siblings carry the 63-bit value in the NodeID (a wide inst field) instead of the 1.1.5 index, so render, `node_type` and `node_inst` read it without a table.
-
-A pair keeps its tail word. List readers (`print`, `value_str`, `len`, `nth`) end at that word. `tail`, `value_eq` and `eq` see the word. Go and Rust read the pair as `[h]` on every reader; TS stops on `cons` onto a non-list.
+The inst of a 1.1.2/1.1.7 leaf is kernel-local; `eq` and `value_eq` meet by content; `value_str` renders such a leaf by value.
+A pair keeps its tail word. List readers (`print`, `value_str`, `len`, `nth`) end at that word. `tail`, `value_eq` and `eq` see the word.
 
 A measured native (`substring str_find scan_run value_str round_ndigits rotr_u32
 add_u32 bnot_u32 method_define method_has method_invoke recipe_to_bytes
@@ -46,7 +45,7 @@ intern_node_at …`) is released, so fkwu runs the body's own meaning. `bp` is t
 name whose native and BML meanings differ (law 10).
 
 ### Laws the core pins
-The cons law: a pair keeps its tail word, list readers (print, value_str, len, nth) end at it, and tail, value_eq and eq see the word. Go and Rust read the pair as [h] on every reader; TS stops on cons onto a non-list.
+The cons law: a pair keeps its tail word, list readers (print, value_str, len, nth) end at it, and tail, value_eq and eq see the word.
 
 1. Integers are 63-bit two's complement, `[-2^62, 2^62)`, and in a
    defn the JIT has taken as in one it has not.
