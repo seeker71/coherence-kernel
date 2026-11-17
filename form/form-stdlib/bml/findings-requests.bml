@@ -75,7 +75,9 @@
 // when the gate reads, through git by argv: the seentip (the row's seen, else the closure's reviewed, else the
 // closures' map by document) is a commit, related to HEAD when the document named it and an ancestor of HEAD
 // when a caller did; the witness path is repo-relative and tracked at HEAD, and the needle holds there (stands,
-// or is gone when present is 0); the file stood in the seentip and the needle did not hold there; a needle in a
+// or is gone when present is 0); the file stood in the seentip and the needle did not hold there (a file born after
+// the seentip follows its move: the first commit that added it, and the file that commit renamed or copied it from,
+// is the path the seentip held, and the needle is asked there; a file with no such source reads unseen); a needle in a
 // code file stands on a code line (a comment shows a sentence, not a behavior) unless a band witness beside it
 // runs the band on fkwu and reads its bit set; the closing commit is the newest that moved the needle (git log
 // -S), a commit the closure names must be that one, and it lies outside the tree the review read.
@@ -494,7 +496,8 @@ section [form.bml] {
   //    or nothing, pickaxe(needle, path) the newest commit that moved the needle or "", full(c) a commit's full
   //    name or "", band(path) the verdict fkwu reads from a tracked, unchanged band, or nothing, hunks(seen, path)
   //    the text of `git diff -U0 seen HEAD -- path` or nothing, exists?(rev, path) whether the rev holds the path,
-  //    run(name, text) the verdict fkwu reads from a band given as text, or nothing.
+  //    run(name, text) the verdict fkwu reads from a band given as text, or nothing, sources(path) the paths the
+  //    first commit that added the path renamed or copied it from (git's low-threshold copy detection), or [].
   //    "HEAD" in a reader is the head it was made for (frq-git-at) ──
   def frq-relative?(p) {
    let parts = split-on(p, "/");
@@ -560,8 +563,18 @@ section [form.bml] {
    let needle = frq-text(w, "needle");
    if nothing?(now) then [row, "refused:path"] else if ((!frq-some?(needle)) || ((Comparable) len(needle) > 1000)) then [row, "refused:witness"] else if (!frq-holds-in?(w, now)) then [row, "refused:witness"] else frq-gate-before(row, c, w, path, seen, now, g, check);
   }
+  // the text the seentip held at a path: the file itself, else (a file born after the seentip) the text of the files
+  // its first commit renamed or copied it from, as they stood in the seentip, each followed the same way to a depth
+  def frq-before(seen, path, g, depth) {
+   let own = g[3](seen, path);
+   if ((!nothing?(own)) || ((Comparable) depth <= 0)) then own else frq-before-from(map(s => frq-before(seen, s, g, (depth - 1)), g[10](path)));
+  }
+  def frq-before-from(texts) {
+   let held = filter(t => !nothing?(t), texts);
+   if nil?(held) then nothing() else str-join-with(held, "\n");
+  }
   def frq-gate-before(row, c, w, path, seen, now, g, check) {
-   let before = g[3](seen, path);
+   let before = frq-before(seen, path, g, 3);
    let shown = if frq-present?(w) then now else before;
    if nothing?(before) then [row, "refused:unseen"] else if frq-holds-in?(w, before) then [row, "refused:stood-before"] else if frq-some?(frq-text(w, "band")) then (if frq-band-holds?(w, g) then frq-gate-commit(row, c, w, path, seen, g, check) else [row, "refused:band"]) else if frq-comment-only?(path, shown, frq-text(w, "needle")) then [row, "refused:comment"] else frq-gate-commit(row, c, w, path, seen, g, check);
   }
@@ -764,6 +777,16 @@ section [form.bml] {
    let rc = frq-run-out(["git", "diff", "-U0", "--no-color", seen, head, "--", path], out);
    if ((Comparable) rc == 0) then (read_file(out) ?? "") else nothing();
   }
+  // where a path came from: the first commit of HEAD's history that added it, and the files that commit renamed or
+  // copied it from (rename and copy detection at 10%, over every file of the parent: a split gives its parts a low
+  // score); a path whose first commit names none, or that no commit added, comes from nowhere
+  def frq-git-born(head, path) = frq-cut(trim(fhn-capture(["git", "log", "--reverse", "--diff-filter=A", "--format=%H", head, "--", path])), "\n");
+  def frq-git-source-of(cols, path) = if (((Comparable) len(cols) == 3) && ((String) cols[2] == path)) then cols[1] else "";
+  def frq-git-sources-in(text, path) = frq-unique(filter(s => frq-some?(s), map(l => frq-git-source-of(split-on(l, "\t"), path), split-on(text, "\n"))), []);
+  def frq-git-sources(head, path) {
+   let born = frq-git-born(head, path);
+   if (!frq-hex?(born)) then [] else frq-git-sources-in(fhn-capture(["git", "diff-tree", "-r", "--no-commit-id", "-M10%", "-C10%", "--find-copies-harder", "--diff-filter=CR", "--name-status", born]), path);
+  }
   def frq-git-full(c) = if frq-hex?(c) then fhn-capture(["git", "rev-parse", "--verify", "--quiet", c ++ "^{commit}"]) else "";
   def frq-last-line(t) {
    let s = trim(t);
@@ -807,7 +830,7 @@ section [form.bml] {
   // the reader for a head: "HEAD" in the gate's questions is that head (a caller reading a past state of the tree
   // asks as of a commit); the band witness always runs the checkout's own HEAD
   def frq-head-of(head, rev) = if ((String) rev == "HEAD") then head else rev;
-  def frq-git-at(head) = [frq-git-commit?, (a, b) => frq-git-ancestor?(frq-head-of(head, a), frq-head-of(head, b)), c => frq-git-related?(head, c), (rev, path) => frq-git-blob(frq-head-of(head, rev), path), (needle, path) => frq-git-pickaxe-at(head, needle, path), frq-git-full, frq-git-band, (seen, path) => frq-git-hunks(seen, head, path), (rev, path) => frq-git-exists?(frq-head-of(head, rev), path), frq-git-band-text];
+  def frq-git-at(head) = [frq-git-commit?, (a, b) => frq-git-ancestor?(frq-head-of(head, a), frq-head-of(head, b)), c => frq-git-related?(head, c), (rev, path) => frq-git-blob(frq-head-of(head, rev), path), (needle, path) => frq-git-pickaxe-at(head, needle, path), frq-git-full, frq-git-band, (seen, path) => frq-git-hunks(seen, head, path), (rev, path) => frq-git-exists?(frq-head-of(head, rev), path), frq-git-band-text, path => frq-git-sources(head, path)];
   def frq-git() = frq-git-at("HEAD");
   // the tip of a unit's commits: the listed commit every other listed commit is an ancestor of
   def frq-git-tip(hashes) {
