@@ -2,17 +2,24 @@
 //
 // It reads the gaps file and the register's last row, no model and no network. A row that is not closed and whose `next` names a band (a path holding "-band")
 // is offered: as a queue row when that band stands, so a band can witness the gap's closing, and as a finding when it does not. It writes one row to
-// receipts/self-steer-ledger.jsonl (at_unix_ms, the register row it read, open, offered, queue, finding, share_pm, offers) and no other file: the queue
-// (learn/native-turn-queue.jsonl) is written by whoever takes an offer, under that band's witness.
+// receipts/self-steer-ledger.jsonl (at_unix_ms, the register row it read, open, offered, queue, finding, queued, share_pm, offers).
 // A register with no open row offers nothing and reads 1000 pm. An absent register or gaps file is refused by name.
-//   ss-run(opts)   the door: stdin options gaps, register, ledger, root (the directory a band path stands under)
+// With the option queue (the queue file to feed, normally learn/native-turn-queue.jsonl) an offer is taken: the queue is first read back to one row per id
+// (ntq-dedupe), then each queue offer becomes a row of native-turn-run's own shape (id, goal, writable, band, full, checks) only when (a) its band stands,
+// (b) the band, run as native-turn-run runs it (a cell called in this process, no child, no model), reads a number BELOW the full its head declares, and
+// (c) no row of that id stands (ntq-append refuses a repeated id by name). A band that reads its full is closed work and writes nothing; a band that reads
+// above its full, reads no number or declares no full cannot witness a repair and writes nothing (native-turn-run parks such a gap on its contract too).
+// A band is run once however many gaps name it. Without the option no queue row is written, as before.
+//   ss-run(opts)   the door: stdin options gaps, register, ledger, root (the directory a band path stands under), queue, deadline_ms (the most a band may run, default ten minutes)
 // PROOF: form-stdlib/tests/offline-voice-gaps-band.bml, claim steer.
 import form-stdlib/bml/offline-voice-gaps.bml;
+import form-stdlib/bml/band-truth.bml;
+import form-stdlib/bml/native-turn-queue.bml;
 section [form.bml] {
  class SelfSteer {
   def ss-door() = "self-steer";
   def ss-ledger() = "receipts/self-steer-ledger.jsonl";
-  def ss-spec() = [["gaps", "str"], ["register", "str"], ["ledger", "str"], ["root", "str"]];
+  def ss-spec() = [["gaps", "str"], ["register", "str"], ["ledger", "str"], ["root", "str"], ["queue", "str"], ["deadline_ms", "int"]];
   def ss-opts() = dop-doc(ss-door(), stdin-text(), ss-spec());
   def ss-gap-of(gaps, id) = foldl((found, g) => (String) fcgp-str(g, "id") == id ? g : found, nothing(), gaps);
   def ss-band(gap) = nothing?(gap) ? "" : fcgp-str(fcgp-obj(gap, "next"), "band");
@@ -25,12 +32,57 @@ section [form.bml] {
   }
   def ss-count(offers, kind) = len(filter(o => (String) fcgp-str(o, "kind") == kind, offers));
   def ss-pm(offered, open) = (Comparable) open == 0 ? 1000 : ovg-pm(offered, open);
+  // ---- taking the queue offers: a band that reads below its full becomes a gap the voice can turn ----
+  def ss-deadline(opts) = fcgp-num(opts, "deadline_ms") ?? 600000;
+  // the band's reading, as native-turn-run's nt-band-run takes it: a number only when the run stopped nowhere and met no error
+  def ss-ran?(rec) = !nothing?(rec) && nothing?(record_get(rec, "stopped")) && (Comparable) record_get(rec, "errors") == 0;
+  def ss-value(path, opts) {
+   let rec = cell_run(ovg-under(opts, path), 0, ss-deadline(opts), nothing());
+   ss-ran?(rec) && (String) value_kind(record_get(rec, "value")) == "int" ? record_get(rec, "value") : nothing();
+  }
+  // [band, the full its head declares (nothing when it declares none), the reading (nothing when it read no number)]
+  def ss-read-band(band, opts) {
+   let full = bt-int(bt-pin-of(read_file(ovg-under(opts, band))) ?? "");
+   [band, full, nothing?(full) ? nothing() : ss-value(band, opts)];
+  }
+  def ss-readings(offers, opts) = foldl((acc, o) => any?(r => (String) r[0] == fcgp-str(o, "band"), acc) ? acc : append(acc, [ss-read-band(fcgp-str(o, "band"), opts)]), [], offers);
+  def ss-reading-of(readings, band) = foldl((found, r) => (String) r[0] == band ? r : found, nothing(), readings);
+  def ss-goal(gap, offer, reading) = "The register reads the gap " ++ fcgp-str(gap, "id") ++ " " ++ fcgp-str(offer, "verdict") ++ ": " ++ fcgp-str(gap, "title") ++ ". The next step: " ++ fcgp-str(offer, "step") ++ ". Its band " ++ fcgp-str(offer, "band") ++ " reads " ++ reading[2].str() ++ " of its full " ++ reading[1].str() ++ "; change the source the band witnesses until it reads its full.";
+  def ss-row(gap, offer, reading) = json-node-object([fhn-s("id", fcgp-str(gap, "id")), fhn-s("goal", ss-goal(gap, offer, reading)), json-node-pair("writable", json-node-array([])), fhn-s("band", fcgp-str(offer, "band")), fhn-n("full", reading[1]), json-node-pair("checks", json-node-array([])), fhn-s("origin", "self-steer")]);
+  // what one queue offer came to: "queued", or why not: "stands" (a row of that id is there), "full", "above", "unread", "unmeasured", "refused" (the sink said no)
+  def ss-put(offer, gaps, reading, queuePath) {
+   let row = ss-row(ss-gap-of(gaps, fcgp-str(offer, "gap")), offer, reading);
+   let wrote = ntq-append(queuePath, row);
+   let landed = (String) wrote == "appended";
+   let said = print_str(landed ? "[self-steer] queued " ++ fcgp-str(row, "id") ++ ": " ++ fcgp-str(row, "band") ++ " reads " ++ reading[2].str() ++ " of " ++ reading[1].str() : "[self-steer] not queued " ++ fcgp-str(row, "id") ++ ": " ++ wrote);
+   landed ? "queued" : "refused";
+  }
+  def ss-take(offer, gaps, readings, queuePath) {
+   let reading = ss-reading-of(readings, fcgp-str(offer, "band"));
+   nothing?(reading[1]) ? "unmeasured"
+   : nothing?(reading[2]) ? "unread"
+   : (Comparable) reading[2] > reading[1] ? "above"
+   : (Comparable) reading[2] == reading[1] ? "full"
+   : ntq-has?(queuePath, fcgp-str(offer, "gap")) ? "stands"
+   : ss-put(offer, gaps, reading, queuePath);
+  }
+  def ss-tally(took, kind) = len(filter(t => (String) t == kind, took));
+  // [the rows written, the line that says what the queue offers came to]
+  def ss-enqueue(gaps, offers, opts, queuePath) {
+   let dropped = ntq-dedupe(queuePath);
+   let wanted = filter(o => (String) fcgp-str(o, "kind") == "queue", offers);
+   let readings = ss-readings(wanted, opts);
+   let took = map(o => ss-take(o, gaps, readings, queuePath), wanted);
+   [ss-tally(took, "queued"), len(took).str() ++ " queue offer(s) over " ++ len(readings).str() ++ " band(s): " ++ ss-tally(took, "queued").str() ++ " queued, " ++ ss-tally(took, "stands").str() ++ " already stand, " ++ ss-tally(took, "full").str() ++ " read full, " ++ ss-tally(took, "above").str() ++ " read above their full, " ++ ss-tally(took, "unread").str() ++ " read no number, " ++ ss-tally(took, "unmeasured").str() ++ " declare no full, " ++ ss-tally(took, "refused").str() ++ " refused; " ++ dropped.str() ++ " repeated row(s) dropped from " ++ queuePath];
+  }
   def ss-read(gaps, row, opts, ledgerPath) {
    let open = filter(v => (String) fcgp-str(v, "verdict") != "closed", json-array-elements(json-object-get(row, "verdicts")));
    let named = filter(v => ss-names-band?(ss-gap-of(gaps, fcgp-str(v, "id"))), open);
    let offers = map(v => ss-offer(ss-gap-of(gaps, fcgp-str(v, "id")), fcgp-str(v, "verdict"), opts), named);
-   let kept = fhn-append(ledgerPath, lrun-row-line(json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-n("register_at", fcgp-num(row, "at_unix_ms") ?? 0), fhn-n("open", len(open)), fhn-n("offered", len(offers)), fhn-n("queue", ss-count(offers, "queue")), fhn-n("finding", ss-count(offers, "finding")), fhn-n("share_pm", ss-pm(len(offers), len(open))), json-node-pair("offers", json-node-array(offers))])) ++ "\n");
-   "[self-steer] " ++ len(offers).str() ++ " of " ++ len(open).str() ++ " open row(s) offered: " ++ ss-count(offers, "queue").str() ++ " queue, " ++ ss-count(offers, "finding").str() ++ " finding, " ++ ss-pm(len(offers), len(open)).str() ++ " pm; " ++ ledgerPath ++ " " ++ kept;
+   let queuePath = fcgp-str(opts, "queue");
+   let taken = (String) queuePath == "" ? [0, ""] : ss-enqueue(gaps, offers, opts, queuePath);
+   let kept = fhn-append(ledgerPath, lrun-row-line(json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-n("register_at", fcgp-num(row, "at_unix_ms") ?? 0), fhn-n("open", len(open)), fhn-n("offered", len(offers)), fhn-n("queue", ss-count(offers, "queue")), fhn-n("finding", ss-count(offers, "finding")), fhn-n("queued", taken[0]), fhn-n("share_pm", ss-pm(len(offers), len(open))), json-node-pair("offers", json-node-array(offers))])) ++ "\n");
+   "[self-steer] " ++ len(offers).str() ++ " of " ++ len(open).str() ++ " open row(s) offered: " ++ ss-count(offers, "queue").str() ++ " queue, " ++ ss-count(offers, "finding").str() ++ " finding, " ++ ss-pm(len(offers), len(open)).str() ++ " pm; " ++ ledgerPath ++ " " ++ kept ++ ((String) queuePath == "" ? "" : "\n[self-steer] " ++ taken[1]);
   }
   def ss-run(opts) {
    let gapsPath = ovg-or(fcgp-str(opts, "gaps"), ovg-gaps());
