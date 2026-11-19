@@ -17,6 +17,9 @@
 //                                 option writes of itself (observed), so a prediction and its observation share words
 //   fpm-calibration(rows)         [predicted, predicted wholly still (1000), of those observed same, predicted
 //                                 otherwise, of those observed same] over the rows that carry a prediction
+//   fpm-kin-ledgers(rel)          the planner ledger of every checkout of the body that holds one
+//   fpm-gathered(paths, read)     the attempts, the refusals counted by root, the calibration and the options of
+//                                 those ledgers, each read on its own; fpm-reading-of prints them, the roots ranked
 // A refusal that names the voice or the machine (voice-unavailable, voice-release-incomplete) says nothing of a
 // plan and stands in no entry. A recheck reads a kept reply again and is no option. The support is an instrument,
 // not a goal: three attempts over two requests, so one request never teaches the rest alone.
@@ -63,9 +66,31 @@ section [form.bml] {
    nothing?(p) || ((String) fcgp-str(r, "observed") == "unheard") ? c : p == 1000 ? [c[0] + 1, c[1] + 1, c[2] + same, c[3], c[4]] : [c[0] + 1, c[1], c[2], c[3] + 1, c[4] + same];
   }
   def fpm-calibration(rows) = foldl(fpm-cal-step, [0, 0, 0, 0, 0], filter(fpm-option?, rows));
-  def fpm-reading(rows) {
-   let c = fpm-calibration(rows);
-   json-node-object([json-node-pair("entries", json-node-array(map(fpm-entry-node, fpm-entries(fpm-attempts(rows))))), fhn-n("predicted", c[0]), fhn-n("predicted_still", c[1]), fhn-n("still_observed_same", c[2]), fhn-n("predicted_moving", c[3]), fhn-n("moving_observed_same", c[4])]);
+  // Every checkout of the body keeps its own planner ledger, and a request walked in two of them keeps one id: the
+  // attempts are read ledger by ledger and gathered, never paired across two files. From a worktree the kin are its
+  // sibling worktrees and the clones beside the checkout that holds it; from a checkout, its worktrees and the clones
+  // beside it. rel is the ledger's path inside a checkout.
+  def fpm-kin-parents() = fs_is_dir("../../../.claude/worktrees") == 1 ? ["..", "../../../.."] : ["..", ".claude/worktrees"];
+  def fpm-kin-ledgers(rel) = filter(p => file_size(p) > 0, foldl((all, parent) => append(all, map(n => parent + "/" + (String) n + "/" + rel, host_dir_list(parent) ?? [])), [], fpm-kin-parents()));
+  def fpm-count(counts, root) = any?(c => (String) c[0] == root, counts) ? map(c => (String) c[0] == root ? [c[0], c[1] + 1] : c, counts) : append(counts, [[root, 1]]);
+  def fpm-root-step(counts, row) {
+   let root = fpm-root(fcgp-str(row, "kind"));
+   ((String) fcgp-str(row, "verdict") == "refused") && fpm-plan-root?(root) ? fpm-count(counts, root) : counts;
   }
+  def fpm-insert(sorted, c) = nil?(sorted) ? [c] : c[1] > sorted[0][1] ? cons(c, sorted) : cons(sorted[0], fpm-insert(sorted[1:], c));
+  def fpm-ranked(counts) = foldl(fpm-insert, [], counts);
+  // gathered: [attempts, [root, refused] counts, calibration, options, options that landed]
+  def fpm-none() = [[], [], [0, 0, 0, 0, 0], 0, 0];
+  def fpm-gather(g, rows) {
+   let own = filter(fpm-option?, rows);
+   let c = fpm-calibration(rows);
+   [append(g[0], fpm-attempts(rows)), foldl(fpm-root-step, g[1], own), map(i => g[2][i] + c[i], 0 .. 5), g[3] + len(own), g[4] + len(filter(r => !((String) fcgp-str(r, "verdict") == "refused"), own))];
+  }
+  def fpm-gathered(paths, read) = foldl((g, p) => fpm-gather(g, read(p)), fpm-none(), paths);
+  def fpm-reading-of(g, ledgers) {
+   let c = g[2];
+   json-node-object([fhn-n("ledgers", ledgers), fhn-n("options", g[3]), fhn-n("landed", g[4]), json-node-pair("roots", json-node-array(map(r => json-node-object([fhn-s("root", r[0]), fhn-n("refused", r[1])]), fpm-ranked(g[1])))), json-node-pair("entries", json-node-array(map(fpm-entry-node, fpm-entries(g[0])))), fhn-n("predicted", c[0]), fhn-n("predicted_still", c[1]), fhn-n("still_observed_same", c[2]), fhn-n("predicted_moving", c[3]), fhn-n("moving_observed_same", c[4])]);
+  }
+  def fpm-reading(rows) = fpm-reading-of(fpm-gather(fpm-none(), rows), 1);
  }
 }
