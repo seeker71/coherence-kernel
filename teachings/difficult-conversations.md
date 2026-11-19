@@ -71,6 +71,12 @@ while accepting an unsupported assertion. Read the actual answer beside the
 actual request. A passing band, a generated response and a person's volunteered
 account are separate evidence.
 
+A draft can be read before it is offered: `observe/counsel-read-run.bml` asks a
+reader (the native voice, or a person's own lines) for the moves and claims it
+sees, as `move <kind> <1|0>` and `claim <who> <lane>` lines, and prints what
+`dcc-read-lands?` reads over them. The rows are that reader's reading beside the
+draft; whoever holds the draft still chooses what to offer.
+
 ## Sources and doors
 
 - [Voice attunement](voice-attunement.md) carries attention and precise language.
