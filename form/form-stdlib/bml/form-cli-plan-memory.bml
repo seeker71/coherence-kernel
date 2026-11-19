@@ -1,0 +1,80 @@
+// form-cli-plan-memory.bml — what the planner's own ledger remembers about each refusal: a memory for the planner
+// that chooses the way, not for the voice that writes the plan.
+//
+// The planner's ledger (form-cli-local-plan.bml, one row per option, every request in one file) already holds each
+// refusal by name and the way the next option took. Read across requests, the rows are a record of attempts:
+//   root       the refusal an option answered: the kind of the row before it, up to its ':' (unreachable,
+//              band-no-number, request-definition)
+//   way        the rung the option took in answer: resume, focus, lens, voice
+//   outcome    what Form observed of it: verified (the plan landed or read moot), moved (refused under another
+//              root), rose (the same root, more cases held), same (the same root, nothing more held)
+// An entry groups the attempts under one root and one way: [root, way, tried, verified, moved, rose, same, requests].
+//   fpm-attempts(rows)            [root, way, outcome, request] of every option that answered a refusal of its request
+//   fpm-entries(attempts)         the entries, in the order their first attempt stands in the ledger
+//   fpm-predict(entries, r, w)    [same per mille, tried] of root r answered by way w, read before the option runs;
+//                                 nothing() below fpm-support() attempts or under two requests
+//   fpm-swerve?(entries, r, w, o) way w is on record and leaves root r standing more often than way o does; a way
+//                                 with no record reads fpm-unread(), so an untried way is taken over one that mostly
+//                                 failed, and is left again once its own record reads worse
+//   fpm-outcome(...)              the one reading of an outcome, used for the rows of the past and for the row an
+//                                 option writes of itself (observed), so a prediction and its observation share words
+//   fpm-calibration(rows)         [predicted, predicted wholly still (1000), of those observed same, predicted
+//                                 otherwise, of those observed same] over the rows that carry a prediction
+// A refusal that names the voice or the machine (voice-unavailable, voice-release-incomplete) says nothing of a
+// plan and stands in no entry. A recheck reads a kept reply again and is no option. The support is an instrument,
+// not a goal: three attempts over two requests, so one request never teaches the rest alone.
+import form-stdlib/bml/form-cli-guide-packet.bml;
+section [form.bml] {
+ class FormCliPlanMemory {
+  def fpm-support() = 3;
+  def fpm-root(kind) {
+   let at = str_find(kind, ":", 0);
+   at < 0 ? kind : substring(kind, 0, at);
+  }
+  def fpm-plan-root?(root) = (len(root) > 0) && !((len(root) >= 6) && ((String) substring(root, 0, 6) == "voice-"));
+  def fpm-option?(r) = (len(fcgp-str(r, "request")) > 0) && (len(fcgp-str(r, "verdict")) > 0) && !((String) fcgp-str(r, "rung") == "recheck");
+  def fpm-outcome(root, heldBefore, verdict, kind, heldNow) = !((String) verdict == "refused") ? "verified" : !((String) fpm-root(kind) == root) ? "moved" : (!nothing?(heldBefore) && !nothing?(heldNow) && (heldNow > heldBefore)) ? "rose" : "same";
+  // the fold keeps the last option row of each request: [[request, row] ...] and the attempts read so far
+  def fpm-last-of(lasts, id) = nil?(lasts) ? nothing() : (String) lasts[0][0] == id ? lasts[0][1] : fpm-last-of(lasts[1:], id);
+  def fpm-put-last(lasts, id, row) = cons([id, row], filter(p => !((String) p[0] == id), lasts));
+  def fpm-step(state, row) {
+   let id = fcgp-str(row, "request");
+   let prev = fpm-last-of(state[0], id);
+   let root = nothing?(prev) ? "" : fpm-root(fcgp-str(prev, "kind"));
+   let answers = !nothing?(prev) && ((String) fcgp-str(prev, "verdict") == "refused") && fpm-plan-root?(root) && !((String) fcgp-str(row, "rung") == "first");
+   let unheard = fpm-voice-kind?(fcgp-str(row, "kind"));
+   let attempt = answers && !unheard ? [[root, fcgp-str(row, "rung"), fpm-outcome(root, fcgp-num(prev, "cases_held"), fcgp-str(row, "verdict"), fcgp-str(row, "kind"), fcgp-num(row, "cases_held")), id]] : [];
+   // a voice that could not open leaves the refusal before it as the one the next option answers
+   [unheard ? state[0] : fpm-put-last(state[0], id, row), append(state[1], attempt)];
+  }
+  def fpm-voice-kind?(kind) = (len(kind) >= 6) && ((String) substring(kind, 0, 6) == "voice-");
+  def fpm-attempts(rows) = foldl(fpm-step, [[], []], filter(fpm-option?, rows))[1];
+  def fpm-entry-new(a) = fpm-entry-add([a[0], a[1], 0, 0, 0, 0, 0, []], a);
+  def fpm-entry-add(e, a) = [e[0], e[1], e[2] + 1, e[3] + ((String) a[2] == "verified" ? 1 : 0), e[4] + ((String) a[2] == "moved" ? 1 : 0), e[5] + ((String) a[2] == "rose" ? 1 : 0), e[6] + ((String) a[2] == "same" ? 1 : 0), any?(q => (String) q == a[3], e[7]) ? e[7] : append(e[7], [a[3]])];
+  def fpm-entry?(e, root, way) = ((String) e[0] == root) && ((String) e[1] == way);
+  def fpm-bump(entries, a) = any?(e => fpm-entry?(e, a[0], a[1]), entries) ? map(e => fpm-entry?(e, a[0], a[1]) ? fpm-entry-add(e, a) : e, entries) : append(entries, [fpm-entry-new(a)]);
+  def fpm-entries(attempts) = foldl(fpm-bump, [], attempts);
+  def fpm-entry(entries, root, way) = nil?(entries) ? nothing() : fpm-entry?(entries[0], root, way) ? entries[0] : fpm-entry(entries[1:], root, way);
+  def fpm-predict(entries, root, way) {
+   let e = fpm-entry(entries, root, way);
+   nothing?(e) || (e[2] < fpm-support()) || (len(e[7]) < 2) ? nothing() : [(e[6] * 1000) / e[2], e[2]];
+  }
+  def fpm-unread() = 500;
+  def fpm-swerve?(entries, root, way, other) {
+   let p = fpm-predict(entries, root, way);
+   let q = fpm-predict(entries, root, other);
+   !nothing?(p) && (p[0] > (nothing?(q) ? fpm-unread() : q[0]));
+  }
+  def fpm-entry-node(e) = json-node-object([fhn-s("root", e[0]), fhn-s("way", e[1]), fhn-n("tried", e[2]), fhn-n("verified", e[3]), fhn-n("moved", e[4]), fhn-n("rose", e[5]), fhn-n("same", e[6]), fhn-n("requests", len(e[7]))]);
+  def fpm-cal-step(c, r) {
+   let p = fcgp-num(r, "predicted_still_pm");
+   let same = (String) fcgp-str(r, "observed") == "same" ? 1 : 0;
+   nothing?(p) || ((String) fcgp-str(r, "observed") == "unheard") ? c : p == 1000 ? [c[0] + 1, c[1] + 1, c[2] + same, c[3], c[4]] : [c[0] + 1, c[1], c[2], c[3] + 1, c[4] + same];
+  }
+  def fpm-calibration(rows) = foldl(fpm-cal-step, [0, 0, 0, 0, 0], filter(fpm-option?, rows));
+  def fpm-reading(rows) {
+   let c = fpm-calibration(rows);
+   json-node-object([json-node-pair("entries", json-node-array(map(fpm-entry-node, fpm-entries(fpm-attempts(rows))))), fhn-n("predicted", c[0]), fhn-n("predicted_still", c[1]), fhn-n("still_observed_same", c[2]), fhn-n("predicted_moving", c[3]), fhn-n("moving_observed_same", c[4])]);
+  }
+ }
+}
