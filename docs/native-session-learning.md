@@ -13,6 +13,12 @@ including direct collectors. A teaching offered without retention scope returns
 creates no training example. Source discovery stays in the explicitly selected
 home; readable sibling worktrees are not automatically admitted.
 
+Queued inference requests carry the admitted owner/purpose scope identity.
+The worker checks that identity and current retention permission before either
+organ retrieval or model admission. An absent, withdrawn or replaced scope
+stops the request before reply, stream or inference-event output; the existing
+worker stderr records the refusal without copying the prompt.
+
 Setting both controls to zero stops new content capture and source delivery.
 The learner rechecks before each round and before publishing its candidate.
 The scope command reports whether work is in flight. Existing records and

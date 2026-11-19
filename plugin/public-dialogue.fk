@@ -100,15 +100,25 @@ section [form.bml] {
         pd-result(200, ("{" + (pd-jkv("anchor_dialogue_id", pd-jstr(anchor)) + ("," + (pd-jkv("root_dialogue_id", pd-jstr(root)) + ("," + (pd-jkv("turns", ("[" + (pd-turns-json(dir, ids) + "]"))) + ("," + (pd-jkv("directed_edges", ("[" + (pd-edges-json(dir, ids) + "]"))) + "}")))))))));
     } : pd-result(403, pd-error-json("dialogue does not disclose its thread")) : pd-result(404, pd-error-json("dialogue not found"));
     def pd-released-json(id) = ("{" + (pd-jkv("id", pd-jstr(id)) + ("," + (pd-jkv("state", pd-jstr("tombstoned")) + ("," + (pd-jkv("released", "true") + "}"))))));
+    def pd-content-fields() = ["question", "point", "locale"];
+    def pd-release-incomplete(id, state, remaining) = pd-result(503, json-emit(json-node-object([
+        json-node-pair("id", json-node-string(id)),
+        json-node-pair("state", json-node-string(state)),
+        json-node-pair("released", json-node-bool(false)),
+        json-node-pair("error", json-node-string("release-incomplete")),
+        json-node-pair("remaining_fields", json-node-array(remaining |> map(field => json-node-string(field)))),
+        json-node-pair("retry", json-node-string("Restore storage access and retry with the same removal capability."))
+    ])));
     def pd-release-record(dir, id) = {
         pd-write(dir, id, "state", "tombstoned");
-        pd-forget(dir, id, "question");
-        pd-forget(dir, id, "point");
-        pd-forget(dir, id, "locale");
-        pd-result(200, pd-released-json(id));
+        pd-content-fields() |> map(field => pd-forget(dir, id, field));
+        let state = pd-read(dir, id, "state");
+        let remaining = pd-content-fields() |> filter(field => pd-has-field?(dir, id, field));
+        (String) state == "tombstoned" && len(remaining) == 0 ? pd-result(200, pd-released-json(id)) : pd-release-incomplete(id, state, remaining);
     };
     def pd-release-known(dir, id, token) = (Comparable) pd-constant-match?(pd-read(dir, id, "token-digest"), pd-token-digest(token)) == 1 ? pd-release-record(dir, id) : pd-result(403, pd-error-json("removal capability did not match"));
-    def pd-release-with(dir, id, token) = (Comparable) pd-id-ok?(id) == 0 ? pd-result(400, pd-error-json("dialogue id is malformed")) : pd-record?(dir, id) ? pd-release-known(dir, id, token) : pd-result(404, pd-error-json("dialogue not found"));
+    // The capability also owns recovery when an interrupted write lost state.
+    def pd-release-with(dir, id, token) = (Comparable) pd-id-ok?(id) == 0 ? pd-result(400, pd-error-json("dialogue id is malformed")) : pd-has-field?(dir, id, "token-digest") ? pd-release-known(dir, id, token) : pd-result(404, pd-error-json("dialogue not found"));
     // ----- HTTP request membrane ------------------------------------------
     def pd-method-at(raw, at) = at < 0 ? "" : substring(raw, 0, at);
     def pd-method(raw) = pd-method-at(raw, str_find(raw, " ", 0));

@@ -1,45 +1,15 @@
-// relationship-store.fk — a minimal, real, file-backed "does the body remember
-// this handle" store: one file per remembered identity, no in-memory pretense.
-//
-// This exists because form-stdlib/cell-log-store.fk (the scale-appropriate
-// segmented log store) does not run correctly on this kernel's direct-source
-// runner (`fkwu`): its byte-encoding loop uses `ord`/`char_at`,
-// and both are unbound on this runner (`fkwu` on `(ord (char_at "hello" 0))`
-// returns `nothing` instead of 104) — writing through it fills the segment
-// file with null bytes instead of the record text.
-// That is a real gap in the direct-source op surface, named honestly rather
-// than silently worked around.
-//
-// This file sidesteps it by using `str_byte_at` (confirmed correct on this
-// runner) for the same string->bytes need, and by keeping the shape as simple
-// as the "does Sema remember this one handle" question actually requires: one
-// file per handle, whole-file read, remove-then-append on write (this runner
-// has no truncating write). That trades the log-store's SCALE (bounded
-// segment files under many keys) for RELIABILITY on the runner available
-// today. cell-log-store.fk remains the right choice once its byte-encoding is
-// fixed to use str_byte_at; this file is not a replacement for it, a stopgap
-// verified to actually persist.
-//
-// Verified directly across separate `fkwu` process invocations (not
-// just within one run): write in one process, read back true/matching in a
-// fresh one, unknown handle reads back false — see the receipt for the exact
-// commands run.
-//
+// One durable file per relationship field. The caller owns consent and verifies
+// its requested effect. Native truncating writes replace the whole value;
+// failure to remove an old file must never append a new value to it.
 import form-stdlib/core.fk;
 section [form.bml] {
-    // --- string -> byte list, via str_byte_at (NOT ord/char_at — see above) ---
-    def rs-bytes-loop(s, i, n, acc) = (Comparable) i == n ? acc : rs-bytes-loop(s, i + 1, n, cons(str_byte_at(s, i), acc));
-    def rs-bytes-rev(xs, acc) = (Comparable) len(xs) == 0 ? acc : rs-bytes-rev(xs[1:], cons(xs[0], acc));
-    def rs-str-bytes(s) = rs-bytes-rev(rs-bytes-loop(s, 0, len(s), empty()), empty());
     // --- one file per remembered handle ---
     def rs-path(dir, handle) = (dir + ("/" + (handle + ".rel")));
     // remember — the ONLY write path. Called only when consent is open
     // (the relationship-memory consent); never a default.
     def rs-remember(dir, handle, description) = {
         fs_mkdir(dir);
-        fs_remove(rs-path(dir, handle));
-        // no truncating write on this runner; remove then append
-        file_append_bytes(rs-path(dir, handle), rs-str-bytes(description));
+        write_file_text(rs-path(dir, handle), description);
     };
     // known? — has this handle been remembered before (in ANY prior breath)?
     def rs-known?(dir, handle) = fs_exists(rs-path(dir, handle));

@@ -56,15 +56,22 @@ recipe execution; lower training loss does not yet establish improved answer qua
   drafts, and lifts at its cadence
   ([`form/form-stdlib/bml/host-walk-learn.bml`](form/form-stdlib/bml/host-walk-learn.bml)).
 - **Companion** — [`observe/companion-run.bml`](observe/companion-run.bml) takes
-  successive stdin triples: words, language, and voice flag (`0` records without
-  generation). It supplies the last six stored exchanges explicitly. One native
+  successive stdin triples: words, language, and space-separated options. Blank
+  generates with the last six in-process exchanges; `0` skips generation.
+  `retain` saves this turn, `recall` includes saved history, `mouth` exports the
+  reply for speech, and `spool` permits the resident's disk transport. Each
+  permission applies only to that turn. One native
   owner retains the prepared guidance and current retrieved context; exact token
   matches reuse them, changed context returns to the guidance checkpoint, and
-  changed language/model opens afresh. EOF releases both checkpoints and the
-  model, printing its release result. Per-turn metadata names retained ownership.
-  The door attempts to append exchanges to `.hearth/companion/conversation.jsonl`;
-  inspect writes and host capture controls before claiming retention or privacy.
-  Native inference makes no model-server or provider call.
+  changed language/model opens afresh. Between turns, standalone `/pause` releases the model
+  and skips ordinary triples until `/resume`; `/leave` releases and consumes no
+  later input. `/forget` clears session memory and releases its model context;
+  saved files remain. Active generation uses the process cancellation path;
+  these input commands do not interrupt a turn already generating. EOF also
+  releases the owner. Release and requested writes
+  report their outcomes. Explicitly saved exchanges live in the protected local
+  `.hearth/companion/conversation.jsonl`. Host capture, existing files and resident
+  transport have separate retention; this door promises no whole-machine erasure.
 - **Engineering turns** — [`observe/native-turn-run.bml`](observe/native-turn-run.bml)
   takes the open gap in [`learn/native-turn-queue.jsonl`](learn/native-turn-queue.jsonl)
   with the fewest attempts, runs its band, hands the goal to the native code lane
@@ -154,9 +161,10 @@ recipe execution; lower training loss does not yet establish improved answer qua
   stands, and opens a model of its own only when none does. The decode itself is still the model's time.
 - **The companion's ear.** `from-ear` on [`observe/companion-run.bml`](observe/companion-run.bml)
   reads the ear spool's last closed line and, when a word is present and the resident
-  server stands, asks that server and offers the answer to the mouth. It does not open
-  a second model. A typed line asks the same server when one stands. With no server
-  standing, `from-ear` waits; a typed line still opens the companion's own residence.
+  server stands, asks that server with a following options line containing `spool`.
+  `mouth` separately authorizes its speech export. It does not open a second model.
+  Typed turns also require `spool` when a resident stands. With no server standing,
+  `from-ear` reports unavailable; a typed turn can open the companion's own residence.
 - **The open gaps.** The band-first gaps the lane works are the rows of
   [`learn/native-turn-queue.jsonl`](learn/native-turn-queue.jsonl), each naming
   its band; each attempt's candidate waits under `.hearth/native-turns`, and

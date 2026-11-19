@@ -78,9 +78,40 @@
     (let release-root (pd-release-with dir root-id root-token))
     (let release-reply (pd-release-with dir reply-id reply-token))
     (let release-third (pd-release-with dir third-id third-token))
+
+    ; A blocked field removal is an incomplete release, never a false success.
+    ; Use an isolated nonempty directory at one field path, independent of uid.
+    (let blocked-id "dlg-blocked")
+    (let blocked-token "remove-blocked-capability")
+    (pd-create-with dir blocked-id blocked-token "" "release fixture" "view" "en" disclosure)
+    (let blocked-field (rs-path dir (pd-key blocked-id "question")))
+    (pd-forget dir blocked-id "question")
+    (fs_mkdir blocked-field)
+    (let blocker (str_concat blocked-field "/held"))
+    (write_file_text blocker "fixture content")
+    (let incomplete (pd-release-with dir blocked-id blocked-token))
+    (let blocked-observed
+        (and (eq (pd-code incomplete) 503)
+            (and (pdb-contains? (pd-body incomplete) "\"released\":false")
+                (and (pdb-contains? (pd-body incomplete) "release-incomplete")
+                    (and (pd-has-field? dir blocked-id "question")
+                        (str_eq (pd-read dir blocked-id "state") "tombstoned"))))))
+    (fs_remove blocker)
+    (fs_rmdir blocked-field)
+    ; Recovery remains owned by its token even when a partial write lost state.
+    (pd-forget dir blocked-id "state")
+    (let retry (pd-release-with dir blocked-id blocked-token))
+    (let repeated (pd-release-with dir blocked-id blocked-token))
+    (let release-verified
+        (and blocked-observed
+            (and (eq (pd-code retry) 200)
+                (and (eq (pd-code repeated) 200)
+                    (and (str_eq (pd-read dir blocked-id "state") "tombstoned")
+                        (if (pd-has-field? dir blocked-id "question") false true))))))
     (let c6 (pdb-score
         (and (eq (pd-code release-root) 200)
-            (and (eq (pd-code release-reply) 200) (eq (pd-code release-third) 200))) 32))
+            (and (eq (pd-code release-reply) 200)
+                (and (eq (pd-code release-third) 200) release-verified))) 32))
     (let tombstones (pd-thread dir reply-id))
     (let c7 (pdb-score
         (and (eq (pd-code tombstones) 200)
@@ -183,6 +214,7 @@
     (pdb-purge-turn dir root-id)
     (pdb-purge-turn dir reply-id)
     (pdb-purge-turn dir third-id)
+    (pdb-purge-turn dir blocked-id)
     (pdb-purge-turn http-dir http-root-id)
     (pdb-purge-turn http-dir http-reply-id)
     (pdb-purge-turn mcp-dir mcp-root-id)
