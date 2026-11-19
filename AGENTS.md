@@ -160,19 +160,16 @@ Use the edit tool or native authoring doors; probe, count and diff with `./fkwu`
 and BML. A missing internal tool belongs in that body, with its behavior observed
 in the same movement. OS operations are begun by argv through the body's doors (`host-child.bml`); the body's own cells are
 not OS operations and are not begun at all: they run in-process and answer a value (item 11, `docs/in-process-cells.md`). The tree holds
-only kinds the body names (Form, the C seed, documents and data: `gate/structural-gate.fk` is an allowlist and refuses
-any other file, a script of any language included, outside its declared carriers); perl, python, sed, awk and jq do not
-become implementation or analysis detours. The body holds this for sed, awk, perl and python at its own doors:
-every door that begins a child (the walk's `hch-run`, the control language's doors, the heal and findings doors)
-reads the argv or shell line first through `form/form-stdlib/bml/spawn-guard.bml`, and a command that runs one ends with
-a named line (`host-tool <names>: not used here; the body carries its own awk and path, the edit door, read_file, ...`)
-and is never begun. What an agent ran in its own Bash calls shows in its transcript:
+Form, the C seed, documents and data; `gate/structural-gate.fk` observes the source carriers and the completeness of its inventory.
+Implementation and analysis live in the native body; a missing capability is work to carry home.
+An offered host operation runs through its existing owner with its actual arguments, deadline and outcome.
+A program or language name supplies no verdict about that operation. What an agent ran in its own Bash calls shows in its transcript:
 `./fkwu observe/forbidden-tools-audit-run.bml` reads the transcripts of this repo's checkouts and mirrors the count, and
 the land cadence prints the count of its own window as a lens beside the gates each breath. The reading and what it
 cannot see: `form/form-stdlib/bml/command-words.bml`.
 
-**Said plainly, so no one leans on more than stands:** the body's own spawn doors read every child before it begins, and
-the audit lens mirrors afterward. A Claude Code Bash or Monitor call runs as the agent chose it: no hook stands between
+**Said plainly, so no one leans on more than stands:** native execution observes the operation, and
+the audit lens mirrors command names afterward. A Claude Code Bash or Monitor call runs as the agent chose it: no hook stands between
 the call and its run, and none is planned; Urs chose that direction (no hook, no tool outside Form). What an agent's own
 Bash call ran is counted afterward in its transcript, so the boundary rests with whoever holds the call: the mirror
 shows, the writer decides.
@@ -220,12 +217,15 @@ The send receipt names the delivered body byte count. Read the correlated
 response and its `stopped` field: exhausting the generation budget leaves an
 unfinished response, even when durable delivery succeeded.
 
-When comparing native answers, retain the admitted startup teaching alongside
-the caller's packet. The resident takes `fqt-overlay-prefix` from
-`form/form-stdlib/form-cli-qwen-teach-layer.fk` at admission. Its shared
-`bml/form-cli-qwen-meaning.bml` keeps Form symbols and scannerless parsing
-distinct from Qwen's tokenizer and decoder. A later source edit changes future
-admissions; it does not rewrite the context of an already standing resident.
+When comparing native answers, retain the caller's packet and identify the
+teaching admitted by the actual route. Lanes using `fqt-overlay-prefix` take
+it from `form/form-stdlib/form-cli-qwen-teach-layer.fk`; its shared
+`bml/form-cli-qwen-meaning.bml` distinguishes Form symbols and scannerless parsing
+from Qwen's tokenizer and decoder. The shared `qwen-serve-run` chat route uses
+`qlz-chat-prefix` and `qlz-chat-lens`: the caller supplies the teaching in its
+packet, and the assistant opens with an empty reasoning block. That route
+does not implicitly insert the overlay. A source edit does not rewrite the
+context of an already standing resident.
 
 For a concept-rich enquiry, select the relevant exact terms and read:
 

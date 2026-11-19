@@ -45,7 +45,8 @@
 // One rendering rule, and it is no restriction: a value whose words would outgrow the observation
 // answers node=@<address> <summary>; — the address of its own recipe tree, so node-get reaches
 // its parts (node-get @address;from..to) and eval reaches the value itself (@address). A value
-// whose words carry control bytes (<|) is never spoken: it answers nothing=value-carries-control.
+// containing protocol markers is returned as a JSON string with escaped marker openings;
+// decoding that string restores its exact words without turning them into executable framing.
 //
 // Payload headers, shared by the verbs that make: an optional scope (local:, request:, lineage:,
 // global:) and, for node-make and recipe-birth, an optional NAME = before the payload. A name
@@ -75,12 +76,12 @@ import form-stdlib/form-recipe-birth-token.fk;
 import form-stdlib/bml/form-source-lift.bml;
 import form-stdlib/form-recipe-exec-token.fk;
 import form-stdlib/bml/native-node-lookup.bml;
+import form-stdlib/bml/form-token-kinds.bml;
 import form-stdlib/bml/value-operators.bml;
 import form-stdlib/bml/string-join.bml;
 import form-stdlib/json-precise.bml;
 import form-stdlib/bml/pure-stdlib.bml;
 import form-stdlib/bml/form-token-workspace.bml;
-import form-stdlib/bml/spawn-guard.bml;
 import form-stdlib/grammars/living-equation.fk;
 import form-stdlib/bml/form-awk.bml;
 import form-stdlib/bml/form-path.bml;
@@ -128,7 +129,6 @@ section [form.bml] {
   // pieces join pairwise (str-spans), so each byte is copied once per level, never per piece
   def ftv-join(parts, sep) = str-join-with(parts, sep);
   def ftv-carries-control?(text) = str_find(text, "<|", 0) >= 0;
-  def ftv-control?(payload) = ftv-carries-control?(payload);
   def ftv-last-index(s, needle) = ftv-last-from(s, needle, 0, -1);
   def ftv-last-from(s, needle, from, last) {
    let at = str_find(s, needle, from);
@@ -139,9 +139,9 @@ section [form.bml] {
   def ftv-defang(text) = ftv-join(split-on(text, "<|"), "< |");
 
   // ── RESULT text ──────────────────────────────────────────────────────
-  // A RESULT closes no observation and opens no control: text that carries <| is not spoken, so
-  // the stream, the crossing ledger and a trace never hold a control Form did not receive.
-  def ftv-value-result(text) = nothing?(text) ? ftv-nothing("value-exceeds-observation") : len(text) > ftv-max-render() ? ftv-nothing("value-exceeds-observation") : ftv-carries-control?(text) ? ftv-nothing("value-carries-control") : "value=" ++ text ++ ";";
+  // Data may name the protocol itself. A JSON string preserves those bytes
+  // reversibly while its escaped opening remains data in the surrounding frame.
+  def ftv-value-result(text) = nothing?(text) ? ftv-nothing("value-exceeds-observation") : len(text) > ftv-max-render() ? ftv-nothing("value-exceeds-observation") : ftk-result("value",text);
   def ftv-node-result(node) = "node=" ++ ftv-coord(node) ++ ftv-node-summary(node) ++ ";";
   def ftv-node-summary(node) {
    let name = kind(node); let kids = node_children(node);
@@ -157,7 +157,7 @@ section [form.bml] {
   }
   def ftv-summary-field(kids,key) = len(kids)<2 ? nothing() : ftw-decode(kids[0])==key ? ftw-decode(kids[1]) : ftv-summary-field(kids[2:],key);
   def ftv-recipe-result(node) = "recipe=" ++ ftv-coord(node) ++ ";";
-  def ftv-nothing(reason) = "nothing=" ++ (ftv-carries-control?(reason) ? "reason-carries-control" : ftv-defang(reason)) ++ ";";
+  def ftv-nothing(reason) = ftk-result("nothing",reason);
 
   // ── nodes ────────────────────────────────────────────────────────────
   def ftv-coord(node) = frex-node-coordinate(node);
@@ -255,7 +255,7 @@ section [form.bml] {
      ftv-render-text(session, v, ftv-show(session, v, allowance));
     };
   }
-  def ftv-render-text(session, v, text) = nothing?(text) ? ftv-large(session, v) : ftv-carries-control?(text) ? ftv-nothing("value-carries-control") : "value=" ++ text ++ ";";
+  def ftv-render-text(session, v, text) = nothing?(text) ? ftv-large(session, v) : ftk-result("value",text);
   // a value too large to speak: the address of its recipe tree and a short summary
   def ftv-large(session, v) {
    let node = ftv-hold(session, ftw-encode(v));
@@ -658,12 +658,8 @@ section [form.bml] {
    else if name == "print_str" then ftv-print(ctx, vals)
    else if name == "read_line" then ftv-refuse(ctx, "stdin-is-the-lanes")
    else if ftv-lane-path-reason(name, vals) != "" then ftv-refuse(ctx, ftv-lane-path-reason(name, vals))
-   else if !nil?(sg-door-forbidden(name, vals)) then ftv-forbidden(ctx, sg-door-forbidden(name, vals))
    else ftv-door-timed(ctx, name, vals);
   }
-  // a control that starts a child running sed, awk, perl or python ends where it asks: the door answers
-  // nothing=host-tool:<names> (the body carries its own awk and path, the edit door, read_file, ./fkwu cells and BML);
-  def ftv-forbidden(ctx, names) = ftv-refuse(ctx, sg-token(names));
   def ftv-door-timed(ctx, name, vals) {
    if (name == "host_sleep_ms") && ftv-int?(vals[0]) then ftv-sleep(ctx, vals[0])
    else if (name == "host_wait") && ftv-int?(vals[0]) then ftv-wait(ctx, vals[0])
@@ -1089,10 +1085,9 @@ section [form.bml] {
   def ftv-eval(session, payload) {
    let head = ftv-header(payload);
    let started = co-error-start();
-   let body = ftv-control?(payload) ? nothing() : ftv-parse-expr(ftv-at-rewrite(head[1]));
+   let body = ftv-parse-expr(ftv-at-rewrite(head[1]));
    let diagnostic = nothing?(body) ? co-error-since(started) : nothing();
-   if ftv-control?(payload) then ftv-nothing("nested-control")
-   else if nothing?(body) then ftv-nothing("parse-refused" ++ (nothing?(diagnostic) ? "" : ": " ++ diagnostic))
+   if nothing?(body) then ftv-nothing("parse-refused" ++ (nothing?(diagnostic) ? "" : ": " ++ diagnostic))
    else ftv-run(session, body, ftv-write-scope(head[0]));
   }
   def ftv-run(session, body, scope) {
@@ -1134,8 +1129,8 @@ section [form.bml] {
    let ended = ftv-end(ctx);
    let session = ftv-session-of(ctx);
    let result = ftv-refused?(ctx) ? ftv-nothing(record_get(ctx, "refused")) : ftv-speak-settled(ctx, ftv-keep-value(session, value));
-   record_set(session, "returned", ftv-refused?(ctx) || ftv-starts?(result, "nothing=") ? nothing() : value);
-   if ftv-starts?(result, "value=") then record_set(session, "observed", ftv-observation-value(value)) else 0;
+   record_set(session, "returned", ftv-refused?(ctx) || ftk-result-kind(result)=="nothing" ? nothing() : value);
+   if ftk-result-kind(result)=="value" then record_set(session, "observed", ftv-observation-value(value)) else 0;
    result;
   }
   def ftv-observation-value(value) = value_kind(value) == "record" ? "function" : value_kind(value) == "list" ? map(ftv-observation-value, value) : value;
@@ -1342,7 +1337,7 @@ section [form.bml] {
    ftv-threaded?(t) ? ftv-as-list(t[3]) : [];
   }
   def ftv-context-of(session) = ftv-view(ftv-context-list(session));
-  def ftv-bare(answer) = ftv-starts?(answer, "value=") && ftv-ends?(answer, ";") ? substring(answer, 6, len(answer) - 1) : answer;
+  def ftv-bare(answer) = ftk-result-kind(answer)=="value" && ftv-ends?(answer, ";") ? ftk-result-body(answer) : answer;
   def ftv-clip-segments(text, max) {
    let parts = ftv-split(text, " | ");
    len(text) <= max || nil?(parts) ? text : ftv-clip-from(parts, max);
@@ -1360,7 +1355,7 @@ section [form.bml] {
    let text = read_file(ftv-receipt-dir(session) ++ "/" ++ name) ?? "";
    let nl = str_find(text, byte_to_str(10), 0);
    let body = nl < 0 ? "" : trim(substring(text, nl + 1, len(text) < nl + 401 ? len(text) : nl + 401));
-   (len(body) == 0) || ftv-carries-control?(body) ? "" : ftv-cap("receipts/" ++ name ++ ": " ++ body);
+   len(body) == 0 ? "" : ftv-cap("receipts/" ++ name ++ ": " ++ body);
   }
   def ftv-next-deep(session, offered, deepened) = ftv-next-deep-at(session, offered, deepened, 0);
   def ftv-next-deep-at(session, offered, deepened, i) {
@@ -1397,7 +1392,7 @@ section [form.bml] {
    ftv-value-result(ftv-spoken(context));
   }
   def ftv-satsang-line(session) {
-   let segs = filter(s => !ftv-starts?(s, "nothing="), ftv-context-list(session));
+   let segs = filter(s => ftk-result-kind(s)!="nothing", ftv-context-list(session));
    let offered = nil?(segs) ? "" : ftv-title-of(segs[0]);
    "satsang: inquiry=what is actually here | offered=" ++ offered ++ " | ack=node | tag=" ++ oac-tag-node().str();
   }
@@ -1474,7 +1469,7 @@ section [form.bml] {
    let terms = take(6, ftv-terms(rest));
    if nil?(terms) then ftv-knowledge-continue(session) else {
     let rows = ftv-ask-rows(session, terms);
-    let grounded = filter(r => !ftv-carries-control?(r), rows);
+    let grounded = rows;
     let answer = ftv-knowledge-rows(rows);
     let context = ftv-context-extend(ftv-context-list(session), nil?(grounded) ? [ftv-bare(answer)] : grounded);
     let kept = ftv-thread-put(session, terms, ftv-shown(rows), [], context);
@@ -1522,7 +1517,7 @@ section [form.bml] {
   def ftv-doc-begin(session, payload, said) {
    let piece = ftv-bare(said);
    let kept = ftv-thread-put(session, take(6, ftv-terms(payload)), [], [], len(piece) > 0 ? [piece] : [said]);
-   ftv-starts?(said, "value=") ? ftv-value-result(ftv-spoken([piece])) : said;
+   ftk-result-kind(said)=="value" ? ftv-value-result(ftv-spoken([piece])) : said;
   }
   def ftv-doc-finish(session, payload, said) = ftv-threaded?(ftv-thread(session)) ? ftv-join-follow(session, said) : ftv-doc-begin(session, payload, said);
   def ftv-doc-lines(session, program) {
@@ -1537,9 +1532,8 @@ section [form.bml] {
    else ftv-doc-finish(session, payload, ftv-path(session, chosen[1]));
   }
   def ftv-knowledge(session, payload) {
-   let terms = ftv-control?(payload) ? [] : take(6, ftv-terms(payload));
-   if ftv-control?(payload) then ftv-nothing("nested-control")
-   else if ftv-threaded?(ftv-thread(session)) && ftv-lane?(payload) then ftv-lane(session, payload)
+   let terms = take(6, ftv-terms(payload));
+   if ftv-threaded?(ftv-thread(session)) && ftv-lane?(payload) then ftv-lane(session, payload)
    else if ftv-asks?(payload) && ftv-only-thread?(session, payload) then ftv-knowledge-asked(session, payload)
    else if !nil?(ftv-doc-choice(session, payload)) then ftv-doc-run(session, payload)
    else if nil?(terms) then ftv-nothing("no-terms")
@@ -1555,7 +1549,7 @@ section [form.bml] {
   }
   def ftv-knowledge-ask(session, terms) {
    let rows = ftv-ask-rows(session, terms);
-   let grounded = filter(r => !ftv-carries-control?(r), rows);
+   let grounded = rows;
    let answer = ftv-knowledge-rows(rows);
    let kept = ftv-thread-put(session, terms, ftv-shown(rows), [], nil?(grounded) ? [ftv-bare(answer)] : grounded);
    answer;
@@ -1569,7 +1563,7 @@ section [form.bml] {
    !nil?(rows) ? ftv-knowledge-kept(session, terms, append(offered, ftv-shown(rows)), deepened, rows) : ftv-knowledge-deeper(session, terms, offered, deepened);
   }
   def ftv-knowledge-kept(session, terms, offered, deepened, rows) {
-   let grounded = filter(r => !ftv-carries-control?(r), rows);
+   let grounded = rows;
    let answer = ftv-knowledge-rows(rows);
    let context = ftv-context-extend(ftv-context-list(session), nil?(grounded) ? [ftv-bare(answer)] : grounded);
    let kept = ftv-thread-put(session, terms, offered, deepened, context);
@@ -1662,8 +1656,8 @@ section [form.bml] {
    let row = ftv-next-deep(session, offered, deepened);
    if len(row) == 0 then ftv-nothing("thread-read") else ftv-knowledge-kept(session, terms, offered, cons(ftv-name-of(row), deepened), [row]);
   }
-  // a row read from a file that carries control bytes is not offered; the others still are
-  def ftv-knowledge-rows(rows) = ftv-knowledge-offer(filter(r => !ftv-carries-control?(r), rows));
+  // Source rows remain evidence even when their words describe the protocol.
+  def ftv-knowledge-rows(rows) = ftv-knowledge-offer(rows);
   def ftv-knowledge-offer(rows) = nil?(rows) ? ftv-nothing("no-grounded-row") : ftv-value-result(ftv-join(rows, " | "));
 
   // ── node-get, node-make, node-select ─────────────────────────────────
@@ -1681,9 +1675,8 @@ section [form.bml] {
    let semi = str_find(payload, ";", 0);
    let target = trim(semi < 0 ? payload : substring(payload, 0, semi));
    let window = ftv-window-of(semi < 0 ? "" : trim(substring(payload, semi + 1, len(payload))));
-   let node = ftv-control?(payload) ? nothing() : ftv-target(session, target);
-   if ftv-control?(payload) then ftv-nothing("nested-control")
-   else if nothing?(node) then ftv-nothing("unknown-node")
+   let node = ftv-target(session, target);
+   if nothing?(node) then ftv-nothing("unknown-node")
    else if ftv-leaf?(node) then ftv-leaf-view(session, node, window)
    else ftv-kids-view(session, node, node_children(node), window);
   }
@@ -1708,7 +1701,7 @@ section [form.bml] {
    let rest = (to - from) - len(shown);
    let more = rest > 0 ? (nil?(shown) ? "" : ", ") ++ "... +" ++ rest.str() ++ " more (node-get " ++ ftv-coord(node) ++ ";" ++ (from + len(shown)).str() ++ ".." ++ to.str() ++ ")" : "";
    let text = head ++ ftv-join(shown, ", ") ++ more ++ "]]";
-   ftv-carries-control?(text) ? ftv-nothing("value-carries-control") : "value=" ++ text ++ ";";
+   ftk-result("value",text);
   }
   def ftv-fit(session, kids, room, out, used) = nil?(kids) ? reverse(out) : ftv-fit-one(session, kids, room, out, used, ftv-node-show(session, kids[0]));
   def ftv-fit-one(session, kids, room, out, used, text) = (used + len(text) + 2) > room ? reverse(out) : ftv-fit(session, kids[1:], room, cons(text, out), used + len(text) + 2);
@@ -1748,10 +1741,9 @@ section [form.bml] {
    let semi = str_find(body, ";", 0);
    let catText = semi < 0 ? trim(body) : trim(substring(body, 0, semi));
    let items = semi < 0 ? [] : ftv-items(substring(body, semi + 1, len(body)));
-   let cat = ftv-control?(payload) ? nothing() : ftv-category(session, catText);
+   let cat = ftv-category(session, catText);
    let kids = nothing?(cat) ? [] : map(item => ftv-child(session, item), items);
-   if ftv-control?(payload) then ftv-nothing("nested-control")
-   else if nothing?(cat) then ftv-nothing("category")
+   if nothing?(cat) then ftv-nothing("category")
    else if any?(k => nothing?(k), kids) then ftv-nothing("child")
    else ftv-made(session, head[0], named[0], "node", intern_node(cat, map(k => ftv-hold(session, k), kids)));
   }
@@ -1766,11 +1758,10 @@ section [form.bml] {
   // list of nodes
   def ftv-node-select(session, payload) {
    let cut = ftv-last-index(payload, ";");
-   let body = (cut < 1) || ftv-control?(payload) ? nothing() : ftv-parse-expr(ftv-at-rewrite(substring(payload, 0, cut)));
+   let body = cut < 1 ? nothing() : ftv-parse-expr(ftv-at-rewrite(substring(payload, 0, cut)));
    let refs = cut < 1 ? [] : ftv-items(substring(payload, cut + 1, len(payload)));
    let nodes = foldl((acc, r) => append(acc, ftv-candidates(session, r)), [], refs);
-   if ftv-control?(payload) then ftv-nothing("nested-control")
-   else if cut < 1 then ftv-nothing("select-fields")
+   if cut < 1 then ftv-nothing("select-fields")
    else if nothing?(body) then ftv-nothing("parse-refused")
    else if nil?(refs) then ftv-nothing("no-candidates")
    else if any?(k => nothing?(k), nodes) then ftv-nothing("unknown-node")
@@ -1905,8 +1896,7 @@ section [form.bml] {
    let head = ftv-header(payload);
    let named = ftv-named(head[1]);
    let body = named[1];
-   if ftv-control?(payload) then ftv-nothing("nested-control")
-   else if ftv-starts?(body, "affine-i32;") then ftv-birth-affine(session, head[0], named[0], body)
+   if ftv-starts?(body, "affine-i32;") then ftv-birth-affine(session, head[0], named[0], body)
    else if ftv-starts?(body, "bml;") then ftv-birth-bml(session, head[0], named[0], substring(body, 4, len(body)))
    else ftv-nothing("recipe-kind");
   }
@@ -1945,7 +1935,7 @@ section [form.bml] {
   }
   def ftv-recipe-exec(session, payload) = ftv-recipe-exec-in(session, payload, ftv-ctx(session));
   def ftv-recipe-exec-in(session, payload, ctx) {
-   let fields = ftv-control?(payload) ? nothing() : ftv-exec-fields(payload);
+   let fields = ftv-exec-fields(payload);
    if nothing?(fields) then ftv-nothing("request-fields") else ftv-exec(session, fields[0], fields[1], fields[2], ctx);
   }
   // The recipe is an address, a name or a library export (LIB.EXPORT). Anything else is an
@@ -2039,7 +2029,7 @@ section [form.bml] {
    let open = ftv-reopen(ctx);
    let result = ftv-recipe-exec-in(session, ref ++ rest, ctx);
    record_set(last, "result", result);
-   ftv-starts?(result, "value=") ? result : fail;
+   ftk-result-kind(result)=="value" ? result : fail;
   }
  }
  0;

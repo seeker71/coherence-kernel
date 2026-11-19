@@ -33988,15 +33988,10 @@ static int fk_run(int argc, char **argv) {
     /* --check <unit>: compile only (fk_check_only, above fk_run_src) */
     if (argc >= 3 && fk_cstr_eq(argv[1], "--check")) {
         fk_check_only = 1;
-        if (fk_path_has_suffix(argv[2], ".bml") ||
-            (fk_path_has_suffix(argv[2], ".fk") && fk_unit_lowers(argv[2]))) {
+        if (fk_unit_lowers(argv[2])) {
             return fk_run_bml(argv[2], 0);
         }
-        if (fk_path_has_suffix(argv[2], ".fk")) {
-            return fk_run_src(argv[2], 0);
-        }
-        fk_diag_path("error", argv[2], "--check reads .fk and .bml units");
-        return 2;
+        return fk_run_src(argv[2], 0);
     }
     if (argc >= 4 && fk_cstr_eq(argv[1], "--closure")) {
         return fk_run_closure(argv[2], argv[3]);
@@ -34013,15 +34008,6 @@ static int fk_run(int argc, char **argv) {
     if (argc >= 3 && argv[1][0] == FK_CH_DASH && argv[1][1] == FK_CH_DASH) {
         return fk_run_src(argv[2], argc > 3 ? atoi(argv[3]) : 0);
     }
-    if (fk_path_has_suffix(argv[1], ".fk")) {
-        if (fk_unit_lowers(argv[1])) {
-            return fk_run_bml(argv[1], argc > 2 ? atoi(argv[2]) : 0);
-        }
-        return fk_run_src(argv[1], argc > 2 ? atoi(argv[2]) : 0);
-    }
-    if (fk_path_has_suffix(argv[1], ".bml")) {
-        return fk_run_bml(argv[1], argc > 2 ? atoi(argv[2]) : 0);
-    }
     if (fk_path_has_suffix(argv[1], ".fkb")) {
         if (!fk_src_load_fkb(argv[1])) {
             char whybuf[192];
@@ -34037,12 +34023,10 @@ static int fk_run(int argc, char **argv) {
         fk_run_door = 3;
         return fk_run_dylib_artifact(argv[1], argc > 2 ? atoi(argv[2]) : 0) ? 0 : 2;
     }
-    if (fk_path_has_suffix(argv[1], ".tbl")) {
-        fk_diag_path("error", argv[1], ".tbl execution has been retired; use .fk, .fkb, or .dylib");
-        return 2;
+    if (fk_unit_lowers(argv[1])) {
+        return fk_run_bml(argv[1], argc > 2 ? atoi(argv[2]) : 0);
     }
-    fk_diag_path("error", argv[1], "unsupported file extension; supported: .fk .fkb .dylib");
-    return 2;
+    return fk_run_src(argv[1], argc > 2 ? atoi(argv[2]) : 0);
 }
 #if defined(_WIN32)
 /* the same law as the POSIX main below: the walker runs on a big explicit thread stack

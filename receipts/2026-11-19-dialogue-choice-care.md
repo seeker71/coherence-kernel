@@ -136,3 +136,107 @@ first source write; the remaining data change was applied directly.
 `/tmp/form-dialogue-label-repair.bml` initially failed on the same unavailable
 binding without writing; it was repaired to use existing string primitives.
 These failures were resolved locally rather than repeated unchanged.
+
+## Next pass: quoted controls stay examples
+
+After `07abbbdaca`, the remaining live control grammar still treated inline
+code as executable instructions. The original source is
+`form/form-stdlib/bml/form-token-grammar.bml` at that commit. The exact native
+probe is `form-run ./fkwu /tmp/form-inline-control-20261119.bml`; it feeds only
+scripted text and a harmless arithmetic expression, without a model or retained
+crossing ledger. Before the repair it returned:
+
+```text
+example=Use `<|form:eval|>6 * 7<|/form:eval|>` as an example.
+prose=Use `` as an example.
+complete-opening-labelled-unfinished=1
+quoted-example-observation=value=42;
+quoted-example-executions=1
+```
+
+The complete sentence used for the unfinished check was
+`The opening is \`<|form:eval|>\`.`. The unchanged probe after repair returned
+the exact original example as prose, unfinished `0`, an empty observation and
+executions `0`.
+
+The shared scanner now keeps backtick code quotations as text, including
+inline spans and wider fences containing shorter runs. The stream window
+keeps a quotation begun after an active frame and waits for the next chunk to
+establish a closing run's width. Actual controls still execute, their payloads
+remain verbatim, and the existing reserve and multiple-control behavior remains.
+This is a code quotation boundary, not a judgment about human meaning or quality.
+
+The affected callers are `ftg-feed` and `ftg-coding-chunk` for execution,
+`fcnv-read-owned` for presented prose and unfinished status,
+`fgcr-ordinary-prose` for ordinary generation, and grounded synthesis's partial
+native response projection. They share the repaired grammar; no caller-specific
+filter or new admission layer was added.
+
+The existing `form-token-grammar-band.bml` now exercises single and double
+backticks, fenced examples, wider quotation, longer closing fences, quotations
+split across chunks, and a quotation following an actual control. It observes
+only the intended active control crossing in both the interceptor and coding
+parser. `form-run ./fkwu form/form-stdlib/tests/form-token-grammar-band.bml`
+returned `1023` with all ten claims, and `form-run git diff --check` exited `0`.
+
+The first edit's native compilation reported unbound `end-at` and `end-quote`;
+spacing subtraction repaired those names, and the same probe recompiled and
+produced the changed observations above. An additional compatibility case then
+returned `1021`: an equal-width-only implementation failed to close a three-tick
+fence with four ticks. The owning matcher now consumes equal or longer closing
+fences, and the same band returned `1023`. These observations establish parsing,
+execution and presentation behavior; no generated-answer quality claim follows.
+
+## Next pass: transmutation keeps the source's meaning
+
+`form-run ./fkwu /tmp/form-transmute-claim-20261119.bml` supplied this complete
+fixture answer to the old `tm-served`:
+
+```text
+answer=This event does not serve [lc-ceremony]; [outside-the-list] is the source's own name.
+recorded-as-served=[lc-ceremony]
+```
+
+`observe/transmute-run.bml` used that lookup directly for its `ideas served`
+display and `ideas_served` ledger field. Source search found no runtime reader
+of that field; historical receipts keep their original rows. The lookup now
+has the narrower name `tm-mentioned-seeds`, its caller displays `seed mentions`
+and writes `seed_mentions`. The identical negative sentence still mentions
+the supplied ID; it establishes no agreement or service. Unknown names remain
+in the answer. They are outside this supplied index, not counterfeit language.
+
+The same probe retained the actual event packet before repair. For a source
+that established no gift or relationship, the packet required two or three
+ideas, a gift, four uplifting sentences and a final thread question. It also
+required hedging every unobserved interior, including attributed reports of
+feelings, and the passage path replaced absences with offered paths. The
+repaired shared fidelity guidance preserves facts, negation, refusals,
+uncertainty and reports; the event's connections and possibilities remain
+interpretations, including evidence against an idea or no established link.
+The supplied field vocabulary remains available for the requested telling.
+These are observed packet changes, not observed improvements in generation.
+
+The existing `transmute-band.bml` first returned `183`: its two packet checks
+still required the retired `UPLIFTING DIALOGUE` title. The checks now observe
+the current shared card, fidelity guidance, source packet and mention scope;
+the same command returned `255`:
+
+```text
+form-run ./fkwu form/form-stdlib/tests/transmute-band.bml
+```
+
+The actual `observe/transmute-run.bml` then ran from
+`/tmp/form-transmute-20261119` with source `fixture`, model `0`, blank seed
+paths and the event `No connection to the supplied ideas is established.`.
+The command used absolute paths to the repository's `fkwu` and source cell,
+and completed with exit `0`, `seed mentions 0`, `voice=not-asked`. Readback of
+the scratch ledger confirmed `seed_mentions:[]` and no `ideas_served` field.
+No model ran, and no repository ledger was written.
+
+The isolated invocation spent time lowering; its retained compiler warning
+identifies `word-frequency-purify.fk` changing during that operation and the
+subsequent re-lowering. A sampled stack was in the native BML lowerer. A
+later stop request found the process already complete. A ledger-path-only
+fixture of the same source was also run afterward and returned `0`; both
+rows are confined to `/tmp/form-transmute-20261119/receipts/transmute-ledger.jsonl`.
+No generated-answer claim depends on these model-disabled runs.

@@ -467,7 +467,7 @@ The body's one grep sits behind the shell executor's `grep` builtin too (`sh-bi-
 (`tracked-files()`, the seam the native `git ls-files` will answer) and runs the same grep over each
 file's text: `stw-grep-rows(args, paths)` gives `path:line:content` rows, `stw-grep-files(args, paths)`
 the paths with a selected line, `stw-pick(paths, suffixes)` the `*.fk` / `*.bml` pathspecs.
-prelude-reach, band-cover and the spawn-guard census read the tree this way.
+prelude-reach and band-cover read the tree this way.
 
 The `head` and `tail` tools also read the older `-N` spelling (`head -2`) as
 `-n N`, so a shell pipeline's stages become calls with the same argv.

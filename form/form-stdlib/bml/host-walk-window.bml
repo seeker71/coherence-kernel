@@ -1,43 +1,22 @@
-// host-walk-window.bml — a walk's turns share the caller's window and GPU.
-//
-// The window: a walk's turns live inside it (hw-turns, host-walk-turns.bml). Each turn reads the window's end on stdin
-// as its wall deadline, {"turns":24,"deadline_ms":<the window's end on host_monotonic_ms>}; the host's monotonic clock
-// is one clock for every process on this host, so the turn reads the same deadline its walk set, starts no option the
-// time left cannot hold, and stops its lane at the deadline. A turn begins only while the time left holds one
-// option, as long as the median real option of the voice it opens on the checkout's own ledger (hw-room), and only after the host's
-// other checkouts let the one GPU go: a turn waits, inside its window, while a walk door or the session learner
-// runs in another checkout (hw-yield). Actual voice admission reserves its own
-// model and packet geometry; the walk does not estimate another memory allowance.
-// What it holds: the room over the option floor (hw-room; the floor itself is host-walk-floor.bml), the walk doors of other checkouts and the
-// yield to them (hw-walk-doors, hw-yield), and hw-ready. The planner owns its
-// registry voice chain and retains actual resource refusals in its continuation.
-// What it needs: host-walk-text.bml (hw-field, hw-minutes, hw-ends?, hw-say), memory-governor.bml (mg-*) and
-// model-registry.bml (mr-find, mr-path: the fast-answer weight file).
+// The walk forwards the caller's whole deadline. Historical durations, other
+// processes and host memory are observations, not a forecast of whether the
+// next operation can run. Native session admission owns the actual allocation,
+// resource wait, release and next choice; the existing checkpoint owns a turn
+// when its caller's window ends.
 import form-stdlib/bml/host-walk-text.bml;
 import form-stdlib/bml/host-walk-floor.bml;
 import form-stdlib/bml/memory-governor.bml;
-import form-stdlib/model-registry.bml;
 section [form.bml] {
  class HostWalkWindow {
 
   def hw-left(until, now) = until > now ? until - now : 0;
-  // The window keeps room for what learns: the turns and the planner end this long before the window does, so the reading,
-  // the rows, the lift, the proof and the register never meet a window the turns spent.
-  def hw-learn-room-ms() = 1800000;
-  def hw-turns-until(until) = until - hw-learn-room-ms();
-  def hw-fastest-fits?(left, floor) = len(floor) > 2 && left >= floor[2];
   def hw-room-at(until, now, floor) {
    let left = hw-left(until, now);
-   let held = left >= floor[0] ? [true, "[walk-window] " ++ hw-minutes(left) ++ " left holds an option of " ++ hw-minutes(floor[0]) ++ " (" ++ floor[1] ++ ")"] : hw-fastest-fits?(left, floor) ? [true, "[walk-window] " ++ hw-minutes(left) ++ " left is short of the median option of " ++ hw-minutes(floor[0]) ++ " (" ++ floor[1] ++ ") and holds the fastest measured, " ++ hw-minutes(floor[2]) ++ "; the window's end keeps the option's checkpoint"] : [false, "[walk-window] " ++ hw-minutes(left) ++ " left cannot hold an option of " ++ hw-minutes(floor[0]) ++ " (" ++ floor[1] ++ "): no turn starts"];
-   held;
+   [left > 0, "[walk-window] " ++ hw-minutes(left) ++ " left; " ++ (left > 0 ? "the caller's window remains open" : "the caller's window ended") ++ "; " ++ floor[1] ++ (nothing?(floor[0]) ? "" : ": " ++ hw-minutes(floor[0]))];
   }
   def hw-room(until) = hw-room-at(until, host_monotonic_ms(), hw-option-floor());
-  // the walk doors of the host's other checkouts, the local planner (observe/local-plan-run.bml, which opens a plan
-  // voice), the prompt-lookup run (observe/prompt-lookup-run.bml, which opens Qwen sessions to time them), and the
-  // session learner that trains on the GPU (its worker and the session door that hands it a teaching and waits for
-  // it to settle): one model on the one GPU at a time. The two walk coordinators (scheduled-walk and day-turn) are not on
-  // the list: a coordinator that waits holds no model, and the doors it opens (the children above) are what hold the GPU,
-  // so two walks in two checkouts never wait on each other's waiting
+  // Process activity names what is running elsewhere. It cannot establish
+  // current device ownership or the capacity a new session needs.
   def hw-walk-doors() = ["observe/movement-run.bml", "observe/native-turn-run.bml", "observe/form-cli-code-run.fk", "observe/prompt-draft-run.bml", "observe/draft-native-reading-run.bml", "observe/lora-lift-run.bml", "observe/local-plan-run.bml", "observe/prompt-lookup-run.bml", "observe/native-session-learning-run.fk", "observe/form-cli-session-home-embody-run.fk", "observe/offline-exam-run.bml", "observe/self-distill-run.bml", "observe/self-review-run.bml"];
   def hw-door-in(arg, doors) = nil?(doors) ? "" : hw-ends?(arg, doors[0]) ? doors[0] : hw-door-in(arg, doors[1:]);
   def hw-door-of(argv) = (String) value_kind(argv) != "list" ? "" : len(argv) < 2 ? "" : (String) value_kind(argv[1]) != "string" ? "" : hw-door-in(argv[1], hw-walk-doors());
@@ -54,40 +33,17 @@ section [form.bml] {
   }
   def hw-walk-name(row) = hw-door-of(row[4]) ++ " (pid " ++ row[0].str() ++ ") in " ++ row[3];
   def hw-walk-names(rows) = nil?(rows) ? "" : hw-walk-name(rows[0]) ++ (nil?(rows[1:]) ? "" : ", " ++ hw-walk-names(rows[1:]));
-  // look(here) answers the host's walk rows in other checkouts; the wait rests a minute between looks, and ends
-  // when none walks or when the window no longer holds an option
-  def hw-yield-poll-ms() = 60000;
-  def hw-yield(until) = hw-yield-with(until, hw-elsewhere, hw-option-floor(), hw-yield-poll-ms());
-  def hw-yield-now(until) = hw-yield-with(until, hw-elsewhere, hw-option-floor(), hw-yield-poll-ms());
-  def hw-yield-floor(until) = hw-yield-with(until, hw-elsewhere, hw-option-floor(), hw-yield-poll-ms());
-  def hw-yield-with(until, look, floor, poll) = hw-yield-from(until, host_monotonic_ms(), look, floor, hw-here(), look(hw-here()), "", poll);
-  def hw-yield-from(until, began, look, floor, here, others, named, poll) {
-   let room = hw-room-at(until, host_monotonic_ms(), floor);
-   nil?(others) ? hw-yielded(began, named)
-   : !room[0] ? "[walk-yield] " ++ hw-walk-names(others) ++ " still walks, and the window no longer holds an option"
-   : hw-yield-rest(until, began, look, floor, here, (String) named == "" ? hw-walk-names(others) : named, poll);
-  }
-  def hw-yield-rest(until, began, look, floor, here, named, poll) {
-   let rested = host_sleep_ms(poll);
-   hw-yield-from(until, began, look, floor, here, look(here), named, poll);
-  }
-  def hw-yielded(began, named) = (String) named == "" ? "" : "[walk-yield] waited " ++ hw-minutes(host_monotonic_ms() - began) ++ " for " ++ named ++ " to end: one model on the GPU at a time";
-  // The walk's own room in memory. A process is charged its physical footprint (kernel_stat 91: compressed pages included; RSS reads a few GiB where the machine charges tens) and the host can give what mg-available
-  // reads. A walk that holds more than the host has left to give is the one that must release: no further turn starts, the turns end, what learns still runs, and the window's end leaves the process, so the next start is a
-  // fresh one. Measured 2026-11-14 14:36: this door held 54 GiB (the lowerer's recipe nodes, interned and never freed) while the host read 10.8 GiB available and 35 GiB compressed. A reading that did not arrive (an older
-  // kernel answers nothing for 91, or the host's statistics are unreadable) holds nothing back: nothing is claimed on a number nobody read.
-  // A host whose compressor holds over a quarter of its memory is paging: measured 2026-11-14 21:55, 44 GiB compressed and 21 of 22 GiB of swap used, the resident decoded 0.5 to 1.1 tok/s where it decoded
-  // 7 tok/s a stream three days before, with every process quiet. Available memory alone read 20 GiB and said nothing; the compressor says it. No turn starts while the host is paging.
-  // The pages the compressor STORES (host_vm_stat word 17: what it holds, 2.7 million here, 41 GiB), not the pages it occupies (word 8: 91641, 1.4 GiB): the occupied figure read 1.3 GiB while the host paged.
+  def hw-activity-of(others) = nil?(others) ? "" : "[walk-activity] " ++ hw-walk-names(others) ++ "; native admission observes current ownership and allocation";
+  def hw-activity-with(look) = hw-activity-of(look(hw-here()));
+  def hw-activity() = hw-activity-with(hw-elsewhere);
+  // Retain the actual memory reading without inventing a quota from its ratios.
   def hw-stored(vm) = len(vm) >= 18 ? vm[17] * vm[0] : mg-compressor(vm);
-  def hw-compressed-room(vm) = mg-vm-ok?(vm) && hw-stored(vm) * 4 > mg-mem(vm) ? [false, "[walk-window] the host stores " ++ mg-gib-text(hw-stored(vm)) ++ " in its compressor, over a quarter of its " ++ mg-gib-text(mg-mem(vm)) ++ ": it is paging, decode runs slower than the weights' bandwidth, and no turn starts until it drains"] : [true, ""];
-  def hw-memory-room-of(own, vm) = !hw-compressed-room(vm)[0] ? hw-compressed-room(vm) : hw-memory-room-own(own, vm);
-  def hw-memory-room-own(own, vm) = (String) value_kind(own) != "int" || own <= 0 || !mg-vm-ok?(vm) ? [true, ""] : own > mg-available(vm) ? [false, "[walk-window] this walk holds " ++ mg-gib-text(own) ++ " and the host has " ++ mg-gib-text(mg-available(vm)) ++ " available: no turn starts (the turns end, what learns still runs, and the next start is a fresh process)"] : [true, ""];
+  def hw-memory-room-of(own, vm) = [true,"[walk-memory] footprint " ++ (value_kind(own)=="int" && own>0 ? mg-gib-text(own) : "unobserved") ++ (mg-vm-ok?(vm) ? "; available " ++ mg-gib-text(mg-available(vm)) ++ "; compressed " ++ mg-gib-text(hw-stored(vm)) : "; host memory unobserved") ++ "; native admission owns the requested allocation"];
   def hw-memory-room() = hw-memory-room-of(kernel_stat(91), mg-sense());
   def hw-ready(until) {
-   let said = hw-say(hw-yield(until));
-   let mem = hw-memory-room();
-   mem[0] ? hw-room(until) : mem;
+   let said = hw-say(hw-activity());
+   let mem = hw-say(hw-memory-room()[1]);
+   hw-room(until);
   }
  }
 }

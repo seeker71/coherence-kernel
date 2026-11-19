@@ -368,7 +368,7 @@ Each step moves one user, proves it with a band, and deletes the spawn path it r
    table above with what each would change; the LoRA workers follow the same record. `voice-track-reap-band` kills by `host_signal` on a pid
    and reads its exit as the parent of its synthetic workers.
 9. **The seed's floor child**, landed (above), and the sibling doors the cell door lets us retire (`host_capture` of an `./fkwu` argv, `host-exec` of a
-   cell). When nothing in the tree names `./fkwu` as an argv outside the exceptions, the spawn guard can refuse it by name.
+   cell). Move each remaining internal call into its owning process and observe its value and release there; a command-name refusal does not establish that movement.
 
 ## The patch
 

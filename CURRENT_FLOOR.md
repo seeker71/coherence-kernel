@@ -31,11 +31,12 @@ appear beside each source on its first run, and `./fkwu gate/form-cli-build-run.
 
 fkwu is the only runtime and every band answers its pin on it. Nothing in this tree builds, runs or
 gates on Go, Rust, TypeScript or Swift: the regeneration of `form/form-stdlib/bootstrap/` needs `cc` and
-`./fkwu` (the identities are the body's own fingerprint, the HMAC Form's). The tree holds only kinds the body names
-(Form, the C seed, documents and data: the structural gate is an allowlist, so any other file, whatever its
-extension or its case, is foreign) and no foreign file stands outside two declared carriers (`form-run`, the
-output-compaction wrapper whose Form classifier is pending, and the three lines of `Sema Ear.app`'s bundle
-executable), and no Form door calls sed, awk, perl or python: the band sweep (`./fkwu gate/band-sweep-run.bml`, `form/form-stdlib/bml/band-sweep.bml`) reads what a band's head and
+`./fkwu` (the identities are the body's own fingerprint, the HMAC Form's). Implementation lives in Form and its
+bootstrap. The structural reader observes source carriers and inventory completeness; names supply no admission
+verdict. The public entry and preflight ask the existing native parser to read caller-selected source, and
+host operations carry their actual argv, deadline, outcome and release. These boundaries were re-observed on
+2026-11-19 in [the execution-boundary receipt](receipts/2026-11-19-trust-at-execution-boundaries.md).
+The band sweep (`./fkwu gate/band-sweep-run.bml`, `form/form-stdlib/bml/band-sweep.bml`) reads what a band's head and
 the verdict manifest say in process (`observe/band-head.bml`, band `observe/tests/band-head-band`, 2047), so
 `{"list":1}` names every workload (410 on 2026-10-04) with each one's staging, pin and row in about a second (the shell took 4 s,
 2026-10-04: the same columns, line for line). `hearth.bml`, `rumi-glass.bml` and `observe/hearth-glass-live.fk` read the
@@ -176,26 +177,11 @@ observe/tests/review-panel-band          -> 127  (observe/review-panel-run.bml, 
                                             says `; FOLD: decimal|count` on a head line; a sweep that lists no band
                                             is a flaw too; 2026-10-03)
 form/form-stdlib/tests/band-truth-band   -> 1048575
-form-stdlib/tests/spawn-guard-band       -> 131071  (form-stdlib/bml/spawn-guard.bml: every door of the body that begins a child from an argv or
-                                            a shell line another cell or an agent supplied reads it first, in process, with no child to read it:
-                                            ["sed",..] by its first element, through the wrappers command-words knows, `sh -c` by the line it
-                                            carries (sh, bash, zsh, dash, ksh, ash, csh, tcsh, fish), a shell given a script file by the file's
-                                            text, a bare shell by its input, also behind a wrapper or by `-` and `-s` (`["env","bash"]` fed
-                                            `sed p f` is read), pythonw as python; the census classes are read too: no file called `fixed`
-                                            holds a host tool as a quoted command word. A host tool's command is never begun and ends with a
-                                            named line: hch-run-with answers [nothing(), "", "birth refused: host-tool sed: not used
-                                            here; the body carries its own awk and path, the edit door, read_file, fs_list, ./fkwu cells and
-                                            BML ..."], the control language answers nothing=host-tool:sed (the body carries its own awk and
-                                            path, the edit door, read_file, ./fkwu cells and BML), the pid natives -5, host_capture and
-                                            host-exec nothing(). A warm
-                                            argv reading is about 6 us (5000 in 32 ms), a `sh -c` line about 90 us (500 in 46 ms; 2026-10-04,
-                                            this Mac). Doors that ask: host-child, form-token-verbs, form-cli-heal-native-io and -process,
-                                            findings-requests, form-cli-code-circle, native-source-inventory, native-pipe-darwin, metal-ask,
-                                            crossing-record; tests/fixtures/spawn-doors.txt names every other cell that calls a host native
-                                            that starts a child and says why its command is fixed words (class fixed, table, seed, rented), and
-                                            the band computes the same set from the tree so a door that asks nothing and is in no row fails it;
-                                            plants: the reading with wrappers or basenames off, an unclassified door, an ask removed from its
-                                            source)
+form-stdlib/tests/host-walk-band.bml     -> 9007199254740991 (2026-11-19: all 53 existing claims, including the same executable offered
+                                            directly and through a temporary language-named alias. Both run with the same observed
+                                            output and exit. The former command-name veto, enforcement band and duplicate door census
+                                            were retired after moving their callers. Ownership, explicit deadlines and release stay
+                                            with the executing organ; command names remain observations.)
 ./fkwu observe/forbidden-tools-audit-run.bml -> the commands agents ran in their own Bash and Monitor calls, read from their transcripts
                                             (~/.claude/projects/<project>/<session>.jsonl and <session>/subagents/*.jsonl): per session and
                                             agent the commands counted, the flagged ones and their first 160 bytes newest first, then a totals
@@ -1422,14 +1408,15 @@ What answered red, died, or was not witnessed today, so no one leans on it:
   learned.
 
 - A Claude Code Bash or Monitor call runs as the agent chose it: no hook stands between the call and its run
-  (Urs's direction: no hook, no non-Form tool). The body's own spawn doors read every child before it begins
-  (`spawn-guard.bml`: every door of the body that begins a child asks it), and the audit lens mirrors afterward
+  (Urs's direction: no hook, native Form working practice). The body's spawn doors carry the offered operation
+  and its actual outcome; program names no longer veto it. The audit lens mirrors afterward
   (`forbidden-tools-audit-run.bml`, the land cadence's fourth reading) what an agent's own Bash calls ran, counted
   in its transcript: the mirror shows, the writer decides.
 
 - The double-click and hot-key launcher of the live ear glass is gone. `Sema Ear Glass.command` was a
   shell file that opened a full-screen terminal on `observe/ear-glass-live.fk`, and a Shortcut could be bound
-  to it; the structural gate refuses a script, so it left. What Urs can do now: the documented door line in a
+  to it; it left under the earlier structural rule. The current carrier inventory supplies no filename veto.
+  What Urs can do now: the documented door line in a
   terminal (`printf '600\n\n' | ./fkwu observe/ear-glass-live.fk`, 600 s of the room in three tongues), or
   `open -n "Sema Ear.app"` for the microphone's principal (that bundle runs the speech-to-text door on a request
   file and writes its answer under `.hearth/`; it is not the glass). `Sema Ear.app`'s executable is itself

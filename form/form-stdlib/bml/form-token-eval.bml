@@ -33,6 +33,7 @@
 // A reading that did not arrive is nothing, never 0: a rate over no generated IDs and IDs per correct answer over
 // no correct answer read null.
 import form-stdlib/bml/form-token-kinds.bml;
+import form-stdlib/bml/form-token-grammar.bml;
 import form-stdlib/bml/form-rows-bridge.bml;
 import form-stdlib/bml/form-cli-guide-packet.bml;
 import form-stdlib/bml/string-join.bml;
@@ -60,37 +61,39 @@ section [form.bml] {
   def ftcn-word-from?(s, i) = i >= len(s) ? true : ftcn-word-byte?(str_byte_at(s, i)) ? ftcn-word-from?(s, i + 1) : false;
   def ftcn-word?(s) = (len(s) > 0) && (len(s) <= 40) && ftcn-word-from?(s, 0);
   // ── the scanner: every <|form:KIND|> opening in order, as [kind, payload, start, end, closed] ──
-  // An opening whose close does not come before the next opening is unclosed: its payload is empty and its end
-  // lies just past the opening.
+  // The runtime's matching close decides the frame. An absent close leaves an
+  // empty payload and the end just past the opening.
   def ftcn-scan(text) = reverse(ftcn-scan-from(text, 0, []));
   def ftcn-scan-from(text, from, acc) {
-   let i = str_find(text, "<|form:", from);
+   let i = ftg-next-opening(text,from)[0];
    if (i < 0) then acc else ftcn-scan-at(text, i, str_find(text, "|>", i + 7), acc);
   }
   def ftcn-scan-at(text, i, kindEnd, acc) {
    let kind = kindEnd < 0 ? "" : substring(text, i + 7, kindEnd);
-   if ftcn-word?(kind) then ftcn-scan-closed(text, i, kind, kindEnd + 2, str_find(text, ftcn-close(kind), kindEnd + 2), str_find(text, "<|form:", kindEnd + 2), acc) else ftcn-scan-from(text, i + 7, acc);
+   if ftcn-word?(kind) then ftcn-scan-closed(text, i, kind, kindEnd + 2, ftg-payload-close(text,kindEnd + 2,kind), acc) else ftcn-scan-from(text, i + 7, acc);
   }
-  def ftcn-scan-closed(text, i, kind, body, close, next, acc) {
-   let closed = (close >= 0) && ((next < 0) || (close < next));
+  def ftcn-scan-closed(text, i, kind, body, close, acc) {
+   let closed = close >= 0;
    let end = closed ? close + len(ftcn-close(kind)) : body;
    ftcn-scan-from(text, end, cons([kind, closed ? substring(text, body, close) : "", i, end, closed], acc));
   }
   // ── what Form answered ──
-  def ftcn-class(result) = (String) result == "" ? "" : ftcn-starts?(result, "value=") ? "value" : ftcn-starts?(result, "recipe=@") ? "recipe" : ftcn-starts?(result, "node=@") ? "node" : ftcn-starts?(result, "nothing=") ? "nothing" : "other";
+  def ftcn-class(result) = (String) result == "" ? "" : ftk-result-kind(result)=="value" ? "value" : ftcn-starts?(result, "recipe=@") ? "recipe" : ftcn-starts?(result, "node=@") ? "node" : ftk-result-kind(result)=="nothing" ? "nothing" : "other";
   def ftcn-success?(result) = ftcn-member?(ftcn-class(result), ["value", "recipe", "node"]);
   def ftcn-outcome(result) = ftcn-success?(result) ? "success" : (String) ftcn-class(result) == "nothing" ? "nothing" : "other";
   // a bare result written right after a closed control, past spaces: the voice's imitation of Form's answer, since
   // every text read here carries Form's own answers in their envelope
-  def ftcn-bare-prefixes() = ["value=", "recipe=@", "node=@", "nothing=", "failure="];
+  def ftcn-bare-prefixes() = ["value=", "value-json=", "recipe=@", "node=@", "nothing=", "nothing-json=", "failure="];
   def ftcn-space?(b) = ((Comparable) b == 32) || ((Comparable) b == 10) || ((Comparable) b == 9) || ((Comparable) b == 13);
   def ftcn-skip-space(s, i) = (i < len(s)) && ftcn-space?(str_byte_at(s, i)) ? ftcn-skip-space(s, i + 1) : i;
   def ftcn-bare?(text, end) = any?(p => ftcn-starts-at?(text, ftcn-skip-space(text, end), p), ftcn-bare-prefixes());
   // what an answer carries to cite a success: the value's text, or the @address
   def ftcn-cite(result) {
+   if ftk-result-encoded?(result) then ftk-result-body(result) else {
    let at = (String) ftcn-class(result) == "value" ? 6 : str_find(result, "@", 0);
    let semi = str_find(result, ";", max2(at, 0));
    at < 0 ? "" : trim(substring(result, at, semi < 0 ? len(result) : semi));
+   };
   }
   // ── the voice's controls, each with what Form answered: [kind, payload, result, end, closed, bare] ──
   // result is "" when Form answered nothing in this text; bare is 1 when the voice wrote a bare result right after the

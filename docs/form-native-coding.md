@@ -54,6 +54,14 @@ Changing resume outcomes remain eligible without a fixed resume count; repeated
 unchanged outcomes invite another approach. Successful publication records the
 resulting source fingerprint so subsequent execution recognizes completed work.
 
+The host walk, native turn and planner forward the caller's actual deadline.
+Historical option durations, compression, process footprint and other checkout
+activity remain observations; they do not forecast whether the next operation
+can run. Missing duration stays unknown. Offered models reach their actual
+session admission without a guessed scratch reserve or disk fraction veto.
+Planner service requests carry the selected model and reply allowance, and the
+original packet must be retained before generation begins.
+
 Inline tool observations use the same owned context growth as ordinary decode;
 remaining allocation is a resource signal rather than an observation cutoff.
 An identical tool call returning the same evidence over unchanged source in the
@@ -1168,7 +1176,7 @@ An observed failure beyond a completed coding job's checks can reopen that check
 
 ## Rehearse a small BML repair
 
-`rehearse-bml` takes `[path]` or `[path,decimalCheckBudget]` and empty input. `fbvs-search(source,checker,contract,budget)` wraps one existing value expression in a unary call already in that source. Each candidate starts from the original and runs the unchanged checker. The 1–64 allowance counts the original check. A passing original stays unchanged; exhaustion preserves it. Results retain spans, digests and observations. This is one repair family; the caller owns checker cost, purity and any process supervision.
+`rehearse-bml` takes `[path]` or `[path,decimalCheckBudget]` and empty input. `fbvs-search(source,checker,contract,budget)` adds or removes one unary call already in that source. Each candidate starts from the original and runs the unchanged checker. An omitted allowance explores the finite candidate frontier; a supplied positive native integer counts the original check. A passing original stays unchanged; exhaustion preserves it. Results retain spans, digests and observations. This is one repair family; the caller owns checker cost, purity and any process supervision.
 
 ### Caller-enabled rehearsal after a failed action
 

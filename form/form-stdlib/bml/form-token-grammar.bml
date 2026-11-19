@@ -3,7 +3,8 @@
 // A model writes <|form:VERB|>PAYLOAD<|/form:VERB|>; when the stream closes the control, Form
 // runs the verb (form-token-verbs.bml) and answers in the same stream
 // with <|form:observation|>RESULT<|/form:observation|>. RESULT is value=<v>; recipe=@<p.l.t.i>;
-// node=@<p.l.t.i>; or nothing=<reason>;. A refusal offers another choice.
+// node=@<p.l.t.i>; or nothing=<reason>;. Marker-bearing text uses value-json or
+// nothing-json; the shared result reader restores its exact string. A refusal offers another choice.
 // Repeating a refused observation echo ends that stream with its evidence intact.
 //
 // The opening bytes of recipe-birth, recipe-exec and knowledge-query are the ones
@@ -28,6 +29,7 @@
 import form-stdlib/bml/form-rows-bridge.bml;
 import form-stdlib/bml/form-token-kinds.bml;
 import form-stdlib/bml/form-token-verbs.bml;
+import form-stdlib/bml/source-scan.bml;
 import form-stdlib/bml/form-token-tool.bml;
 import form-stdlib/form-cli-recipe-exec-session.fk;
 import form-stdlib/json.fk;
@@ -47,12 +49,8 @@ section [form.bml] {
   def ftg-observation(result) = ftg-observation-open() ++ result ++ ftg-observation-close();
   // a source observation already carries its own envelope (nodeid-knowledge-query)
   def ftg-envelope(text) = ftv-starts?(text, "<|form:") ? text : ftg-observation(text);
-  def ftg-result-kind(result) = ftv-starts?(result, "value=") ? "value" : ftv-starts?(result, "recipe=") ? "recipe" : ftv-starts?(result, "node=") ? "node" : ftv-starts?(result, "nothing=") ? "nothing" : "";
-  def ftg-result-body(result) {
-   let at = str_find(result, "=", 0);
-   let end = ftv-ends?(result, ";") ? len(result) - 1 : len(result);
-   at < 0 ? "" : substring(result, at + 1, end);
-  }
+  def ftg-result-kind(result) = ftk-result-kind(result);
+  def ftg-result-body(result) = ftk-result-body(result);
   def ftg-session() = FTG-DEFAULT;
   def ftg-session-fresh() = ftv-session();
   // a lane's workspace under root: the lane is the lineage, this process a fresh request in it
@@ -171,21 +169,51 @@ section [form.bml] {
   // unknown verb with its nothing instead of passing over it
   def ftg-scan-any(text) = ftg-scan-from(text, 0, [], 1);
   // Presentation uses the same grammar as execution: active control frames
-  // belong to the retained trace, while fenced examples remain answer text.
+  // belong to the retained trace, while code-quoted examples remain answer text.
   // Unclosed controls stay visible as unfinished; this never rewrites model IDs.
   def ftg-prose(text) = ftg-prose-at(text,ftg-scan-any(text),0);
   def ftg-prose-at(text,frames,from) = nil?(frames) ? substring(text,from,len(text)) : substring(text,from,frames[0][2]) ++ ftg-prose-at(text,frames[1:],frames[0][3]);
   def ftg-unfinished?(prose) = ftg-next-opening(prose,0)[0]>=0;
   def ftg-name?(verb) = (len(verb) > 0) && (str_find(verb, "<", 0) < 0);
-  // Markdown fences quote examples. Once a control opens, its payload stays
-  // verbatim; a fence in source carried by that control has no lexical role.
+  // Backtick runs quote examples, inline or fenced. Inline runs match exactly;
+  // a fence (three or more ticks) closes with an equal or longer run. A longer
+  // quote can carry shorter backtick runs as text.
+  // Once a control opens, its payload stays verbatim. A closing backtick run at the current stream end stays held
+  // until the next chunk establishes its width.
   // [next control, unfinished quotation, prose start], byte offsets in text.
-  def ftg-next-opening(text,from) {
-   let at=str_find(text,"<|form:",from);
-   let fence=str_find(text,"```",from);
-   if fence<0 || (at>=0 && at<fence) then [at,-1,from] else {
-    let close=str_find(text,"```",fence+3);
-    close<0 ? [-1,fence,from] : ftg-next-opening(text,close+3);
+  def ftg-ticks-end(text,at) = substring(text,at,at+1)=="`" ? ftg-ticks-end(text,at+1) : at;
+  def ftg-quote-close(text,from,width) {
+   let at=str_find(text,"`",from);
+   if at<0 then -1 else {
+    let end=ftg-ticks-end(text,at);
+    (end - at==width || (width>=3 && end - at>width)) ? at : ftg-quote-close(text,end,width);
+   };
+  }
+  def ftg-next-opening(text,from) = ftg-next-mark(text,from,"<|form:");
+  def ftg-next-mark(text,from,mark) {
+   let at=str_find(text,mark,from);
+   let quote=str_find(text,"`",from);
+   if quote<0 || (at>=0 && at<quote) then [at,-1,from] else {
+    let end=ftg-ticks-end(text,quote);
+    let width=end - quote;
+    let close=ftg-quote-close(text,end,width);
+    let after=close<0 ? -1 : ftg-ticks-end(text,close);
+    after<0 || after==len(text) ? [-1,quote,from] : ftg-next-mark(text,after,mark);
+   };
+  }
+  def ftg-prose-window(text,opening,prefix) = substring(text,opening[1]>=0 ? opening[1] : max2(opening[2],max2(0,len(text) - len(prefix)+1)),len(text));
+  // Source payloads use the native lexer for strings, characters and comments.
+  // Raw enquiries keep their own punctuation, including an unmatched inch mark.
+  def ftg-payload-close(text,from,verb) = ftk-source-payload?(verb) ? ftg-source-close(text,from,ftg-close(verb)) : str_find(text,ftg-close(verb),from);
+  def ftg-source-close(text,from,close) {
+   let n=len(text);
+   let start=ssc-trivia(text,from,n,bml-line-comment-prefix(0),bml-block-comment-open(0),bml-block-comment-close(0));
+   if ssc-at?(text,start,n,close) then start
+   else if start>=n then -1
+   else {
+    let ch=str_byte_at(text,start);
+    let next=ch==34 || ch==39 ? ssc-quoted(text,start + 1,n,ch,"")[1] : start + 1;
+    ftg-source-close(text,next,close);
    };
   }
   def ftg-scan-from(text, from, out, any) {
@@ -197,7 +225,7 @@ section [form.bml] {
    let verbEnd = str_find(text, "|>", at + 7);
    let verb = verbEnd < 0 ? "" : substring(text, at + 7, verbEnd);
    let wanted = any == 1 ? ftg-name?(verb) : ftg-verb?(verb);
-   let close = (verbEnd < 0) || !wanted ? -1 : str_find(text, ftg-close(verb), verbEnd + 2);
+   let close = (verbEnd < 0) || !wanted ? -1 : ftg-payload-close(text,verbEnd + 2,verb);
    if verbEnd < 0 then reverse(out)
    else if close < 0 then ftg-scan-from(text, at + 7, out, any)
    else ftg-scan-from(text, close + len(ftg-close(verb)), cons([verb, substring(text, verbEnd + 2, close), at, close + len(ftg-close(verb))], out), any);
@@ -211,17 +239,19 @@ section [form.bml] {
    let joined = window ++ chunk;
    let opening=ftg-next-opening(joined,0);
    let at=opening[0];
-   let held = at < 0 ? substring(joined, opening[1]>=0 ? opening[1] : max2(opening[2],len(joined) >= len(prefix) ? len(joined) - len(prefix) + 1 : 0), len(joined)) : substring(joined, at, len(joined));
+   let held = at < 0 ? ftg-prose-window(joined,opening,prefix) : substring(joined, at, len(joined));
    let verbEnd = str_find(held, "|>", len(prefix));
    let verb = verbEnd < 0 ? "" : substring(held, len(prefix), verbEnd);
    let close = "<|/form:" ++ verb ++ "|>";
-   let end = verbEnd < 0 ? -1 : str_find(held, close, verbEnd + 2);
+   let end = verbEnd < 0 ? -1 : ftg-payload-close(held,verbEnd + 2,verb);
    let tooLong = !nothing?(reserve) && len(held) > reserve;
    let frame = end < 0 ? "" : substring(held, 0, end + len(close));
    if (at < 0) || ((end < 0) && !tooLong) then [held, "held", verb, "", ""]
    else if tooLong then ["", "too-long", verb, frame, ""]
-   else if ftg-next-opening(held,end+len(close))[0] >= 0 then ["", "multiple", verb, frame, ""]
-   else ["", "control", verb, frame, substring(held, verbEnd + 2, end)];
+   else {
+    let after=ftg-next-opening(held,end+len(close));
+    after[0]>=0 ? ["", "multiple", verb, frame, ""] : [ftg-prose-window(held,after,prefix), "control", verb, frame, substring(held, verbEnd + 2, end)];
+   };
   }
 
   // ── the token-walk interceptor ───────────────────────────────────────

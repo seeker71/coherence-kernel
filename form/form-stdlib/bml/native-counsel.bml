@@ -4,7 +4,7 @@
 // to the 27B through the lenses a counsel gives (observe/local-counsel-run.bml): one request a lens in the standing server's spool, each decoded beside every other sequence the
 // server holds, under the server's GPU lease. The turn never opens a model of its own for it: no server standing is named and the turn goes on without counsel (counsel
 // is advice, never a gate). The reply is kept beside the turn's candidates (.hearth/native-turns/<gap>.counsel, one lens a paragraph) for the lens and voice ways to read,
-// the door line is printed, and the turn's walk line carries what was asked: "; counsel: <n> lenses, surest <i>".
+// the door line carries each token-surprise reading and the turn's walk line carries how many lenses answered. The reading does not rank the advice.
 //
 //   ncs-wanted?()                          .hearth/walk.counsel stands
 //   ncs-question(goal)                     the question one lens is asked of
@@ -15,15 +15,26 @@ section [form.bml] {
  class NativeCounsel {
   def ncs-dir() = ".hearth/native-turns";
   def ncs-gen() = 120;
-  def ncs-lenses() = ["Answer by naming what could go wrong first.", "Answer by naming the smallest first step."];
-  def ncs-wanted?() = file_size(".hearth/walk.counsel") >= 0;
-  def ncs-question(goal) = "An engineering request for one small edit of a Form codebase:\n" ++ goal ++ "\nWhat should the engineer know before the first edit?";
+  def ncs-lenses() = ["Explain useful actions for the request at its stated scope.", "Examine the assumptions and evidence relevant to the request."];
+  def ncs-wanted-at?(path) = file_size(path) >= 0;
+  def ncs-wanted?() = ncs-wanted-at?(".hearth/walk.counsel");
+  def ncs-question(goal) = "An engineering request in a Form codebase:\n" ++ goal ++ "\nOffer useful counsel for completing this request, carrying its scope and constraints.";
   // the reply ends at the model's own end-of-turn; ids decoded after it are not part of it
   def ncs-reply(text) {
    let at = str_find(text, "<|im_end|>", 0);
    trim(at < 0 ? text : substring(text, 0, at));
   }
-  def ncs-surest(sc, i, best) = i >= len(sc) ? best : ncs-surest(sc, i + 1, sc[i] < sc[best] ? i : best);
+  def ncs-reading(doc,key) {
+   let node = json-object-get(doc,key);
+   let value = json-int-value(node);
+   value_kind(value) != "int" ? nothing() : node_eq(node,json-node-int(value)) ? value : nothing();
+  }
+  def ncs-reading-text(value) = nothing?(value) ? "unmeasured" : value.str();
+  def ncs-surprise(doc) {
+   let tokens = ncs-reading(doc,"generated_ids");
+   let value = ncs-reading(doc,"surprise_micro_nats");
+   nothing?(tokens) || tokens <= 0 || nothing?(value) || value < 0 ? nothing() : value;
+  }
   def ncs-ask(dir, question, lenses, gen, who) {
    let st = svc-standing(dir);
    (String) st[0] != "standing" ? ["unserved", "no server stands (" ++ st[1] ++ ")", [], []] : ncs-served(dir, question, lenses, gen, who);
@@ -34,21 +45,26 @@ section [form.bml] {
    let down = filter(g => (String) g[0] != "answered", got);
    nil?(down) ? ncs-of-docs(lenses, map(g => g[1], got)) : ["unserved", "the server did not answer (" ++ down[0][1] ++ ")", [], []];
   }
-  // the replies as the turn reads them: the line, each lens's text, each lens's surprise (micro-nats a token: the confidence it read)
+  // Token surprise describes these decoded tokens. It establishes neither the
+  // advice's correctness nor confidence in its claims. Absent readings stay absent.
   def ncs-of-docs(lenses, docs) {
-   let sc = map(d => svc-int(d, "surprise_micro_nats"), docs);
-   let line = "served by the resident server: " ++ len(lenses).str() ++ " lenses, prompt " ++ svc-int(docs[0], "prompt_ids").str() ++ " ids a lens; queue " ++ svc-int(docs[0], "queue_ms").str() ++ " ms, prefill " ++ svc-int(docs[0], "prefill_ms").str() ++ " ms, " ++ svc-int(docs[0], "generated_ids").str() ++ " tokens; surest lens " ++ ncs-surest(sc, 0, 0).str();
+   let sc = map(d => ncs-surprise(d), docs);
+   let line = "served by the resident server: " ++ len(lenses).str() ++ " lenses, prompt " ++ ncs-reading-text(ncs-reading(docs[0], "prompt_ids")) ++ " ids on lens 0; queue " ++ ncs-reading-text(ncs-reading(docs[0], "queue_ms")) ++ " ms, prefill " ++ ncs-reading-text(ncs-reading(docs[0], "prefill_ms")) ++ " ms, " ++ ncs-reading-text(ncs-reading(docs[0], "generated_ids")) ++ " tokens; token surprise (micro-nats/token) [" ++ str-join-with(map(v => ncs-reading-text(v),sc),", ") ++ "]";
    ["served", line, map(d => ncs-reply(svc-str(d, "text")), docs), sc];
   }
-  def ncs-keep(id, lenses, texts) {
-   let made = host_dir_mkdir(".hearth") + host_dir_mkdir(ncs-dir());
-   write_file(ncs-dir() ++ "/" ++ id ++ ".counsel", str-join(map(i => "[" ++ lenses[i] ++ "]\n" ++ texts[i] ++ "\n", range(0, len(lenses)))));
+  def ncs-keep-at(dir,id,lenses,texts) {
+   let made = host_dir_mkdir(dir);
+   write_file(dir ++ "/" ++ id ++ ".counsel", str-join(map(i => "[" ++ lenses[i] ++ "]\n" ++ texts[i] ++ "\n", range(0, len(lenses)))));
+  }
+  def ncs-keep(id,lenses,texts) {
+   let made = host_dir_mkdir(".hearth");
+   ncs-keep-at(ncs-dir(),id,lenses,texts);
   }
   def ncs-for-turn(id, goal) {
    let r = ncs-ask(svc-default-dir(), ncs-question(goal), ncs-lenses(), ncs-gen(), "native-turn-counsel");
    let said = print_str("[native-turn:counsel] " ++ id ++ " " ++ ((String) r[0] == "served" ? r[1] : "unserved: " ++ r[1] ++ "; the turn goes on without counsel"));
    let kept = (String) r[0] == "served" ? ncs-keep(id, ncs-lenses(), r[2]) : 0;
-   (String) r[0] == "served" ? "; counsel: " ++ len(ncs-lenses()).str() ++ " lenses, surest " ++ ncs-surest(r[3], 0, 0).str() : "";
+   (String) r[0] == "served" ? "; counsel: " ++ len(ncs-lenses()).str() ++ " lenses" : "";
   }
  }
 }

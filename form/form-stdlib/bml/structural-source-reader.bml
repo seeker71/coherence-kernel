@@ -16,16 +16,41 @@ section [form.bml] {
   // a listed entry under a name that is never walked, at any depth
   def sga-skipped?(entry,skipA,skipB) = (sga-starts?(entry,(skipA + "/")) || (sga-starts?(entry,(skipB + "/")) || ((str_find(entry,("/" + (skipA + "/")),0) >= 0) || (str_find(entry,("/" + (skipB + "/")),0) >= 0))));
   def sga-joined(root,entry) = if ((String) root == ".") then ("./" + entry) else (root + ("/" + entry));
-  def sga-stands?(root,entry) = ((len(entry) > 0) && ((Comparable) file_size(sga-joined(root,entry)) >= 0));
-  // git's listing of the tree, the paths relative to the root; nothing when git cannot read the root
-  def sga-listing(root) {
-   let captured = nsi-settled(nsi-capture(["git","-C",sga-root(root),"ls-files","-z","--cached","--others","--exclude-standard"]));
-   if nsi-admitted?(captured) then split-on(nsi-text(captured),byte_to_str(0)) else nothing();
+  def sga-listing(root) = nsi-capture(["git","-C",sga-root(root),"ls-files","-z","--cached","--others","--exclude-standard"]);
+  // Git can exit zero while warning that an untracked directory could not be
+  // read. Let the available tree reader resolve that uncertainty as well.
+  def sga-git-complete?(captured) = nsi-admitted?(captured) && file_size(nsi-path(nsi-evidence(captured),"stderr"))==0;
+  def sga-entries(captured,skipA,skipB) = filter(e => len(e)>0 && !sga-skipped?(e,skipA,skipB),split-on(nsi-text(captured),byte_to_str(0)));
+  def sga-follow(root,skipA,skipB,prior,reason) {
+   let row=oh-reading("source-inventory",nsi-evidence(prior),reason,json-node-int(1),json-node-int(0),json-node-int(0),[oh-need("complete-successful-inventory",oh-reference(nsi-path(nsi-evidence(prior),"capture.json")))],["read-tree","defer"],oh-reference(nsi-path(nsi-evidence(prior),"stderr")));
+   oh-voice(row);
+   let response=oh-response(row,"read-tree");
+   oh-voice(response);
+   let selected=oh-select(row,response,"read-tree");
+   let next=sga-capture(root,skipA,skipB);
+   let context=json-node-object([oh-s("schema","source-inventory-continuation-v1"),oh-s("root",root),json-node-pair("skips",json-node-array(oh-strings([skipA,skipB]))),oh-s("reason",reason),oh-s("prior",nsi-evidence(prior)),oh-s("current",nsi-evidence(next)),oh-s("choice","read-tree"),oh-n("complete",nsi-admitted?(next))]);
+   let held=nsi-continuation(prior,context);
+   let continued=nsi-continuation(next,context);
+   if nsi-admitted?(next) then {
+    oh-voice(oh-applied(row,selected,oh-reference(nsi-path(nsi-evidence(next),"capture.json"))));
+    next;
+   } else nsi-refuse(next,"tree-inventory-completion");
   }
-  def sga-from-git(root,entries,skipA,skipB) = map(e => sga-joined(root,e),filter(e => (sga-stands?(root,e) && (!sga-skipped?(e,skipA,skipB))),entries));
+  def sga-paths(captured) = filter(p => len(p)>0,split-on(nsi-text(captured),byte_to_str(0)));
+  def sga-from-git(root,captured,skipA,skipB) {
+   let paths=map(e => sga-joined(root,e),sga-entries(captured,skipA,skipB));
+   if all?(path => file_size(path)>=0,paths) then {
+    let released=nsi-settled(captured);
+    paths;
+   } else {
+    // A failed stat is not evidence of deletion. A complete walk establishes
+    // which indexed paths still stand; inaccessible paths retain the failure.
+    let observed=sga-paths(sga-follow(root,skipA,skipB,captured,"indexed-path-unobserved"));
+    filter(path => any?(present => sga-root(present)==sga-root(path),observed),paths);
+   };
+  }
   def sga-read(root,skipA,skipB) = if (!((Comparable) fs_is_dir(root) == 1)) then nsi-refuse(sga-capture(root,skipA,skipB),"directory-root") else sga-read-listed(root,skipA,skipB,sga-listing(root));
-  def sga-read-listed(root,skipA,skipB,listed) = if nothing?(listed) then sga-read-find(root,skipA,skipB) else sga-from-git(root,listed,skipA,skipB);
-  def sga-read-find(root,skipA,skipB) = filter(p => (len(p) > 0),split-on(nsi-text(nsi-require-nuls(sga-capture(root,skipA,skipB))),byte_to_str(0)));
+  def sga-read-listed(root,skipA,skipB,listed) = if sga-git-complete?(listed) then sga-from-git(root,listed,skipA,skipB) else sga-paths(sga-follow(root,skipA,skipB,listed,"git-inventory-incomplete"));
  }
  0;
 }

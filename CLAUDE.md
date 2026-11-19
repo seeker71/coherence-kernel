@@ -56,10 +56,9 @@ line, never a stream.
 Work through the body's own tools and flows (Urs, 2026-09-28): the edit tool or the body's doors, `./fkwu` cells and BML,
 the native agent tools ([`docs/form-native-agent-tools.md`](docs/form-native-agent-tools.md)), and the body's own `awk`
 and `path`, which select, transform and compute over its recipes, blueprints and cells with Form's choice. The host's
-perl, python, sed and awk stay outside the body: a missing internal tool is written into the body in the same movement
-(`AGENTS.md`, "Enrich the response with Form"). The body's spawn doors read each child before it begins and end a host
-tool's command with a named line saying what the body carries instead
-([`spawn-guard.bml`](form/form-stdlib/bml/spawn-guard.bml)); `observe/forbidden-tools-audit-run.bml` mirrors what agents
+perl, python, sed and awk are unnecessary for native implementation: a missing internal tool is written into the body in the same movement
+(`AGENTS.md`, "Enrich the response with Form"). An offered host operation keeps its existing owner, actual outcome and
+caller allowance; its language or program name is no admission verdict. `observe/forbidden-tools-audit-run.bml` mirrors what agents
 ran in their own Bash calls, after the fact. No hook stands between a Claude Code Bash call and its run (Urs's direction):
 the mirror shows, the writer decides.
 
