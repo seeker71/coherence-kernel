@@ -79,9 +79,12 @@ own ask; the voice knows it unhanded, and bare reads it too.
 
 ## The door a person meets
 
-The frozen door handed door lines to 19 of 20 invented sentences of ordinary life, because a noun was enough. The door
-now asks more, as written in `cp-door-named?`, and `voice-door-ground-band` holds 24 such sentences to the bare packet.
-A word list cannot read a life, so a sentence shaped like a question about a door can still receive door lines.
+The frozen door handed door lines to 19 of 20 invented sentences of ordinary life, because a noun was enough. A later
+version used question cues and suppressed any query with personal pronouns or selected possessives. That suppressed
+"Which kernel source should I read?" and "Which source defines our kernel?" while admitting the equivalent enquiry
+with "we". The 2026-11-19 repair removes those vetoes. Query cues still select a lookup, and source matching returns
+candidates, not a verdict about the person's meaning. A miss leaves other sources and meanings open. The existing
+`voice-door-ground-band` checks this routing and source scope; it does not classify a person's life from word lists.
 
 The later reading of this door, label `g5-doors-repaired`, stands beside the first. 15 asks carry ground; the other 9
 answer byte for byte as bare does.

@@ -10,7 +10,7 @@
 //               without that file the draft counts in skipped_no_text
 //   rejected -> never a trainer row: <out>/draft-readings-heldout.jsonl holds the draft id, session, prompt_t, the reading's
 //               note, and the messages when the draft's text is here (a held-out negative with the reason we gave)
-// A draft file is read the way prompt-draft-run wrote it ("# The person asked", the prompt, "# The body's draft", the text;
+// A draft file is read the way prompt-draft-run wrote it ("# Captured request", or the legacy "# The person asked", then the prompt and "# The body's draft");
 // the turn-before and files sections after it are context, never taught). An accepted or revised draft whose text is not
 // readable here, or that was cut at the reply budget, counts in skipped_no_text; a rejected reading always lands with the ledger's own fields. Both row files are
 // rewritten whole on each run: the ledger is the source and the rows are its projection. Nothing is scheduled by this door.
@@ -27,10 +27,11 @@
 // Prints one JSON line {accepted, revised, rejected, rows_written, heldout_written, skipped_no_text} and appends one row to the
 // receipt ledger with provenance: the source ledger's path, sha256 digest and row count, the drafts dir and whether it stood,
 // the counts, the two row paths ("" for a file not written), the readers projected ("of-record" or "native-voice"),
-// retention "local-only" and authorization "our own readings of our own drafts". With readers ["native-voice"] line and row also
+// retention "local-only" and the actual caller-selected reader. A review is no evidence of captured-text authorship,
+// sharing scope or permission to train; those remain with the request that uses these rows. With readers ["native-voice"] line and row also
 // carry of_record_stands and the agreement on the drafts both of us read (drr-agreement): both_read, agreed (the same word),
 // same_side (kept or turned away: accepted and revised keep, rejected turns away), the same three over the drafts whose native
-// reading was the voice's own word and not a covenant rejection (voice_both_read, voice_agreed, voice_same_side), and confusion
+// reading was the voice's actual answered result (voice_both_read, voice_agreed, voice_same_side), and confusion
 // (the counts by "<ours>><native>"). Agreement is what earns trust; it establishes that the two readers said the same word on
 // those drafts, never that either was right, and nothing here promotes a reader. Read agreed beside confusion: a reader that always said rejected would agree on every draft we rejected (27 of 52 on 2026-10-31, beside this reader's 28).
 // preflight-exec: forbidden
@@ -62,21 +63,21 @@ section [form.bml] {
   def drr-agreement(ds, ours, theirs) = foldl((a, d) => drr-agree-one(a, d, ours, theirs), [0, 0, 0, 0, 0, 0, []], ds);
   def drr-agreement-pairs(a) = [fhn-n("both_read", a[0]), fhn-n("agreed", a[1]), fhn-n("same_side", a[2]), fhn-n("voice_both_read", a[3]), fhn-n("voice_agreed", a[4]), fhn-n("voice_same_side", a[5]), json-node-pair("confusion", json-node-object(map(p => fhn-n(p[0], p[1]), a[6])))];
   // ---- the draft file as prompt-draft-run wrote it
-  def drr-asked() = "# The person asked\n\n";
-  def drr-mark() = "\n\n# The body's draft\n\n";
+  def drr-mark() = dl-answered-mark();
   def drr-cut-at(s, mark) { let i = str_find(s, mark, 0); i < 0 ? s : substring(s, 0, i); }
   def drr-body(s) = trim(drr-cut-at(drr-cut-at(s, "\n# The turn before (what the voice was given)\n"), "\n# Files the voice read\n"));
   // [prompt, draft]; a file without its marks is a draft text with no prompt, which no row can carry
   def drr-split(text) {
-   let a = str_find(text, drr-asked(), 0);
+   let a = len(dl-asked-mark-in(text)) > 0 ? 0 : -1;
    let b = str_find(text, drr-mark(), 0);
-   (a < 0) || (b < a) ? ["", trim(text)] : [trim(substring(text, a + len(drr-asked()), b)), drr-body(substring(text, b + len(drr-mark()), len(text)))];
+   (a < 0) || (b < a) ? ["", trim(text)] : [trim(substring(text, a + len(dl-asked-mark-in(text)), b)), drr-body(substring(text, b + len(drr-mark()), len(text)))];
   }
   def drr-file(dir, id, suffix) = read_file(dir ++ "/" ++ id ++ suffix);
   def drr-pair-of(dir, id) { let t = drr-file(dir, id, ".md"); nothing?(t) ? ["", ""] : drr-split(t); }
   def drr-revised-text(dir, id) { let t = drr-file(dir, id, ".revised.md"); nothing?(t) ? "" : trim(t); }
-  // a draft cut at the reply budget is no whole answer: it teaches nothing
-  def drr-whole?(p, a) = (len(p) > 0) && (len(a) > 0) && (str_find(a, "(cut at the reply budget of ", 0) < 0);
+  // Completion comes from the generating operation, never a phrase in prose.
+  def drr-whole?(p, a) = (len(p) > 0) && (len(a) > 0);
+  def drr-complete?(d) = (String) fhn-text(d, "voice") == "answered" && fhn-count(d, "cut") == 0;
   // ---- rows
   def drr-msg(role, text) = json-node-object([fhn-s("role", role), fhn-s("content", text)]);
   def drr-messages(p, a) = json-node-pair("messages", json-node-array([drr-msg("user", p), drr-msg("assistant", a)]));
@@ -91,7 +92,8 @@ section [form.bml] {
    let id = dl-id(d);
    let reading = dl-reading(id, all);
    let read = dl-word?(reading);
-   let pa = read ? drr-pair-of(dir, id) : ["", ""];
+   let found = read ? drr-pair-of(dir, id) : ["", ""];
+   let pa = drr-complete?(d) ? found : [found[0], ""];
    read && !keep(id) ? [s[0], s[1], s[2], s[3], s[4], s[5], s[6] + 1]
    : (String) reading == "accepted" ? drr-accepted(id, pa, s)
    : (String) reading == "revised" ? drr-revised(id, pa, drr-revised-text(dir, id), s)
@@ -124,7 +126,7 @@ section [form.bml] {
    let w1 = write_file_text(rows-path, drr-join(reverse(s[3])));
    let w2 = native ? 0 : write_file_text(held-path, drr-join(reverse(s[4])));
    let counts = append([fhn-n("accepted", s[0]), fhn-n("revised", s[1]), fhn-n("rejected", s[2]), fhn-n("rows_written", len(s[3])), fhn-n("heldout_written", native ? 0 : len(s[4])), fhn-n("skipped_no_text", s[5])], native ? append([fhn-n("of_record_stands", s[6])], drr-agreement-pairs(drr-agreement(drafts, ours, all))) : []);
-   let row = json-node-object(append([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("source", lrun-home-free(ledger)), fhn-s("source_digest", drr-digest(ledger)), fhn-n("source_rows", len(source)), fhn-s("drafts", lrun-home-free(dir)), fhn-n("drafts_present", present ? 1 : 0)], append(counts, [fhn-s("rows", rows-path), fhn-s("heldout", held-path), fhn-s("readers", readers), fhn-s("retention", "local-only"), fhn-s("authorization", "our own readings of our own drafts")])));
+   let row = json-node-object(append([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("source", lrun-home-free(ledger)), fhn-s("source_digest", drr-digest(ledger)), fhn-n("source_rows", len(source)), fhn-s("drafts", lrun-home-free(dir)), fhn-n("drafts_present", present ? 1 : 0)], append(counts, [fhn-s("rows", rows-path), fhn-s("heldout", held-path), fhn-s("readers", readers), fhn-s("retention", "local-only")])));
    let appended = fhn-append(receipt, lrun-row-line(row) ++ "\n");
    print_str(json-emit(json-node-object(counts)) ++ "\n");
   }

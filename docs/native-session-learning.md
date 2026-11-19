@@ -6,6 +6,9 @@ The local `session scope|{"owner":"…","purpose":"…","retain":1,"train":0}`
 command records established authorization for that home. Use `train:1` only for
 an authorized learning scope. A conversation, an old record or `resume` supplies
 no new authorization. `session status` exposes the scope and both allowances.
+An explicit zero is reported as declined, separately from missing authorization;
+teaching reports preserve the actual retention and worker outcome. A completed
+no does not become another request for permission or a claimed learning update.
 
 The checks run before experience, training-row and inference-request writes,
 including direct collectors. A teaching offered without retention scope returns
@@ -180,6 +183,11 @@ use the existing dynamic native generation path, including cancellation,
 observed context/memory pressure and observed repetition. Repetition is read
 with case and line wrapping folded, at sentence and paragraph length. There is
 no fixed total generation budget.
+
+When a retained answer accompanies the same question, it carries its original
+session, event, route, outcome, evidence and observation time. The answering
+prompt presents it as historical context. A caller teaching is not relabelled
+as an independently verified answer or assumed to be the immediately prior turn.
 
 The serialized learner consumes resource needs through `organ-care.bml`.
 Its native verified-memory responder accepts an offered retrieval action,

@@ -25,8 +25,9 @@ its existing checker, and its exact expected stdout. Healing stays native when
 the final mode is omitted or is `local`; neither spelling launches the remote
 CLI probe. A final `remote` field is the caller's explicit provider door: it
 authorizes one Codex CLI attempt after every native route has completed or
-reported its inability. The checker timeout defaults to 30 seconds and accepts
-1–120 seconds.
+reported its inability. An omitted checker allowance or `0` uses the existing
+progress supervisor without a lifetime deadline. A positive integer is the
+caller's check deadline in seconds.
 
 The same native recipe has a stdin door in the source-backed form-cli:
 
@@ -50,9 +51,10 @@ alongside the state.
    existing native RAG index. RAG evidence includes a bounded current source
    excerpt when the reference resolves inside the repository. Missing resources
    and timeouts remain recorded.
-3. Replay matching verified repair examples. Try at most eight deterministic
-   candidates, including closers before nested definitions and at EOF. Each is
-   a hypothesis; the checker decides whether it survives.
+3. Replay matching verified repair examples and walk the finite distinct
+   deterministic candidates, including closers before nested definitions and
+   at EOF. Duplicate candidates are offered once. Each is a hypothesis; the
+   original checker decides whether it survives.
 4. Ask the shared native session learner through
    `observe/native-session-learning-run.fk` when it holds a serving repair
    adapter and this failure is not an unchanged, already-failed prediction.
@@ -73,7 +75,7 @@ alongside the state.
    planned native model, and receipts for the session-learner, adapter and
    native-admission stages before the exact frontier-admission predicate. A
    model starting or returning text does not establish completion. An invalid
-   or oversized inventory leaves the remote door closed. An
+   inventory leaves the remote door closed. An
    invocation-specific claim allows at most one remote call, including after
    failure. Codex receives the bounded repair prompt in an empty directory with
    read-only permissions, ephemeral mode, and no user configuration. Its answer
@@ -85,8 +87,8 @@ alongside the state.
    carries the receipt reference.
 
 Accepted model responses contain one exact unique old/new replacement. Ambiguous
-matches, commentary around the replacement, empty output, and oversized edits
-are refused. Models cannot select the target file or change the expected result.
+matches, commentary around the replacement and empty output are refused.
+Models cannot select the target file or change the expected result.
 
 ## What counts as a repair
 
@@ -107,9 +109,11 @@ target, checker, proposals, manifest, and observations remain in the evidence di
 and attempt stage. `attempts.tsv` records model-specific admissions, checks, and
 completion. These show which resource remains owed after an interrupted attempt.
 
-The source limit is 64 KiB; model replacements total at most 4 KiB, and model
-prompts at most 24,000 bytes. Larger or multi-file repairs need a separate
-contract. Only production `.fk` and `.bml` targets are admitted; test targets,
+Source, replacements, attempts, diagnostics and matching references are retained
+whole. Prompt publication reads back the exact bytes before model admission;
+the actual model and resource owners determine whether that context can run.
+This remains a single-target repair contract. Only production `.fk` and `.bml`
+targets are admitted; test targets,
 managed source symlinks, and explicit `DO NOT REPAIR:` exclusions are refused.
 No source, test expectation, historical recording, or model weight is changed
 merely to make a verdict look successful.
@@ -189,13 +193,15 @@ contracts. A later matching failure offers that repair again and rechecks it
 against the current snapshot. Each accepted example includes a training-candidate
 record; failed candidates remain counterexamples in their attempt directories.
 
-Every candidate/check round offers its observed outcome to the shared
-native session learner by default. Verified replacements become supervised
-repair targets; failed proposals retain the problem, attempt and observed
-outcome without treating the proposal as a correct answer. Evaluation experience
-is retained but excluded from the gradient. `learning.jsonl` links the actual
-private experience, example and worker state; queued or paused work is never
-labelled a completed weight update or promotion.
+Every candidate/check round offers its observed outcome to the shared native
+session learner under its existing owner-and-purpose scope. Repair execution
+continues when that scope does not authorize capture, and its receipt says
+`not-retained;scope-required`. Authorized retention and training remain distinct.
+Verified replacements can become supervised repair targets; failed proposals
+preserve the observed outcome without treating the proposal as a correct answer.
+Authorized evaluation experience stays outside the gradient. `learning.jsonl`
+links the actual private experience, example and worker state; queued or paused
+work is never labelled a completed weight update or promotion.
 
 The Llama learner uses full next-token LoRA gradients and restores Adam state
 from the previous generation. Every completed learning round updates all loaded

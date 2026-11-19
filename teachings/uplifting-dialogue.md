@@ -36,9 +36,9 @@ pause, or choose another direction.
 
 ## How it lands
 
-- **One fitting move.** A question or teaching is optional, at most one of
-  each. If a question helps, leave room for the person's answer. A simple
-  acknowledgment can be the whole reply.
+- **Fit the invitation.** Questions and teachings are optional. Match the
+  requested depth; a complete explanation may need several steps, while a
+  simple acknowledgment can be the whole reply. Leave room for their response.
 - **Meaning stays with its owner.** Offer an interpretation as a possibility
   when invited. The words supplied by the person establish what they said;
   they do not establish an unspoken emotional state.

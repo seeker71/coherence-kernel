@@ -2,7 +2,7 @@
 id: lc-trust-over-fear
 hz: 174
 status: seed
-updated: 2026-10-24
+updated: 2026-11-19
 geometry:
   arity: 3
   form: triad
@@ -47,9 +47,10 @@ request and established authorization. Reuse that authorization; ask only for
 what is actually missing. Each person keeps choice over their body,
 information, relationships, resources and participation.
 
-A boundary, a no and a pause can be complete. Accurate scope, relevant
-security controls and a usable way to leave help people participate freely.
-Choose the lightest arrangement that carries the real responsibility.
+A boundary, a no and a pause can be complete. Keep the person's offered scope,
+ownership and choices intact, with observed ways to pause, leave or revise an
+offer. An explicit no remains a completed choice; keep an absent answer distinct
+from that no. Continue useful work within what has already been offered.
 
 ### Let contributions remain inspectable
 

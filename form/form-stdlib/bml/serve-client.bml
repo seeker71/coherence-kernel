@@ -3,15 +3,19 @@
 // The spool is a directory (default /tmp/form-serve, one for the whole machine as the GPU lease is): a client writes its request into tmp/ and renames it into
 // req/<id>.json (whole or absent); the server claims it (req -> work), reads it in chunks with every other live sequence, and writes reply/<id>.json the same way.
 // A server STANDS when its status.json names a pid that is alive and is the same process (host_process's start time matches) and no stop file asks it to
-// end. A caller that finds none runs a session of its own and names why (svc-reason); a caller that finds one never opens its own model, because the server
-// holds the GPU lease for its whole life and a second Metal client would wait on it for ever.
+// end. A caller that finds none or cannot use that route retains the reason (svc-reason) and can offer its own session. Current guest admission measures
+// that session's activations and KV; a standing resident is not an exclusive device lease.
 //
 // Waiting is never cut: a reply is waited for as long as the server lives (wait_ms 0), and a server that dies while the request waits is named (server-gone) so
 // the caller can run its own session. Pressure slows a reply, it never truncates it.
-// preludes: form-stdlib/core.fk form-stdlib/json.fk form-stdlib/bml/serve-sched.bml
+// preludes: form-stdlib/core.fk form-stdlib/json.fk form-stdlib/sha256.fk form-stdlib/hex.fk form-stdlib/bml/serve-sched.bml
 section [form.bml] {
  class ServeClient {
   def svc-default-dir() = "/tmp/form-serve";
+  def svc-bell-name(dir) {
+   let path = host_realpath(dir) ?? dir;
+   path == (host_realpath(svc-default-dir()) ?? svc-default-dir()) ? "/fgn-serve-bell" : "/fgn-sv-" ++ substring(hex-encode(sha256-stream-string(path)),0,20);
+  }
   def svc-status-path(dir) = dir ++ "/status.json";
   def svc-readable(path) {
    let t = read_file(path);
@@ -28,7 +32,7 @@ section [form.bml] {
    let doc = len(trim(text)) == 0 ? nothing() : (try parse-json("serve-status", trim(text)) catch nothing());
    nothing?(doc) || !json-object-has?(doc, "label") ? "" : json-string-value(json-object-get(doc, "label"));
   }
-  def svc-holds?(dir, model) = len(model) > 0 && (String) svc-standing(dir)[0] == "standing" && str_find(svc-label(dir), " " ++ model, 0) >= 0;
+  def svc-holds?(dir, model) = len(model) > 0 && (String) svc-standing(dir)[0] == "standing" && any?(word => any?(held => (String) held == model,split-on(word,",")),split-on(svc-label(dir)," "));
   def svc-standing-doc(dir, doc) = nothing?(doc) ? ["absent", "status file unreadable"] : svc-standing-row(dir, doc, host_process(json-int-value(json-object-get(doc, "pid"))));
   def svc-standing-row(dir, doc, row) = (String) value_kind(row) != "list" ? ["absent", "the server's process is gone (pid " ++ json-int-value(json-object-get(doc, "pid")).str() ++ ")"] : row[5] != json-int-value(json-object-get(doc, "start")) ? ["absent", "the server's pid was reused"] : (Comparable) file_size(dir ++ "/stop") >= 0 ? ["absent", "the server is stopping"] : ["standing", doc];
   def svc-reason(st) = st[1];
@@ -44,13 +48,16 @@ section [form.bml] {
    let made = host_dir_mkdir(dir) + host_dir_mkdir(dir ++ "/tmp") + host_dir_mkdir(dir ++ "/req") + host_dir_mkdir(dir ++ "/reply");
    let w = write_file(dir ++ "/tmp/" ++ id ++ ".req", text);
    let r = w < 0 ? -1 : host_path_rename(dir ++ "/tmp/" ++ id ++ ".req", dir ++ "/req/" ++ id ++ ".json");
-   let rung = r == 0 ? svc-ring(id) : 0;
+   let rung = r == 0 ? svc-ring-at(dir,id) : 0;
    r == 0 ? id : "";
   }
   // the request bell: a shared-memory frame the idle server rests on (observe/qwen-serve-run.bml); writing it moves its seq word and wakes the
   // server at once, so no one polls the spool. A server that stands with no bell frame is still served by its own cap.
-  def svc-ring(id) {
-   let b = shm_receive("/fgn-serve-bell");
+  def svc-ring-at(dir,id) {
+   let name = svc-bell-name(dir);
+   let seen = shm_receive(name);
+   let b = nothing?(seen) ? nothing() : shm_offer(name,len(id));
+   let readFreed = nothing?(seen) ? 0 : shm_release(seen);
    let w = nothing?(b) ? 0 : shm_write(b, id);
    let r = nothing?(b) ? 0 : shm_release(b);
    0;
@@ -124,8 +131,10 @@ section [form.bml] {
    (String) r[0] == "answered" ? svc-voice-of(r[1]) : svc-voice-down(r[1]);
   }
   def svc-voice-down(reason) = svc-voice-said("unserved (" ++ reason ++ ")");
-  def svc-model-tag(doc) = "serve:" ++ (len(svc-str(doc, "model")) > 0 ? svc-str(doc, "model") : "qwen3.8-27b");
-  def svc-voice-of(doc) = svc-answered?(doc) ? [ "answered", svc-str(doc, "text"), svc-int(doc, "prompt_ids"), svc-int(doc, "generated_ids"), svc-model-tag(doc), 1, 1, "", "", [], "", svc-int(doc, "prefill_ms"), svc-int(doc, "decode_ms"), svc-int(doc, "queue_ms"), 0] : ["unavailable", "", svc-int(doc, "prompt_ids"), svc-int(doc, "generated_ids"), svc-model-tag(doc), 0, 1, "serve-" ++ svc-str(doc, "status") ++ (len(svc-str(doc, "reason")) > 0 ? ":" ++ svc-str(doc, "reason") : ""), svc-str(doc, "text"), [], "", svc-int(doc, "prefill_ms"), svc-int(doc, "decode_ms"), svc-int(doc, "queue_ms"), 0];
+  def svc-model-tag(doc) = "serve:" ++ svc-str(doc, "model");
+  // The transport that received this reply names itself. Consumers do not infer
+  // ownership or crossing counts from a model label, and no model is invented.
+  def svc-voice-of(doc) = append(svc-answered?(doc) ? [ "answered", svc-str(doc, "text"), svc-int(doc, "prompt_ids"), svc-int(doc, "generated_ids"), svc-model-tag(doc), 1, 1, "", "", [], "", svc-int(doc, "prefill_ms"), svc-int(doc, "decode_ms"), svc-int(doc, "queue_ms"), 0] : ["unavailable", "", svc-int(doc, "prompt_ids"), svc-int(doc, "generated_ids"), svc-model-tag(doc), 0, 1, "serve-" ++ svc-str(doc, "status") ++ (len(svc-str(doc, "reason")) > 0 ? ":" ++ svc-str(doc, "reason") : ""), svc-str(doc, "text"), [], "", svc-int(doc, "prefill_ms"), svc-int(doc, "decode_ms"), svc-int(doc, "queue_ms"), 0],["resident-service",svc-int(doc,"cached_ids")]);
  }
  0;
 }

@@ -29,23 +29,16 @@ section [form.bml] {
     def fcr-request-root() = ".coherence-network/rag-requests/";
     def fcr-key-path() = ".coherence-network/attestation/grounding-v1.key";
     def fcr-max-id-bytes() = 128;
-    // Questions are UTF-8 text, not an unbounded file ingestion door. Receipts
-    // contain eighteen bounded identifiers/digests plus one witness key. These
-    // limits are part of the native request contract and are proven at exactly
-    // max and max+1 by the standalone carrier gate.
-    def fcr-max-query-bytes() = 8192;
+    // The native reader admits the offered question. Its byte count is not a
+    // proxy for relevance or capability. Receipts retain their protocol bound:
+    // eighteen identifiers/digests plus one witness key.
     def fcr-max-receipt-bytes() = 16384;
-    // Measured current corpus: 1,546 rows / 5,736,270 staged bytes. 16 MiB keeps
-    // the whole deterministic batch failure-atomic with nearly 3x headroom while
-    // retaining a hard allocation/DoS boundary.
-    def fcr-max-embed-bytes() = 16777216;
     def fcr-id-byte-valid?(b) = b >= 48 && b <= 57 || (b >= 65 && b <= 90 || (b >= 97 && b <= 122 || ((Comparable) b == 45 || (Comparable) b == 95))) ? 1 : 0;
     def fcr-id-valid-loop(id, i) = i >= len(id) ? 1 : (Comparable) fcr-id-byte-valid?(str_byte_at(id, i)) == 1 ? fcr-id-valid-loop(id, i + 1) : 0;
     def fcr-id-valid?(id) = len(id) > 0 && (len(id) <= fcr-max-id-bytes() && (Comparable) fcr-id-valid-loop(id, 0) == 1) ? 1 : 0;
     def fcr-path(id, suffix) = (fcr-request-root() + ((String) id + suffix));
     def fcr-query-path(id) = fcr-path(id, ".query");
     def fcr-receipt-path(id) = fcr-path(id, ".receipt");
-    def fcr-consuming-receipt-path(id) = fcr-path(id, ".receipt.consuming");
     def fcr-embed-path(id) = fcr-path(id, ".embed");
     def fcr-embed-output-path(id) = fcr-path(id, ".embed.output");
     def fcr-strip-last-byte-if(s, code) = {
@@ -58,8 +51,7 @@ section [form.bml] {
     def fcr-hit-for-query(query) = ra-grounded-hit-at(ra-default-index(), query);
     def fcr-ask-request(id) = (Comparable) fcr-id-valid?(id) == 0 ? "ask-request:error:invalid-id" : {
         let query-path = fcr-query-path(id);
-        let query-size = file_size(query-path);
-        query-size > fcr-max-query-bytes() ? "ask-request:error:query-too-large" : {
+        {
             let query0 = read_file(query-path);
             let query = nothing?(query0) ? "" : query0;
             (Comparable) len(query) == 0 ? "ask-request:error:missing-query" : (Comparable) fcr-text-has-nul?(query) == 1 ? "ask-request:error:invalid-query" : {
@@ -75,33 +67,65 @@ section [form.bml] {
         let hit = ra-stream-hit(index-text, query);
         fcr-trace-for-query-at(hit, receipt, query, key-hex, now);
     };
-    def fcr-finish-consume(query-path, consuming-path, result) = {
-        let removed-receipt = fs_remove(consuming-path);
-        let removed-query = fs_remove(query-path);
+    def fcr-attempt(id, serial) = {
+        let path = fcr-path(id, ".consuming-" ++ host_pid().str() ++ "-" ++ host_monotonic_ms().str() ++ "-" ++ serial.str());
+        let made = host_dir_mkdir(path);
+        (Comparable) made == 1 ? path : fs_exists(path) ? fcr-attempt(id, serial + 1) : nothing();
+    };
+    def fcr-finish-consume(attempt, result) = {
+        let removed-receipt = fs_remove(attempt ++ "/receipt");
+        let removed-query = fs_remove(attempt ++ "/query");
+        let removed-attempt = host_dir_rmdir(attempt);
         result;
     };
-    def fcr-ask-request-trace(id) = (Comparable) fcr-id-valid?(id) == 0 ? "ask-request-trace:error:invalid-id" : {
+    // Return snapshots only into empty slots. Keep the claimed pair until both
+    // returns succeed. A partial return never shares an inode with the retained
+    // original: later writes through the returned path cannot change its context.
+    def fcr-restore-owned(original, owned) = file_size(owned) < 0 ? "" : {
+        let returning = owned ++ ".returning";
+        let copied = host_file_copy(owned, returning);
+        let restored = copied < 0 ? 1 : host_link(returning, original);
+        let removed = fs_remove(returning);
+        (Comparable) restored == 0 ? "" : owned;
+    };
+    def fcr-hold-consume(id, attempt, result) = {
+        let query-held = fcr-restore-owned(fcr-query-path(id), attempt ++ "/query");
+        let receipt-held = fcr-restore-owned(fcr-receipt-path(id), attempt ++ "/receipt");
+        // host_dir_rmdir is the body's recursive directory removal. A retained
+        // child keeps its owned directory; it is not an empty-directory probe.
+        let removed-attempt = query-held == "" && receipt-held == "" ? host_dir_rmdir(attempt) : 0;
+        query-held == "" && receipt-held == "" ? result
+        : result ++ (file_size(attempt ++ "/query") < 0 ? "" : ";query-retained:" ++ attempt ++ "/query") ++ (file_size(attempt ++ "/receipt") < 0 ? "" : ";receipt-retained:" ++ attempt ++ "/receipt");
+    };
+    def fcr-ask-request-trace(id) = (Comparable) fcr-id-valid?(id) == 0 ? "ask-request-trace:error:invalid-id" : file_size(fcr-receipt-path(id)) < 0 ? "ask-request-trace:error:missing-receipt" : {
+        let attempt = fcr-attempt(id, 0);
+        nothing?(attempt) ? "ask-request-trace:error:request-directory-unavailable" : fcr-claim-request(id, attempt);
+    };
+    def fcr-claim-request(id, attempt) = {
         let receipt-path = fcr-receipt-path(id);
-        let consuming-path = fcr-consuming-receipt-path(id);
+        let consuming-path = attempt ++ "/receipt";
         let moved = fs_rename(receipt-path, consuming-path);
-        !((Comparable) moved == 0) ? "ask-request-trace:error:missing-receipt" : {
-            let query-path = fcr-query-path(id);
-            let query-size = file_size(query-path);
+        !((Comparable) moved == 0) ? fcr-finish-consume(attempt, "ask-request-trace:error:missing-receipt") : {
+            let query-path = attempt ++ "/query";
+            let query-moved = fs_rename(fcr-query-path(id), query-path);
             let receipt-size = file_size(consuming-path);
             // Permit at most one terminal CRLF beyond the logical
             // receipt cap; the stripped payload is checked again below.
-            query-size > fcr-max-query-bytes() ? fcr-finish-consume(query-path, consuming-path, "ask-request-trace:error:query-too-large") : receipt-size > fcr-max-receipt-bytes() + 2 ? fcr-finish-consume(query-path, consuming-path, "ask-request-trace:error:receipt-too-large") : {
+            receipt-size > fcr-max-receipt-bytes() + 2 ? fcr-hold-consume(id, attempt, "ask-request-trace:error:receipt-too-large") : {
                 let query0 = read_file(query-path);
                 let query = nothing?(query0) ? "" : query0;
-                (Comparable) len(query) == 0 ? fcr-finish-consume(query-path, consuming-path, "ask-request-trace:error:missing-query") : (Comparable) fcr-text-has-nul?(query) == 1 ? fcr-finish-consume(query-path, consuming-path, "ask-request-trace:error:invalid-query") : {
+                (Comparable) len(query) == 0 ? fcr-hold-consume(id, attempt, "ask-request-trace:error:missing-query") : (Comparable) fcr-text-has-nul?(query) == 1 ? fcr-hold-consume(id, attempt, "ask-request-trace:error:invalid-query") : {
                     let receipt = fcr-strip-eol(read_file(consuming-path));
-                    len(receipt) > fcr-max-receipt-bytes() ? fcr-finish-consume(query-path, consuming-path, "ask-request-trace:error:receipt-too-large") : (Comparable) fcr-text-has-nul?(receipt) == 1 ? fcr-finish-consume(query-path, consuming-path, "ask-request-trace:error:invalid-receipt") : {
+                    len(receipt) > fcr-max-receipt-bytes() ? fcr-hold-consume(id, attempt, "ask-request-trace:error:receipt-too-large") : (Comparable) fcr-text-has-nul?(receipt) == 1 ? fcr-hold-consume(id, attempt, "ask-request-trace:error:invalid-receipt") : {
                         // Derive the query binding before
                         // any key/index host read.
                         let query-key = fcast-query-key(query);
                         let hit = fcr-hit-for-query(query);
                         let key-hex = fcr-strip-eol(read_file(fcr-key-path()));
-                        fcr-finish-consume(query-path, consuming-path, fcast-trace-hit-for-at(hit, receipt, id, query-key, key-hex, fcr-now-seconds()));
+                        let now = fcr-now-seconds();
+                        let bits = fcast-grounding-bits-for-at(hit, receipt, id, query-key, key-hex, now);
+                        let trace = fca-ask-trace-row(fcast-result-from-ground-bits-for-at(hit, receipt, id, key-hex, now, bits)) ++ "\n" ++ ra-hit-output(hit);
+                        bits == 511 ? fcr-finish-consume(attempt, trace) : fcr-hold-consume(id, attempt, trace);
                     };
                 };
             };
@@ -110,7 +134,7 @@ section [form.bml] {
     def fcr-ask-request-debug(id) = (Comparable) fcr-id-valid?(id) == 0 ? "ask-request-debug:error:invalid-id" : {
         let query-path = fcr-query-path(id);
         let receipt-path = fcr-receipt-path(id);
-        file_size(query-path) > fcr-max-query-bytes() ? "ask-request-debug:error:query-too-large" : file_size(receipt-path) > fcr-max-receipt-bytes() + 2 ? "ask-request-debug:error:receipt-too-large" : {
+        file_size(receipt-path) > fcr-max-receipt-bytes() + 2 ? "ask-request-debug:error:receipt-too-large" : {
             let query = read_file(query-path);
             let receipt = fcr-strip-eol(read_file(receipt-path));
             (Comparable) len(query) == 0 ? "ask-request-debug:error:missing-query" : (Comparable) fcr-text-has-nul?(query) == 1 ? "ask-request-debug:error:invalid-query" : len(receipt) > fcr-max-receipt-bytes() ? "ask-request-debug:error:receipt-too-large" : (Comparable) fcr-text-has-nul?(receipt) == 1 ? "ask-request-debug:error:invalid-receipt" : {
@@ -227,7 +251,7 @@ section [form.bml] {
     def fcr-embed-request(id) = (Comparable) fcr-id-valid?(id) == 0 ? "embed-request:error:invalid-id" : {
         let path = fcr-embed-path(id);
         let size = file_size(path);
-        size <= 0 ? "embed-request:error:missing-input" : size > fcr-max-embed-bytes() ? "embed-request:error:input-too-large" : {
+        size <= 0 ? "embed-request:error:missing-input" : {
             let raw = read_file(path);
             (Comparable) fcr-embed-input-valid?(raw) == 0 ? "embed-request:error:invalid-row" : fcr-embed-file-output(id, raw);
         };

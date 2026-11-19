@@ -1,41 +1,22 @@
-// companion-run.bml — the body's companion: it listens, and the body's own voice answers from this Mac's metal,
-// remembering the last turns of the conversation.
-//
-// stdin line 1: what the person says; line 2: their tongue (blank -> en); line 3: space-separated options:
-// "0" skips the voice; "retain" saves this turn; "recall" reads saved turns;
-// "mouth" exports the answer; "spool" allows the resident's disk transport.
-// Blank asks the voice with session-only memory. These permissions are per turn.
-// /pause, /resume, /leave and /forget are standalone control lines between turns, without a triple.
-// Pause releases the native owner and skips ordinary triples until resume; leave
-// releases it and consumes no later input. Forget clears session memory, not disk.
-// Further triples reuse the same
-// native owner; EOF closes it. Each packet still carries only the last six
-// available exchanges. The reusable checkpoint contains guidance and retrieved
-// context; changed context returns to the guidance checkpoint, while changed
-// language opens a fresh owner. Personal turns are
-// supplied by the existing explicit memory packet, not by the checkpoint.
-// A present word is what gets an answer. An empty line does not. With spool permission and a standing resident, the ask goes there
-// at a priority above a draft, and this door does not open a model. A first line `from-ear` reads the ear spool's last closed line (time, tongue,
-// text) and asks that server; with no server standing it waits, and does not open one. `from-ear-check` reads a
-// fixture and does not ask. With mouth permission the answer is offered as a text file under
-// .hearth/companion/mouth/; the vocoder pass reads that file when it is run, and this door does not open the vocoder.
-// The voice is the registry's answer model in the fkwu session (form-stdlib/bml/form-cli-native-voice.bml), with the
-// last six available exchanges in this process as context. Saved history is read
-// only with recall. Retention and mouth writes report their actual outcomes.
-// Inspect the selected voice lane and recording scope before using personal material; local context
-// storage alone establishes neither understanding nor a complete retention/processing guarantee.
-// When the person's words carry the counsel (difficult conversations), the reply is read against its predicate before it is
-// offered to the mouth and the door prints "[companion] lands=1|0" beside it: a reading for the caller, never a gate on the answer.
-// The packet opens with the covenant's own arrival card (cognition/dialogue-covenant.fk, dc-card-core), then the
-// ground the person's words actually touch (observe/companion-ground.bml): a teaching, a receipt, a counsel cell,
-// or the miss when nothing carries them. The voice meets the person carrying both.
+// companion-run.bml — successive words, language (blank -> en), voice flag
+// (0 skips generation). Each answer stands; the next turn begins with the next
+// offered words. EOF releases the native owner through its existing lifecycle.
+// All exchanges stay in this process's context, without a guessed turn limit,
+// automatic conversation archive, or training. Resource admission owns capacity.
+// A standing resident serves through its existing disk transport; otherwise a
+// typed turn uses the owned native residence. Guidance checkpoints retain their
+// existing ownership; conversation context travels explicitly with each ask.
+// `from-ear` reads the last closed utterance through the same available routes.
+// Its completed answer is offered to the existing mouth folder for the vocoder.
+// `from-ear-check` observes a synthetic fixture without generation.
+// The packet carries the covenant and relevant source; its answer is read as an
+// answer, without a lexical verdict pretending to establish how it lands.
 // preflight-exec: forbidden
-// preludes: form-stdlib/core.fk observe/companion-packet.bml form-stdlib/bml/form-cli-native-voice.bml form-stdlib/bml/form-cli-heal-native-report.bml form-stdlib/meaning-codes.bml form-stdlib/bml/ledger.bml form-stdlib/bml/serve-client.bml
+// preludes: form-stdlib/core.fk control/offer-ack-core.fk control/choice-lane-core.fk observe/companion-packet.bml form-stdlib/bml/form-cli-native-voice.bml form-stdlib/bml/form-cli-heal-native-report.bml form-stdlib/meaning-codes.bml form-stdlib/bml/serve-client.bml
 section [form.bml] {
- blueprint CompanionRow { at_unix_ms: int, lang: string, said: string, answer: string, voice: string }
+ blueprint CompanionRow { at_unix_ms: int, lang: string, said: string, answer: string, voice: string, reason: string, model: string }
  class Companion {
   def cp-dir() = ".hearth/companion";
-  def cp-log() = ".hearth/companion/conversation.jsonl";
   def cp-mouth() = ".hearth/companion/mouth";
   def cp-ear-segs() = ".hearth/ear.spool.segments";
   def cp-tab() = byte_to_str(9);
@@ -59,11 +40,6 @@ section [form.bml] {
    let heard = cp-ear-of("live" ++ cp-tab() ++ "1" ++ cp-tab() ++ "2" ++ cp-tab() ++ "en" ++ cp-tab() ++ "hello there\n9" ++ cp-tab() ++ "en" ++ cp-tab() ++ "I am scared of the change\ndone\n");
    print([heard[0], heard[1], cp-present?(heard[1]) ? 1 : 0]);
   }
-  // the reading is printed only when there is one (print_str ends its text with a line)
-  def cp-say-lands(said, answer) {
-   let line = cp-lands-line(said, answer);
-   (Comparable) len(line) > 0 ? print_str(trim(line)) : 0;
-  }
   def cp-present?(said) = (Comparable) len(trim(said)) > 0;
   def cp-private-dir() {
    fs_mkdir(cp-dir());
@@ -82,89 +58,71 @@ section [form.bml] {
    };
   }
   def cp-line() { let l = read_line(); nothing?(l) ? "" : trim(l); }
-  def cp-last(xs, n) = len(xs) <= n ? xs : cp-last(xs[1:], n);
-  def cp-memory-lines(rows) = rows |> map(r => "Person: " ++ row-get(r, "said") ++ "\nCompanion: " ++ row-get(r, "answer") ++ "\n") |> str-join;
-  def cp-has?(options,name) = any?(o => (String) o == name,options);
-  def cp-options(text) {
-   let options = filter(o => len(o) > 0, split-on(trim(text)," "));
-   all?(o => cp-has?(["0","retain","recall","mouth","spool"],o),options) ? options : nothing();
-  }
-  def cp-memory(owner,options) = cp-memory-lines(cp-last(append(cp-has?(options,"recall") ? ledger-rows(cp-log(),"CompanionRow") : [],record_get(owner,"conversation")),6));
-  def cp-control?(said) = cp-has?(["/pause","/resume","/leave","/forget"],said);
-  def cp-control(owner,said) {
-   if said == "/forget" then {
-    record_set(owner,"conversation",[]);
-    let closed = fcnv-residence-close(owner);
-    print_str("[companion] session-memory=cleared saved-history=unchanged release=" ++ (closed ? "released" : "incomplete"));
-   } else if said == "/resume" then {
-    let closed = fcnv-residence-close(owner);
-    record_set(owner,"companion-state",closed ? "active" : "paused");
-    print_str("[companion] state=" ++ record_get(owner,"companion-state"));
-   } else {
-    record_set(owner,"companion-state",said == "/leave" ? "left" : "paused");
-    if said == "/leave" then record_set(owner,"conversation",[]) else 0;
-    let closed = fcnv-residence-close(owner);
-    print_str("[companion] state=" ++ record_get(owner,"companion-state") ++ " release=" ++ (closed ? "released" : "incomplete"));
-   };
-  }
+  def cp-memory-lines(rows) = rows |> map(r => "Person: " ++ row-get(r, "said") ++ "\nCompanion outcome: " ++ row-get(r,"voice") ++ "; reason=" ++ row-get(r,"reason") ++ "; model=" ++ row-get(r,"model") ++ "\nCompanion: " ++ row-get(r, "answer") ++ "\n") |> str-join;
+  def cp-memory(owner) = cp-memory-lines(record_get(owner,"conversation"));
   def cp-turn(owner,said) {
-   cp-control?(said) ? cp-control(owner,said) : cp-asked(owner,said);
-  }
-  def cp-asked(owner,said) {
    let lang0 = cp-line();
    let lang = (Comparable) len(lang0) == 0 ? "en" : lang0;
-   let options = cp-options(cp-line());
-   if record_get(owner,"companion-state") == "paused" then print_str("[companion] state=paused")
-   else if !cp-present?(said) then print_str("[companion] present=0")
-   else if nothing?(options) then print_str("[companion] options=refused; use 0 retain recall mouth spool")
-   else cp-kept(owner,said,lang,options,cp-ask(owner,said,lang,options));
+   let voiceFlag = cp-line();
+   !cp-present?(said) ? print_str("[companion] present=0") : cp-kept(owner,said,lang,false,voiceFlag == "0" ? ["not-asked", ""] : cp-ask(owner,said,lang,false));
   }
-  def cp-ask(owner,said,lang,options) {
-   if cp-has?(options,"0") then ["not-asked", ""] else {
-    let served = svc-standing(svc-default-dir())[0] == "standing";
-    if served && !cp-has?(options,"spool") then ["spool-permission-required",""] else {
-     let context = cp-context(said,lang) ++ cp-runtime-scope(cp-has?(options,"retain"),cp-has?(options,"recall"),cp-has?(options,"mouth"),served);
-     let packet = cp-packet-from(context,said,cp-memory(owner,options));
-     served ? (svc-voice-prio(packet,0,"companion",8) ?? ["unserved",""]) : fcnv-resident-ask-with-floor(owner,packet,context,cp-prefix(lang),json-node-object([json-node-pair("interactive",json-node-bool(true))]));
-    };
+  def cp-ask(owner,said,lang,spoken) {
+   record_set(owner,"route-result",nothing());
+   let walk = oac-backtrack-walk([cp-server-option,cp-native-option],[owner,said,lang,spoken],[]);
+   record_get(owner,"route-result") ?? fcnv-none("unavailable","",cp-findings(oac-backtrack-memory(walk)));
+  }
+  def cp-findings(memory) = str-join-with(map(finding => node_value(finding),memory),"; ");
+  def cp-route-context(offered,served) {
+   let args = oac-option-args(offered);
+   let findings = cp-findings(oac-option-memory(offered));
+   cp-context(args[1],args[2]) ++ cp-runtime-scope(served,args[3]) ++ (len(findings) > 0 ? "\nExecution observations from earlier choices: " ++ findings ++ "\n" : "");
+  }
+  def cp-route-answer(owner,answer) {
+   record_set(owner,"route-result",answer);
+   oac-one(intern_trivial_string(answer[0]));
+  }
+  def cp-server-option(offered) {
+   let args = oac-option-args(offered);
+   let standing = svc-standing(svc-default-dir());
+   standing[0] != "standing" ? oac-node(intern_trivial_string(svc-reason(standing))) : !fcnv-residence-close(args[0]) ? cp-route-answer(args[0],fcnv-none("release-incomplete","","companion-route-release-incomplete")) : {
+    let context = cp-route-context(offered,true);
+    let answer = svc-voice-prio(cp-packet-from(context,args[1],cp-memory(args[0])),0,"companion",8);
+    nothing?(answer) ? {
+     let after = svc-standing(svc-default-dir());
+     oac-node(intern_trivial_string("Resident transport returned no answer; " ++ (after[0] == "standing" ? "resident still stands" : svc-reason(after))));
+    } : cp-route-answer(args[0],answer);
    };
+  }
+  def cp-native-option(offered) {
+   let args = oac-option-args(offered);
+   let context = cp-route-context(offered,false);
+   let answer = fcnv-resident-ask-with-floor(args[0],cp-packet-from(context,args[1],cp-memory(args[0])),context,cp-prefix(args[2]),json-node-object([json-node-pair("interactive",json-node-bool(true))]));
+   cp-route-answer(args[0],answer);
   }
   def cp-listen(owner) {
-   if record_get(owner,"companion-state") == "left" then 0 else {
-    let line=read_line();
-    nothing?(line) ? 0 : { cp-turn(owner,trim(line)); cp-listen(owner); };
-   };
+   let line=read_line();
+   nothing?(line) ? 0 : { cp-turn(owner,trim(line)); cp-listen(owner); };
   }
-  def cp-retain(row) {
-   cp-private-dir() != 0 ? "refused:permissions" : {
-    let kept = ledger-append(cp-log(),row);
-    let protected = host_chmod(cp-log(),384);
-    protected == 0 ? kept : "refused:permissions";
-   };
-  }
-  def cp-kept(owner,said,lang,options,asked) {
+  def cp-kept(owner,said,lang,spoken,asked) {
    let answer = (String) asked[0] == "answered" ? trim(asked[1]) : "";
    let partial = asked[0] != "answered" && len(asked) > 8 ? trim(asked[8]) : "";
-   let reason = len(asked) > 7 ? asked[7] : asked[0];
-   let read = cp-say-lands(said, answer);
-   let offered = cp-has?(options,"mouth") ? cp-offer(answer) : "not-requested";
+   let reason = len(asked) > 7 && len(asked[7]) > 0 ? asked[7] : asked[0];
+   let model = len(asked) > 4 ? asked[4] : "";
+   let offered = spoken ? cp-offer(answer) : "text";
    let told = len(answer) > 0 ? print_str(answer ++ "\n") : 0;
    if len(partial) > 0 then print_str("[companion] unfinished reason=" ++ reason ++ "\n" ++ partial) else 0;
    let remembered = len(partial) > 0 ? "[unfinished reason=" ++ reason ++ "]\n" ++ partial : answer;
-   let row = CompanionRow{at_unix_ms: now_unix_ms(), lang: lang, said: said, answer: remembered, voice: asked[0]};
-   record_set(owner,"conversation",cp-last(append(record_get(owner,"conversation"),[row]),6));
-   let kept = cp-has?(options,"retain") ? cp-retain(row) : "not-requested";
-   print_str("[companion] voice=" ++ asked[0] ++ " reason=" ++ reason ++ " retention=" ++ kept.str() ++ " mouth=" ++ offered.str());
+   let row = CompanionRow{at_unix_ms: now_unix_ms(), lang: lang, said: said, answer: remembered, voice: asked[0], reason: reason, model: model};
+   record_set(owner,"conversation",append(record_get(owner,"conversation"),[row]));
+   print_str("[companion] voice=" ++ asked[0] ++ " reason=" ++ reason ++ " model=" ++ model ++ " memory=session mouth=" ++ offered.str());
   }
   def cp-from-ear(owner) {
    let heard = cp-ear-heard();
-   let options = cp-options(cp-line());
-   !cp-present?(heard[1]) ? print_str("[companion] present=0") : nothing?(options) ? print_str("[companion] options=refused") : cp-has?(options,"0") ? cp-kept(owner,heard[1],heard[0],options,["not-asked",""]) : !cp-has?(options,"spool") ? print_str("[companion] voice=spool-permission-required") : svc-standing(svc-default-dir())[0] != "standing" ? print_str("[companion] unserved: no server stands") : cp-kept(owner,heard[1],heard[0],options,cp-ask(owner,heard[1],heard[0],options));
+   !cp-present?(heard[1]) ? print_str("[companion] present=0") : cp-kept(owner,heard[1],heard[0],true,cp-ask(owner,heard[1],heard[0],true));
   }
   def cp-reside(said) {
    let owner=fcnv-residence();
    record_set(owner,"conversation",[]);
-   record_set(owner,"companion-state","active");
    defer print(["companion-release",fcnv-residence-close(owner)]);
    said == "from-ear" ? cp-from-ear(owner) : cp-turn(owner, said);
    cp-listen(owner);

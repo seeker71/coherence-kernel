@@ -55,19 +55,20 @@ paths. The card must fit the 1800-byte arrival window.
 Claims carry `who` (`self` or `other`) and an observer-assigned lane
 (`observed`, `reported`, `inferred`, `imagined`).
 `dcc-other-held-open?` rejects an absent person's interior assigned as observed
-fact. `dcc-reply-lands?` composes that condition with the current covenant's
-fabrication flags, lift-count, ending and advice-count predicates. These checks
-do not validate every possible move label or establish that an arbitrary
-reply fits the encounter.
+fact. `dcc-reply-lands?` reads that condition beside the supplied grounding
+and encounter labels. The person's pause ends a reply; counts of questions or
+teachings and the order of explanation do not decide whether it fits their
+request. These checks do not classify an arbitrary reply or establish its truth.
 
 ```sh
 ./fkwu cognition/tests/difficult-conversation-counsel-band.fk
 # expected: 1111111111
 ```
 
-The band checks authored fixtures and source/card structure. It does not
-classify a raw transcript, establish factual truth or measure a person's
-experience. A passing band, a generated response and a person's volunteered
+The band checks authored fixtures and source/card structure. The old lexical
+reader has been removed: it rejected reported feelings and requested questions
+while accepting an unsupported assertion. Read the actual answer beside the
+actual request. A passing band, a generated response and a person's volunteered
 account are separate evidence.
 
 ## Sources and doors
