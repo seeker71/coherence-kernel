@@ -626,6 +626,10 @@ The JSON door can normalize exact yes/no/true/false strings when a caller's root
 
 Supply an existing answer as a writable document with `mode: "code"`, direct entry, the original enquiry, immutable sources and checks. Use guarded `edit`; `write` creates an absent document. Read the changed answer after verification. Keep assessed answers out of gradients with `weight_training: 0`, or use `evaluation: 1` for fresh evaluation without continuity.
 
+Passing source checks at entry retains that observation beside the pending task;
+it does not complete an unperformed rewrite. The existing implementation,
+review and checkpoint flow owns completion and returned repair findings.
+
 ### Amend a retained report
 
 Repair observations carry `report_amend.base`, the exact retained report's SHA-256. Submit either `replacements:[{path:["answer"],value:...}]` or `text_edits:[{path:["answer"],old:"unique current text",new:"replacement"}]` inside `report_amend`, with that base. Paths address existing object keys and zero-based array indexes. There are 1–32 nonoverlapping edits, each path 1–32 segments. Text edits select strings; `old` is nonempty and occurs exactly once, including overlaps. Empty `new` deletes text. Missing paths, stale bases, duplicate keys, overlap and unchanged values preserve the retained report. The operation replaces values rather than inserting/removing array entries.
