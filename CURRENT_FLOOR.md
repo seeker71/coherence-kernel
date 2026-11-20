@@ -133,7 +133,7 @@ observe/qwen-serve-run.bml               the resident server (vLLM's continuous 
                                             releases the least recently used entry, no count caps it. SAMPLING: a request may name temperature_milli and seed; the row draws its token by
                                             Gumbel-max among the tokens within min-p 0.05 (q38m-sample-msl, one seed + one prompt = one text, greedy and drawn rows share one
                                             pass); the planner's later options draw (the first stays greedy) because a greedy retry answers the same refused plan. Each answer
-                                            also lands a row in receipts/local-run-ledger.jsonl. observe/ear-yield-load-run.fk is the ear's cadence with no mic
+                                            also lands a row in receipts/local-run-ledger.rows. observe/ear-yield-load-run.fk is the ear's cadence with no mic
                                             (form-stdlib/bml/ear-yield.bml holds the one yield predicate the ear and the stand-in share)
 ./fkwu gate/structural-gate-run.fk       -> structural-gate-v6 [2, 0, 2, 0] then 1: "2 declared carrier(s) and 0 fixture(s) stand; no
                                             other foreign file" (total/unclassified/carrier/fixture). The gate is an ALLOWLIST: Form (.fk

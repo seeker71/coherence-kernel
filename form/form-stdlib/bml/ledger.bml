@@ -5,7 +5,9 @@
 // fhn-n / fhn-s, then json-emit, then fhn-append) and read back one field at a time by parse-json and a string
 // accessor. A row declared once is checked when it is written and when it is read, and the same row is the same
 // cell, so a repeat is known by its NodeID. The file stays what it was: one JSON object per line, field names as
-// declared, so every reader that exists keeps reading it.
+// declared, so every reader that exists keeps reading it. A ledger whose path ends .rows is the same row as a form-rows
+// line instead ({at_unix_ms 123 lang "en"}: Form's own data text, no JSON; row-line / row-cell-rows), chosen by the path alone, so
+// a ledger moves from JSON lines to rows by renaming its path and carrying its history (observe/rows-from-json-run.bml).
 //
 //   blueprint CompanionRow { at_unix_ms: int, lang: string, said: string, answer: string, voice: string }
 //   ledger-append(path, CompanionRow{at_unix_ms: now_unix_ms(), lang: "en", said: s, answer: a, voice: v});
@@ -18,7 +20,7 @@
 // pairs. A row whose line is not strict JSON, names a field the blueprint does not declare, leaves out one it
 // requires, or holds a value of the wrong type reads as nothing(), and the ledger's other rows read on.
 //////////////////////////////////////////////////////////////////////
-// preludes: form-stdlib/bml/blueprint-literal.bml form-stdlib/bml/json-view-parse.bml form-stdlib/spool-bell-transport.fk
+// preludes: form-stdlib/bml/blueprint-literal.bml form-stdlib/bml/json-view-parse.bml form-stdlib/spool-bell-transport.fk form-stdlib/bml/form-rows.bml
 section [form.bml] {
  class FormLedger {
   // ---- a row as one line of JSON, the fields as declared ---------------------------------------------------------
@@ -40,6 +42,43 @@ section [form.bml] {
   def row-json(row) {
    let a = bl-cell-ast(row, bl-now());
    nothing?(a) ? nothing() : (a[0] == "rec" ? row-object(a[2]) : nothing());
+  }
+
+  // ---- the same row as a form-rows line (form-rows.bml): Form's own data text, no JSON ----------------------------------
+  // A ledger whose path ends .rows keeps one Form value a line: {at_unix_ms 123 lang "en" said "hi"}. The row's declared fields are the record's
+  // keys in declared order; an int, float or string is itself, a bool is 1 or 0, an absent option is _, a list/set/tuple is a list, a map with text
+  // keys is a record (other keys: a list of [key value] pairs) and a nested blueprint is a nested record. row-cell-rows reads a line back as the typed cell.
+  def row-rows-path?(path) = len(path) > 5 && (String) substring(path, len(path) - 5, len(path)) == ".rows";
+  def row-rows-record(fields) = foldl((rec, f) => record_set(rec, f[0], row-rows-value(f[1])), record_new(0), fields);
+  def row-rows-value(a) = match a[0] {
+   "int" | "float" | "str" => a[1],
+   "bool" => a[1] == 1 ? 1 : 0,
+   "none" => nothing(),
+   "some" => row-rows-value(a[1]),
+   "list" | "set" | "tuple" => a[1] |> map(m => row-rows-value(m)),
+   "map" => row-all-text-keys?(a[1]) ? foldl((rec, p) => record_set(rec, p[0][1], row-rows-value(p[1])), record_new(0), a[1]) : (a[1] |> map(p => [row-rows-value(p[0]), row-rows-value(p[1])])),
+   "rec" => row-rows-record(a[2]),
+   _ => nothing()
+  };
+  def row-line(row) {
+   let a = bl-cell-ast(row, bl-now());
+   nothing?(a) ? nothing() : (a[0] == "rec" ? frw-emit(row-rows-record(a[2])) : nothing());
+  }
+  // a Form value read from a rows line, then each value read as the type its field declares (the same typing as the JSON view above)
+  def row-vnative(v, t, defs) = match (String) value_kind(v) {
+   "record" => row-vrecord-native(v, t, defs),
+   "list" => (0 .. len(v)) |> map(i => row-vnative(v[i], row-elem-type(t, i), defs)),
+   "null" => nothing(),
+   _ => v
+  };
+  def row-vrecord-native(v, t, defs) = nothing?(bl-find(t[0], defs)) ? (record_keys(v) |> map(key => [key, row-vnative(record_get(v, key), row-val-type(t), defs)])) : row-cell-from-value(t[0], v, defs);
+  def row-cell-from-value(name, v, defs) {
+   let d = bl-find(name, defs);
+   (nothing?(d) || ((String) value_kind(v) != "record")) ? nothing() : bl-make(name, record_keys(v) |> map(key => [key, row-vnative(record_get(v, key), row-field-type(d, key), defs)]));
+  }
+  def row-cell-rows(name, text) {
+   let r = frw-parse(text);
+   (String) r[0] == "ok" ? row-cell-from-value(name, r[1], bl-now()) : nothing();
   }
 
   // ---- a line as a row: the strict JSON view, then each value read as the type its field declares -----------------------
@@ -89,10 +128,10 @@ section [form.bml] {
   def lrun-home-back-of(text, home) = (len(text) >= 2) && ((String) substring(text, 0, 2) == "~/") ? home ++ substring(text, 1, len(text)) : text;
   def lrun-home-back(text) = lrun-home-back-of(text, trim(host_getenv("HOME") ?? ""));
   def ledger-append(path, row) {
-   let line = lrun-home-free(row-json(row));
+   let line = lrun-home-free(row-rows-path?(path) ? row-line(row) : row-json(row));
    nothing?(line) ? nothing() : (sbt-append-count(path, line ++ "\n") == len(line) + 1 ? "appended" : "refused:short-append");
   }
-  def ledger-rows(path, name) = file_size(path) < 1 ? [] : (split-on(read_file(path), "\n") |> filter(line => len(trim(line)) > 0) |> map(line => row-cell(name, line)) |> filter(row => !nothing?(row)));
+  def ledger-rows(path, name) = file_size(path) < 1 ? [] : (split-on(read_file(path), "\n") |> filter(line => len(trim(line)) > 0 && (!row-rows-path?(path) || str_byte_at(trim(line), 0) != 59)) |> map(line => row-rows-path?(path) ? row-cell-rows(name, line) : row-cell(name, line)) |> filter(row => !nothing?(row)));
  }
  0;
 }

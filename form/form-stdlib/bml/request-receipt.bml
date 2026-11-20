@@ -11,22 +11,27 @@
 // here: the line counts the streams it found and does not guess one.
 // The flow lands the line beside its end row (observe/flow-direct-run.bml, fl-end: receipts/request-receipts.rows), and
 // observe/request-receipt-run.bml prints it for any request, or for a whole set ({"set":"answered"}).
-// The two ledgers it READS, run and plan, are still JSON lines at their writer (ledger.bml ledger-append): that is the one edge left in
-// this file (parse-json below), named so that the next layer can rebase those writers on rows and delete it.
+// The run ledger it reads is form-rows (receipts/local-run-ledger.rows, written by ledger.bml ledger-append). The plan ledger is still JSON lines
+// at its writers (observe/local-plan-run.bml, the flow's end row): that is the one edge left in this file (rr-json-rows, parse-json), named so that
+// the next layer can rebase those writers on rows and delete it.
 import form-stdlib/bml/form-cli-heal-native-report.bml;
 import form-stdlib/bml/form-rows.bml;
 section [form.bml] {
  class RequestReceipt {
-  def rr-run-ledger() = "receipts/local-run-ledger.jsonl";
+  def rr-run-ledger() = "receipts/local-run-ledger.rows";
   def rr-plan-ledger() = "receipts/local-plan-ledger.jsonl";
   def rr-tenants-ledger() = "receipts/ask-tenants.rows";
   def rr-lines(path, id) = file_size(path) < 1 ? [] : filter(x => (Comparable) len(trim(x)) != 0 && str_find(x, id, 0) >= 0, split-on(fhn-read(path), "\n"));
   // the JSON edge: a run or plan ledger row, read once into the fields this file uses
   def rr-json-rows(path, id) = map(x => parse-json("receipt-row", x), rr-lines(path, id));
-  // a ledger field may be null (a row with no who, a row with no model): read it as text only when it is text
+  // a ledger field may be null (a row with no who, a row with no model) or absent (a row from before the field): read it as text or as a number only when it is one
   def rr-str(r, key) { let v = fhn-text(r, key); (String) value_kind(v) == "string" ? v : ""; }
-  def rr-mine(rows, id) = filter(r => str_find(rr-str(r, "who"), id, 0) >= 0, rows);
-  def rr-stream(r) = record_new(0, "who", rr-str(r, "who"), "model", rr-str(r, "model"), "wall_ms", fhn-count(r, "wall_ms"), "generated_ids", fhn-count(r, "generated_ids"), "surprise_micro_nats", fhn-count(r, "surprise_micro_nats"), "rent_tokens", fhn-count(r, "rent_tokens"));
+  // the run ledger's rows are form-rows records: the rows whose line holds the id, read back as data
+  def rr-run-rows(id) = filter(r => !nothing?(r), map(x => rr-ok-or-nothing(frw-parse(x)), rr-lines(rr-run-ledger(), id)));
+  def rr-rstr(r, key) { let v = frw-get(r, key); (String) value_kind(v) == "string" ? v : ""; }
+  def rr-rint(r, key) { let v = frw-get(r, key); (String) value_kind(v) == "int" ? v : 0; }
+  def rr-mine(rows, id) = filter(r => str_find(rr-rstr(r, "who"), id, 0) >= 0, rows);
+  def rr-stream(r) = record_new(0, "who", rr-rstr(r, "who"), "model", rr-rstr(r, "model"), "wall_ms", rr-rint(r, "wall_ms"), "generated_ids", rr-rint(r, "generated_ids"), "surprise_micro_nats", rr-rint(r, "surprise_micro_nats"), "rent_tokens", rr-rint(r, "rent_tokens"));
   def rr-end-row(rows, id) = foldl((acc, r) => (String) rr-str(r, "request") == id ? r : acc, nothing(), rows);
   def rr-end-record(r) = nothing?(r) ? record_new(0) : record_new(0, "verdict", rr-str(r, "verdict"), "kind", rr-str(r, "kind"), "repairs", fhn-count(r, "repairs"), "ms", fhn-count(r, "ms"), "planned", fhn-count(r, "planned"), "rent_tokens", fhn-count(r, "rent_tokens"));
   // the asks the flow bracketed with the GPU registry: one Form row a line, read back as data
@@ -37,8 +42,8 @@ section [form.bml] {
   def rr-ok-or-nothing(r) = (String) r[0] == "ok" ? r[1] : nothing();
   def rr-ask(r) = record_new(0, "who", frw-get(r, "who"), "wall_ms", frw-get(r, "wall_ms"), "tenants", frw-get(r, "tenants"));
   def rr-data(id) {
-   let mine = rr-mine(rr-json-rows(rr-run-ledger(), id), id);
-   record_new(0, "request", id, "streams", len(mine), "rows", map(r => rr-stream(r), mine), "rent_tokens", foldl((a, r) => a + fhn-count(r, "rent_tokens"), 0, mine), "asks", map(r => rr-ask(r), rr-asks(id)), "end", rr-end-record(rr-end-row(rr-json-rows(rr-plan-ledger(), id), id)));
+   let mine = rr-mine(rr-run-rows(id), id);
+   record_new(0, "request", id, "streams", len(mine), "rows", map(r => rr-stream(r), mine), "rent_tokens", foldl((a, r) => a + rr-rint(r, "rent_tokens"), 0, mine), "asks", map(r => rr-ask(r), rr-asks(id)), "end", rr-end-record(rr-end-row(rr-json-rows(rr-plan-ledger(), id), id)));
   }
   def rr-line(id) = frw-emit(rr-data(id));
   // The receipt of a whole set in ONE line, read from the ledgers: every request of learn/local-requests.jsonl whose status is `status` (a row begins {"id":"frq-... on its own line), joined by id as rr-data joins one
@@ -47,7 +52,7 @@ section [form.bml] {
   def rr-requests() = "learn/local-requests.jsonl";
   def rr-set-ids(status) = map(l => substring(l, 7, str_find(l, "\"", 7)), filter(l => str_find(l, "{\"id\":\"frq-", 0) == 0 && str_find(l, "\"status\":\"" ++ status ++ "\"", 0) >= 0, split-on(fhn-read(rr-requests()), "\n")));
   def rr-surprise(d) = foldl((a, r) => a + frw-get(r, "surprise_micro_nats"), 0, frw-get(d, "rows"));
-  def rr-end-text(d) = (String) frw-get(frw-get(d, "end"), "verdict") ++ "/" ++ (String) frw-get(frw-get(d, "end"), "kind");
+  def rr-end-text(d) = rr-rstr(frw-get(d, "end"), "verdict") ++ "/" ++ rr-rstr(frw-get(d, "end"), "kind");
   def rr-set-row(d) = record_new(0, "request", frw-get(d, "request"), "streams", frw-get(d, "streams"), "surprise_micro_nats", rr-surprise(d), "rent_tokens", frw-get(d, "rent_tokens"), "end", rr-end-text(d));
   def rr-set-record(status) {
    let ds = map(id => rr-data(id), rr-set-ids(status));
