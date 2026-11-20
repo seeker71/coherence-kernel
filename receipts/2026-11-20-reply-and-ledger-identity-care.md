@@ -192,6 +192,46 @@ flow was added to the companion.
 
 ## Axioms and limits
 
+The original answer-repair request with `checks: []` had been refused before
+execution, forcing a source-preservation assertion unrelated to the requested
+prose repair. The request now accepts that explicitly supplied empty array.
+Its source reading says no assertions were supplied; it establishes no
+implementation behavior. Missing/null data remains distinct from this present
+empty value. Re-observing the exact retained request reports admission 1,
+assertions 0, stage `implement`, original pending task preserved and documents
+unchanged (`.hearth/reply-identity-empty-checks.out`).
+
+The same investigation found that a checked session LoRA proposal bypassed task
+review and manufactured completion. Its actual assertion result now accompanies
+the candidate, original phase, pending work, completed effects and prior
+observation. The existing task/review flow continues. The candidate is saved
+before another model is admitted, so unavailable admission leaves it resumable.
+The existing usage accumulator counts accepted and unsuccessful proposal tokens
+once; native source observation does not invent model turns or tool calls.
+No additional evaluator, content filter or approval stage was introduced.
+
+The live proposal also receives the current documents and task context, while
+the learning example retains its original-input representation. Both an applied
+and an unsuccessful proposal retain their exact proposed documents, source
+reading and previous candidate. A resumed proposal that returns original bytes
+therefore leaves the preceding edited candidate available in the same owned
+observation. No proposal outcome silently resets that evidence.
+
+The existing check-witness band now observes empty assertions, preserved task
+state, exact prior evidence, failed model admission with a recoverable candidate,
+and usage/release accounting. It returns **1023**, exit 0. Its initial 767
+reading exposed artificially incremented counters; the source now uses the same
+counter-preservation operation as current-source observation. Exact failed and
+successful runs remain under `.hearth/reply-identity-empty-witness*`.
+The broader continuity band returns **524287**, exit 0. These deterministic
+observations establish the repaired transitions, not new model answer quality.
+The final proposal-evidence run also returns **1023**, exit 0, including current
+prompt context, original/current/proposed candidate distinction and exact failed
+assertion retention (`.hearth/reply-identity-proposal-evidence.*`).
+
+This continuation is after the measured work interval below. It does not extend
+that interval's token accounting or change the first-pass privacy result.
+
 The movement keeps zero, one and missing observation distinct. A row's authored
 name is not its entire content identity. A completed generation is not a truth
 attestation, and the absence of one operation does not negate a larger

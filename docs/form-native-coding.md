@@ -373,7 +373,7 @@ Execution-image assembly remains synchronous for a whole unit, and lowering memo
 
 Glass admission paints its first frame, observes a compact watcher hint and preserves all cached images. Changed and current hints both defer compilation to the demanded loader; no admission sweep or bulk deletion remains. The loader owns source/compiler identity and regeneration. `fglu-launch-at(path)` lets a caller own its watcher state; the ordinary door uses the hearth's shared path. Its image inventory derives `.fkb` and `.sym` paths from the two demanded source units, including their `.fk` extension. [Actual admission observations](../receipts/native-glass-cache.json) retain both choices and exact unchanged file bytes.
 
-An evaluated session LoRA may offer a proposal before Qwen unless the request names a model, selects evaluation or requests review. The original checks decide whether it suffices. The optional learner uses native workers. Explicit `model` and `weight_training: 0` keep ongoing quality assessment on the selected local model with checkpoints and no answer gradients. [Session learning](native-session-learning.md), [healing](form-cli-healing.md), [provider repair](form-response-resource.md) and [provider synthesis](form-response-synthesis.md) describe their separate interfaces; provider paths are not implicit `code` behavior.
+An evaluated session LoRA may offer a proposal before Qwen unless the request names a model, selects evaluation or requests review. A proposal that preserves read-only documents and passes the supplied source assertions continues the original task and review. Its candidate, prior observations and completed effects are checkpointed before Qwen admission; proposal tokens remain counted even when the proposal fails its checks. Assertions alone do not establish completion. The optional learner uses native workers. Explicit `model` and `weight_training: 0` keep ongoing quality assessment on the selected local model with checkpoints and no answer gradients. [Session learning](native-session-learning.md), [healing](form-cli-healing.md), [provider repair](form-response-resource.md) and [provider synthesis](form-response-synthesis.md) describe their separate interfaces; provider paths are not implicit `code` behavior.
 
 ## Native surface lifting
 
@@ -443,10 +443,10 @@ The CLI's native tool JSON also admits `{id,path}` file snapshots before executi
 | `goal` | Nonempty original task, retained beside refinements |
 | `documents` | `[{id,path,text?}]`; omitted text snapshots the native file; explicit text must be a string. Supply callers, helpers and ownership contracts |
 | `writable` | Paths implementation/repair may change; `[]` for review |
-| `checks` | Nonempty caller-owned source assertions, described below |
+| `checks` | Caller-owned source assertions; `[]` explicitly supplies none. The original task and review still apply |
 | `mode` | `code` (default) or `review` |
 | `report_checks` | Required, nonempty in review; read-only assertions on the report |
-| `model` | Registry name; default `qwen38-q8`; explicit selection skips the LoRA proposal |
+| `model` | Registry name; default `qwen38-q4`; explicit selection skips the LoRA proposal |
 | `context` | Positions per admission; default 8192 |
 | `turns` | Reply allowance; default 64; additional allowance on resume |
 | `max_reply_tokens` | Optional positive integer ceiling per reply |
@@ -455,7 +455,7 @@ The CLI's native tool JSON also admits `{id,path}` file snapshots before executi
 | `source_queries` | Catalog-only `[{tool,arguments}]` read-only queries; no supplied input/output |
 | `context_graph` | Optional `{focus:[path],dependencies:[[source,required_source]]}` over admitted source paths |
 | `helper` | Coding-only native read-only consultation: model, prompt and phases; optional caller allowances, otherwise native completion and progress; see below |
-| `evaluation` | Integer 0/1; 1 excludes recall, resume, checkpoint writes, LoRA proposals and training |
+| `evaluation` | Integer 0/1; 1 excludes cross-attempt recall, LoRA proposals and answer training; retains private checkpoints and explicit resume under the same original contract and evaluation policy |
 | `weight_training` | Integer 0/1, default 1; 0 excludes answer gradients while preserving ordinary continuity |
 | `resume` | Returned checkpoint ID with the same original request |
 | `feedback` | Coding resume only: exactly `{id,text}`, both nonempty |
