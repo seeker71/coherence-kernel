@@ -1,0 +1,43 @@
+// gpu-clients.bml — who held the GPU during an ask: each client's accumulated GPU time, read twice and differenced.
+//
+// The host's accelerator registry (ioreg -r -c IOAccelerator -l) lists every client that holds a GPU context: IOUserClientCreator names it (pid and
+// process) and AppUsage carries accumulatedGPUTime in nanoseconds. No privilege is needed (powermetrics needs the superuser). gc-snapshot() reads
+// it once through the body's own child door (host-child.bml) and answers [[name, nanoseconds]], one row a name (a process with two clients is one
+// row); gc-delta(before, after) answers [[name, milliseconds]] for every name whose GPU time grew by at least gc-floor-ms() between the two, the
+// most first. A client new in `after` counts from zero. The resident's own client reports no AppUsage on this host, so its share is the ask's wall
+// minus the others'; a tenant that used the device shows as its own row.
+// Why it exists: a 16.28 tok/s ask beside twelve at 18.8 (2026-11-20, 16:45:58) stayed unattributed because nothing bracketed it, and the device
+// level (host_gpu_utilization) reads 98 to 100 percent for the resident alone, so a co-tenant does not move it. Measured on one 8.2 s decode:
+// the resident +8249.8 ms, Chrome Helper +4.0 ms, 42 other clients under 0.5 ms.
+import form-stdlib/bml/host-child.bml;
+section [form.bml] {
+ class GpuClients {
+  def gc-argv() = ["/usr/sbin/ioreg", "-r", "-c", "IOAccelerator", "-l", "-w0"];
+  def gc-floor-ms() = 1;
+  def gc-text() = hch-said(hch-run-in(hch-dir(), "gpu-clients", gc-argv(), "", hch-by(15000)));
+  def gc-digits-end(s, i) = i < len(s) && str_byte_at(s, i) >= 48 && str_byte_at(s, i) <= 57 ? gc-digits-end(s, i + 1) : i;
+  def gc-sum-from(s, at) = at < 0 ? 0 : gc-sum-at(s, at + 20);
+  def gc-sum-at(s, b) = str_to_int(substring(s, b, gc-digits-end(s, b))) + gc-sum-from(s, str_find(s, "accumulatedGPUTime\"=", gc-digits-end(s, b)));
+  def gc-sum(s) = gc-sum-from(s, str_find(s, "accumulatedGPUTime\"=", 0));
+  def gc-name(l) {
+   let at = str_find(l, "= \"", 0);
+   let e = at < 0 ? -1 : str_find(l, "\"", at + 3);
+   at < 0 || e < 0 ? "" : substring(l, at + 3, e);
+  }
+  // one pass over the registry's lines: [the AppUsage sum of the block being read, the rows so far]; a block begins at its +-o line, AppUsage comes before IOUserClientCreator inside it
+  def gc-step(st, l) = str_find(l, "+-o AGXDeviceUserClient", 0) >= 0 ? [0, st[1]]
+   : str_find(l, "\"AppUsage\"", 0) >= 0 ? [gc-sum(l), st[1]]
+   : str_find(l, "\"IOUserClientCreator\"", 0) >= 0 ? [0, append(st[1], [[gc-name(l), st[0]]])]
+   : st;
+  def gc-merge(rows, r) = any?(x => (String) x[0] == (String) r[0], rows) ? map(x => (String) x[0] == (String) r[0] ? [x[0], x[1] + r[1]] : x, rows) : append(rows, [r]);
+  def gc-rows(text) = foldl((acc, r) => gc-merge(acc, r), [], foldl((st, l) => gc-step(st, l), [0, []], split-on(text, "\n"))[1]);
+  def gc-snapshot() = gc-rows(gc-text());
+  def gc-ns-of(rows, name) = foldl((a, x) => (String) x[0] == (String) name ? x[1] : a, 0, rows);
+  def gc-ms-row(before, r) = [r[0], (r[1] - gc-ns-of(before, r[0])) / 1000000];
+  def gc-more(a, b) = a[1] >= b[1];
+  def gc-sort(rows) = nil?(rows) ? [] : append(gc-sort(filter(x => x[1] > rows[0][1], rows[1:])), append([rows[0]], gc-sort(filter(x => x[1] <= rows[0][1], rows[1:]))));
+  def gc-delta(before, after) = gc-sort(filter(r => r[1] >= gc-floor-ms(), map(r => gc-ms-row(before, r), after)));
+  def gc-row-json(r) = json-node-object([fhn-s("name", r[0]), fhn-n("ms", r[1])]);
+  def gc-json(rows) = json-node-array(map(r => gc-row-json(r), rows));
+ }
+}
