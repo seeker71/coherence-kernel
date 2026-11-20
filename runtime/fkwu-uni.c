@@ -29882,9 +29882,29 @@ static void fk_units_seal(void) {
         u = u + 1;
     }
 }
+/* A creator records what its artifact cost to make beside it (disk-steward.bml: ds-side, ds-record-ms,
+ * ds-recorded-ms): <image>.make_ms holds the milliseconds this compile took, parse to published image, as
+ * decimal text. The steward weighs a lease by that measure when it stands and by its class estimate only
+ * when it does not. A sidecar that cannot be written is nothing lost: the estimate stands. */
+static void fk_record_make_ms(const char *fkb_path, long long ms) {
+#if !defined(_WIN32)
+    char side[FK_PATH_CAP + 16];
+    char num[32];
+    if (fk_path_len(fkb_path) + 9 > FK_PATH_CAP) return;
+    sprintf(side, "%s.make_ms", fkb_path);
+    int n = sprintf(num, "%lld", ms);
+    int fd = open(side, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd < 0) return;
+    if (write(fd, num, (unsigned long)n) < 0) { /* the estimate stands */ }
+    close(fd);
+#else
+    (void)fkb_path; (void)ms;
+#endif
+}
 static void fk_src_compile_current_unit(const char *path, const char *fkb_path,
                                         const char *sym_path, long long unit_mtime,
                                         const char *source_hash) {
+    long long make_t0 = fk_now_ms();
     fk_spos = 0;
     fk_srctext[fk_slen] = 0;
     fk_src_check_balance();
@@ -29956,6 +29976,7 @@ static void fk_src_compile_current_unit(const char *path, const char *fkb_path,
         fk_admission_image_note(fk_admissions, fkb_path, 0, fk_node_count, 0);
     else fk_diag_path("cache-failure", fkb_path, "published image changed before descriptor capture; running graph has no image mapping");
     if (!fk_fkb_errors && !fk_fkb_unrunnable) fk_sig_heal_settle(fkb_path);
+    fk_record_make_ms(fkb_path, fk_elapsed_ms(make_t0));
 }
 /* A unit standing alone: its closure collected as its own image's compile collects it. With
  * `compile` it compiles and writes that image (the import lane's artifact door); with the out
