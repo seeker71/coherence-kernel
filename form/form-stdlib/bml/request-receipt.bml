@@ -1,44 +1,58 @@
-// request-receipt.bml — one request's receipt, joined by its id from the ledgers themselves.
+// request-receipt.bml — one request's receipt, joined by its id from the ledgers themselves, written as a Form row (no JSON).
 //
 // Every local voice stream that works for a request names it in its ledger row's who (planner-<id>, planner-guide-<id>,
-// planner-lens-*-<id>, planner-repair-<id>, lens-names-<id>, counsel-<id>, repair-manifest-<id>, flow-<id>). rr-line(id) reads
+// planner-lens-*-<id>, planner-repair-<id>, lens-names-<id>, counsel-<id>, repair-manifest-<id>, flow-<id>). rr-data(id) reads
 // receipts/local-run-ledger.jsonl, keeps the rows whose who holds the id (a raw line is searched for the id first, so a ledger of
-// thousands of rows is not parsed), and answers ONE JSON line: each stream's who, model, wall_ms, generated_ids, surprise_micro_nats
-// and rent_tokens, the sum of rent_tokens, and the request's last row of receipts/local-plan-ledger.jsonl (verdict, kind, repairs,
-// ms, planned). The join is the key, never a time window; nothing in the line is typed by hand. A stream that carries no id (a
-// request planned before the planner named it) is not here: the line counts the streams it found and does not guess one.
-// The flow lands the line beside its end row (observe/flow-direct-run.bml, fl-end: receipts/request-receipts.jsonl), and
-// observe/request-receipt-run.bml prints it for any request.
+// thousands of rows is not parsed), and answers ONE Form record: each stream's who, model, wall_ms, generated_ids, surprise_micro_nats
+// and rent_tokens, the sum of rent_tokens, the asks the flow bracketed with the GPU registry (which tenants used the device during each,
+// receipts/ask-tenants.rows) and the request's last row of receipts/local-plan-ledger.jsonl (verdict, kind, repairs, ms, planned).
+// rr-line(id) is that record as a form-rows line (frw-emit): {request "frq-..." streams 7 rows [{...}] ...}. The join is the key, never a
+// time window; nothing in the line is typed by hand. A stream that carries no id (a request planned before the planner named it) is not
+// here: the line counts the streams it found and does not guess one.
+// The flow lands the line beside its end row (observe/flow-direct-run.bml, fl-end: receipts/request-receipts.rows), and
+// observe/request-receipt-run.bml prints it for any request, or for a whole set ({"set":"answered"}).
+// The two ledgers it READS, run and plan, are still JSON lines at their writer (ledger.bml ledger-append): that is the one edge left in
+// this file (parse-json below), named so that the next layer can rebase those writers on rows and delete it.
 import form-stdlib/bml/form-cli-heal-native-report.bml;
+import form-stdlib/bml/form-rows.bml;
 section [form.bml] {
  class RequestReceipt {
   def rr-run-ledger() = "receipts/local-run-ledger.jsonl";
   def rr-plan-ledger() = "receipts/local-plan-ledger.jsonl";
-  def rr-rows(path, id) = file_size(path) < 1 ? [] : map(x => parse-json("receipt-row", x), filter(x => (Comparable) len(trim(x)) != 0 && str_find(x, id, 0) >= 0, split-on(fhn-read(path), "\n")));
+  def rr-tenants-ledger() = "receipts/ask-tenants.rows";
+  def rr-lines(path, id) = file_size(path) < 1 ? [] : filter(x => (Comparable) len(trim(x)) != 0 && str_find(x, id, 0) >= 0, split-on(fhn-read(path), "\n"));
+  // the JSON edge: a run or plan ledger row, read once into the fields this file uses
+  def rr-json-rows(path, id) = map(x => parse-json("receipt-row", x), rr-lines(path, id));
   // a ledger field may be null (a row with no who, a row with no model): read it as text only when it is text
   def rr-str(r, key) { let v = fhn-text(r, key); (String) value_kind(v) == "string" ? v : ""; }
   def rr-mine(rows, id) = filter(r => str_find(rr-str(r, "who"), id, 0) >= 0, rows);
-  def rr-stream(r) = json-node-object([fhn-s("who", rr-str(r, "who")), fhn-s("model", rr-str(r, "model")), fhn-n("wall_ms", fhn-count(r, "wall_ms")), fhn-n("generated_ids", fhn-count(r, "generated_ids")), fhn-n("surprise_micro_nats", fhn-count(r, "surprise_micro_nats")), fhn-n("rent_tokens", fhn-count(r, "rent_tokens"))]);
-  def rr-end(rows, id) = foldl((acc, r) => (String) rr-str(r, "request") == id ? r : acc, nothing(), rows);
-  def rr-end-node(r) = nothing?(r) ? json-node-object([]) : json-node-object([fhn-s("verdict", rr-str(r, "verdict")), fhn-s("kind", rr-str(r, "kind")), fhn-n("repairs", fhn-count(r, "repairs")), fhn-n("ms", fhn-count(r, "ms")), fhn-n("planned", fhn-count(r, "planned")), fhn-n("rent_tokens", fhn-count(r, "rent_tokens"))]);
-  def rr-line(id) {
-   let mine = rr-mine(rr-rows(rr-run-ledger(), id), id);
-   let asks = filter(r => (String) rr-str(r, "request") == id, rr-rows(rr-tenants-ledger(), id));
-   json-emit(json-node-object([fhn-s("request", id), fhn-n("streams", len(mine)), json-node-pair("rows", json-node-array(map(r => rr-stream(r), mine))), fhn-n("rent_tokens", foldl((a, r) => a + fhn-count(r, "rent_tokens"), 0, mine)), json-node-pair("asks", json-node-array(map(r => rr-ask(r), asks))), json-node-pair("end", rr-end-node(rr-end(rr-rows(rr-plan-ledger(), id), id)))]));
+  def rr-stream(r) = record_new(0, "who", rr-str(r, "who"), "model", rr-str(r, "model"), "wall_ms", fhn-count(r, "wall_ms"), "generated_ids", fhn-count(r, "generated_ids"), "surprise_micro_nats", fhn-count(r, "surprise_micro_nats"), "rent_tokens", fhn-count(r, "rent_tokens"));
+  def rr-end-row(rows, id) = foldl((acc, r) => (String) rr-str(r, "request") == id ? r : acc, nothing(), rows);
+  def rr-end-record(r) = nothing?(r) ? record_new(0) : record_new(0, "verdict", rr-str(r, "verdict"), "kind", rr-str(r, "kind"), "repairs", fhn-count(r, "repairs"), "ms", fhn-count(r, "ms"), "planned", fhn-count(r, "planned"), "rent_tokens", fhn-count(r, "rent_tokens"));
+  // the asks the flow bracketed with the GPU registry: one Form row a line, read back as data
+  def rr-asks(id) {
+   let t = file_size(rr-tenants-ledger()) < 1 ? [] : filter(x => str_find(x, id, 0) >= 0, split-on(fhn-read(rr-tenants-ledger()), "\n"));
+   filter(r => !nothing?(r) && (String) value_kind(r) == "record" && (String) frw-get(r, "request") == id, map(x => rr-ok-or-nothing(frw-parse(x)), t));
   }
-  // The receipt of a whole set in ONE line, read from the ledgers: every request of learn/local-requests.jsonl whose status is `status` (a row begins {"id":"frq-... on its own line), joined by id as rr-line joins one
+  def rr-ok-or-nothing(r) = (String) r[0] == "ok" ? r[1] : nothing();
+  def rr-ask(r) = record_new(0, "who", frw-get(r, "who"), "wall_ms", frw-get(r, "wall_ms"), "tenants", frw-get(r, "tenants"));
+  def rr-data(id) {
+   let mine = rr-mine(rr-json-rows(rr-run-ledger(), id), id);
+   record_new(0, "request", id, "streams", len(mine), "rows", map(r => rr-stream(r), mine), "rent_tokens", foldl((a, r) => a + fhn-count(r, "rent_tokens"), 0, mine), "asks", map(r => rr-ask(r), rr-asks(id)), "end", rr-end-record(rr-end-row(rr-json-rows(rr-plan-ledger(), id), id)));
+  }
+  def rr-line(id) = frw-emit(rr-data(id));
+  // The receipt of a whole set in ONE line, read from the ledgers: every request of learn/local-requests.jsonl whose status is `status` (a row begins {"id":"frq-... on its own line), joined by id as rr-data joins one
   // request. Per request: its id, the streams the keyed ledgers hold for it, their surprise and rent_tokens, and its last plan-ledger end. A request that ended before the ledgers named the request id in each stream has
   // streams 0 here and is counted as keyless, never given a stream. The sums are the ledgers' own.
   def rr-requests() = "learn/local-requests.jsonl";
   def rr-set-ids(status) = map(l => substring(l, 7, str_find(l, "\"", 7)), filter(l => str_find(l, "{\"id\":\"frq-", 0) == 0 && str_find(l, "\"status\":\"" ++ status ++ "\"", 0) >= 0, split-on(fhn-read(rr-requests()), "\n")));
-  def rr-one(id) { let d = parse-json("receipt-line", rr-line(id)); [id, fhn-count(d, "streams"), fhn-count(d, "rent_tokens"), foldl((a, r) => a + fhn-count(r, "surprise_micro_nats"), 0, json-array-elements(json-object-get(d, "rows"))), json-object-get(d, "end")]; }
-  def rr-one-node(x) = json-node-object([fhn-s("request", x[0]), fhn-n("streams", x[1]), fhn-n("surprise_micro_nats", x[3]), fhn-n("rent_tokens", x[2]), fhn-s("end", rr-str(x[4], "verdict") ++ "/" ++ rr-str(x[4], "kind"))]);
-  def rr-set-line(status) {
-   let xs = map(id => rr-one(id), rr-set-ids(status));
-   json-emit(json-node-object([fhn-s("set", status), fhn-n("requests", len(xs)), fhn-n("with_streams", len(filter(x => x[1] > 0, xs))), fhn-n("keyless", len(filter(x => x[1] == 0, xs))), fhn-n("streams", foldl((a, x) => a + x[1], 0, xs)), fhn-n("surprise_micro_nats", foldl((a, x) => a + x[3], 0, xs)), fhn-n("rent_tokens", foldl((a, x) => a + x[2], 0, xs)), json-node-pair("rows", json-node-array(map(x => rr-one-node(x), xs)))]));
+  def rr-surprise(d) = foldl((a, r) => a + frw-get(r, "surprise_micro_nats"), 0, frw-get(d, "rows"));
+  def rr-end-text(d) = (String) frw-get(frw-get(d, "end"), "verdict") ++ "/" ++ (String) frw-get(frw-get(d, "end"), "kind");
+  def rr-set-row(d) = record_new(0, "request", frw-get(d, "request"), "streams", frw-get(d, "streams"), "surprise_micro_nats", rr-surprise(d), "rent_tokens", frw-get(d, "rent_tokens"), "end", rr-end-text(d));
+  def rr-set-record(status) {
+   let ds = map(id => rr-data(id), rr-set-ids(status));
+   record_new(0, "set", status, "requests", len(ds), "with_streams", len(filter(d => frw-get(d, "streams") > 0, ds)), "keyless", len(filter(d => frw-get(d, "streams") == 0, ds)), "streams", foldl((a, d) => a + frw-get(d, "streams"), 0, ds), "surprise_micro_nats", foldl((a, d) => a + rr-surprise(d), 0, ds), "rent_tokens", foldl((a, d) => a + frw-get(d, "rent_tokens"), 0, ds), "rows", map(d => rr-set-row(d), ds));
   }
-  // the asks the flow bracketed with the GPU registry (receipts/ask-tenants.jsonl): which stream, how long, and which tenants used the device during it
-  def rr-tenants-ledger() = "receipts/ask-tenants.jsonl";
-  def rr-ask(r) = json-node-object([fhn-s("who", rr-str(r, "who")), fhn-n("wall_ms", fhn-count(r, "wall_ms")), json-node-pair("tenants", json-object-has?(r, "tenants") ? json-object-get(r, "tenants") : json-node-array([]))]);
+  def rr-set-line(status) = frw-emit(rr-set-record(status));
  }
 }
