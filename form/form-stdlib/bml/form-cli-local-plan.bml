@@ -1671,19 +1671,22 @@ section [form.bml] {
    }
    def flp-metal-of(memory) = foldl(flp-metal-keep, "", memory);
    def flp-planner(memory, n, way, said) {
-    let base = [fhn-s("plan_voice", way[0]), fhn-s("plan_lens", way[1]), fhn-n("plan_options", n), fhn-n("plan_local_generated_ids", (flp-spent(memory, 7) + said[3])), fhn-n("plan_local_prompt_ids", flp-steer-prompt(memory)), fhn-n("plan_local_injected_ids", (flp-spent(memory, 6) + said[2])), fhn-n("plan_cases_copied", flp-copies-kept(map(m=>m[5],memory)) + flp-said-copied(said))];
+    let base = [fhn-s("plan_voice", way[0]), fhn-s("plan_lens", way[1]), fhn-n("plan_options", n), fhn-n("plan_local_generated_ids", (flp-spent(memory, 7) + said[3])), fhn-n("plan_local_prompt_ids", flp-steer-prompt(memory)), fhn-n("plan_local_injected_ids", (flp-spent(memory, 6) + said[2])), fhn-n("plan_cases_copied", flp-copies-kept(map(m=>m[5],memory)) + flp-said-copied(said)), fhn-s("plan_reference_reply", len(said) > 4 ? said[4] : "")];
     let metal = flp-metal-of(memory);
     (String) metal == "" ? base : append(base, [fhn-s("plan_metal", metal)]);
    }
    // A copy stands once its proposal read cases; a reply refused before that left the base as it was.
    def flp-copies-kept(rows) = foldl((t,r)=>t + (nothing?(fcgp-num(r,"cases_held")) ? 0 : (fcgp-num(r,"cases_copied") ?? 0)),0,rows);
+   // An option's row is the walk's own value (carried in its memory and printed as it is read). A caller that names a
+   // file gets the rows there as well; the planner door names none, so the body keeps no ledger of options.
+   def flp-row-out(ctx, row) = len(flp-ctx-ledger(ctx)) == 0 ? 0 : fhn-append(flp-ctx-ledger(ctx), json-emit(row) ++ "\n");
    def flp-observed(req, ctx, n, way, said, started, planner) {
    let heard = !fat-has(["answered","incomplete"],said[0]) || len(trim(said[1])) == 0 ? ["voice-" + said[0],mc-cat(["The voice ",way[0]," gave no admissible reply (",said[0],"). ",said[1]]),[]] : !nothing?(flp-said-refusal(said)) ? [flp-said-refusal(said)[0],flp-said-refusal(said)[1],[]] : flp-parse(said[1]);
    let parsed = if (((String) said[0] == "incomplete") && ((Comparable) len(heard[0]) > 0)) then [heard[0], mc-cat([heard[1], " The reply was cut at its reply budget: write a shorter goal and band."]), heard[2]] else heard;
    let stamp = mc-cat([flp-safe-id(req), "-", n.str(), "-", now_unix_ms().str()]);
    let v = if ((Comparable) len(parsed[0]) > 0) then flp-refused(6, parsed[0], parsed[1]) else flp-verify(parsed[2], req, ctx, planner, stamp);
    let row = flp-option-row(req, n, way, v, parsed[2], said, started, stamp);
-   let logged = fhn-append(flp-ctx-ledger(ctx), json-emit(row) ++ "\n");
+   let logged = flp-row-out(ctx, row);
    let spoken = print_str("[local-plan] " ++ json-emit(row));
    let swept = if (flp-held?(v) || flp-moot?(v)) then 0 else host_dir_rmdir(flp-at(flp-ctx-scratch(ctx), stamp));
     [parsed, v, row, stamp];
@@ -1735,7 +1738,7 @@ section [form.bml] {
       let declined=append(v[:2],append(["Native reference care: "+repaired[1]+"\nRetained result: "+repaired[4]+"\nOriginal refusal: "+v[2]],v[3:]));
       let total=[said[0],said[1],said[2]+repaired[2],said[3]+repaired[3],reply];
       let row=flp-option-row(req,n,[way[0],way[1],"reference-attention"],declined,observed[0][2],[said[0],said[1],repaired[2],repaired[3],reply],started,observed[3]);
-      fhn-append(flp-ctx-ledger(ctx),json-emit(row)+"\n");
+      flp-row-out(ctx,row);
       flp-finish(req,ctx,n,way,total,flp-planner(memory,n,way,total),[observed[0],declined,row,observed[3]]);
      } else {
       let total=[repaired[0],repaired[1],said[2]+repaired[2],said[3]+repaired[3],repaired[4]];
@@ -1860,7 +1863,7 @@ section [form.bml] {
     let v=flp-held?(shape) ? flp-verify-paths(parsed[2],req,verifyCtx,[],stamp) : shape;
     let way=[flp-text(origin,"voice"),flp-text(origin,"lens"),"recheck"];
     let row=oh-set(flp-option-row(req,0,way,v,parsed[2],["retained",fhn-read(reply),0,0,reply],started,stamp),"reference_reply",json-node-string(referenceReply));
-    let kept=fhn-append(flp-ctx-ledger(ctx),json-emit(row) + "\n");
+    let kept=flp-row-out(ctx,row);
     !flp-held?(v) ? ["refused",[],v[2],v[0]] : {
      let taskRows=append(rows |> filter(r=>flp-text(r,"request")==flp-req-id(req)),flp-heard-rows(rows,req));
      let generated=foldl((n,r)=>n + (fcgp-num(r,"local_generated_ids") ?? 0),0,taskRows);
@@ -1940,7 +1943,7 @@ section [form.bml] {
   // reading the rows again; a request whose digest moved reads unmarked and takes one option.
   def flp-park-path(ledger) = ledger ++ ".parked";
   def flp-park-mark(req, ctx, why) = flp-park-mark-at(req, flp-ctx-ledger(ctx), why);
-  def flp-park-mark-at(req, ledger, why) = fhn-append(flp-park-path(ledger), json-emit(json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("request", flp-req-id(req)), fhn-s("source_digest", flp-source-digest(req)), fhn-s("why", why)])) ++ "\n");
+  def flp-park-mark-at(req, ledger, why) = len(ledger) == 0 ? 0 : fhn-append(flp-park-path(ledger), json-emit(json-node-object([fhn-n("at_unix_ms", now_unix_ms()), fhn-s("request", flp-req-id(req)), fhn-s("source_digest", flp-source-digest(req)), fhn-s("why", why)])) ++ "\n");
   def flp-park-marked?(req, ledger) {
    let rows = filter(r => (String) flp-text(r, "request") == flp-req-id(req), flp-queue-rows(flp-park-path(ledger)));
    nil?(rows) ? false : { let today = flp-source-digest(req); any?(r => (String) flp-text(r, "source_digest") == today, rows); };
