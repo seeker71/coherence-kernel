@@ -386,7 +386,9 @@ section [form.bml] {
     let named = fcgp-present?(base, "writable") && fcgp-array?(json-object-get(base, "writable")) ? filter(f => flp-has?(files, f), flp-strings(json-object-get(base, "writable"))) : [];
     let first = nil?(named) ? files[0] : named[0];
     let homes = map(d => flp-frame-home(d[0], files, first), defs);
-    let plan = oh-set(oh-set((len(fcgp-str(base, "id")) > 0 ? base : oh-set(base, "id", json-node-string(flp-req-id(req)))), "writable", flp-json-strings(flp-frame-uniq(homes))), "definitions", json-node-array(map(i => json-node-object([fhn-s("name", defs[i][0]), json-node-pair("params", flp-json-strings(defs[i][1])), fhn-s("file", homes[i])]), 0 .. len(defs))));
+    let loads = flp-frame-loads(reference, files);
+    let based = nil?(loads) ? base : oh-set(base, "sources", flp-json-strings(flp-frame-uniq(append(fcgp-present?(base, "sources") ? filter(s => len(s) > 0, flp-strings(json-object-get(base, "sources"))) : [], loads))));
+    let plan = oh-set(oh-set((len(fcgp-str(based, "id")) > 0 ? based : oh-set(based, "id", json-node-string(flp-req-id(req)))), "writable", flp-json-strings(flp-frame-uniq(homes))), "definitions", json-node-array(map(i => json-node-object([fhn-s("name", defs[i][0]), json-node-pair("params", flp-json-strings(defs[i][1])), fhn-s("file", homes[i])]), 0 .. len(defs))));
     let voiced = flp-block(text, "goal") ?? "";
     let goal = len(trim(voiced)) > 0 ? voiced : mc-cat(["Write ", flp-join(map(d => d[0], defs), ", "), " as the request states: ", flp-text(req, "title")]);
     let stated = flp-stated-cases(req);
@@ -981,8 +983,19 @@ section [form.bml] {
    let calls = flp-calls-of(ref);
    let table = nil?(calls) ? "" : flp-defs-table();
    let lines = take(10, filter(s => len(s) > 0, map(c => flp-stands-as(c[0], table), calls)));
-   nil?(lines) ? "" : mc-cat(["\nThe names your definition calls stand with these parameters, in this order: ", flp-join(lines, "; "), "."]);
+   let uses = nil?(lines) ? [] : take(3, filter(u => len(u) > 0, map(c => flp-use-of(c[0]), calls)));
+   nil?(lines) ? "" : mc-cat(["\nThe names your definition calls stand with these parameters, in this order: ", flp-join(lines, "; "), ".", nil?(uses) ? "" : mc-cat(["\nAs the body calls them today:\n", flp-join(uses, "\n")])]);
   }
+  // one line of the body that calls name with a function first: the order of a walker's arguments and of its
+  // function's own parameters, shown as it stands and not described
+  def flp-use-line(text, key, from) {
+   let at = str_find(text, key, from);
+   let start = at < 0 ? -1 : flp-line-start(text, at);
+   let line = at < 0 ? "" : trim(substring(text, start, flp-line-end(text, at)));
+   at < 0 ? "" : len(line) <= 150 && !flp-starts?(line, "//") && (at == 0 || !flp-ident-byte?(str_byte_at(text, at - 1))) ? line : flp-use-line(text, key, at + 1);
+  }
+  def flp-use-of(name) = flp-first-use(take(40, filter(f => flp-starts?(f, "form/form-stdlib/bml/"), flp-defs-files())), name + "((");
+  def flp-first-use(files, key) = nil?(files) ? "" : { let u = flp-use-line(fhn-read(files[0]), key, 0); len(u) > 0 ? u : flp-first-use(files[1:], key); };
   def flp-shape(plan, ctx) = flp-shape-at(plan,ctx,false);
   def flp-shape-at(plan, ctx, owned) {
    let id = flp-p-id(plan);
@@ -1279,7 +1292,31 @@ section [form.bml] {
    let here = flp-exists?(w);
    let original = if here then fhn-read(w) else "";
    let bml = if here then flp-bml-surface?(original) else flp-ends?(w, ".bml");
-   foldl((t, d) => place(t, d, bml), if here then original else flp-blank(bml), filter(d => ((String) d[2] == w), flp-p-defs(plan)));
+   flp-loaded(foldl((t, d) => place(t, d, bml), if here then original else flp-blank(bml), filter(d => ((String) d[2] == w), flp-p-defs(plan))), flp-p-reference(plan), flp-p-sources(plan));
+  }
+  // A definition may call a name that stands in one file of the stdlib the written file does not load yet. The frame
+  // names that file in the plan's sources (flp-frame-loads); here the written file's own preludes line takes it, in the
+  // scratch copy and at the landing alike, so the call resolves where the definition lives and not only under the band.
+  def flp-load-file(name, table, skip) {
+   let at = filter(f => str_find(f, "/tests/", 0) < 0, flp-definers(name, table, skip));
+   len(at) == 1 ? at[0] : "";
+  }
+  def flp-frame-loads(reference, files) {
+   let calls = map(c => c[0], flp-calls-of(reference));
+   let standing = nil?(calls) ? [] : flp-standing-names();
+   let own = nil?(calls) ? [] : flp-source-names(files);
+   let open = filter(n => !flp-has?(standing, n) && !flp-has?(own, n), calls);
+   let table = nil?(open) ? "" : flp-defs-table();
+   flp-frame-uniq(filter(f => len(f) > 0, map(n => flp-load-file(n, table, files), open)));
+  }
+  def flp-loaded(text, reference, sources) {
+   let at = nothing?(text) ? -1 : str_find(text, "preludes: ", 0);
+   let end = at < 0 ? -1 : flp-line-end(text, at);
+   let line = at < 0 ? "" : substring(text, at, end);
+   let calls = at < 0 || nil?(sources) ? [] : map(c => c[0], flp-calls-of(reference));
+   let table = nil?(calls) ? "" : flp-defs-table();
+   let wanted = filter(s => flp-starts?(s, "form/form-stdlib/") && str_find(line, flp-token(s), 0) < 0 && any?(n => flp-has?(flp-definers(n, table, []), s), calls), sources);
+   nil?(wanted) ? text : mc-cat([substring(text, 0, end), " ", flp-join(map(flp-token, wanted), " "), substring(text, end, len(text))]);
   }
   def flp-stubbed(plan, w, flavor) = flp-flow-held(flp-standing(plan, w, (t, d, bml) => flp-stub-def(t, d, bml, flavor)));
   // A band preludes a door whole, so what stands after the door's last class runs at import, and under a stub that flow
