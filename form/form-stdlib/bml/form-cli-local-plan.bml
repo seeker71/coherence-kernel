@@ -420,10 +420,14 @@ section [form.bml] {
    let pairs = len(queue) == 0 ? [] : flp-held-before(req, queue);
    nil?(pairs) ? "" : mc-cat(["\nWhat was asked before in this body, and the definition that holds it today. Read them for the spellings and shapes that stand:\n", mc-cat(map(p => mc-cat(["asked: ", flp-head(p[0], 500), "\nholds in ", p[2], ":\n", flp-head(p[1], 700), "\n\n"]), pairs))]);
   }
+  // A request that states its own examples is answered by a definition alone, so its next try hears the finding beside
+  // the definition it wrote and is asked for the definition again: a whole four-block reply spent the voice's tokens
+  // before it reached <reference> (2026-11-24: a second try ended inside <goal>).
+  def flp-definition-feedback(feedback, prior) = len(trim(feedback)) == 0 ? "" : mc-cat(["\nForm stood your definition in the file and ran the request's examples. What it saw:\n", feedback, len(trim(flp-block(prior, "reference") ?? "")) == 0 ? "" : mc-cat(["\n\nThe definition you wrote:\n", trim(flp-block(prior, "reference"))]), "\n\nWrite the definition again, whole, inside <reference>...</reference>, with what Form saw repaired. Nothing else is needed: no <plan>, no <goal>, no <cases>.\n"]);
   def flp-envelope-refusal(reading) = nothing?(reading) || len(reading[3]) == 0 ? nothing() : ["envelope-ended", mc-cat(["Your reply left its envelope at ", reading[3], " and no next token the voice weighed kept it inside, so it ended there. Write the whole reply again: <plan>, <goal>, <cases> or <band>, then <reference>, each block closed."])];
   def flp-packet(req, lens, feedback, prior, queue) {
    let head = mc-cat([flp-intro(), "\n\n", flp-case-words(), "\nThe witness imports form-stdlib/core.fk. Use start .. end for end-exclusive integer ranges, such as 0 .. len(xs); never enumerate a dynamic index range as literals. substring(text,start,end) also uses an exclusive end, not a length. str_byte_at(text,index) returns the integer byte.\n", flp-lens-text(lens), "\n\nThe request:\n", flp-request-text(req), "\n", flp-files-block(req), "\n", flp-held-block(req, queue)]);
-   let tail = mc-cat([flp-head-block(req), flp-case-reply-for(req), flp-stated-note(req), flp-feedback-block(feedback, prior), "\nThe original task and current observations take precedence:\n", flp-text(req,"needs"), "\n", flp-text(req,"evidence")]);
+   let tail = mc-cat([flp-head-block(req), flp-case-reply-for(req), flp-stated-note(req), len(flp-stated-cases(req)) >= 2 && !flp-head-request?(req) ? flp-definition-feedback(feedback, prior) : flp-feedback-block(feedback, prior), "\nThe original task and current observations take precedence:\n", flp-text(req,"needs"), "\n", flp-text(req,"evidence")]);
    mc-cat([head, flp-callers-block(req), tail]);
   }
   // No byte limit stands on a packet. One decode reads the whole packet before its first reply id, so what a packet costs is the
@@ -596,9 +600,32 @@ section [form.bml] {
     let h=str_find(line,"held=",0); let t=str_find(line,"total=",0);
     let held=h<0 ? nothing() : flp-number-at(line,h+5); let total=t<0 ? nothing() : flp-number-at(line,t+6);
     let rows=filter(l=>flp-starts?(l,flp-case-failed-mark()) && faj-valid(substring(l,len(flp-case-failed-mark()),len(l))),lines) |> map(l=>json-array-elements(parse-json("case-failed",substring(l,len(flp-case-failed-mark()),len(l))))) |> filter(r=>len(r)==4) |> map(r=>[json-int-value(r[0]),json-string-value(r[1]),json-string-value(r[2]),json-string-value(r[3])]);
-    nothing?(held) || nothing?(total) || held>total || len(rows)!=total - held ? nothing() : [held,total,rows];
+    nothing?(held) || nothing?(total) || held>total || len(rows)!=total - held ? nothing() : [held,total,flp-rows-with-reasons(rows,flp-raise-reasons(lines))];
    };
   }
+  // A call that raised says why. The kernel names each stop on stderr as it backtracks ("foldl: not a list: closure");
+  // the band run hands those on as [plan-case-raised] lines in the order they happened. A raised row takes its own
+  // reason when there is one for each, and the shared one when every stop said the same.
+  def flp-raised-mark() = "[plan-case-raised] ";
+  def flp-raise-reasons(lines) = filter(l=>flp-starts?(l,flp-raised-mark()),lines) |> map(l=>trim(substring(l,len(flp-raised-mark()),len(l))));
+  def flp-raise-word(reason) = "(the call raised and gave no value: " + reason + ")";
+  def flp-rows-with-reasons(rows,reasons) {
+   let raised=filter(i=>flp-raised?(rows[i]),0 .. len(rows));
+   let same=!nil?(reasons) && all?(r=>(String) r==(String) reasons[0],reasons);
+   nil?(reasons) || nil?(raised) ? rows : len(reasons)==len(raised) ? map(i=>{ let k=flp-index-of(raised,i); k<0 ? rows[i] : [rows[i][0],rows[i][1],flp-raise-word(reasons[k]),rows[i][3]]; },0 .. len(rows)) : same ? map(r=>flp-raised?(r) ? [r[0],r[1],flp-raise-word(reasons[0]),r[3]] : r,rows) : rows;
+  }
+  def flp-index-of(xs,x) = foldl((a,i)=>a<0 && xs[i]==x ? i : a,-1,0 .. len(xs));
+  // the stops of a band's stderr, each as one line: the kernel's own words with the scratch path and the walker's
+  // inner name left out
+  def flp-stop-reason(line) {
+   let body=substring(line,len(flp-organ-prefix()),len(line));
+   let node=fcgp-object-line?(body) ? parse-json("band-stop",body) : nothing();
+   let seen=nothing?(node) ? "" : fcgp-str(node,"observed");
+   let cut=flp-cut-at(flp-cut-at(seen," -- in core-walk-refused")," (/");
+   let said=flp-starts?(cut,"fkwu: ") ? substring(cut,6,len(cut)) : cut;
+   flp-starts?(said,"form_error: ") ? substring(said,12,len(said)) : said;
+  }
+  def flp-raised-lines(stderr) = mc-cat(map(l=>mc-cat(["\n",flp-raised-mark(),flp-head(flp-stop-reason(l),240)]),filter(l=>flp-starts?(l,flp-organ-prefix()) && str_find(l,"\"aspect\":\"stop\"",0)>=0 && len(flp-stop-reason(l))>0,flp-lines(stderr))));
   def flp-cases-node(rows) = json-node-array(map(r=>json-node-array([json-node-int(r[0]),json-node-string(r[1]),json-node-string(r[2]),json-node-string(r[3])]),rows));
   def flp-cases-rows(node) = map(n=>{ let r=json-array-elements(n); [json-int-value(r[0]),json-string-value(r[1]),json-string-value(r[2]),json-string-value(r[3])]; },json-array-elements(node));
   def flp-failed-text(rows) = mc-cat(map(r=>mc-cat(["- call: ",r[1],"\n  actual: ",r[2],"\n  expected: ",r[3],"\n"]),rows));
@@ -918,11 +945,43 @@ section [form.bml] {
    let names = flp-unresolved-names(said);
    nil?(names) ? "" : {
     let standing = flp-standing-names();
+    let table = flp-defs-table();
     mc-cat(["\nThe compiler found no definition for: ", flp-join(names, ", "), ". ", flp-join(map(n => {
      let near = flp-near-names(n, standing, own);
-     nil?(near) ? mc-cat([n, " shares no word with a name that stands."]) : mc-cat(["Names that stand and share a word with ", n, ": ", flp-join(near, ", "), "."]);
+     let elsewhere = flp-definers(n, table, []);
+     let begins = nil?(near) && nil?(elsewhere) ? flp-table-begins(table, n) : [];
+     !nil?(elsewhere) ? mc-cat([n, " stands as ", flp-stands-as(n, table), ", a file the one you are writing does not load.", nil?(near) ? "" : mc-cat([" Names it does load that share a word with ", n, ": ", flp-join(near, ", "), "."])])
+     : !nil?(near) ? mc-cat(["Names that stand and share a word with ", n, ": ", flp-join(near, ", "), "."])
+     : !nil?(begins) ? mc-cat(["No loaded name shares a word with ", n, ". Elsewhere in the body stand: ", flp-join(begins, "; "), "; the file you are writing does not load those files."])
+     : mc-cat([n, " shares no word with a name that stands."]);
     }, names), " "), " Use a name that stands, or write the helper whole in your <reference>."]);
    };
+  }
+  // how a name stands: its parameters in order and its file. A .bml row of the table carries its parameters; a .fk
+  // defn's are read from its own text
+  def flp-stands-as(name, table) {
+   let bml = flp-def-arities(name, table);
+   let fk = nil?(bml) ? flp-def-arities("@" + name, table) : [];
+   let text = nil?(fk) ? "" : fhn-read(fk[0][0]);
+   let at = nil?(fk) ? -1 : str_find(text, flp-fk-mark(name), 0);
+   !nil?(bml) ? (str_find(bml[0][0], "/tests/", 0) >= 0 ? "" : mc-cat([name, "(", bml[0][1], ") in ", bml[0][0]])) : at < 0 ? "" : mc-cat([name, "(", flp-join(flp-fk-params-at(text, at, name), ", "), ") in ", fk[0][0]]);
+  }
+  // up to five names of the table that begin with name and a dash, each as it stands
+  def flp-table-begins(table, name) = flp-frame-uniq(append(flp-table-names(table, "\n" + name + "-", 0, []), flp-table-names(table, "\n@" + name + "-", 0, []))) |> take(5) |> map(n => flp-stands-as(n, table)) |> filter(s => len(s) > 0);
+  def flp-table-names(table, key, from, acc) {
+   let at = len(acc) >= 5 ? -1 : str_find(table, key, from);
+   let end = at < 0 ? -1 : str_find(table, "\t", at);
+   let raw = end < 0 ? "" : substring(table, at + 1, end);
+   let name = flp-starts?(raw, "@") ? substring(raw, 1, len(raw)) : raw;
+   at < 0 || end < 0 ? acc : flp-table-names(table, key, end, flp-has?(acc, name) ? acc : append(acc, [name]));
+  }
+  // The names a definition calls, as they stand: a call that raised or did not compile most often gave a standing name
+  // its arguments in another language's order (foldl(xs, acc, f) where foldl(f, init, xs) stands)
+  def flp-called-block(ref) {
+   let calls = flp-calls-of(ref);
+   let table = nil?(calls) ? "" : flp-defs-table();
+   let lines = take(10, filter(s => len(s) > 0, map(c => flp-stands-as(c[0], table), calls)));
+   nil?(lines) ? "" : mc-cat(["\nThe names your definition calls stand with these parameters, in this order: ", flp-join(lines, "; "), "."]);
   }
   def flp-shape(plan, ctx) = flp-shape-at(plan,ctx,false);
   def flp-shape-at(plan, ctx, owned) {
@@ -1024,8 +1083,14 @@ section [form.bml] {
   // What a failed run says to the voice is the compiler's words. An organ reading is heard as its words; a warning
   // reading, and the line that an image was written by another fkwu build, say nothing of the reply and are not
   // heard. The whole stream stays in the execution evidence the text names.
-  def flp-heard-line(line) = flp-starts?(line, flp-organ-prefix()) ? ((str_find(line, "\"observed\":\"compile-warning\"", 0) < 0) && ((Comparable) len(flp-said-line(line)) > 0) ? flp-said-line(line) : nothing()) : (str_find(line, "image admission failed", 0) >= 0 ? nothing() : line);
-  def flp-heard-err(text) = flp-join(filter(l => !nothing?(l), map(flp-heard-line, flp-lines(text))), "\n");
+  def flp-heard-line(line) = flp-starts?(line, flp-organ-prefix()) ? ((str_find(line, "\"observed\":\"compile-warning\"", 0) < 0) && ((Comparable) len(flp-said-line(line)) > 0) ? flp-said-line(line) : nothing()) : (str_find(line, "image admission failed", 0) >= 0 ? nothing() : flp-short-path(line));
+  // a scratch copy's path reads as the path it stands for: the walk's own tree before "/reference/" says nothing to a reader
+  def flp-path-start(line, i) = i > 0 && str_byte_at(line, i - 1) != 32 && str_byte_at(line, i - 1) != 40 ? flp-path-start(line, i - 1) : i;
+  def flp-short-path(line) {
+   let at = str_find(line, "/reference/form/", 0);
+   at < 0 ? line : flp-short-path(substring(line, 0, flp-path-start(line, at)) + substring(line, at + 11, len(line)));
+  }
+  def flp-heard-err(text) = flp-join(map(l => flp-short-path(l), filter(l => !nothing?(l), map(flp-heard-line, flp-lines(text)))), "\n");
   def flp-errors(text) =flp-join(take(8, filter(l => ((Comparable) len(l) > 0), map(l => flp-said-line(l), flp-lines(text)))), "\n");
   // The band runs as its own kernel, a child of this process, begun and waited on through the walk's child door's own
   // pieces (host-child.bml: host_spawn_at, hch-wait, hch-exit-line, hch-signal-finding): its deadline is the host's, read
@@ -1077,7 +1142,7 @@ section [form.bml] {
    let evidence=flp-dir() + "/executions/" + flp-sha(path) + ".json";
    let receipt=json-emit(json-node-object([fhn-s("command","./fkwu " + path),json-node-pair("exit",nothing?(status) ? json-node-null() : json-node-int(status)),fhn-n("timed_out",timed),fhn-n("stdout_bytes",flp-band-bytes(out)),fhn-n("stderr_bytes",flp-band-bytes(err)),fhn-s("stdout",stdout),fhn-s("stderr",stderr)]));
    let written=flp-put(evidence,receipt);
-   [reading, timed, mc-cat([read_file(evidence)==receipt ? "\nExecution evidence: " + evidence : "\nExecution evidence could not be retained at " + evidence,nothing?(reading) ? "\nExecution exit=" + flp-show(status) + " stderr:\n" + flp-heard-err(stderr) + "stdout:\n" + stdout : "\nExecution stdout:\n" + stdout + flp-errors(stderr)])];
+   [reading, timed, mc-cat([read_file(evidence)==receipt ? "\nExecution evidence: " + evidence : "\nExecution evidence could not be retained at " + evidence,nothing?(reading) ? "\nExecution exit=" + flp-show(status) + " stderr:\n" + flp-heard-err(stderr) + "stdout:\n" + stdout : "\nExecution stdout:\n" + stdout + flp-raised-lines(stderr) + "\n" + flp-errors(stderr)])];
   }
   def flp-mkdirs-at(path, i) {
    let sp = str_find(path, "/", i);
@@ -1382,9 +1447,18 @@ section [form.bml] {
   }
   def flp-quote-at(said, texts) {
    let n = flp-said-line-no(said);
-   let named = flp-first(texts, wt => (str_find(said, wt[0], 0) >= 0));
+   let token = flp-said-token(said);
+   let holds = wt => !nothing?(n) && !nothing?(wt[1]) && !nothing?(flp-line-of(wt[1], n)) && len(token) > 0 && str_find(flp-line-of(wt[1], n), token, 0) >= 0;
+   let named = flp-first(texts, wt => (str_find(said, wt[0], 0) >= 0)) ?? flp-first(texts, holds);
    let line = if (nothing?(n) || nothing?(named)) then nothing() else flp-line-of(named[1], n);
-   if nothing?(line) then "" else mc-cat(["\nLine ", n.str(), " of ", named[0], ", with your definitions standing, reads:\n", line]);
+   if nothing?(line) then "" else mc-cat(["\nLine ", n.str(), " of ", named[0], ", with your definitions standing, reads:\n", line, len(token) > 0 ? mc-cat(["\nThe reading stopped at: ", token]) : ""]);
+  }
+  // the word the cursor stopped at: "section: line 24: char (wanted: reclit)" names char
+  def flp-said-token(said) {
+   let at = str_find(said, "section: line ", 0);
+   let colon = at < 0 ? -1 : str_find(said, ": ", at + 14);
+   let end = colon < 0 ? -1 : str_find(said, " (wanted", colon);
+   colon < 0 || end < 0 || end - colon > 80 ? "" : trim(substring(said, colon + 2, end));
   }
   def flp-ref-missing(ref,defs) = flp-first(defs,d=>nothing?(flp-ref-text(ref,d,flp-file-bml?(d[2]))));
   def flp-reference(plan, ctx, tree, v) {
@@ -1417,10 +1491,10 @@ section [form.bml] {
    let full = flp-p-full(plan);
    if (!nothing?(unplaced)) then flp-with-readings(flp-refused(7, mc-cat(["reference-site:", unplaced[0]]), mc-cat(["Form could not stand the <reference> definitions in ", unplaced[0], "."])), v[3], v[4])
    else if (!nothing?(broken)) then flp-with-readings(flp-refused(7, mc-cat(["reference-check:", flp-head(flp-sha(json-emit(broken)), 12)]), mc-cat(["The check ", json-emit(broken), " forbids the change your <reference> makes: with your definitions standing it prints ", flp-said(seen[2]), " (exit ", seen[4].str(), ") where it asks ", flp-said(seen[1]), " (exit ", seen[3].str(), "). A check pins what the gap keeps: leave out a check the change must break, or ask for what the changed file prints."])), v[3], v[4])
-   else if (nothing?(r[0]) && (str_find(r[2], "error", 0) >= 0)) then flp-reach(flp-refused(7, "reference-compile", mc-cat(["Your <reference> definitions, standing in a scratch copy of the file, do not compile, so they witness nothing. Write them in the file's own dialect, as its other definitions are written. fkwu said:\n", r[2], flp-quote-at(r[2], texts), flp-unresolved-block(r[2], flp-source-names(filter(w => flp-exists?(w) && !flp-is-dir?(w), flp-p-writable(plan)))), str_find(r[2], "stray ')'", 0) >= 0 ? flp-arity-block(ref) : ""])), v[3], v[4], r[0])
+   else if (nothing?(r[0]) && (str_find(r[2], "error", 0) >= 0)) then flp-reach(flp-refused(7, "reference-compile", mc-cat(["Your <reference> definitions, standing in a scratch copy of the file, do not compile, so they witness nothing. Write them in the file's own dialect, as its other definitions are written. fkwu said:\n", r[2], flp-quote-at(r[2], texts), flp-unresolved-block(r[2], flp-source-names(filter(w => flp-exists?(w) && !flp-is-dir?(w), flp-p-writable(plan)))), str_find(r[2], "stray ')'", 0) >= 0 ? flp-arity-block(ref) : "", flp-called-block(ref)])), v[3], v[4], r[0])
    else if (nothing?(r[0]) || (!((Comparable) r[0] == full))) then {
     let cases=flp-cases-read(r[2]);
-    flp-with-cases(flp-reach(flp-refused(7, "unreachable", !nothing?(cases) ? flp-cases-words(cases,r[0],full,r[2]) : mc-cat(["With your <reference> definitions standing, the band reads ", flp-show(r[0]), " of ", full.str(), ": the band, the goal and the reference disagree, so no candidate the goal describes turns the band full.", if ((Comparable) len(r[2]) > 0) then mc-cat([" fkwu said:\n", r[2], flp-quote-at(r[2], texts)]) else ""])), v[3], v[4], r[0]),cases);
+    flp-with-cases(flp-reach(flp-refused(7, "unreachable", !nothing?(cases) ? flp-cases-words(cases,r[0],full,r[2]) + (any?(flp-raised?,cases[2]) ? flp-called-block(ref) : "") : mc-cat(["With your <reference> definitions standing, the band reads ", flp-show(r[0]), " of ", full.str(), ": the band, the goal and the reference disagree, so no candidate the goal describes turns the band full.", if ((Comparable) len(r[2]) > 0) then mc-cat([" fkwu said:\n", r[2], flp-quote-at(r[2], texts)]) else ""])), v[3], v[4], r[0]),cases);
    }
    else flp-with-cases(flp-reach(v, v[3], v[4], r[0]),flp-cases-read(r[2]));
   }
@@ -1575,7 +1649,7 @@ section [form.bml] {
   def flp-focus-packet(req,feedback,base,lens) {
    let failed=flp-failed-of(base);
    let held=fcgp-num(base[5],"cases_held") ?? 0;
-   mc-cat([flp-intro(),"\n",flp-lens-text(lens),"\nThe request:\n",flp-request-text(req),"\n",flp-files-block(req),"\nThe candidate definitions:\n",flp-block(base[4],"reference"),"\n\n",flp-starts?(feedback,"Verification") && str_find(feedback,"The failing cases:",0)>=0 ? "" : feedback + "\n\n",held.str()," cases hold and ",len(failed).str()," fail. The failing cases:\n",flp-failed-text(failed),"\n",flp-held-block(req,flp-queue()),"\n",flp-focus-words(held,len(failed))]);
+   mc-cat([flp-intro(),"\n",flp-lens-text(lens),"\nThe request:\n",flp-request-text(req),"\n",flp-files-block(req),"\nThe candidate definitions:\n",flp-block(base[4],"reference"),"\n\n",flp-starts?(feedback,"Verification") && str_find(feedback,"The failing cases:",0)>=0 ? "" : feedback + "\n\n",held.str()," cases hold and ",len(failed).str()," fail. The failing cases:\n",flp-failed-text(failed),any?(flp-raised?,failed) ? flp-called-block(flp-block(base[4],"reference") ?? "") : "","\n",flp-held-block(req,flp-queue()),"\n",flp-focus-words(held,len(failed))]);
   }
   def flp-block-put(t,tag,body) {
    let span=flp-block-span(t,tag);
@@ -1595,7 +1669,7 @@ section [form.bml] {
    flp-call-bare-at(s,i+1,quoted,cons(substring(s,i,i+1),kept));
   };
   def flp-call-bare(s) = flp-call-bare-at(s,0,false,[]);
-  def flp-raised?(row) = (String) row[2]=="(the call raised and gave no value)";
+  def flp-raised?(row) = flp-starts?(row[2],"(the call raised and gave no value");
   def flp-focus-merged(base,reply,earlier) {
    let failed=flp-failed-of(base);
    let raw=flp-block(reply,"cases") ?? flp-unfence(reply);
