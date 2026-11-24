@@ -429,7 +429,7 @@ section [form.bml] {
   def flp-envelope-refusal(reading) = nothing?(reading) || len(reading[3]) == 0 ? nothing() : ["envelope-ended", mc-cat(["Your reply left its envelope at ", reading[3], " and no next token the voice weighed kept it inside, so it ended there. Write the whole reply again: <plan>, <goal>, <cases> or <band>, then <reference>, each block closed."])];
   def flp-packet(req, lens, feedback, prior, queue) {
    let head = mc-cat([flp-intro(), "\n\n", flp-case-words(), "\nThe witness imports form-stdlib/core.fk. Use start .. end for end-exclusive integer ranges, such as 0 .. len(xs); never enumerate a dynamic index range as literals. substring(text,start,end) also uses an exclusive end, not a length. str_byte_at(text,index) returns the integer byte.\n", flp-lens-text(lens), "\n\nThe request:\n", flp-request-text(req), "\n", flp-files-block(req), "\n", flp-held-block(req, queue)]);
-   let tail = mc-cat([flp-head-block(req), flp-case-reply-for(req), flp-stated-note(req), len(flp-stated-cases(req)) >= 2 && !flp-head-request?(req) ? flp-definition-feedback(feedback, prior) : flp-feedback-block(feedback, prior), "\nThe original task and current observations take precedence:\n", flp-text(req,"needs"), "\n", flp-text(req,"evidence")]);
+   let tail = mc-cat([flp-head-block(req), len(flp-stated-cases(req)) >= 2 && !flp-head-request?(req) ? "" : flp-case-reply-for(req), flp-stated-note(req), len(flp-stated-cases(req)) >= 2 && !flp-head-request?(req) ? flp-definition-feedback(feedback, prior) : flp-feedback-block(feedback, prior), "\nThe original task and current observations take precedence:\n", flp-text(req,"needs"), "\n", flp-text(req,"evidence")]);
    mc-cat([head, flp-callers-block(req), tail]);
   }
   // No byte limit stands on a packet. One decode reads the whole packet before its first reply id, so what a packet costs is the
@@ -963,6 +963,12 @@ section [form.bml] {
     }, names), " "), " Use a name that stands, or write the helper whole in your <reference>."]);
    };
   }
+  // A name the compiler could not find that the reference itself binds with let to a function: the function calls
+  // itself, and a let-bound function is not in scope inside its own body here
+  def flp-self-let-block(ref, names) {
+   let own = filter(n => { let at = str_find(ref, "let " + n + " = ", 0); at >= 0 && str_find(substring(ref, at, flp-line-end(ref, at)), "=>", 0) >= 0; }, names);
+   nil?(own) ? "" : mc-cat(["\n", flp-join(own, ", "), len(own) == 1 ? " is" : " are", " bound by let inside your own definition and called from inside that let: a function bound by let cannot call itself here. Write it as its own def beside the one asked for, in the same <reference>, and call that def."]);
+  }
   // how a name stands: its parameters in order and its file. A .bml row of the table carries its parameters; a .fk
   // defn's are read from its own text
   def flp-stands-as(name, table) {
@@ -1492,7 +1498,21 @@ section [form.bml] {
    let holds = wt => !nothing?(n) && !nothing?(wt[1]) && !nothing?(flp-line-of(wt[1], n)) && len(token) > 0 && str_find(flp-line-of(wt[1], n), token, 0) >= 0;
    let named = flp-first(texts, wt => (str_find(said, wt[0], 0) >= 0)) ?? flp-first(texts, holds);
    let line = if (nothing?(n) || nothing?(named)) then nothing() else flp-line-of(named[1], n);
-   if nothing?(line) then "" else mc-cat(["\nLine ", n.str(), " of ", named[0], ", with your definitions standing, reads:\n", line, len(token) > 0 ? mc-cat(["\nThe reading stopped at: ", token]) : ""]);
+   if nothing?(line) then "" else mc-cat(["\nLine ", n.str(), " of ", named[0], ", with your definitions standing, reads:\n", line, len(token) > 0 ? mc-cat(["\nThe reading stopped at: ", token]) : "", flp-unread-word(line, token)]);
+  }
+  // A line that begins with a word no line of the body's .bml files begins with is written in another language's
+  // statement: the body is asked, and what it shows is said (while, for and return begin no line of it)
+  def flp-begins-line?(text, key, from) {
+   let at = str_find(text, key, from);
+   at < 0 ? false : flp-blank-before?(text, at - 1) ? true : flp-begins-line?(text, key, at + 1);
+  }
+  def flp-blank-before?(text, i) = i < 0 || str_byte_at(text, i) == 10 ? true : str_byte_at(text, i) == 32 || str_byte_at(text, i) == 9 ? flp-blank-before?(text, i - 1) : false;
+  def flp-line-word(line) = flp-cut-at(flp-cut-at(trim(line), " "), "(");
+  def flp-unread-word(line, token) {
+   let word = flp-line-word(line);
+   let plain = len(word) > 1 && all?(i => str_byte_at(word, i) >= 97 && str_byte_at(word, i) <= 122, 0 .. len(word));
+   let files = !plain ? [] : take(40, filter(f => flp-starts?(f, "form/form-stdlib/bml/"), flp-defs-files()));
+   !plain || any?(f => flp-begins-line?(fhn-read(f), word + " ", 0), files) ? "" : mc-cat(["\nNo line of the ", len(files).str(), " .bml files of the body read here begins with ", word, ": it is not a statement of this dialect. What it would repeat or return is written here as a recursion or a fold, as the definitions shown above are."]);
   }
   // the word the cursor stopped at: "section: line 24: char (wanted: reclit)" names char
   def flp-said-token(said) {
@@ -1532,7 +1552,7 @@ section [form.bml] {
    let full = flp-p-full(plan);
    if (!nothing?(unplaced)) then flp-with-readings(flp-refused(7, mc-cat(["reference-site:", unplaced[0]]), mc-cat(["Form could not stand the <reference> definitions in ", unplaced[0], "."])), v[3], v[4])
    else if (!nothing?(broken)) then flp-with-readings(flp-refused(7, mc-cat(["reference-check:", flp-head(flp-sha(json-emit(broken)), 12)]), mc-cat(["The check ", json-emit(broken), " forbids the change your <reference> makes: with your definitions standing it prints ", flp-said(seen[2]), " (exit ", seen[4].str(), ") where it asks ", flp-said(seen[1]), " (exit ", seen[3].str(), "). A check pins what the gap keeps: leave out a check the change must break, or ask for what the changed file prints."])), v[3], v[4])
-   else if (nothing?(r[0]) && (str_find(r[2], "error", 0) >= 0)) then flp-reach(flp-refused(7, "reference-compile", mc-cat(["Your <reference> definitions, standing in a scratch copy of the file, do not compile, so they witness nothing. Write them in the file's own dialect, as its other definitions are written. fkwu said:\n", r[2], flp-quote-at(r[2], texts), flp-unresolved-block(r[2], flp-source-names(filter(w => flp-exists?(w) && !flp-is-dir?(w), flp-p-writable(plan)))), str_find(r[2], "stray ')'", 0) >= 0 ? flp-arity-block(ref) : "", flp-called-block(ref)])), v[3], v[4], r[0])
+   else if (nothing?(r[0]) && (str_find(r[2], "error", 0) >= 0)) then flp-reach(flp-refused(7, "reference-compile", mc-cat(["Your <reference> definitions, standing in a scratch copy of the file, do not compile, so they witness nothing. Write them in the file's own dialect, as its other definitions are written. fkwu said:\n", r[2], flp-quote-at(r[2], texts), flp-unresolved-block(r[2], flp-source-names(filter(w => flp-exists?(w) && !flp-is-dir?(w), flp-p-writable(plan)))), str_find(r[2], "stray ')'", 0) >= 0 ? flp-arity-block(ref) : "", flp-self-let-block(ref, flp-unresolved-names(r[2])), flp-called-block(ref)])), v[3], v[4], r[0])
    else if (nothing?(r[0]) || (!((Comparable) r[0] == full))) then {
     let cases=flp-cases-read(r[2]);
     flp-with-cases(flp-reach(flp-refused(7, "unreachable", !nothing?(cases) ? flp-cases-words(cases,r[0],full,r[2]) + (any?(flp-raised?,cases[2]) ? flp-called-block(ref) : "") : mc-cat(["With your <reference> definitions standing, the band reads ", flp-show(r[0]), " of ", full.str(), ": the band, the goal and the reference disagree, so no candidate the goal describes turns the band full.", if ((Comparable) len(r[2]) > 0) then mc-cat([" fkwu said:\n", r[2], flp-quote-at(r[2], texts)]) else ""])), v[3], v[4], r[0]),cases);
